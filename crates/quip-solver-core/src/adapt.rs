@@ -215,6 +215,11 @@ mod tests {
         let cases = quip_solver_conformance::adapt_params_cases();
         assert!(!cases.is_empty());
         for c in &cases {
+            assert_eq!(
+                c.bounds, "cpu_sa",
+                "case is measured against CPU_SA, but names bounds preset {}",
+                c.bounds
+            );
             let got = adapt_params(
                 c.target_milli,
                 c.min_solutions,
