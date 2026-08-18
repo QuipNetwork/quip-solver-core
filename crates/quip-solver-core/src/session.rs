@@ -124,14 +124,17 @@ fn capabilities_json_from(c: &Capabilities) -> String {
     serde_json::to_string(&view).expect("serialize capabilities")
 }
 
-#[expect(
-    clippy::print_stdout,
-    reason = "user-facing CLI capabilities JSON for --capabilities"
-)]
-fn print_capabilities(id: &BackendIdentity, stream_width: u32) {
+fn print_capabilities(id: &BackendIdentity, stream_width: u32) -> ExitCode {
     // The protobuf JSON mapping, so the flag and the session reply agree on
     // field names. Both answers are built by [`capabilities`].
-    println!("{}", capabilities_json(id, stream_width));
+    //
+    // Routed through `write_and_map` for the same reason `--solve` is:
+    // `println!` panics on a closed pipe. Reachability does not depend on the
+    // output being large enough to fill the pipe buffer — `--capabilities |
+    // false` closes the reader before the write happens, and that panics too.
+    let mut line = capabilities_json(id, stream_width).into_bytes();
+    line.push(b'\n');
+    write_and_map(&mut std::io::stdout(), &line)
 }
 
 /// Write `--solve` JSON to `writer` and map the I/O result to an exit code.
@@ -813,8 +816,7 @@ pub fn run<S: Sampler>(
     }
 
     if common.capabilities {
-        print_capabilities(&id, 1);
-        return StdExitCode::SUCCESS;
+        return StdExitCode::from(print_capabilities(&id, 1) as u8);
     }
     if common.solve {
         let sampler = match open() {
@@ -837,7 +839,12 @@ pub fn run<S: Sampler>(
             return StdExitCode::from(ExitCode::ConfigInvalid as u8);
         }
         return match crate::driver::solve(&sampler, &input) {
-            Ok(bytes) => StdExitCode::from(write_and_map(&mut std::io::stdout(), &bytes) as u8),
+            Ok(mut bytes) => {
+                // `println!` supplied this before the broken-pipe fix. A CLI
+                // that emits a JSON document should end it with a newline.
+                bytes.push(b'\n');
+                StdExitCode::from(write_and_map(&mut std::io::stdout(), &bytes) as u8)
+            }
             Err(e) => {
                 tracing::error!("[quip-solver-{}] solve failed: {e}", id.backend);
                 StdExitCode::from(ExitCode::InternalFatal as u8)
