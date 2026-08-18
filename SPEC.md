@@ -127,11 +127,30 @@ On `DeviceFault`, the session rejects the job, sends `Fatal` with
 
 ## Cancellation
 
-`CancelToken` carries an opaque monotonic watermark. `None` means cancel
-does not apply to that job.
+This section is normative for every language, so it is stated on the wire
+first. The Rust binding follows.
 
-A solver that owns its own sweep loop must poll the token at its
-checkpoints, not only at dequeue.
+The coordinator sends `Cancel { max_generation }`. Every job whose own
+generation is at or below `max_generation` is abandoned. The solver stops
+work on those jobs, sends no `Result` for them, and reports the abandoned
+generation in `Status.abandoned_generation` rather than in a `Result`.
+
+A job carries its own cancellation watermark, and that watermark is
+optional. A job with no watermark is never cancelled by this mechanism.
+Generation `0` means exactly that: mempool jobs carry no watermark, so a
+`Cancel` never abandons them, whatever `max_generation` says. The watermark
+is opaque and monotonic, so repeated or out-of-order `Cancel` messages are
+idempotent.
+
+A solver that owns its own sweep loop must check for cancellation at its
+checkpoints, not only when it takes a job off the queue. A long sweep that
+only checks at dequeue keeps burning device time on work nobody is waiting
+for.
+
+In the Rust binding, the watermark reaches the solver as
+`StreamJob.watermark: Option<u64>`, and the solver checks it by calling
+`CancelToken::is_cancelled(watermark)`. The `CancelToken` itself is never
+optional; the `None` belongs to the job's watermark.
 
 ## Conformance
 
