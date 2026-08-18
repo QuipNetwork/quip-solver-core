@@ -253,9 +253,6 @@ pub(crate) fn prepare_job<S: Sampler>(
     target: Option<&SessionTarget>,
 ) -> Prepared {
     let job_id = job.job_id.clone();
-    // Capture before `job.ising` is moved out below; threads into StreamJob so
-    // the sampler knows what a Cancel invalidates.
-    let generation = job.generation;
 
     if job.kind != JobKind::IsingSample as i32 {
         return Prepared::Reject(reject(job_id, RejectReason::UnsupportedKind));
@@ -321,7 +318,10 @@ pub(crate) fn prepare_job<S: Sampler>(
             job_id,
             graph,
             params,
-            generation,
+            // Generation 0 marks a mempool job, which a reseed never cancels. That
+            // is a chain rule, so it is applied here rather than inside
+            // CancelToken.
+            watermark: (job.generation != 0).then_some(job.generation),
         },
         num_reads,
         num_sweeps,

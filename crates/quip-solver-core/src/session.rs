@@ -10,7 +10,7 @@ use crate::job::{
     finalize_result, miner, num_sweeps_from_toml, prepare_job, status_msg, Prepared, SessionTarget,
     TopologyCache, DEFAULT_NUM_SWEEPS,
 };
-use crate::{CancelGuard, Sampler, StreamJob, StreamOutcome, StreamResult};
+use crate::{CancelToken, Sampler, StreamJob, StreamOutcome, StreamResult};
 use quip_proto::v1::miner_service_client::MinerServiceClient;
 use quip_proto::v1::{coord_msg, miner_msg, CoordMsg, JobKind, JobRequest, MinerMsg, Ready};
 use quip_protocol::session::{build_hello, BackendCaps, ExitCode, SessionConfig, SessionError};
@@ -389,7 +389,7 @@ async fn run_session<S: Sampler>(
     // Control-plane cancellation watermark: bumped here on `Cancel`, read by the
     // sampler thread to skip/abort jobs from generations the coordinator
     // abandoned on reseed.
-    let cancel = CancelGuard::default();
+    let cancel = CancelToken::default();
     let sampler_thread = {
         let s = Arc::clone(&sampler);
         let cancel = cancel.clone();

@@ -27,56 +27,71 @@ pub use session::{run, BackendIdentity, OpenError};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-/// Control-plane cancellation watermark. The session bumps it on `Cancel`; the
-/// sampler reads it to skip jobs from abandoned generations. Cheap to clone
-/// (one `Arc<AtomicU64>`); monotonic, so out-of-order or repeated cancels are
+/// Cancellation point for in-flight work.
+///
+/// The session raises it when the coordinator abandons a round; the solver
+/// reads it to skip work nobody is waiting for. Cheap to clone (one
+/// `Arc<AtomicU64>`) and monotonic, so out-of-order or repeated cancels are
 /// idempotent.
+///
+/// Watermarks are opaque and start at 1. The stored value `0` is the sentinel
+/// for "nothing cancelled yet", so a fresh token cancels nothing. Which jobs
+/// carry a watermark at all is a caller decision: a job built with
+/// `watermark: None` is never cancelled.
 #[derive(Clone, Default)]
-pub struct CancelGuard(Arc<AtomicU64>);
+pub struct CancelToken(Arc<AtomicU64>);
 
-impl CancelGuard {
-    /// Abandon every generation `<= generation`.
-    pub fn cancel_through(&self, generation: u64) {
-        let _ = self.0.fetch_max(generation, Ordering::Relaxed);
+impl CancelToken {
+    /// Abandon every watermark at or below `watermark`.
+    pub fn cancel_through(&self, watermark: u64) {
+        let _ = self.0.fetch_max(watermark, Ordering::Relaxed);
     }
 
-    /// True when this job's generation has been abandoned. Generation `0`
-    /// (mempool jobs) is never reseed-cancelled — mirrors the coordinator
-    /// router's `cancel` (`generation <= max && generation != 0`).
+    /// True when this job's watermark has been abandoned.
     #[must_use]
-    pub fn is_cancelled(&self, generation: u64) -> bool {
-        generation != 0 && generation <= self.0.load(Ordering::Relaxed)
+    pub fn is_cancelled(&self, watermark: Option<u64>) -> bool {
+        let Some(w) = watermark else { return false };
+        let point = self.0.load(Ordering::Relaxed);
+        point != 0 && w <= point
     }
 }
 
 #[cfg(test)]
 mod cancel_tests {
-    use super::CancelGuard;
+    use super::CancelToken;
 
     #[test]
-    fn cancel_guard_marks_generations_at_or_below_watermark() {
-        let g = CancelGuard::default();
-        assert!(!g.is_cancelled(5)); // nothing cancelled yet
-        g.cancel_through(5);
-        assert!(g.is_cancelled(5)); // <= watermark
-        assert!(g.is_cancelled(4));
-        assert!(!g.is_cancelled(6)); // > watermark, still live
+    fn marks_watermarks_at_or_below_the_cancel_point() {
+        let t = CancelToken::default();
+        assert!(!t.is_cancelled(Some(5))); // nothing cancelled yet
+        t.cancel_through(5);
+        assert!(t.is_cancelled(Some(5)));
+        assert!(t.is_cancelled(Some(4)));
+        assert!(!t.is_cancelled(Some(6)));
     }
 
     #[test]
-    fn cancel_guard_never_cancels_generation_zero() {
-        let g = CancelGuard::default();
-        g.cancel_through(10);
-        assert!(!g.is_cancelled(0)); // mempool jobs are never reseed-cancelled
+    fn a_job_with_no_watermark_is_never_cancelled() {
+        let t = CancelToken::default();
+        t.cancel_through(u64::MAX);
+        assert!(!t.is_cancelled(None));
     }
 
     #[test]
-    fn cancel_guard_watermark_is_monotonic() {
-        let g = CancelGuard::default();
-        g.cancel_through(7);
-        g.cancel_through(3); // a lower value must not lower the watermark
-        assert!(g.is_cancelled(7));
-        assert!(g.is_cancelled(4));
+    fn the_cancel_point_is_monotonic() {
+        let t = CancelToken::default();
+        t.cancel_through(7);
+        t.cancel_through(3); // a lower value must not lower the cancel point
+        assert!(t.is_cancelled(Some(7)));
+        assert!(t.is_cancelled(Some(4)));
+    }
+
+    #[test]
+    fn a_fresh_token_cancels_nothing_at_all() {
+        // The zero sentinel must not read as "watermark 0 is cancelled".
+        let t = CancelToken::default();
+        assert!(!t.is_cancelled(Some(0)));
+        assert!(!t.is_cancelled(Some(1)));
     }
 }
 
@@ -88,9 +103,9 @@ pub struct StreamJob {
     pub graph: IsingGraph,
     /// Resolved sampling knobs for this job.
     pub params: SampleParams,
-    /// Reseed round the job belongs to; what a `Cancel` invalidates. `0` for
-    /// mempool jobs (never reseed-cancelled).
-    pub generation: u64,
+    /// Cancellation watermark for this job, or `None` when the job cannot be
+    /// cancelled. The caller decides which jobs carry one.
+    pub watermark: Option<u64>,
 }
 
 /// One job leaving the streaming sampler, in completion order.
@@ -143,14 +158,14 @@ pub trait Sampler: Send + Sync + 'static {
         &self,
         mut jobs: tokio::sync::mpsc::Receiver<StreamJob>,
         out: tokio::sync::mpsc::Sender<StreamResult>,
-        cancel: CancelGuard,
+        cancel: CancelToken,
     ) {
         while let Some(j) = jobs.blocking_recv() {
             // Skip a job the coordinator abandoned on reseed; refund the credit
             // (via the session's Cancelled handling) so the pipeline keeps depth.
             // The serial default can only check at dequeue; backends that own a
             // sweep/read loop poll `cancel` at their finer checkpoints.
-            if cancel.is_cancelled(j.generation) {
+            if cancel.is_cancelled(j.watermark) {
                 if out
                     .blocking_send(StreamResult {
                         job_id: j.job_id,
@@ -248,7 +263,7 @@ mod stream_tests {
         let (res_tx, mut res_rx) = tokio::sync::mpsc::channel::<StreamResult>(8);
 
         let worker = std::thread::spawn(move || {
-            OneResultSampler.sample_stream(job_rx, res_tx, CancelGuard::default());
+            OneResultSampler.sample_stream(job_rx, res_tx, CancelToken::default());
         });
 
         rt.block_on(async {
@@ -258,7 +273,7 @@ mod stream_tests {
                         job_id: vec![i],
                         graph: tiny_graph(),
                         params: SampleParams::default(),
-                        generation: 1,
+                        watermark: Some(1),
                     })
                     .await
                     .expect("send job");
@@ -306,7 +321,7 @@ mod stream_tests {
         let (job_tx, job_rx) = tokio::sync::mpsc::channel::<StreamJob>(8);
         let (res_tx, mut res_rx) = tokio::sync::mpsc::channel::<StreamResult>(8);
         let calls = Arc::new(AtomicUsize::new(0));
-        let cancel = CancelGuard::default();
+        let cancel = CancelToken::default();
         cancel.cancel_through(3); // generations 1..=3 abandoned
 
         let sampler = CountingSampler(Arc::clone(&calls));
@@ -318,7 +333,7 @@ mod stream_tests {
                     job_id: vec![1],
                     graph: tiny_graph(),
                     params: SampleParams::default(),
-                    generation: 2, // stale
+                    watermark: Some(2), // stale
                 })
                 .await
                 .expect("send");
@@ -327,7 +342,7 @@ mod stream_tests {
                     job_id: vec![2],
                     graph: tiny_graph(),
                     params: SampleParams::default(),
-                    generation: 5, // live
+                    watermark: Some(5), // live
                 })
                 .await
                 .expect("send");
