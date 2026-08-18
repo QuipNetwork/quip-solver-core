@@ -442,6 +442,14 @@ mod tests {
     /// A minimal valid `IsingSample` job with inline edges (no topology cache
     /// needed) and `num_sweeps` left unset (0), so `prepare_job` falls back to
     /// `default_sweeps`.
+    /// `edges_job` with an explicit chain generation, for the watermark rule.
+    fn edges_job_at_generation(job_id: u8, generation: u64) -> Job {
+        Job {
+            generation,
+            ..edges_job(job_id)
+        }
+    }
+
     fn edges_job(job_id: u8) -> Job {
         Job {
             job_id: vec![job_id],
@@ -669,5 +677,49 @@ mod tests {
             panic!("expected Sample");
         };
         assert_eq!(job.params.sweeps_per_beta, 1);
+    }
+
+    /// The chain rule lives here, not in `CancelToken`: generation 0 means a
+    /// mempool job, and a mempool job is never reseed-cancelled. Without this
+    /// test an accidental unconditional `Some(job.generation)` compiles, passes
+    /// clippy, and passes every other test, while silently making mempool jobs
+    /// cancellable.
+    #[test]
+    fn a_mempool_job_gets_no_watermark() {
+        let sampler = StubSampler;
+        let id = identity("sa");
+        let Prepared::Sample { job, .. } =
+            prepare_job(edges_job_at_generation(1, 0), &sampler, &id, 64, None, None, None)
+        else {
+            panic!("expected Sample");
+        };
+        assert_eq!(
+            job.watermark, None,
+            "generation 0 is a mempool job and must never carry a watermark"
+        );
+    }
+
+    #[test]
+    fn a_chain_job_carries_its_generation_as_the_watermark() {
+        let sampler = StubSampler;
+        let id = identity("sa");
+        for generation in [1_u64, 2, 7, u64::MAX] {
+            let Prepared::Sample { job, .. } = prepare_job(
+                edges_job_at_generation(1, generation),
+                &sampler,
+                &id,
+                64,
+                None,
+                None,
+                None,
+            ) else {
+                panic!("expected Sample");
+            };
+            assert_eq!(
+                job.watermark,
+                Some(generation),
+                "a chain job must carry its generation as the watermark"
+            );
+        }
     }
 }

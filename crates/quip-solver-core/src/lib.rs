@@ -112,7 +112,7 @@ pub struct StreamJob {
 pub struct StreamResult {
     /// Opaque job id, matching the inbound [`StreamJob`].
     pub job_id: Vec<u8>,
-    /// Completed samples, reject reason, or cancelled generation.
+    /// Completed samples, a device error, or a cancelled watermark.
     pub outcome: StreamOutcome,
     /// Per-model device/sample time in microseconds, reported in `SamplerMeta`.
     pub device_access_time_us: u64,
@@ -122,9 +122,9 @@ pub struct StreamResult {
 pub enum StreamOutcome {
     /// Ran to completion, or failed with a device condition.
     Completed(Result<Vec<SamplerResult>, SampleError>),
-    /// Abandoned because its generation was cancelled; the coordinator has
-    /// moved on, so nothing is sent upstream — only the local credit is
-    /// refunded to keep pipeline depth for the live round.
+    /// Abandoned because its watermark was cancelled; the caller has moved
+    /// on, so nothing is sent upstream — only the local credit is refunded to
+    /// keep pipeline depth for the live round.
     Cancelled,
 }
 
