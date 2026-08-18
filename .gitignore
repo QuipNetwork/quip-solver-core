@@ -7,3 +7,9 @@ venv/
 python/**/__pycache__/
 .pytest_cache/
 .ruff_cache/
+
+# maturin/PyO3 build artifacts: `maturin develop` drops the compiled
+# extension into python/quip_proto/, where `git add -A` would stage ~34MB.
+*.so
+*.pyd
+*.dylib
