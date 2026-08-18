@@ -11,6 +11,8 @@ use crate::job::{
     TopologyCache, DEFAULT_NUM_SWEEPS,
 };
 use crate::{CancelToken, Sampler, StreamJob, StreamOutcome, StreamResult};
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine as _;
 use quip_proto::v1::miner_service_client::MinerServiceClient;
 use quip_proto::v1::{
     coord_msg, miner_msg, Capabilities, CoordMsg, JobKind, JobRequest, MinerMsg, Ready,
@@ -18,6 +20,7 @@ use quip_proto::v1::{
 use quip_protocol::session::{build_hello, BackendCaps, ExitCode, SessionConfig, SessionError};
 use serde::Serialize;
 use std::collections::HashMap;
+use std::io::Write;
 use std::process::ExitCode as StdExitCode;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -68,7 +71,8 @@ pub fn capabilities(id: &BackendIdentity, stream_width: u32) -> Capabilities {
 /// Protobuf JSON view of [`Capabilities`]. Field order matches the message.
 ///
 /// `native_topology_hash` is omitted when unset, which is the protobuf JSON
-/// mapping and keeps the current eight-field output byte-identical.
+/// mapping and keeps the current eight-field output byte-identical. When set,
+/// protobuf JSON maps `bytes` to a standard-base64 string, not a number array.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CapabilitiesJson<'a> {
@@ -81,7 +85,7 @@ struct CapabilitiesJson<'a> {
     protocol_version: u32,
     stream_width: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
-    native_topology_hash: Option<&'a [u8]>,
+    native_topology_hash: Option<String>,
 }
 
 /// Render [`Capabilities`] in the protobuf JSON mapping.
@@ -90,7 +94,10 @@ struct CapabilitiesJson<'a> {
 /// `quip-proto` would put a serde dependency in the wire crate for one CLI
 /// flag. Nine fields is less code than that.
 fn capabilities_json(id: &BackendIdentity, stream_width: u32) -> String {
-    let c = capabilities(id, stream_width);
+    capabilities_json_from(&capabilities(id, stream_width))
+}
+
+fn capabilities_json_from(c: &Capabilities) -> String {
     let view = CapabilitiesJson {
         backend: &c.backend,
         algorithm: &c.algorithm,
@@ -105,7 +112,10 @@ fn capabilities_json(id: &BackendIdentity, stream_width: u32) -> String {
         features: &c.features,
         protocol_version: c.protocol_version,
         stream_width: c.stream_width,
-        native_topology_hash: c.native_topology_hash.as_deref(),
+        native_topology_hash: c
+            .native_topology_hash
+            .as_deref()
+            .map(|h| STANDARD.encode(h)),
     };
     #[expect(
         clippy::expect_used,
@@ -124,12 +134,20 @@ fn print_capabilities(id: &BackendIdentity, stream_width: u32) {
     println!("{}", capabilities_json(id, stream_width));
 }
 
-#[expect(
-    clippy::print_stdout,
-    reason = "user-facing CLI solutions JSON for --solve"
-)]
-fn print_solutions(json: &str) {
-    println!("{json}");
+/// Write `--solve` JSON to `writer` and map the I/O result to an exit code.
+///
+/// `ErrorKind::BrokenPipe` is not an error: the consumer stopped reading,
+/// which is its right. `head` closing the pipe means it got what it asked
+/// for. Exiting non-zero would make ordinary shell pipelines report
+/// spurious failures. Normal Unix tools die silently on SIGPIPE. Rust
+/// suppresses SIGPIPE and surfaces EPIPE instead, and restoring the default
+/// handler needs `unsafe`, which this workspace denies.
+fn write_and_map<W: Write>(writer: &mut W, bytes: &[u8]) -> ExitCode {
+    match writer.write_all(bytes) {
+        Ok(()) => ExitCode::Clean,
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => ExitCode::Clean,
+        Err(_) => ExitCode::InternalFatal,
+    }
 }
 
 /// Emit a miner progress line every N completed jobs (v0.2 `mine_work_item`
@@ -819,11 +837,7 @@ pub fn run<S: Sampler>(
             return StdExitCode::from(ExitCode::ConfigInvalid as u8);
         }
         return match crate::driver::solve(&sampler, &input) {
-            Ok(bytes) => {
-                let json = String::from_utf8_lossy(&bytes);
-                print_solutions(&json);
-                StdExitCode::from(ExitCode::Clean as u8)
-            }
+            Ok(bytes) => StdExitCode::from(write_and_map(&mut std::io::stdout(), &bytes) as u8),
             Err(e) => {
                 tracing::error!("[quip-solver-{}] solve failed: {e}", id.backend);
                 StdExitCode::from(ExitCode::InternalFatal as u8)
@@ -1009,5 +1023,48 @@ mod tests {
         let v: serde_json::Value =
             serde_json::from_str(&json).expect("quoted feature must produce valid JSON");
         assert_eq!(v.get("features"), Some(&serde_json::json!(["has\"quote"])));
+    }
+
+    #[test]
+    fn native_topology_hash_serializes_as_base64_string() {
+        // `--capabilities` has no path that sets this field. Build the JSON
+        // view from a Capabilities that carries a hash.
+        let mut c = capabilities(&test_identity(), 1);
+        c.native_topology_hash = Some(vec![1, 2, 3]);
+        let json = capabilities_json_from(&c);
+        let v: serde_json::Value = serde_json::from_str(&json).expect("printer emits JSON");
+        let hash = v.get("nativeTopologyHash").expect("field present");
+        assert!(
+            hash.is_string(),
+            "protobuf JSON maps bytes to a base64 string"
+        );
+        assert!(!hash.is_array(), "must not emit a JSON number array");
+        assert_eq!(hash, &serde_json::json!("AQID"));
+    }
+
+    struct FailWrite(std::io::ErrorKind);
+
+    impl Write for FailWrite {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(self.0, "test write failure"))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn write_and_map_treats_broken_pipe_as_clean_and_other_errors_as_fatal() {
+        // Bytes must be non-empty: write_all returns Ok on an empty slice
+        // without calling write.
+        assert_eq!(
+            write_and_map(&mut FailWrite(std::io::ErrorKind::BrokenPipe), b"x"),
+            ExitCode::Clean
+        );
+        assert_eq!(
+            write_and_map(&mut FailWrite(std::io::ErrorKind::Other), b"x"),
+            ExitCode::InternalFatal
+        );
     }
 }
