@@ -1,0 +1,16 @@
+[package]
+name = "quip-solver-conformance"
+version = "0.3.0"
+edition = "2021"
+description = "Golden vectors and the scripted session driver every Quip solver tests against"
+
+[lib]
+name = "quip_solver_conformance"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[lints]
+workspace = true

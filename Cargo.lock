@@ -869,6 +869,7 @@ dependencies = [
  "blake3",
  "prost",
  "quip-proto",
+ "quip-solver-conformance",
  "serde_json",
  "tokio",
  "tonic",
@@ -883,6 +884,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "quip-solver-conformance"
+version = "0.3.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "quip-solver-core"
 version = "0.3.0"
 dependencies = [
@@ -893,6 +902,7 @@ dependencies = [
  "quip-mock-coordinator",
  "quip-proto",
  "quip-protocol",
+ "quip-solver-conformance",
  "serde_json",
  "tokio",
  "tokio-stream",
@@ -1002,6 +1012,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4148590afebada386688f18773da617792bf2ef03ffc1e4cbd2b1d45b023e0ba"
 dependencies = [
  "serde_core",
+ "serde_derive",
 ]
 
 [[package]]

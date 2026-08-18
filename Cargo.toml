@@ -9,6 +9,7 @@ default-members = [
     "crates/quip-proto",
     "crates/quip-protocol",
     "crates/quip-solver-core",
+    "crates/quip-solver-conformance",
     "crates/quip-mock-coordinator",
 ]
 

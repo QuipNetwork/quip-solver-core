@@ -12,9 +12,8 @@ import pytest
 
 from quip_proto._core import scoring, wire
 
-GOLDEN = json.loads(
-    (Path(__file__).resolve().parents[1] / "conformance/golden_vectors.json").read_text()
-)
+VECTORS = Path(__file__).resolve().parents[1] / "crates/quip-solver-conformance/vectors"
+GOLDEN = json.loads((VECTORS / "golden_vectors.json").read_text())
 
 
 def test_energy_matches_golden():

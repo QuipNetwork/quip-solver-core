@@ -8,7 +8,8 @@ sys.path.insert(0, str(ROOT / "python"))
 
 from quip_proto import wire, scoring  # noqa: E402
 
-GOLDEN = json.loads((ROOT / "conformance" / "golden_vectors.json").read_text())
+VECTORS = Path(__file__).resolve().parents[1] / "crates/quip-solver-conformance/vectors"
+GOLDEN = json.loads((VECTORS / "golden_vectors.json").read_text())
 
 
 def test_wire_roundtrip():

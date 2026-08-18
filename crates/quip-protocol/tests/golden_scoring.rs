@@ -14,18 +14,13 @@
 
 use quip_protocol::scoring::{energy_milli, set_diversity};
 use serde_json::Value;
-use std::fs;
 
 #[expect(
     clippy::unwrap_used,
     reason = "integration-test helper; missing golden fixture should panic"
 )]
 fn golden() -> Value {
-    let path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../conformance/golden_vectors.json"
-    );
-    serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap()
+    serde_json::from_str(quip_solver_conformance::GOLDEN_VECTORS).unwrap()
 }
 
 #[test]

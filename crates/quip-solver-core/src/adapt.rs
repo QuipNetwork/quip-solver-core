@@ -181,7 +181,6 @@ pub fn adapt_params(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::Value;
 
     const CPU_SA: AdaptBounds = AdaptBounds {
         min_sweeps: 64,
@@ -195,105 +194,45 @@ mod tests {
 
     #[test]
     fn energy_to_difficulty_matches_python_golden() {
-        let text = include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../conformance/golden_adapt.json"
-        ));
-        let golden: Value = serde_json::from_str(text).expect("parse golden");
-        #[expect(
-            clippy::indexing_slicing,
-            reason = "golden JSON schema keys are fixed by the conformance fixture"
-        )]
-        let cases = golden["energy_to_difficulty"].as_array().expect("cases");
+        let cases = quip_solver_conformance::adapt_cases();
         assert!(!cases.is_empty());
-        for c in cases {
-            let target = c["target_milli"].as_i64().unwrap();
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "golden fixture sizes fit usize; milli values fit i32"
-            )]
-            let n = c["num_nodes"].as_u64().unwrap() as usize;
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "golden fixture sizes fit usize"
-            )]
-            let m = c["num_edges"].as_u64().unwrap() as usize;
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "allowed_h_milli golden values fit i32"
-            )]
-            let h: Vec<i32> = c["allowed_h_milli"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|v| v.as_i64().unwrap() as i32)
-                .collect();
-            let expected = c["difficulty"].as_f64().unwrap();
-            let got = energy_to_difficulty(target, n, m, &h);
+        for c in &cases {
+            let got =
+                energy_to_difficulty(c.target_milli, c.num_nodes, c.num_edges, &c.allowed_h_milli);
             assert!(
-                (got - expected).abs() < 1e-9,
-                "target={target} n={n} m={m} h={h:?}: got {got}, want {expected}"
+                (got - c.difficulty).abs() < 1e-9,
+                "target={} n={} m={}: got {got}, want {}",
+                c.target_milli,
+                c.num_nodes,
+                c.num_edges,
+                c.difficulty
             );
         }
     }
 
     #[test]
     fn adapt_params_matches_python_golden_cpu_sa() {
-        let text = include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../conformance/golden_adapt.json"
-        ));
-        let golden: Value = serde_json::from_str(text).expect("parse golden");
-        #[expect(
-            clippy::indexing_slicing,
-            reason = "golden JSON schema keys are fixed by the conformance fixture"
-        )]
-        let cases = golden["adapt_params_cpu_sa"].as_array().expect("cases");
+        let cases = quip_solver_conformance::adapt_params_cases();
         assert!(!cases.is_empty());
-        for c in cases {
-            let target = c["target_milli"].as_i64().unwrap();
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "golden fixture sizes fit usize"
-            )]
-            let n = c["num_nodes"].as_u64().unwrap() as usize;
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "golden fixture sizes fit usize"
-            )]
-            let m = c["num_edges"].as_u64().unwrap() as usize;
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "golden min_solutions fits u32"
-            )]
-            let min_sol = c["min_solutions"].as_u64().unwrap() as u32;
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "allowed_h_milli golden values fit i32"
-            )]
-            let h: Vec<i32> = c["allowed_h_milli"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|v| v.as_i64().unwrap() as i32)
-                .collect();
-            let got = adapt_params(target, min_sol, n, m, &h, &CPU_SA);
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "golden num_reads/num_sweeps fit u32"
-            )]
-            {
-                assert_eq!(
-                    got.num_reads,
-                    c["num_reads"].as_u64().unwrap() as u32,
-                    "reads {c}"
-                );
-                assert_eq!(
-                    got.num_sweeps,
-                    c["num_sweeps"].as_u64().unwrap() as u32,
-                    "sweeps {c}"
-                );
-            }
+        for c in &cases {
+            let got = adapt_params(
+                c.target_milli,
+                c.min_solutions,
+                c.num_nodes,
+                c.num_edges,
+                &c.allowed_h_milli,
+                &CPU_SA,
+            );
+            assert_eq!(
+                got.num_reads as usize, c.num_reads,
+                "reads target={} n={} m={}",
+                c.target_milli, c.num_nodes, c.num_edges
+            );
+            assert_eq!(
+                got.num_sweeps as usize, c.num_sweeps,
+                "sweeps target={} n={} m={}",
+                c.target_milli, c.num_nodes, c.num_edges
+            );
         }
     }
 
