@@ -352,7 +352,7 @@ async fn run_script(
     // generation 2, so nothing in flight is abandoned — this exercises the
     // cancel-ack Status path without racing the results above. (Skipping of a
     // job whose own generation is cancelled is covered white-box by
-    // quip-miner-core's sample_stream unit test.)
+    // quip-solver-core's sample_stream unit test.)
     let _ = tx
         .send(Ok(coord(coord_msg::Msg::Cancel(quip_proto::v1::Cancel {
             max_generation: 1,

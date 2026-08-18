@@ -3,7 +3,7 @@
 //! `tests/loop_conformance.rs` to exercise the session loop without a backend.
 
 use clap::Parser;
-use quip_miner_core::{
+use quip_solver_core::{
     run, BackendIdentity, CommonArgs, IsingGraph, SampleParams, Sampler, SamplerResult,
 };
 use quip_proto::v1::RejectReason;
@@ -44,7 +44,7 @@ fn main() -> ExitCode {
             algorithm: "sa",
             max_nodes: 100_000,
             max_edges: 1_000_000,
-            adapt: quip_miner_core::adapt::AdaptBounds {
+            adapt: quip_solver_core::adapt::AdaptBounds {
                 min_sweeps: 64,
                 max_sweeps: 4096,
                 min_reads: 64,

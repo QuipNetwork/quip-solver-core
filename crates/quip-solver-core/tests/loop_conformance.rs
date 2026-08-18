@@ -14,7 +14,7 @@ fn example_bin(name: &str) -> String {
         reason = "test helper: cargo build failure is a setup error"
     )]
     let status = Command::new(env!("CARGO"))
-        .args(["build", "--example", name, "-p", "quip-miner-core"])
+        .args(["build", "--example", name, "-p", "quip-solver-core"])
         .status()
         .expect("cargo build --example");
     assert!(status.success(), "failed to build example {name}");

@@ -94,8 +94,8 @@ mod tests {
 
     #[test]
     fn rust_log_beats_the_level_flag() {
-        let d = resolve_directives("info", Some("quip_miner_core=trace")).unwrap();
-        assert_eq!(d, "quip_miner_core=trace");
+        let d = resolve_directives("info", Some("quip_solver_core=trace")).unwrap();
+        assert_eq!(d, "quip_solver_core=trace");
     }
 
     #[test]

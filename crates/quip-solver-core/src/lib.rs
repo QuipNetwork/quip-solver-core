@@ -1,10 +1,10 @@
-//! Shared miner harness for the v0.3 Ising miners.
+//! The Quip solver contract.
 //!
-//! Holds the generic gRPC session loop, job validation, the base Ising types,
-//! the CSR representation used by GPU backends, and the beta schedule. Each
-//! miner provides a [`Sampler`] and calls [`run`]; the harness owns everything
-//! else (Hello/Welcome, Configure, credits, Reject reasons, Status, Shutdown,
-//! idle timeout, exit codes).
+//! Holds the [`Sampler`] trait every solver implements, the base Ising types,
+//! the CSR representation GPU backends upload, the beta ladder, the adaptive
+//! sampling budget, and the generic gRPC session loop. A solver provides a
+//! [`Sampler`] and calls [`run`]; this crate owns everything else (Hello and
+//! Welcome, Configure, credits, reject reasons, Status, Shutdown, exit codes).
 
 pub mod adapt;
 pub mod beta;

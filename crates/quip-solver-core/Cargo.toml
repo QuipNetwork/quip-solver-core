@@ -1,11 +1,11 @@
 [package]
-name = "quip-miner-core"
+name = "quip-solver-core"
 version = "0.3.0"
 edition = "2021"
-description = "Shared miner harness: gRPC session loop + Sampler trait for v0.3 miners"
+description = "The Quip solver contract: Sampler trait, Ising types, and the gRPC session loop"
 
 [lib]
-name = "quip_miner_core"
+name = "quip_solver_core"
 path = "src/lib.rs"
 
 [dependencies]
