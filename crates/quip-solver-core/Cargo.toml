@@ -23,7 +23,6 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
-quip-mock-coordinator = { path = "../quip-mock-coordinator" }
 quip-solver-conformance = { path = "../quip-solver-conformance" }
 serde_json = "1"
 # test-util: `start_paused` clocks only advance while every task is idle, which

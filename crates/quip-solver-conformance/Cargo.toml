@@ -8,9 +8,21 @@ description = "Golden vectors and the scripted session driver every Quip solver 
 name = "quip_solver_conformance"
 path = "src/lib.rs"
 
+[[bin]]
+name = "quip-solver-drive"
+path = "src/bin/quip-solver-drive.rs"
+
 [dependencies]
+quip-proto = { path = "../quip-proto" }
+quip-protocol = { path = "../quip-protocol" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tonic = { workspace = true }
+prost = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "process", "io-util", "sync", "time"] }
+tokio-stream = { version = "0.1", features = ["net"] }
+tower = "0.5"
+hyper-util = { version = "0.1", features = ["tokio"] }
 
 [lints]
 workspace = true

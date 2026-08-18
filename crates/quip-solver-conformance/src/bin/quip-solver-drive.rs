@@ -1,7 +1,7 @@
 //! CLI entry for the mock coordinator: run one miner binary through the
 //! full conformance session and print the driver report.
 
-use quip_mock_coordinator::driver::drive_miner;
+use quip_solver_conformance::driver::drive_miner;
 use std::process::ExitCode;
 
 #[tokio::main]
@@ -13,7 +13,7 @@ async fn main() -> ExitCode {
             reason = "CLI usage error is intentionally written to stderr"
         )]
         {
-            eprintln!("usage: quip-mock-coordinator <miner-bin> <unix://socket>");
+            eprintln!("usage: quip-solver-drive <solver-bin> <unix://socket>");
         }
         return ExitCode::from(64);
     };
@@ -23,7 +23,7 @@ async fn main() -> ExitCode {
             reason = "CLI usage error is intentionally written to stderr"
         )]
         {
-            eprintln!("usage: quip-mock-coordinator <miner-bin> <unix://socket>");
+            eprintln!("usage: quip-solver-drive <solver-bin> <unix://socket>");
         }
         return ExitCode::from(64);
     };

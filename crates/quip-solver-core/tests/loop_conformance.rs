@@ -3,7 +3,7 @@
 //! Exercises the loop without any real backend: handshake, Ready, credits, job
 //! results, each Reject reason, and clean exit.
 
-use quip_mock_coordinator::driver::drive_miner;
+use quip_solver_conformance::driver::{drive_miner, drive_miner_bad_welcome};
 use quip_proto::v1::RejectReason;
 use std::process::Command;
 
@@ -108,4 +108,22 @@ async fn capped_sampler_rejects_too_large() {
         report.result_job_ids()
     );
     assert_eq!(report.exit_code, 0, "clean shutdown expected");
+}
+
+#[tokio::test]
+async fn a_bad_welcome_ends_the_session_with_config_invalid() {
+    let bin = example_bin("mock_sampler_miner");
+    let socket = unique_socket("bad-welcome");
+    let report = drive_miner_bad_welcome(&bin, &format!("unix://{socket}")).await;
+
+    assert!(report.handshake_ok, "handshake failed: {report:?}");
+    assert_eq!(
+        report.exit_code, 64,
+        "a Welcome with the wrong protocol version must exit ConfigInvalid: {report:?}"
+    );
+    assert!(
+        report.result_job_ids().is_empty(),
+        "a miner that rejected the Welcome must not have run jobs: {:?}",
+        report.result_job_ids()
+    );
 }

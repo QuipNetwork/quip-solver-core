@@ -840,20 +840,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "quip-mock-coordinator"
-version = "0.3.0"
-dependencies = [
- "hyper-util",
- "prost",
- "quip-proto",
- "quip-protocol",
- "tokio",
- "tokio-stream",
- "tonic",
- "tower 0.5.3",
-]
-
-[[package]]
 name = "quip-proto"
 version = "0.3.0"
 dependencies = [
@@ -887,8 +873,16 @@ dependencies = [
 name = "quip-solver-conformance"
 version = "0.3.0"
 dependencies = [
+ "hyper-util",
+ "prost",
+ "quip-proto",
+ "quip-protocol",
  "serde",
  "serde_json",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tower 0.5.3",
 ]
 
 [[package]]
@@ -899,7 +893,6 @@ dependencies = [
  "getrandom 0.2.17",
  "hyper-util",
  "prost",
- "quip-mock-coordinator",
  "quip-proto",
  "quip-protocol",
  "quip-solver-conformance",

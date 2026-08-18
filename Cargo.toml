@@ -10,7 +10,6 @@ default-members = [
     "crates/quip-protocol",
     "crates/quip-solver-core",
     "crates/quip-solver-conformance",
-    "crates/quip-mock-coordinator",
 ]
 
 [workspace.lints.rust]
