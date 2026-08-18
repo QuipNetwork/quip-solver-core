@@ -25,3 +25,23 @@ fn hello_roundtrips_through_prost() {
         _ => panic!("wrong variant"),
     }
 }
+
+#[test]
+fn capabilities_roundtrips() {
+    use prost::Message as _;
+    use quip_proto::v1::{Capabilities, JobKind};
+
+    let c = Capabilities {
+        backend: "cuda".to_owned(),
+        algorithm: "sa".to_owned(),
+        supported_kinds: vec![JobKind::IsingSample as i32],
+        max_nodes: 4096,
+        max_edges: 32768,
+        features: vec!["streaming".to_owned(), "governor".to_owned()],
+        protocol_version: 1,
+        stream_width: 8,
+        native_topology_hash: None,
+    };
+    let bytes = c.encode_to_vec();
+    assert_eq!(Capabilities::decode(&bytes[..]).expect("decode"), c);
+}

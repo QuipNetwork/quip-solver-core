@@ -12,7 +12,9 @@ use crate::job::{
 };
 use crate::{CancelToken, Sampler, StreamJob, StreamOutcome, StreamResult};
 use quip_proto::v1::miner_service_client::MinerServiceClient;
-use quip_proto::v1::{coord_msg, miner_msg, CoordMsg, JobKind, JobRequest, MinerMsg, Ready};
+use quip_proto::v1::{
+    coord_msg, miner_msg, Capabilities, CoordMsg, JobKind, JobRequest, MinerMsg, Ready,
+};
 use quip_protocol::session::{build_hello, BackendCaps, ExitCode, SessionConfig, SessionError};
 use std::collections::HashMap;
 use std::process::ExitCode as StdExitCode;
@@ -34,6 +36,9 @@ pub struct BackendIdentity {
     pub max_nodes: u32,
     /// Hard cap on edges accepted for a job.
     pub max_edges: u32,
+    /// Extra capability names advertised in `Hello` and `Capabilities`
+    /// (for example `"streaming"`, `"governor"`). Empty for a plain backend.
+    pub features: &'static [&'static str],
     /// Sampling-parameter envelope used by `adapt::adapt_params`.
     pub adapt: crate::adapt::AdaptBounds,
 }
@@ -42,15 +47,59 @@ pub struct BackendIdentity {
 #[derive(Debug)]
 pub struct OpenError(pub String);
 
+/// Build this solver's [`Capabilities`]. The `--capabilities` flag prints it,
+/// and `GetCapabilities` returns it, so both answers come from one place.
+#[must_use]
+pub fn capabilities(id: &BackendIdentity, stream_width: u32) -> Capabilities {
+    Capabilities {
+        backend: id.backend.to_owned(),
+        algorithm: id.algorithm.to_owned(),
+        supported_kinds: vec![JobKind::IsingSample as i32],
+        max_nodes: id.max_nodes,
+        max_edges: id.max_edges,
+        features: id.features.iter().map(|f| (*f).to_owned()).collect(),
+        protocol_version: quip_protocol::session::PROTOCOL_VERSION,
+        stream_width,
+        native_topology_hash: None,
+    }
+}
+
+/// Render [`Capabilities`] in the protobuf JSON mapping.
+///
+/// The generated prost types carry no serde derives, and adding them to
+/// `quip-proto` would put a serde dependency in the wire crate for one CLI
+/// flag. Nine fields is less code than that.
+fn capabilities_json(id: &BackendIdentity, stream_width: u32) -> String {
+    let c = capabilities(id, stream_width);
+    let kinds = c
+        .supported_kinds
+        .iter()
+        .filter_map(|k| JobKind::try_from(*k).ok())
+        .map(|k| format!("\"{}\"", k.as_str_name()))
+        .collect::<Vec<_>>()
+        .join(",");
+    let features = c
+        .features
+        .iter()
+        .map(|f| format!("\"{f}\""))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "{{\"backend\":\"{}\",\"algorithm\":\"{}\",\"supportedKinds\":[{kinds}],\
+         \"maxNodes\":{},\"maxEdges\":{},\"features\":[{features}],\
+         \"protocolVersion\":{},\"streamWidth\":{}}}",
+        c.backend, c.algorithm, c.max_nodes, c.max_edges, c.protocol_version, c.stream_width
+    )
+}
+
 #[expect(
     clippy::print_stdout,
     reason = "user-facing CLI capabilities JSON for --capabilities"
 )]
-fn print_capabilities(id: &BackendIdentity) {
-    println!(
-        r#"{{"backend":"{}","algorithm":"{}","supported_kinds":["ISING_SAMPLE"],"max_nodes":{},"max_edges":{}}}"#,
-        id.backend, id.algorithm, id.max_nodes, id.max_edges
-    );
+fn print_capabilities(id: &BackendIdentity, stream_width: u32) {
+    // The protobuf JSON mapping, so the flag and the session reply agree on
+    // field names. Both answers are built by [`capabilities`].
+    println!("{}", capabilities_json(id, stream_width));
 }
 
 /// Emit a miner progress line every N completed jobs (v0.2 `mine_work_item`
@@ -589,6 +638,14 @@ async fn run_session<S: Sampler>(
                         ))
                         .await?;
                 }
+                Some(coord_msg::Msg::GetCapabilities(_)) => {
+                    ctrl_tx
+                        .send(miner(miner_msg::Msg::Capabilities(capabilities(
+                            id,
+                            u32::try_from(width).unwrap_or(u32::MAX),
+                        ))))
+                        .await?;
+                }
                 Some(coord_msg::Msg::Shutdown(s)) => {
                     grace_ms = if s.grace_ms == 0 {
                         5000
@@ -707,7 +764,7 @@ pub fn run<S: Sampler>(
     }
 
     if common.capabilities {
-        print_capabilities(&id);
+        print_capabilities(&id, 1);
         return StdExitCode::SUCCESS;
     }
     if common.check {
@@ -818,5 +875,52 @@ mod tests {
             .await
             .expect("writer returned once both inputs closed")
             .expect("writer did not panic");
+    }
+
+    fn test_identity() -> BackendIdentity {
+        BackendIdentity {
+            backend: "mock",
+            algorithm: "sa",
+            max_nodes: 100,
+            max_edges: 200,
+            features: &["streaming"],
+            adapt: crate::adapt::AdaptBounds {
+                min_sweeps: 1,
+                max_sweeps: 1,
+                min_reads: 1,
+                max_reads: 1,
+                reads_solution_min_factor: 1,
+                reads_solution_max_factor: 1,
+                reads_solution_floor_factor: 0,
+            },
+        }
+    }
+
+    #[test]
+    fn capabilities_constructor_matches_the_printer() {
+        let id = test_identity();
+        let c = capabilities(&id, 4);
+        let v: serde_json::Value =
+            serde_json::from_str(&capabilities_json(&id, 4)).expect("printer emits JSON");
+        assert_eq!(v.get("backend"), Some(&serde_json::json!(c.backend)));
+        assert_eq!(v.get("algorithm"), Some(&serde_json::json!(c.algorithm)));
+        assert_eq!(v.get("maxNodes"), Some(&serde_json::json!(c.max_nodes)));
+        assert_eq!(v.get("maxEdges"), Some(&serde_json::json!(c.max_edges)));
+        assert_eq!(
+            v.get("protocolVersion"),
+            Some(&serde_json::json!(c.protocol_version))
+        );
+        assert_eq!(
+            v.get("streamWidth"),
+            Some(&serde_json::json!(c.stream_width))
+        );
+        assert_eq!(v.get("features"), Some(&serde_json::json!(["streaming"])));
+        assert_eq!(
+            v.get("supportedKinds"),
+            Some(&serde_json::json!(["ISING_SAMPLE"]))
+        );
+        assert_eq!(c.supported_kinds, vec![JobKind::IsingSample as i32]);
+        assert_eq!(c.features, vec!["streaming"]);
+        assert_eq!(c.native_topology_hash, None);
     }
 }

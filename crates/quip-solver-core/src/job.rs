@@ -435,6 +435,7 @@ mod tests {
             algorithm,
             max_nodes: 100_000,
             max_edges: 1_000_000,
+            features: &[],
             adapt: TEST_ADAPT,
         }
     }

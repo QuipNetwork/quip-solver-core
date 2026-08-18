@@ -22,7 +22,7 @@ pub use cli::CommonArgs;
 pub use csr::CsrGraph;
 pub use error::SampleError;
 pub use ising::{Algorithm, IsingGraph, SampleParams, SamplerResult};
-pub use session::{run, BackendIdentity, OpenError};
+pub use session::{capabilities, run, BackendIdentity, OpenError};
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;

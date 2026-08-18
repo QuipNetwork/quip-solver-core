@@ -43,6 +43,7 @@ fn main() -> ExitCode {
             algorithm: "sa",
             max_nodes: 100_000,
             max_edges: 1_000_000,
+            features: &[],
             adapt: quip_solver_core::adapt::AdaptBounds {
                 min_sweeps: 64,
                 max_sweeps: 4096,

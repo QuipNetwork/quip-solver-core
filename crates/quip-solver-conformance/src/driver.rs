@@ -273,7 +273,7 @@ async fn drain_replies(inbound: &mut Streaming<MinerMsg>, outcome: &mut SessionO
             miner_msg::Msg::Fatal(f) => {
                 outcome.fatal = Some((f.exit_code.cast_signed(), f.reason));
             }
-            miner_msg::Msg::Hello(_) => {}
+            miner_msg::Msg::Hello(_) | miner_msg::Msg::Capabilities(_) => {}
         }
     }
 }

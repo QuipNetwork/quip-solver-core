@@ -32,6 +32,7 @@ message MinerMsg {
     Reject     reject      = 5;
     Status     status      = 6;
     Fatal      fatal       = 7;
+    Capabilities capabilities = 8;
   }
 }
 
@@ -45,6 +46,7 @@ message CoordMsg {
     Ping      ping      = 6;
     Shutdown  shutdown  = 7;
     SetTarget set_target = 8;
+    GetCapabilities get_capabilities = 9;
   }
 }
 
@@ -175,4 +177,23 @@ message Fatal {
   uint32 exit_code = 1; // 64/69/70/77
   string reason    = 2;
   bool   restart_required = 3;
+}
+
+// Coordinator asks a miner what it currently supports. A miner may also send
+// `Capabilities` unprompted when what it supports changes mid-session, for
+// example a degraded device lowering `max_nodes`.
+message GetCapabilities {}
+
+// What a solver supports on this host. A caller uses it to decide whether to
+// launch the binary at all, so it must answer without touching the device.
+message Capabilities {
+  string   backend              = 1; // cpu | cuda | metal | dwave-qpu
+  string   algorithm            = 2; // sa | gibbs | quantum-anneal
+  repeated JobKind supported_kinds = 3;
+  uint32   max_nodes            = 4;
+  uint32   max_edges            = 5;
+  repeated string features      = 6;
+  uint32   protocol_version     = 7; // this spec: 1
+  uint32   stream_width         = 8; // models kept in flight; 1 = serial
+  optional bytes native_topology_hash = 9;
 }
