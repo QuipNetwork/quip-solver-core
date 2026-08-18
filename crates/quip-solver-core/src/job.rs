@@ -689,9 +689,15 @@ mod tests {
     fn a_mempool_job_gets_no_watermark() {
         let sampler = StubSampler;
         let id = identity("sa");
-        let Prepared::Sample { job, .. } =
-            prepare_job(edges_job_at_generation(1, 0), &sampler, &id, 64, None, None, None)
-        else {
+        let Prepared::Sample { job, .. } = prepare_job(
+            edges_job_at_generation(1, 0),
+            &sampler,
+            &id,
+            64,
+            None,
+            None,
+            None,
+        ) else {
             panic!("expected Sample");
         };
         assert_eq!(

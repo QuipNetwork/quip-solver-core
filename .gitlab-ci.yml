@@ -1,0 +1,52 @@
+stages:
+  - test
+
+variables:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+# The contract must build with no device present. That is the test for what
+# belongs in this repository: anything needing special hardware to build
+# belongs in a solver repository instead.
+rust:
+  stage: test
+  image: rust:1.97.1
+  tags: [linux, amd64]
+  before_script:
+    - apt-get update && apt-get install -y --no-install-recommends protobuf-compiler
+    - rustup component add clippy rustfmt
+  script:
+    - cargo fmt --all -- --check
+    - cargo clippy --workspace --exclude quip-protocol-py --all-targets -- -D warnings
+    - cargo test --workspace --exclude quip-protocol-py
+
+conformance:
+  stage: test
+  image: python:3.11
+  tags: [linux, amd64]
+  before_script:
+    - apt-get update && apt-get install -y --no-install-recommends protobuf-compiler
+    - python -m venv .venv
+    - . .venv/bin/activate
+    # Pin grpcio-tools so the stub drift guard stays deterministic. The
+    # checked-in python/quip/v1/*_pb2.py were generated with 1.82.1 (protoc
+    # gencode 7.35.0). A newer grpcio-tools stamps a different gencode version
+    # and trips the diff. Bump this pin and regenerate the stubs together.
+    - pip install maturin "grpcio-tools==1.82.1"
+    - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+    - . "$HOME/.cargo/env"
+    - maturin develop -E dev
+  script:
+    # Proto and stub drift guard: regenerate from the normative .proto and fail
+    # if the checked-in copies are stale.
+    - |
+      set -e
+      TMP=$(mktemp -d)
+      python -m grpc_tools.protoc \
+        -I proto \
+        --python_out="$TMP" \
+        --grpc_python_out="$TMP" \
+        proto/quip/v1/miner.proto
+      diff -u python/quip/v1/miner_pb2.py "$TMP/quip/v1/miner_pb2.py"
+      diff -u python/quip/v1/miner_pb2_grpc.py "$TMP/quip/v1/miner_pb2_grpc.py"
+    - python -m pytest conformance/ -v
