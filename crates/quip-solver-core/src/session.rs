@@ -16,7 +16,7 @@ use quip_proto::v1::{coord_msg, miner_msg, CoordMsg, JobKind, JobRequest, MinerM
 use quip_protocol::session::{build_hello, BackendCaps, ExitCode, SessionConfig, SessionError};
 use std::collections::HashMap;
 use std::process::ExitCode as StdExitCode;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -200,11 +200,8 @@ fn log_attempt(backend: &str, sr: &StreamResult, pending: Option<&PendingJob>) {
                 samples.len(),
             );
         }
-        StreamOutcome::Completed(Err(reason)) => {
-            tracing::warn!(
-                "[quip-miner-{backend}] attempt {job}: rejected {} | {wall} wall",
-                reason.as_str_name(),
-            );
+        StreamOutcome::Completed(Err(err)) => {
+            tracing::warn!("[quip-miner-{backend}] attempt {job}: rejected {err} | {wall} wall",);
         }
         // Expected on every reseed, so this is not a degraded condition.
         StreamOutcome::Cancelled => {
@@ -236,6 +233,7 @@ async fn outbound_writer(
     mut ctrl_rx: mpsc::Receiver<MinerMsg>,
     pending: PendingParams,
     jobs_done: Arc<AtomicU64>,
+    device_faulted: Arc<AtomicBool>,
     backend: &'static str,
 ) {
     // Progress logging (mirrors v0.2 mine_work_item's every-N-attempts line).
@@ -274,7 +272,14 @@ async fn outbound_writer(
                 }
                 log_attempt(backend, &sr, entry.as_ref());
                 for reply in finalize_result(sr, reads, sweeps, &mut done) {
+                    let fatal = matches!(reply.msg, Some(miner_msg::Msg::Fatal(_)));
                     if tx.send(reply).await.is_err() {
+                        return;
+                    }
+                    if fatal {
+                        // The device will not recover without a restart. Stop
+                        // now rather than keep accepting jobs it cannot serve.
+                        device_faulted.store(true, Ordering::Relaxed);
                         return;
                     }
                 }
@@ -405,12 +410,14 @@ async fn run_session<S: Sampler>(
     let jobs_done = Arc::new(AtomicU64::new(0));
 
     let (ctrl_tx, ctrl_rx) = mpsc::channel::<MinerMsg>(CTRL_CHANNEL_DEPTH);
+    let device_faulted = Arc::new(AtomicBool::new(false));
     let writer = tokio::spawn(outbound_writer(
         tx.clone(),
         res_rx,
         ctrl_rx,
         Arc::clone(&pending),
         Arc::clone(&jobs_done),
+        Arc::clone(&device_faulted),
         id.backend,
     ));
 
@@ -613,6 +620,9 @@ async fn run_session<S: Sampler>(
         Ok::<(), tonic::Status>(())
     };
     let _ = tokio::time::timeout(grace, drain).await;
+    if device_faulted.load(Ordering::Relaxed) {
+        return Err("device fault: the backend reported an unrecoverable state".into());
+    }
     Ok(())
 }
 
@@ -751,6 +761,7 @@ mod tests {
             ctrl_rx,
             Arc::new(StdMutex::new(HashMap::new())),
             Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicBool::new(false)),
             "test",
         ));
 

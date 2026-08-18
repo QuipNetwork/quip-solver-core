@@ -3,8 +3,8 @@
 //! Exercises the loop without any real backend: handshake, Ready, credits, job
 //! results, each Reject reason, and clean exit.
 
-use quip_solver_conformance::driver::{drive_miner, drive_miner_bad_welcome};
 use quip_proto::v1::RejectReason;
+use quip_solver_conformance::driver::{drive_miner, drive_miner_bad_welcome};
 use std::process::Command;
 
 /// Build the named example and return its binary path.
@@ -125,5 +125,23 @@ async fn a_bad_welcome_ends_the_session_with_config_invalid() {
         report.result_job_ids().is_empty(),
         "a miner that rejected the Welcome must not have run jobs: {:?}",
         report.result_job_ids()
+    );
+}
+
+#[tokio::test]
+async fn a_device_fault_ends_the_session_instead_of_requesting_more_work() {
+    let bin = example_bin("mock_sampler_faulty");
+    let socket = unique_socket("faulty");
+    let report = drive_miner(&bin, &format!("unix://{socket}")).await;
+
+    assert!(report.handshake_ok, "handshake failed");
+    assert!(
+        report.has_reject(b"job-1", RejectReason::Overloaded),
+        "a DeviceFault must still reject its own job: {:?}",
+        report.rejects
+    );
+    assert_eq!(
+        report.exit_code, 70,
+        "a wedged device must exit InternalFatal, not keep accepting jobs"
     );
 }

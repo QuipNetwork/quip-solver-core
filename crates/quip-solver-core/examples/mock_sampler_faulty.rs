@@ -1,6 +1,5 @@
-//! Test-support miner with `max_reads() == 0`, so every job (`num_reads` ≥ 1) is
-//! rejected `TooLarge`. Used by `tests/loop_conformance.rs` to exercise the
-//! reads-cap path.
+//! Test-support miner whose `sample` always returns `DeviceFault`. Used by
+//! `tests/loop_conformance.rs` to exercise the session-ending fatal path.
 
 use clap::Parser;
 use quip_solver_core::{
@@ -8,20 +7,15 @@ use quip_solver_core::{
 };
 use std::process::ExitCode;
 
-struct CappedSampler;
+struct FaultySampler;
 
-impl Sampler for CappedSampler {
+impl Sampler for FaultySampler {
     fn sample(
         &self,
         _graph: &IsingGraph,
         _params: &SampleParams,
     ) -> Result<Vec<SamplerResult>, SampleError> {
-        // Unreachable in practice: the harness rejects TooLarge before sampling.
-        Ok(Vec::new())
-    }
-
-    fn max_reads(&self) -> u32 {
-        0
+        Err(SampleError::DeviceFault("test: wedged".to_owned()))
     }
 }
 
@@ -51,6 +45,6 @@ fn main() -> ExitCode {
             },
         },
         &cli.common,
-        || Ok(CappedSampler),
+        || Ok(FaultySampler),
     )
 }

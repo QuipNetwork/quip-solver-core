@@ -7,9 +7,10 @@ use crate::session::BackendIdentity;
 use crate::Sampler;
 use crate::{StreamJob, StreamOutcome, StreamResult};
 use quip_proto::v1::{
-    ising_problem, miner_msg, IsingProblem, Job, JobKind, JobRequest, MinerMsg, Reject,
+    ising_problem, miner_msg, Fatal, IsingProblem, Job, JobKind, JobRequest, MinerMsg, Reject,
     RejectReason, Result as JobResult, SamplerMeta, Solution, Status, Topology,
 };
+use quip_protocol::session::ExitCode;
 use quip_protocol::wire::{decode_i32_le, encode_spins, WireError};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -344,11 +345,25 @@ pub(crate) fn finalize_result(
         // A reject is terminal for this job too, so replace its credit like a
         // completion does — otherwise the coordinator's consume-on-dispatch
         // pool leaks one slot per reject and the pipeline slowly starves.
-        StreamOutcome::Completed(Err(reason)) => {
+        //
+        // A DeviceFault is the exception: the device will not recover, so the
+        // session sends Fatal instead of asking for more work.
+        StreamOutcome::Completed(Err(err)) => {
+            let reason = err.to_reject_reason();
+            if err.is_fatal() {
+                return vec![
+                    reject(sr.job_id, reason),
+                    miner(miner_msg::Msg::Fatal(Fatal {
+                        exit_code: ExitCode::InternalFatal as u32,
+                        reason: err.to_string(),
+                        restart_required: true,
+                    })),
+                ];
+            }
             return vec![
                 reject(sr.job_id, reason),
                 miner(miner_msg::Msg::JobRequest(JobRequest { credits: 1 })),
-            ]
+            ];
         }
         // Generation abandoned on reseed: the coordinator has moved on, so send
         // no stale Result/Reject — only refund the credit to keep pipeline depth.
@@ -399,7 +414,7 @@ mod tests {
             &self,
             _graph: &IsingGraph,
             _params: &SampleParams,
-        ) -> Result<Vec<SamplerResult>, RejectReason> {
+        ) -> Result<Vec<SamplerResult>, crate::SampleError> {
             Ok(vec![])
         }
     }

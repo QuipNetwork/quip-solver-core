@@ -12,6 +12,7 @@ pub mod cli;
 pub mod config;
 pub mod csr;
 mod display;
+pub mod error;
 pub mod ising;
 mod job;
 pub mod logging;
@@ -19,10 +20,10 @@ mod session;
 
 pub use cli::CommonArgs;
 pub use csr::CsrGraph;
+pub use error::SampleError;
 pub use ising::{Algorithm, IsingGraph, SampleParams, SamplerResult};
 pub use session::{run, BackendIdentity, OpenError};
 
-use quip_proto::v1::RejectReason;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -104,11 +105,11 @@ pub struct StreamResult {
 
 /// Outcome of one streamed job.
 pub enum StreamOutcome {
-    /// Ran to completion (or a real reject).
-    Completed(Result<Vec<SamplerResult>, RejectReason>),
-    /// Abandoned because its generation was cancelled; the coordinator has moved
-    /// on, so nothing is sent upstream — only the local credit is refunded to
-    /// keep pipeline depth for the live round.
+    /// Ran to completion, or failed with a device condition.
+    Completed(Result<Vec<SamplerResult>, SampleError>),
+    /// Abandoned because its generation was cancelled; the coordinator has
+    /// moved on, so nothing is sent upstream — only the local credit is
+    /// refunded to keep pipeline depth for the live round.
     Cancelled,
 }
 
@@ -118,18 +119,18 @@ pub enum StreamOutcome {
 /// is required; the other methods default to a no-governor, uncapped backend
 /// (the CPU miner's shape).
 pub trait Sampler: Send + Sync + 'static {
-    /// Sample one job. Device errors map to a reject reason
-    /// (`Overloaded`, `TooLarge`, …).
+    /// Sample one job.
     ///
     /// # Errors
     ///
-    /// Returns a [`RejectReason`] when the backend cannot complete the job
-    /// (device overload, size limit, malformed device state, …).
+    /// Returns a [`SampleError`] when the device cannot complete the job.
+    /// Use `Capacity` for a size bound, `DeviceBusy` for transient load, and
+    /// `DeviceFault` for a state that needs a restart.
     fn sample(
         &self,
         graph: &IsingGraph,
         params: &SampleParams,
-    ) -> Result<Vec<SamplerResult>, RejectReason>;
+    ) -> Result<Vec<SamplerResult>, SampleError>;
 
     /// Stream-process jobs: pull from `jobs`, keep up to [`stream_width`] models
     /// in flight, emit each result to `out` in completion order. Blocks until
@@ -226,7 +227,7 @@ mod stream_tests {
             &self,
             graph: &IsingGraph,
             _params: &SampleParams,
-        ) -> Result<Vec<SamplerResult>, RejectReason> {
+        ) -> Result<Vec<SamplerResult>, SampleError> {
             Ok(vec![SamplerResult {
                 spins: vec![1i8; graph.h.len()],
                 energy_milli: 0,
@@ -285,7 +286,7 @@ mod stream_tests {
             &self,
             graph: &IsingGraph,
             _params: &SampleParams,
-        ) -> Result<Vec<SamplerResult>, RejectReason> {
+        ) -> Result<Vec<SamplerResult>, SampleError> {
             use std::sync::atomic::Ordering;
             let _ = self.0.fetch_add(1, Ordering::SeqCst);
             Ok(vec![SamplerResult {

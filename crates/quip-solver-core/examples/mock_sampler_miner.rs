@@ -3,11 +3,10 @@
 //! `tests/loop_conformance.rs` to exercise the session loop without a backend.
 
 use clap::Parser;
-use quip_solver_core::{
-    run, BackendIdentity, CommonArgs, IsingGraph, SampleParams, Sampler, SamplerResult,
-};
-use quip_proto::v1::RejectReason;
 use quip_protocol::scoring::energy_milli;
+use quip_solver_core::{
+    run, BackendIdentity, CommonArgs, IsingGraph, SampleError, SampleParams, Sampler, SamplerResult,
+};
 use std::process::ExitCode;
 
 struct MockSampler;
@@ -17,7 +16,7 @@ impl Sampler for MockSampler {
         &self,
         graph: &IsingGraph,
         params: &SampleParams,
-    ) -> Result<Vec<SamplerResult>, RejectReason> {
+    ) -> Result<Vec<SamplerResult>, SampleError> {
         let spins = vec![1i8; graph.num_nodes()];
         let energy = energy_milli(&spins, &graph.h, &graph.j, &graph.edges);
         Ok((0..params.num_reads)
