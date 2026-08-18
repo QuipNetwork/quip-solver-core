@@ -9,4 +9,5 @@ fn drive_miner_is_exported_from_the_conformance_crate() {
     // arguments, and it does not coerce to a fn pointer (E0308).
     let _ = quip_solver_conformance::driver::drive_miner;
     let _ = quip_solver_conformance::driver::drive_miner_bad_welcome;
+    let _ = quip_solver_conformance::driver::drive_miner_one_job;
 }

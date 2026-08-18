@@ -124,6 +124,10 @@ enum ScriptKind {
     /// Send a `Welcome` with an unsupported `protocol_version` and observe how
     /// the miner rejects it (expected: `Fatal` + exit `ConfigInvalid`).
     BadWelcome,
+    /// Handshake, one valid job, then wait. No `Shutdown`. A miner that ends
+    /// the session after a device fault closes on its own. A miner that keeps
+    /// reading hangs until the harness timeout.
+    OneJobThenWait,
 }
 
 struct MockCoordinator {
@@ -148,6 +152,7 @@ impl MinerService for MockCoordinator {
             let outcome = match script {
                 ScriptKind::Full => run_script(&mut inbound, &tx).await,
                 ScriptKind::BadWelcome => run_script_bad_welcome(&mut inbound, &tx).await,
+                ScriptKind::OneJobThenWait => run_script_one_job(&mut inbound, &tx).await,
             };
             if let Some(otx) = outcome_tx {
                 let _ = otx.send(outcome);
@@ -441,6 +446,62 @@ async fn run_script_bad_welcome(
     outcome
 }
 
+/// Handshake, one valid job, then wait for the miner to close. Unlike
+/// [`run_script`], this does not send `Shutdown`, so a miner that stays in
+/// its read loop after a device fault hangs until the harness timeout.
+async fn run_script_one_job(
+    inbound: &mut Streaming<MinerMsg>,
+    tx: &mpsc::Sender<Result<CoordMsg, Status>>,
+) -> SessionOutcome {
+    let mut outcome = SessionOutcome::default();
+
+    if !read_hello(inbound, &mut outcome).await {
+        return outcome;
+    }
+
+    if tx
+        .send(Ok(coord(coord_msg::Msg::Welcome(Welcome {
+            protocol_version: 1,
+        }))))
+        .await
+        .is_err()
+    {
+        return outcome;
+    }
+    let configure = Configure {
+        queue_depth: 3,
+        idle_timeout_s: 300,
+        heartbeat_s: 15,
+        reconnect_window_s: 60,
+        backend_toml: String::new(),
+    };
+    let _ = tx
+        .send(Ok(coord(coord_msg::Msg::Configure(configure))))
+        .await;
+    let topology = Topology {
+        hash: TOPOLOGY_HASH.to_vec(),
+        nodes: vec![0, 1],
+        edges: Some(EdgeList {
+            u: vec![0],
+            v: vec![1],
+        }),
+        allowed_h_milli: vec![-1000, 0, 1000],
+    };
+    let _ = tx.send(Ok(coord(coord_msg::Msg::Topology(topology)))).await;
+
+    let future = now_unix_ms() + 3_600_000;
+    let _ = tx
+        .send(Ok(coord(coord_msg::Msg::Job(job(
+            b"job-1",
+            future,
+            valid_ising(),
+        )))))
+        .await;
+
+    drain_replies(inbound, &mut outcome).await;
+    outcome
+}
+
 /// Bind a UDS mock coordinator, spawn `bin_path` as a miner client against it,
 /// run the given scripted session, and report what was observed.
 ///
@@ -528,6 +589,11 @@ pub async fn drive_miner(bin_path: &str, socket: &str) -> DriverReport {
 /// sends a `Fatal` before disconnecting.
 pub async fn drive_miner_bad_welcome(bin_path: &str, socket: &str) -> DriverReport {
     drive_miner_with_script(bin_path, socket, ScriptKind::BadWelcome).await
+}
+
+/// Handshake, one valid job, then wait. Does not send `Shutdown`.
+pub async fn drive_miner_one_job(bin_path: &str, socket: &str) -> DriverReport {
+    drive_miner_with_script(bin_path, socket, ScriptKind::OneJobThenWait).await
 }
 
 #[cfg(test)]

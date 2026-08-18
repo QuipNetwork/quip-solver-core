@@ -210,7 +210,7 @@ fn log_attempt(backend: &str, sr: &StreamResult, pending: Option<&PendingJob>) {
     }
 }
 
-/// Outbound half of a session, and the SOLE owner of the outbound sender.
+/// Outbound half of a session.
 ///
 /// Reading the inbound stream and writing to the outbound one must not live in
 /// the same task. A `tx.send().await` blocks once the outbound channel fills,
@@ -225,8 +225,13 @@ fn log_attempt(backend: &str, sr: &StreamResult, pending: Option<&PendingJob>) {
 /// itself. Results (large) arrive on `res_rx` straight from the sampler;
 /// control replies (small, rare) arrive on `ctrl_rx` from the read loop.
 ///
-/// Returns once both inputs are finished, or as soon as the outbound channel
-/// closes.
+/// After Hello, this task is the only sender on the outbound channel.
+/// `run_session` keeps its own `Sender` so the stream stays open until the
+/// shutdown path drops it. Returning here after `Fatal` therefore does not
+/// close the stream; `run_session` watches this task's `JoinHandle`.
+///
+/// Returns once both inputs are finished, after sending `Fatal` for a device
+/// fault, or as soon as the outbound channel closes.
 async fn outbound_writer(
     tx: mpsc::Sender<MinerMsg>,
     mut res_rx: mpsc::Receiver<StreamResult>,
@@ -411,7 +416,7 @@ async fn run_session<S: Sampler>(
 
     let (ctrl_tx, ctrl_rx) = mpsc::channel::<MinerMsg>(CTRL_CHANNEL_DEPTH);
     let device_faulted = Arc::new(AtomicBool::new(false));
-    let writer = tokio::spawn(outbound_writer(
+    let mut writer = tokio::spawn(outbound_writer(
         tx.clone(),
         res_rx,
         ctrl_rx,
@@ -420,6 +425,9 @@ async fn run_session<S: Sampler>(
         Arc::clone(&device_faulted),
         id.backend,
     ));
+    // Set when the `select!` below polls `writer` to completion. A
+    // `JoinHandle` must be joined exactly once: awaiting it again panics.
+    let mut writer_joined = false;
 
     loop {
         // Read loop: owns the inbound stream and nothing else. Every outbound
@@ -432,7 +440,23 @@ async fn run_session<S: Sampler>(
         // truly-gone peer surfaces here as a closed stream (`Ok(None)`) or
         // a transport error (`Err`); dead-peer detection over the network
         // belongs to HTTP/2 keepalive, not an application quiet-period.
-        let msg = inbound.message().await;
+        //
+        // Also watch the writer. On a device fault it sends `Fatal` and
+        // returns while this loop would otherwise sit in `inbound.message()`
+        // until the coordinator sent `Shutdown` or closed. `biased` plus
+        // writer-first means a completed writer wins when both are ready,
+        // so an already-buffered later job is not dispatched after `Fatal`.
+        // In the normal path the writer outlives this loop (`res_rx` and
+        // `ctrl_rx` stay open until we drop them below), so it cannot win.
+        let msg = tokio::select! {
+            biased;
+            join = &mut writer => {
+                writer_joined = true;
+                let _ = join;
+                break;
+            }
+            msg = inbound.message() => msg,
+        };
         {
             let cm: CoordMsg = match msg {
                 Ok(Some(cm)) => cm,
@@ -586,7 +610,7 @@ async fn run_session<S: Sampler>(
     drop(job_tx);
     drop(ctrl_tx);
     let grace = Duration::from_millis(grace_ms);
-    if tokio::time::timeout(grace, writer).await.is_err() {
+    if !writer_joined && tokio::time::timeout(grace, writer).await.is_err() {
         tracing::warn!("outbound writer did not finish within the shutdown grace window");
     }
     // Bounded wait for the sampler worker, then surface panics: a join `Err` is

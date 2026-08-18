@@ -4,7 +4,7 @@
 //! results, each Reject reason, and clean exit.
 
 use quip_proto::v1::RejectReason;
-use quip_solver_conformance::driver::{drive_miner, drive_miner_bad_welcome};
+use quip_solver_conformance::driver::{drive_miner, drive_miner_bad_welcome, drive_miner_one_job};
 use std::process::Command;
 
 /// Build the named example and return its binary path.
@@ -132,12 +132,18 @@ async fn a_bad_welcome_ends_the_session_with_config_invalid() {
 async fn a_device_fault_ends_the_session_instead_of_requesting_more_work() {
     let bin = example_bin("mock_sampler_faulty");
     let socket = unique_socket("faulty");
-    let report = drive_miner(&bin, &format!("unix://{socket}")).await;
+    let report = drive_miner_one_job(&bin, &format!("unix://{socket}")).await;
 
     assert!(report.handshake_ok, "handshake failed");
     assert!(
         report.has_reject(b"job-1", RejectReason::Overloaded),
         "a DeviceFault must still reject its own job: {:?}",
+        report.rejects
+    );
+    assert_eq!(
+        report.rejects.len(),
+        1,
+        "a device fault must stop the session at the first reject, got {:?}",
         report.rejects
     );
     assert_eq!(
