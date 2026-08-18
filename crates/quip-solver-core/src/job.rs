@@ -108,7 +108,7 @@ pub(crate) fn now_unix_ms() -> u64 {
 
 /// Fresh per-job seed from OS entropy. Two jobs issued in the same
 /// millisecond must not sample identically, which a wall-clock-derived seed
-/// would cause (miner-core is shared by cpu/cuda/metal).
+/// would cause (solver-core is shared by cpu/cuda/metal).
 fn os_seed() -> u64 {
     let mut bytes = [0u8; 8];
     #[expect(
