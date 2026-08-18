@@ -896,6 +896,7 @@ dependencies = [
  "quip-proto",
  "quip-protocol",
  "quip-solver-conformance",
+ "serde",
  "serde_json",
  "tokio",
  "tokio-stream",

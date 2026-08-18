@@ -19,6 +19,11 @@ pub struct CommonArgs {
     /// Print the capabilities JSON and exit.
     #[arg(long)]
     pub capabilities: bool,
+    /// Read one problem as JSON on stdin, write its solutions as JSON on
+    /// stdout, and exit. The mode a one-shot caller uses: no coordinator, no
+    /// session, no credits.
+    #[arg(long)]
+    pub solve: bool,
     /// Probe that the backend is runnable and exit.
     #[arg(long)]
     pub check: bool,

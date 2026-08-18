@@ -12,6 +12,7 @@ pub mod cli;
 pub mod config;
 pub mod csr;
 mod display;
+pub mod driver;
 pub mod error;
 pub mod ising;
 mod job;

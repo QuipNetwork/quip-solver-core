@@ -16,6 +16,7 @@ use quip_proto::v1::{
     coord_msg, miner_msg, Capabilities, CoordMsg, JobKind, JobRequest, MinerMsg, Ready,
 };
 use quip_protocol::session::{build_hello, BackendCaps, ExitCode, SessionConfig, SessionError};
+use serde::Serialize;
 use std::collections::HashMap;
 use std::process::ExitCode as StdExitCode;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -64,6 +65,25 @@ pub fn capabilities(id: &BackendIdentity, stream_width: u32) -> Capabilities {
     }
 }
 
+/// Protobuf JSON view of [`Capabilities`]. Field order matches the message.
+///
+/// `native_topology_hash` is omitted when unset, which is the protobuf JSON
+/// mapping and keeps the current eight-field output byte-identical.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CapabilitiesJson<'a> {
+    backend: &'a str,
+    algorithm: &'a str,
+    supported_kinds: Vec<&'a str>,
+    max_nodes: u32,
+    max_edges: u32,
+    features: &'a [String],
+    protocol_version: u32,
+    stream_width: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    native_topology_hash: Option<&'a [u8]>,
+}
+
 /// Render [`Capabilities`] in the protobuf JSON mapping.
 ///
 /// The generated prost types carry no serde derives, and adding them to
@@ -71,25 +91,27 @@ pub fn capabilities(id: &BackendIdentity, stream_width: u32) -> Capabilities {
 /// flag. Nine fields is less code than that.
 fn capabilities_json(id: &BackendIdentity, stream_width: u32) -> String {
     let c = capabilities(id, stream_width);
-    let kinds = c
-        .supported_kinds
-        .iter()
-        .filter_map(|k| JobKind::try_from(*k).ok())
-        .map(|k| format!("\"{}\"", k.as_str_name()))
-        .collect::<Vec<_>>()
-        .join(",");
-    let features = c
-        .features
-        .iter()
-        .map(|f| format!("\"{f}\""))
-        .collect::<Vec<_>>()
-        .join(",");
-    format!(
-        "{{\"backend\":\"{}\",\"algorithm\":\"{}\",\"supportedKinds\":[{kinds}],\
-         \"maxNodes\":{},\"maxEdges\":{},\"features\":[{features}],\
-         \"protocolVersion\":{},\"streamWidth\":{}}}",
-        c.backend, c.algorithm, c.max_nodes, c.max_edges, c.protocol_version, c.stream_width
-    )
+    let view = CapabilitiesJson {
+        backend: &c.backend,
+        algorithm: &c.algorithm,
+        supported_kinds: c
+            .supported_kinds
+            .iter()
+            .filter_map(|k| JobKind::try_from(*k).ok())
+            .map(|k| k.as_str_name())
+            .collect(),
+        max_nodes: c.max_nodes,
+        max_edges: c.max_edges,
+        features: &c.features,
+        protocol_version: c.protocol_version,
+        stream_width: c.stream_width,
+        native_topology_hash: c.native_topology_hash.as_deref(),
+    };
+    #[expect(
+        clippy::expect_used,
+        reason = "CapabilitiesJson is strings and integers; serialization cannot fail"
+    )]
+    serde_json::to_string(&view).expect("serialize capabilities")
 }
 
 #[expect(
@@ -100,6 +122,14 @@ fn print_capabilities(id: &BackendIdentity, stream_width: u32) {
     // The protobuf JSON mapping, so the flag and the session reply agree on
     // field names. Both answers are built by [`capabilities`].
     println!("{}", capabilities_json(id, stream_width));
+}
+
+#[expect(
+    clippy::print_stdout,
+    reason = "user-facing CLI solutions JSON for --solve"
+)]
+fn print_solutions(json: &str) {
+    println!("{json}");
 }
 
 /// Emit a miner progress line every N completed jobs (v0.2 `mine_work_item`
@@ -740,10 +770,11 @@ fn map_err_to_exit(err: Box<dyn std::error::Error>, backend: &str) -> StdExitCod
     StdExitCode::from(ExitCode::InternalFatal as u8)
 }
 
-/// Miner entry point. Dispatches `--capabilities`/`--check`/session mode.
+/// Miner entry point. Dispatches `--capabilities`/`--solve`/`--check`/session mode.
 ///
 /// `open` opens the device and builds the [`Sampler`]; it runs for `--check`
-/// (result discarded) and for session mode. `--capabilities` never calls it.
+/// (result discarded), `--solve`, and session mode. `--capabilities` never
+/// calls it.
 pub fn run<S: Sampler>(
     id: BackendIdentity,
     common: &CommonArgs,
@@ -766,6 +797,38 @@ pub fn run<S: Sampler>(
     if common.capabilities {
         print_capabilities(&id, 1);
         return StdExitCode::SUCCESS;
+    }
+    if common.solve {
+        let sampler = match open() {
+            Ok(s) => s,
+            Err(OpenError(e)) => {
+                tracing::error!("[quip-solver-{}] cannot open device: {e}", id.backend);
+                return StdExitCode::from(ExitCode::EnvIncompatible as u8);
+            }
+        };
+        let mut input = Vec::new();
+        if let Err(e) = std::io::Read::read_to_end(&mut std::io::stdin(), &mut input) {
+            tracing::error!("[quip-solver-{}] cannot read stdin: {e}", id.backend);
+            return StdExitCode::from(ExitCode::ConfigInvalid as u8);
+        }
+        if serde_json::from_slice::<crate::driver::ProblemJson>(&input).is_err() {
+            tracing::error!(
+                "[quip-solver-{}] malformed problem JSON on stdin",
+                id.backend
+            );
+            return StdExitCode::from(ExitCode::ConfigInvalid as u8);
+        }
+        return match crate::driver::solve(&sampler, &input) {
+            Ok(bytes) => {
+                let json = String::from_utf8_lossy(&bytes);
+                print_solutions(&json);
+                StdExitCode::from(ExitCode::Clean as u8)
+            }
+            Err(e) => {
+                tracing::error!("[quip-solver-{}] solve failed: {e}", id.backend);
+                StdExitCode::from(ExitCode::InternalFatal as u8)
+            }
+        };
     }
     if common.check {
         return match open() {
@@ -922,5 +985,29 @@ mod tests {
         assert_eq!(c.supported_kinds, vec![JobKind::IsingSample as i32]);
         assert_eq!(c.features, vec!["streaming"]);
         assert_eq!(c.native_topology_hash, None);
+    }
+
+    #[test]
+    fn capabilities_json_escapes_quotes_in_features() {
+        let id = BackendIdentity {
+            backend: "mock",
+            algorithm: "sa",
+            max_nodes: 1,
+            max_edges: 1,
+            features: &[r#"has"quote"#],
+            adapt: crate::adapt::AdaptBounds {
+                min_sweeps: 1,
+                max_sweeps: 1,
+                min_reads: 1,
+                max_reads: 1,
+                reads_solution_min_factor: 1,
+                reads_solution_max_factor: 1,
+                reads_solution_floor_factor: 0,
+            },
+        };
+        let json = capabilities_json(&id, 1);
+        let v: serde_json::Value =
+            serde_json::from_str(&json).expect("quoted feature must produce valid JSON");
+        assert_eq!(v.get("features"), Some(&serde_json::json!(["has\"quote"])));
     }
 }
