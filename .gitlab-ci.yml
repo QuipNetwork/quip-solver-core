@@ -20,6 +20,15 @@ rust:
     - cargo clippy --workspace --exclude quip-protocol-py --all-targets -- -D warnings
     - cargo test --workspace --exclude quip-protocol-py
 
+docs:
+  stage: test
+  image: rust:1.97.1
+  tags: [linux, amd64]
+  before_script:
+    - apt-get update && apt-get install -y --no-install-recommends protobuf-compiler
+  script:
+    - RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace --exclude quip-protocol-py
+
 conformance:
   stage: test
   image: python:3.11

@@ -55,10 +55,10 @@ pub fn decode_i32_le(bytes: &[u8]) -> Result<Vec<i32>, WireError> {
 /// Encode `{-1,+1}` spins to the one-byte wire form (`0x01`/`0xFF`).
 ///
 /// Spins are `{-1,+1}` by contract. The `s > 0` boundary is deliberate: it
-/// matches [`crate::scoring::sign`] so a stray `0` maps to the same spin
-/// (`-1`/`0xFF`) in both the wire byte and the energy scorer. Using `s >= 0`
-/// here would encode `0` as `+1` while the scorer treats it as `-1`, silently
-/// disagreeing on a consensus-scored value.
+/// matches `scoring::sign` (private to this crate) so a stray `0` maps to
+/// the same spin (`-1`/`0xFF`) in both the wire byte and the energy scorer.
+/// Using `s >= 0` here would encode `0` as `+1` while the scorer treats it as
+/// `-1`, silently disagreeing on a consensus-scored value.
 #[must_use]
 pub fn encode_spins(spins: &[i8]) -> Vec<u8> {
     spins

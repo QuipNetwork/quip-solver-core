@@ -7,8 +7,8 @@
 //! [`crate::session::run`].
 //!
 //! Output goes to **stderr**, which is where the coordinator that started the
-//! miner collects it. Stdout is reserved for `--capabilities`, which a caller
-//! parses as JSON.
+//! miner collects it. Stdout is reserved for `--capabilities` and `--solve`,
+//! both of which a caller parses as JSON.
 
 use std::io::IsTerminal as _;
 use tracing_subscriber::EnvFilter;

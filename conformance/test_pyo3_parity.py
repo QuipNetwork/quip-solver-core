@@ -1,8 +1,8 @@
 """Golden-vector parity for the PyO3-backed quip_proto primitives.
 
-Runs the same conformance/golden_vectors.json cases through the compiled
-quip_proto.scoring / wire that the Rust golden tests consume. Because the
-binding is the Rust code, the two cannot diverge.
+Runs the same crates/quip-solver-conformance/vectors cases through the
+compiled quip_proto.scoring / wire that the Rust golden tests consume.
+Because the binding is the Rust code, the two cannot diverge.
 """
 
 import json

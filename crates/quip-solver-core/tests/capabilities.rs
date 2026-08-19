@@ -1,5 +1,5 @@
 //! `--capabilities` must emit the typed Capabilities message, and it must keep
-//! the five keys the current readers already parse.
+//! the seven keys the current readers already parse.
 
 use std::process::Command;
 
