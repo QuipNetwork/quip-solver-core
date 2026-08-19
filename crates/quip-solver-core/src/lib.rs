@@ -23,7 +23,23 @@ pub use cli::CommonArgs;
 pub use csr::CsrGraph;
 pub use error::SampleError;
 pub use ising::{Algorithm, IsingGraph, SampleParams, SamplerResult};
-pub use session::{capabilities, run, BackendIdentity, OpenError};
+pub use session::{capabilities, run, run_code, BackendIdentity, OpenError};
+
+/// The generated protobuf and tonic stubs for the wire contract.
+///
+/// Re-exported so a solver depends on this one crate. Reaching for
+/// `quip-proto` directly only pins a second version of the same code.
+pub use quip_proto;
+/// The consensus primitives: energy and diversity scoring, the `ChaCha8` draw,
+/// nonce derivation, wire codecs, and the handshake.
+///
+/// Re-exported for the same reason as [`quip_proto`]. A solver that scores its
+/// own solutions calls `quip_solver_core::quip_protocol::scoring::energy_milli`
+/// rather than adding a second dependency that must move in lockstep.
+pub use quip_protocol;
+/// Process exit codes from SPEC section 2, and the values `Fatal.exit_code`
+/// carries.
+pub use quip_protocol::session::ExitCode;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;

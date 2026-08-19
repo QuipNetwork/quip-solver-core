@@ -1,8 +1,8 @@
 //! `PyO3` bindings for the consensus primitives in `quip-protocol`.
 //!
-//! Exposes `quip_proto._core.scoring`, `quip_proto._core.wire`, and
-//! `quip_proto._core.ExitCode`. The `quip_proto` package's `__init__` re-exports
-//! these so `from quip_proto import scoring, wire` stays a drop-in. Because the
+//! Exposes `quip_solver_core._core.scoring`, `quip_solver_core._core.wire`,
+//! and `quip_solver_core._core.ExitCode`. The package's `__init__` re-exports
+//! these, so `from quip_solver_core import scoring, wire` works. Because the
 //! math is the Rust source, the Python side cannot drift from it.
 
 use pyo3::exceptions::PyValueError;
@@ -89,7 +89,7 @@ fn decode_spins(b: Vec<u8>) -> PyResult<Vec<i8>> {
     quip_protocol::wire::decode_spins(&b).map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
-/// Python module `quip_proto._core`: scoring, wire, and `ExitCode` constants.
+/// Python module `quip_solver_core._core`: scoring, wire, and `ExitCode`.
 #[pymodule]
 fn _core(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     let scoring = PyModule::new(py, "scoring")?;

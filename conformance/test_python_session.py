@@ -6,8 +6,8 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "python"))
 
-from quip_proto import session  # noqa: E402
-from quip_proto import miner_pb2  # noqa: E402
+from quip_solver_core import session  # noqa: E402
+from quip_solver_core import miner_pb2  # noqa: E402
 
 
 def test_hello_requires_token(monkeypatch):

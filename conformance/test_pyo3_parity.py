@@ -1,7 +1,7 @@
-"""Golden-vector parity for the PyO3-backed quip_proto primitives.
+"""Golden-vector parity for the PyO3-backed quip_solver_core primitives.
 
 Runs the same crates/quip-solver-conformance/vectors cases through the
-compiled quip_proto.scoring / wire that the Rust golden tests consume.
+compiled quip_solver_core.scoring / wire that the Rust golden tests consume.
 Because the binding is the Rust code, the two cannot diverge.
 """
 
@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from quip_proto._core import scoring, wire
+from quip_solver_core._core import scoring, wire
 
 VECTORS = Path(__file__).resolve().parents[1] / "crates/quip-solver-conformance/vectors"
 GOLDEN = json.loads((VECTORS / "golden_vectors.json").read_text())

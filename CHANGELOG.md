@@ -9,6 +9,21 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Published releases. The Rust crates go to crates.io, the `quip_proto` wheel
+  to PyPI, and `@quip.network/quip-solver-core` to npm. The C library ships as
+  a release artifact. A tag builds and publishes all four.
+- `quip-solver-c`, a C ABI over the session loop. A C or C++ solver registers
+  one sampling callback and calls `quip_solver_run`. It also exports
+  `quip_energy_milli` so a C solver scores with the shipped scorer.
+- `@quip.network/quip-solver-core`, the npm package. It carries the consensus
+  primitives as WebAssembly and the generated gRPC stubs.
+- `run_code`, which returns the `ExitCode` enum. `run` stays as a thin wrapper
+  for a Rust `main`. A foreign function interface needs the numeric code, and
+  `std::process::ExitCode` cannot be read back into a number.
+- `quip-solver-core` re-exports `quip_proto` and `quip_protocol`. A solver now
+  names one dependency instead of two that must move in lockstep.
+- Sample solvers in Rust, C++, Python, and TypeScript under `examples/`. Each
+  one passes the conformance gate.
 - The `quip-solver-conformance` crate. It holds the golden vectors and the
   scripted session driver.
 - `Capabilities` and `GetCapabilities` messages on the session stream.
@@ -21,6 +36,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Breaking:** The licence changes from AGPL-3.0-or-later to Apache-2.0.
+  Apache-2.0 adds an express patent grant and stays compatible with AGPLv3, so
+  this code can still be combined into an AGPLv3 work.
+- `quip-proto` ships its generated stubs instead of running `tonic-build` from
+  a build script. A consumer no longer needs `protoc` on the build host. A test
+  regenerates the stubs and fails when the checked-in copy is stale.
+- `quip-protocol` gates its `session` module behind a default feature. Turning
+  the feature off drops `tonic` and `prost`, which is what lets the consensus
+  core build for `wasm32`.
 - **Breaking:** `Sampler::sample` now returns
   `Result<Vec<SamplerResult>, SampleError>`. The previous error type was
   `RejectReason`. `SampleError` has three variants: `Capacity`,
@@ -39,6 +63,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Removed
 
+- The `tonic`, `prost`, and `tokio` dependencies of `quip-protocol`. No source
+  file used them.
+- The `quip-proto` build script.
 - `CancelGuard`.
 - `StreamJob.generation`.
 - `RejectReason` as the `Sampler::sample` error type.

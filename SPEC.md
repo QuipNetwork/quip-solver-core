@@ -258,11 +258,11 @@ four modes) states the session-mode command line.
 These pieces exist now:
 
 - The proto.
-- The `quip_proto` wheel: protocol primitives, scoring, wire encoding, and
+- The `quip-solver-core` wheel: protocol primitives, scoring, wire encoding, and
   exit codes.
 - `quip-solver-drive` as the conformance gate for a solver in any language.
 
-The `quip_proto` wheel carries protocol primitives and handshake helpers. It
+The `quip-solver-core` wheel carries protocol primitives and handshake helpers. It
 does not carry the session loop. A Python solver written today must write
 the state machine itself.
 

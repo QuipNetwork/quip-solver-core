@@ -4,15 +4,28 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+description = "Wire codec, energy and diversity scoring, handshake, and nonce derivation for the Quip solver protocol"
+keywords = ["quip", "protocol", "ising", "consensus", "grpc"]
+categories = ["network-programming", "cryptography"]
+
+[features]
+default = ["session"]
+# Gates src/session.rs, the only module needing the generated protobuf types.
+# Turning it off drops quip-proto (and with it tonic and prost), which is what
+# lets this crate compile to wasm32 for the npm package.
+session = ["dep:quip-proto"]
 
 [dependencies]
-quip-proto = { path = "../quip-proto" }
-tonic = { workspace = true }
-prost = { workspace = true }
-tokio = { workspace = true }
+quip-proto = { workspace = true, optional = true }
 blake3 = "1"
 
 [dev-dependencies]
+# Path-only and deliberately unversioned. quip-solver-conformance depends on
+# this crate, so a version here would make the two impossible to publish in any
+# order. Cargo drops versionless dev-dependencies from the published manifest,
+# which breaks the cycle without affecting `cargo test` in this workspace.
 quip-solver-conformance = { path = "../quip-solver-conformance" }
 serde_json = "1"
 

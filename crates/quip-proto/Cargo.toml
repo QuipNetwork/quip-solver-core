@@ -4,13 +4,21 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+description = "Generated tonic and prost stubs for the Quip solver wire protocol"
+keywords = ["grpc", "protobuf", "tonic", "quip", "ising"]
+categories = ["network-programming", "api-bindings"]
 
 [dependencies]
 tonic = { workspace = true }
 prost = { workspace = true }
 
-[build-dependencies]
+[dev-dependencies]
+# Only tests/stub_drift.rs uses this. The stubs are checked in, so building this
+# crate runs no codegen and needs no protoc; keeping tonic-build out of
+# [build-dependencies] is what spares every consumer that toolchain.
 tonic-build = { workspace = true }
 
-# quip-proto is 100% prost/tonic-generated (tonic::include_proto!); it stays on
-# default lints rather than opting into the strict workspace set.
+# quip-proto is 100% prost/tonic-generated (src/generated/); it stays on default
+# lints rather than opting into the strict workspace set.

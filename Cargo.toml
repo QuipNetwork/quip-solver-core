@@ -15,8 +15,10 @@ default-members = [
 [workspace.package]
 version = "0.0.0-rc1"
 edition = "2021"
-license = "AGPL-3.0-or-later"
+license = "Apache-2.0"
 repository = "https://gitlab.com/quip.network/quip-solver-core"
+homepage = "https://quip.network"
+readme = "README.md"
 
 [workspace.lints.rust]
 missing-docs          = "warn"
@@ -64,6 +66,15 @@ similar-names           = "allow"
 all = "warn"
 
 [workspace.dependencies]
+# Internal crates carry a version alongside the path. Cargo builds against the
+# path inside this workspace and swaps in the version when publishing, which is
+# what lets crates.io resolve them. quip-solver-conformance is deliberately
+# absent: it is only ever a dev-dependency, and versioning it would create a
+# publish cycle with quip-protocol. See the note in crates/quip-protocol.
+quip-proto = { path = "crates/quip-proto", version = "0.0.0-rc1" }
+quip-protocol = { path = "crates/quip-protocol", version = "0.0.0-rc1" }
+quip-solver-core = { path = "crates/quip-solver-core", version = "0.0.0-rc1" }
+
 tonic = "0.12"
 prost = "0.13"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "signal", "io-util", "sync"] }

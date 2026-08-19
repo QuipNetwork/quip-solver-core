@@ -1,5 +1,15 @@
 target/
 Cargo.lock.orig
+
+# npm package build outputs. src/generated/ is checked in and drift-guarded,
+# the same way the Python and Rust stubs are; these three are pure artifacts.
+npm/node_modules/
+npm/dist/
+npm/wasm/
+# Copied from the repository root by the npm `prepack` script so the published
+# tarball carries real files; npm does not follow symlinks.
+npm/LICENSE
+npm/NOTICE
 __pycache__/
 .venv/
 venv/
@@ -13,3 +23,22 @@ python/**/__pycache__/
 *.so
 *.pyd
 *.dylib
+
+# Sample solver build outputs. Each example builds against a published artifact,
+# so nothing here belongs in the repository.
+examples/*/target/
+examples/*/dist/
+examples/*/node_modules/
+examples/cpp/mock_miner
+crates/quip-solver-c/include/
+crates/quip-protocol-wasm/pkg/
+npm/*.tgz
+# Regenerated once @quip.network/quip-solver-core is live on npm. Committing it
+# now would pin the local tarball path used to test before publication.
+examples/typescript/package-lock.json
+
+# Release staging: wheels, sdists, the C library tarball and its unpacked tree.
+# Built by `make check-release` and by the release:validate CI job, published
+# as pipeline artifacts. The .a alone is 43MB, so this must never be committed.
+/dist/
+.venv-examples/

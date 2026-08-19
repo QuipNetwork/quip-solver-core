@@ -771,12 +771,12 @@ fn panic_payload_message(panic: &(dyn std::any::Any + Send)) -> String {
     }
 }
 
-fn map_err_to_exit(err: Box<dyn std::error::Error>, backend: &str) -> StdExitCode {
+fn map_err_to_exit(err: Box<dyn std::error::Error>, backend: &str) -> ExitCode {
     // Prefer the canonical `SessionError -> ExitCode` mapping (quip-protocol)
     // over a hand-rolled match, so real miners exit the same code as the mock
     // reference (e.g. BadWelcome -> ConfigInvalid/64, not InternalFatal/70).
     let err = match err.downcast::<SessionError>() {
-        Ok(se) => return StdExitCode::from(ExitCode::from(*se) as u8),
+        Ok(se) => return ExitCode::from(*se),
         Err(err) => err,
     };
     // Type-erased fallback: the error crossed a boundary that lost the
@@ -784,25 +784,29 @@ fn map_err_to_exit(err: Box<dyn std::error::Error>, backend: &str) -> StdExitCod
     // two documented exit codes we can identify from the message.
     let msg = err.to_string();
     if msg.contains("QUIP_SESSION_TOKEN") || msg.contains("session token") {
-        return StdExitCode::from(ExitCode::TokenRejected as u8);
+        return ExitCode::TokenRejected;
     }
     if msg.contains("unexpected protocol version") {
-        return StdExitCode::from(ExitCode::ConfigInvalid as u8);
+        return ExitCode::ConfigInvalid;
     }
     tracing::error!("quip-miner-{backend} fatal: {err}");
-    StdExitCode::from(ExitCode::InternalFatal as u8)
+    ExitCode::InternalFatal
 }
 
-/// Miner entry point. Dispatches `--capabilities`/`--solve`/`--check`/session mode.
+/// Miner entry point returning the numeric exit code from SPEC section 2.
 ///
 /// `open` opens the device and builds the [`Sampler`]; it runs for `--check`
 /// (result discarded), `--solve`, and session mode. `--capabilities` never
 /// calls it.
-pub fn run<S: Sampler>(
+///
+/// Prefer [`run`] from a Rust `main`. This variant exists because
+/// `std::process::ExitCode` cannot be read back into a number, which a foreign
+/// function interface has to do to return the code to its own caller.
+pub fn run_code<S: Sampler>(
     id: BackendIdentity,
     common: &CommonArgs,
     open: impl FnOnce() -> Result<S, OpenError>,
-) -> StdExitCode {
+) -> ExitCode {
     // Install the subscriber before anything else can log. `--capabilities`
     // writes JSON to stdout and must stay parseable, but the subscriber writes
     // to stderr, so installing first is safe for it too.
@@ -814,38 +818,38 @@ pub fn run<S: Sampler>(
         {
             eprintln!("quip-miner-{}: {e}", id.backend);
         }
-        return StdExitCode::from(ExitCode::ConfigInvalid as u8);
+        return ExitCode::ConfigInvalid;
     }
 
     if common.capabilities {
-        return StdExitCode::from(print_capabilities(&id, 1) as u8);
+        return print_capabilities(&id, 1);
     }
     if common.solve {
         let sampler = match open() {
             Ok(s) => s,
             Err(OpenError(e)) => {
                 tracing::error!("[quip-solver-{}] cannot open device: {e}", id.backend);
-                return StdExitCode::from(ExitCode::EnvIncompatible as u8);
+                return ExitCode::EnvIncompatible;
             }
         };
         let mut input = Vec::new();
         if let Err(e) = std::io::Read::read_to_end(&mut std::io::stdin(), &mut input) {
             tracing::error!("[quip-solver-{}] cannot read stdin: {e}", id.backend);
-            return StdExitCode::from(ExitCode::ConfigInvalid as u8);
+            return ExitCode::ConfigInvalid;
         }
         if serde_json::from_slice::<crate::driver::ProblemJson>(&input).is_err() {
             tracing::error!(
                 "[quip-solver-{}] malformed problem JSON on stdin",
                 id.backend
             );
-            return StdExitCode::from(ExitCode::ConfigInvalid as u8);
+            return ExitCode::ConfigInvalid;
         }
         return match crate::driver::solve(&sampler, &input) {
             Ok(mut bytes) => {
                 // `println!` supplied this before the broken-pipe fix. A CLI
                 // that emits a JSON document should end it with a newline.
                 bytes.push(b'\n');
-                StdExitCode::from(write_and_map(&mut std::io::stdout(), &bytes) as u8)
+                write_and_map(&mut std::io::stdout(), &bytes)
             }
             // The stdin pre-parse above already rejects malformed JSON with
             // ConfigInvalid, so Malformed is unreachable here in practice;
@@ -855,27 +859,27 @@ pub fn run<S: Sampler>(
                     "[quip-solver-{}] malformed problem JSON on stdin: {detail}",
                     id.backend
                 );
-                StdExitCode::from(ExitCode::ConfigInvalid as u8)
+                ExitCode::ConfigInvalid
             }
             Err(e @ crate::driver::SolveError::Sample(_)) => {
                 tracing::error!("[quip-solver-{}] solve failed: {e}", id.backend);
-                StdExitCode::from(ExitCode::InternalFatal as u8)
+                ExitCode::InternalFatal
             }
         };
     }
     if common.check {
         return match open() {
-            Ok(_) => StdExitCode::SUCCESS,
+            Ok(_) => ExitCode::Clean,
             Err(e) => {
                 tracing::error!("{} check failed: {}", id.backend, e.0);
-                StdExitCode::from(ExitCode::EnvIncompatible as u8)
+                ExitCode::EnvIncompatible
             }
         };
     }
 
     let Some(uri) = common.quip_coordinator.clone() else {
         tracing::error!("error: --quip-coordinator required for session mode");
-        return StdExitCode::from(ExitCode::ConfigInvalid as u8);
+        return ExitCode::ConfigInvalid;
     };
     let miner_id = common
         .miner_id
@@ -886,7 +890,7 @@ pub fn run<S: Sampler>(
         Ok(s) => s,
         Err(e) => {
             tracing::error!("failed to open {} device: {}", id.backend, e.0);
-            return StdExitCode::from(ExitCode::EnvIncompatible as u8);
+            return ExitCode::EnvIncompatible;
         }
     };
 
@@ -894,7 +898,7 @@ pub fn run<S: Sampler>(
         Ok(rt) => rt,
         Err(e) => {
             tracing::error!("failed to start tokio runtime: {e}");
-            return StdExitCode::from(ExitCode::InternalFatal as u8);
+            return ExitCode::InternalFatal;
         }
     };
 
@@ -905,9 +909,20 @@ pub fn run<S: Sampler>(
         Arc::new(sampler),
         common.sweeps_per_beta,
     )) {
-        Ok(()) => StdExitCode::SUCCESS,
+        Ok(()) => ExitCode::Clean,
         Err(e) => map_err_to_exit(e, id.backend),
     }
+}
+
+/// Miner entry point. Dispatches `--capabilities`/`--solve`/`--check`/session mode.
+///
+/// Thin wrapper over [`run_code`] for use as a Rust `main` return value.
+pub fn run<S: Sampler>(
+    id: BackendIdentity,
+    common: &CommonArgs,
+    open: impl FnOnce() -> Result<S, OpenError>,
+) -> StdExitCode {
+    StdExitCode::from(run_code(id, common, open) as u8)
 }
 
 #[cfg(test)]

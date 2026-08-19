@@ -1,9 +1,63 @@
+# One pipeline per change. When a branch has an open merge request, only the
+# merge request pipeline runs, so the merge request badge reflects the full
+# gate. Branch pipelines still fire before a merge request exists, and tag
+# pipelines always fire.
+workflow:
+  rules:
+    - if: $CI_COMMIT_TAG
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS
+      when: never
+    - if: $CI_COMMIT_BRANCH
+
 stages:
   - test
+  - validate
+  - smoke
+  - release
 
 variables:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
+  # Must match the protoc that generated npm/src/generated. See the wasm job.
+  PROTOC_VERSION: "35.1"
+
+# ---------------------------------------------------------------------------
+# Shared setup fragments.
+#
+# Referenced with `!reference` rather than YAML anchors so a job can compose
+# several of them inside one before_script, which anchors cannot do.
+# ---------------------------------------------------------------------------
+
+# Pin protoc rather than taking the distro package. ts-proto stamps the protoc
+# version into the generated header, so an unpinned compiler trips the stub
+# drift guard on the version line alone. Bump PROTOC_VERSION and regenerate
+# npm/src/generated together, the same way the Python guard pins grpcio-tools.
+.setup-protoc:
+  script:
+    - apt-get update && apt-get install -y --no-install-recommends curl unzip make
+    - curl -fsSLo /tmp/protoc.zip https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-x86_64.zip
+    - unzip -q -o /tmp/protoc.zip -d /usr/local
+    - protoc --version
+
+# Adds the wasm32 target without letting rustup re-sync the whole toolchain.
+#
+# rust-toolchain.toml pins a channel and names clippy and rustfmt. The rust
+# image already ships both, so a plain `rustup target add` triggers a channel
+# sync that tries to reinstall rustfmt and dies on `detected conflict:
+# bin/cargo-fmt`. RUSTUP_TOOLCHAIN pins the already-installed toolchain and
+# makes rustup ignore the file, so only the missing target is fetched.
+.setup-wasm:
+  script:
+    - export RUSTUP_TOOLCHAIN=1.97.1
+    - rustup target add wasm32-unknown-unknown
+    - curl -sSf https://rustwasm.github.io/wasm-pack/installer/init.sh | sh
+
+.setup-node:
+  script:
+    - curl -fsSL https://deb.nodesource.com/setup_24.x | bash -
+    - apt-get install -y --no-install-recommends nodejs
+    - node --version
 
 # The contract must build with no device present. That is the test for what
 # belongs in this repository: anything needing special hardware to build
@@ -59,3 +113,404 @@ conformance:
       diff -u python/quip/v1/miner_pb2.py "$TMP/quip/v1/miner_pb2.py"
       diff -u python/quip/v1/miner_pb2_grpc.py "$TMP/quip/v1/miner_pb2_grpc.py"
     - python -m pytest conformance/ -v
+
+# The npm package carries the consensus math as WebAssembly rather than a second
+# implementation, so this job proves the wasm build reproduces the same golden
+# vectors the Rust tests use. A JavaScript solver that disagrees with Rust about
+# an energy score would be rejected by the network, so this is a release gate.
+wasm:
+  stage: test
+  image: rust:1.97.1
+  tags: [linux, amd64]
+  before_script:
+    - !reference [.setup-protoc, script]
+    - !reference [.setup-node, script]
+    - !reference [.setup-wasm, script]
+  script:
+    - cd npm
+    - npm ci
+    # Stub drift guard, matching the Python and Rust ones: regenerate the
+    # TypeScript stubs from the normative .proto and fail if they are stale.
+    - cp -r src/generated /tmp/generated-committed
+    - npm run build:stubs
+    - diff -ru /tmp/generated-committed src/generated
+    - npm run build
+    - npm test
+
+# ---------------------------------------------------------------------------
+# Smoke tests.
+#
+# Each job installs one built artifact into a clean container and runs that
+# language's sample solver against it. Nothing here builds a dependency from
+# the source tree, so these test what a consumer actually receives rather than
+# what this repository happens to have on disk.
+#
+# All four run on every pipeline, and the publish jobs need them, so a
+# regression in a shipped artifact stops the release rather than reaching a
+# registry. This is the reason the samples exist.
+# ---------------------------------------------------------------------------
+
+.smoke:
+  stage: smoke
+  tags: [linux, amd64]
+  needs:
+    - job: release:validate
+      artifacts: true
+  timeout: 30m
+
+# Builds against the PACKAGED crates, unpacked from the .crate tarballs, rather
+# than against crates/. [patch.crates-io] redirects the registry dependency to
+# the unpacked package, so a file missing from the tarball fails here instead
+# of after publication. This is also what lets the smoke test run before the
+# version exists on crates.io.
+smoke:rust:
+  extends: .smoke
+  image: rust:1.97.1
+  before_script:
+    - !reference [.setup-protoc, script]
+  script:
+    - mkdir -p /opt/pkg && for f in target/package/*.crate; do tar xzf "$f" -C /opt/pkg; done
+    - ls /opt/pkg
+    - |
+      {
+        echo
+        echo '[patch.crates-io]'
+        for d in /opt/pkg/*/; do
+          name=$(basename "${d%/}" | sed -E 's/-[0-9]+\.[0-9]+\.[0-9]+.*$//')
+          echo "$name = { path = \"${d%/}\" }"
+        done
+      } >> examples/rust/Cargo.toml
+    - tail -8 examples/rust/Cargo.toml
+    - (cd examples/rust && cargo build --release)
+    - ./quip-solver-drive examples/rust/target/release/mock_miner unix:///tmp/rust.sock
+
+# Compiles against the released tarball's header and library only. The repo's
+# target/ is never on the include or link path, so a header that does not match
+# the shipped object fails here.
+smoke:cpp:
+  extends: .smoke
+  image: rust:1.97.1
+  before_script:
+    - apt-get update && apt-get install -y --no-install-recommends g++ make
+  script:
+    - mkdir -p /opt/clib && tar xzf quip-solver-clib-*.tar.gz -C /opt/clib
+    - ls -R /opt/clib
+    - g++ -std=c++17 -O2 -Wall -Wextra -I/opt/clib/include examples/cpp/mock_miner.cpp
+      -o /tmp/mock_miner_cpp -L/opt/clib -Wl,-rpath,/opt/clib -lquip_solver_c -lpthread -ldl -lm
+    - ./quip-solver-drive /tmp/mock_miner_cpp unix:///tmp/cpp.sock
+
+# Installs the built wheel into a fresh virtual environment. The example
+# imports quip_solver_core from site-packages, not from python/ in this tree.
+smoke:python:
+  extends: .smoke
+  image: python:3.11
+  script:
+    - python -m venv /opt/venv
+    - /opt/venv/bin/pip install --quiet dist/python/*.whl
+    - /opt/venv/bin/python -c "import quip_solver_core; print('quip_solver_core from', quip_solver_core.__file__)"
+    - printf '#!/bin/sh\nexec /opt/venv/bin/python %s/examples/python/mock_miner.py "$@"\n' "$PWD" > /tmp/py_miner
+    - chmod +x /tmp/py_miner
+    - ./quip-solver-drive /tmp/py_miner unix:///tmp/python.sock
+
+# Installs the packed tarball into a clean project. The example resolves
+# @quip.network/quip-solver-core from node_modules, not from npm/ in this tree.
+smoke:typescript:
+  extends: .smoke
+  # The rust image plus node, not the node image: quip-solver-drive is built on
+  # rust:1.97.1 and links glibc 2.39, which node:24 does not carry. The npm
+  # package is still installed from the packed tarball, so the isolation that
+  # matters is unaffected.
+  image: rust:1.97.1
+  before_script:
+    - !reference [.setup-node, script]
+  script:
+    - mkdir -p /opt/ts && cp -r examples/typescript/src examples/typescript/tsconfig.json examples/typescript/package.json /opt/ts/
+    - cd /opt/ts
+    - npm install "$CI_PROJECT_DIR"/npm/quip.network-quip-solver-core-*.tgz
+    - npm install
+    - npx tsc
+    - printf '#!/bin/sh\nexec node /opt/ts/dist/mock_miner.js "$@"\n' > /tmp/ts_miner
+    - chmod +x /tmp/ts_miner
+    - cd "$CI_PROJECT_DIR"
+    - ./quip-solver-drive /tmp/ts_miner unix:///tmp/typescript.sock
+
+# ---------------------------------------------------------------------------
+# Release pipeline.
+#
+# The dry run always runs. The real publish runs only on a tag.
+#
+#   release:validate  every pipeline. Dry-runs all four publish paths.
+#   release:crates    tag only. Publishes the four crates to crates.io.
+#   release:pypi      tag only. Publishes the wheel and sdist to PyPI.
+#   release:npm       tag only. Publishes the npm package.
+#   release:clib      tag only. Packs the C library as a release asset.
+#   release:notes     tag only. Creates the release page, once all of the
+#                     above are live.
+#
+# release:validate carries no `rules:`, so it runs on merge requests and
+# branches as well as tags. A broken release setup then fails on a merge
+# request instead of halfway through a release, with some registries written
+# and others not. It writes to no registry: every step is a dry run or a local
+# build, and `make check-release` runs the same steps locally.
+#
+# The three publish jobs stay separate rather than merging into one, because
+# retry granularity differs per registry. cargo hard-fails on an
+# already-published version and has no --skip-existing, so a single job that
+# published the crates and then died on the wheel upload could not be re-run.
+#
+# No CI/CD variables and no stored secrets. All three registries use OIDC
+# trusted publishing, so each pipeline proves its own identity and receives a
+# short-lived token.
+#
+# Every registry needs its publisher registered once against:
+#
+#   namespace  quip.network
+#   project    quip-solver-core
+#   pipeline   .gitlab-ci.yml
+#   environment  as named on the job below (crates-io, pypi, npm)
+#
+# crates.io needs one registration per crate, at
+# crates.io/crates/<name>/settings: quip-proto, quip-protocol,
+# quip-solver-core, quip-solver-conformance. Its GitLab support is public beta
+# and gitlab.com only.
+#
+# Protected tag pattern `v*` already exists, which is what keeps these
+# environments reachable only from a Maintainer-pushed tag.
+# ---------------------------------------------------------------------------
+
+.on-release-tag: &on-release-tag
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v\d/
+
+# Runs on every pipeline. This is the gate everything downstream hangs off.
+#
+# It writes to no registry: every step is a dry run or a local build, and
+# `make check-release` runs the same steps locally. Its artifacts are the exact
+# files the publish jobs would upload, which is what lets the smoke jobs test
+# the real thing instead of a rebuild.
+release:validate:
+  stage: validate
+  image: rust:1.97.1
+  tags: [linux, amd64]
+  # No `rules:` on purpose. See the header: the dry run always runs.
+  needs:
+    - job: rust
+    - job: wasm
+  # Without this GitLab downloads every prior stage's artifacts by default.
+  dependencies: []
+  timeout: 60m
+  before_script:
+    - !reference [.setup-protoc, script]
+    - !reference [.setup-node, script]
+    - apt-get install -y --no-install-recommends python3 python3-venv python3-pip
+    # A virtual environment rather than --break-system-packages: pip cannot
+    # uninstall Debian's `packaging` (no RECORD file), so installing twine into
+    # the system interpreter fails outright.
+    - python3 -m venv /opt/buildenv
+    - export PATH="/opt/buildenv/bin:$PATH"
+    - pip install --quiet maturin twine
+    - !reference [.setup-wasm, script]
+  script:
+    # The C library tarball carries the tag in its name on a tag pipeline, and
+    # the short SHA otherwise, so a branch artifact is never mistaken for a
+    # release one.
+    - export TAG="${CI_COMMIT_TAG:-$CI_COMMIT_SHORT_SHA}"
+    - make check-release TAG="$TAG"
+    - mv dist/quip-solver-clib-*.tar.gz dist/quip-solver-clib-*.tar.gz.sha256 .
+    # The smoke jobs drive the samples with this, rather than each rebuilding
+    # the Rust workspace.
+    - cargo build -p quip-solver-conformance --bin quip-solver-drive --release
+    - cp target/release/quip-solver-drive .
+  artifacts:
+    name: "quip-artifacts-${CI_COMMIT_TAG:-$CI_COMMIT_SHORT_SHA}"
+    paths:
+      - target/package/*.crate
+      - dist/python/*.whl
+      - dist/python/*.tar.gz
+      - npm/*.tgz
+      - quip-solver-clib-*.tar.gz
+      - quip-solver-clib-*.tar.gz.sha256
+      - quip-solver-drive
+    expire_in: 1 week
+
+release:crates:
+  stage: release
+  image: rust:1.97.1
+  tags: [linux, amd64]
+  <<: *on-release-tag
+  needs:
+    - job: release:validate
+      artifacts: true
+    - job: smoke:rust
+    - job: smoke:cpp
+    - job: smoke:python
+    - job: smoke:typescript
+  environment:
+    name: crates-io
+    url: https://crates.io/crates/quip-solver-core
+  # Trusted publishing, so no long-lived token is stored. The audience must be
+  # the literal `crates.io`.
+  id_tokens:
+    CRATES_IO_ID_TOKEN:
+      aud: crates.io
+  timeout: 30m
+  before_script:
+    - !reference [.setup-protoc, script]
+    - apt-get install -y --no-install-recommends jq
+  script:
+    # Exchange the GitLab OIDC token for a 30-minute crates.io token.
+    - export CARGO_REGISTRY_TOKEN="$(bash scripts/exchange-crates-token.sh)"
+    # Cargo resolves the inter-crate order itself and waits for the index
+    # between uploads. The three publish = false crates are skipped.
+    - cargo publish --locked --workspace
+
+release:pypi:
+  stage: release
+  image: ghcr.io/pyo3/maturin:latest
+  tags: [linux, amd64]
+  <<: *on-release-tag
+  needs:
+    - job: release:validate
+      artifacts: true
+    - job: smoke:rust
+    - job: smoke:cpp
+    - job: smoke:python
+    - job: smoke:typescript
+  # Matches the environment registered on the PyPI trusted publisher. PyPI
+  # rejects the OIDC exchange when the two disagree.
+  environment:
+    name: pypi
+    url: https://pypi.org/project/quip-solver-core/
+  # The audience must be the literal `pypi`, not `pypi.org`.
+  id_tokens:
+    PYPI_ID_TOKEN:
+      aud: pypi
+  timeout: 30m
+  script:
+    # dist/python/, matching `make check-python-dist`. A bare dist/ would also
+    # match the C library tarball and any stale wheel from an earlier name.
+    - rm -rf dist/python && mkdir -p dist/python
+    - maturin build --release --out dist/python
+    - maturin sdist --out dist/python
+    - twine check dist/python/*
+    # Exchange the short-lived GitLab token for a PyPI API token. The endpoint
+    # is single-use per token, so this mints once and uploads once.
+    - |
+      set -euo pipefail
+      MINTED=$(curl -fsSL -X POST https://pypi.org/_/oidc/mint-token \
+        -H 'Content-Type: application/json' \
+        -d "{\"token\": \"${PYPI_ID_TOKEN}\"}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')
+      pip install twine
+      # --skip-existing so a re-run after a partial failure is safe. cargo has
+      # no equivalent, which is why the registries are separate jobs.
+      TWINE_USERNAME=__token__ TWINE_PASSWORD="$MINTED" twine upload --skip-existing dist/python/*
+  artifacts:
+    paths:
+      - dist/python/*.whl
+      - dist/python/*.tar.gz
+    expire_in: never
+
+release:npm:
+  stage: release
+  image: rust:1.97.1
+  tags: [linux, amd64]
+  <<: *on-release-tag
+  needs:
+    - job: release:validate
+      artifacts: true
+    - job: smoke:rust
+    - job: smoke:cpp
+    - job: smoke:python
+    - job: smoke:typescript
+  environment:
+    name: npm
+    url: https://www.npmjs.com/package/@quip.network/quip-solver-core
+  id_tokens:
+    NPM_ID_TOKEN:
+      aud: npm:registry.npmjs.org
+  timeout: 30m
+  before_script:
+    - !reference [.setup-protoc, script]
+    - !reference [.setup-node, script]
+    # 11.5.1 is the floor for OIDC trusted publishing.
+    - npm install -g npm@latest
+    - !reference [.setup-wasm, script]
+  script:
+    - cd npm
+    - npm ci
+    # prepack runs the wasm and TypeScript builds and copies LICENSE/NOTICE.
+    # --tag rc keeps prereleases off the `latest` dist-tag. --provenance lives
+    # here rather than in package.json, because it needs a recognised CI
+    # provider and hard-fails any local `npm publish`.
+    - npm publish --tag rc --provenance
+
+# The C library ships as a release asset rather than through a registry,
+# because a C consumer wants the compiled object and the header.
+#
+# This job promotes the tarball release:validate already built and smoke:cpp
+# already compiled against. It does not rebuild: republishing a fresh build
+# would attach an object no smoke test ever exercised.
+release:clib:
+  stage: release
+  image: rust:1.97.1
+  tags: [linux, amd64]
+  <<: *on-release-tag
+  needs:
+    - job: release:validate
+      artifacts: true
+    - job: smoke:rust
+    - job: smoke:cpp
+    - job: smoke:python
+    - job: smoke:typescript
+  timeout: 10m
+  script:
+    - sha256sum -c quip-solver-clib-*.tar.gz.sha256
+    - ls -la quip-solver-clib-*
+  artifacts:
+    name: "quip-solver-clib-$CI_COMMIT_TAG"
+    paths:
+      - quip-solver-clib-*.tar.gz
+      - quip-solver-clib-*.tar.gz.sha256
+    expire_in: never
+
+# Runs last so the release page appears only once every artifact is live. A
+# release pointing at a package that failed to publish is worse than no
+# release. Uses the declarative `release:` keyword, so CI_JOB_TOKEN is enough
+# and a re-run does not error when the release already exists.
+release:notes:
+  stage: release
+  image: registry.gitlab.com/gitlab-org/release-cli:latest
+  tags: [linux, amd64]
+  <<: *on-release-tag
+  needs:
+    - job: release:crates
+    - job: release:pypi
+    - job: release:npm
+    - job: release:clib
+      artifacts: true
+  timeout: 15m
+  script:
+    - echo "Creating the release page for $CI_COMMIT_TAG"
+  release:
+    tag_name: $CI_COMMIT_TAG
+    name: "Quip solver contract $CI_COMMIT_TAG"
+    description: |
+      Quip solver contract $CI_COMMIT_TAG.
+
+      | Artifact | Where |
+      | -- | -- |
+      | `quip-solver-core`, `quip-protocol`, `quip-proto`, `quip-solver-conformance` | crates.io |
+      | `quip-solver-core` wheel | PyPI |
+      | `@quip.network/quip-solver-core` | npm |
+      | `libquip_solver_c` plus `quip_solver.h` | attached below |
+
+      See CHANGELOG.md for the changes in this version, and examples/ for a
+      conformant sample solver in Rust, C++, Python, and TypeScript.
+    assets:
+      links:
+        - name: "C library, Linux amd64"
+          url: "${CI_PROJECT_URL}/-/jobs/artifacts/${CI_COMMIT_TAG}/raw/quip-solver-clib-${CI_COMMIT_TAG}-linux-amd64.tar.gz?job=release:clib"
+          link_type: package
+        - name: "C library checksum"
+          url: "${CI_PROJECT_URL}/-/jobs/artifacts/${CI_COMMIT_TAG}/raw/quip-solver-clib-${CI_COMMIT_TAG}-linux-amd64.tar.gz.sha256?job=release:clib"
+          link_type: other

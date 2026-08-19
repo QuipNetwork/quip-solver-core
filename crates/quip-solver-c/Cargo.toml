@@ -1,0 +1,28 @@
+[package]
+name = "quip-solver-c"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+description = "C ABI over the Quip solver session loop: register a sampler callback and run"
+# Ships as a build artifact (libquip_solver_c.so/.a plus quip_solver.h), not to
+# crates.io. A C consumer wants the compiled library and header, not a crate.
+publish = false
+
+[lib]
+name = "quip_solver_c"
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+quip-solver-core = { workspace = true }
+clap = { version = "4", features = ["derive"] }
+
+[build-dependencies]
+cbindgen = "0.29"
+
+# This crate is the C ABI boundary, so it cannot honour the workspace's
+# `unsafe-code = "deny"`. It stays on default lints and keeps the unsafe surface
+# as small as possible: every extern fn does nothing but validate its pointers
+# and hand off to quip-solver-core, which keeps the strict lints.

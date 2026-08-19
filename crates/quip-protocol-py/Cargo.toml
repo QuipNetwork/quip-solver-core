@@ -5,13 +5,17 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "PyO3 bindings exposing quip-protocol scoring/wire primitives to Python"
+# This crate ships to PyPI as the `quip-solver-core` wheel built by maturin,
+# not to crates.io. A cdylib with an `extension-module` PyO3 feature cannot link
+# without a Python interpreter, so it would fail crates.io publish verification.
+publish = false
 
 [lib]
 name = "_core"
 crate-type = ["cdylib"]
 
 [dependencies]
-quip-protocol = { path = "../quip-protocol" }
+quip-protocol = { workspace = true }
 pyo3 = { version = "0.29", features = ["abi3-py311", "extension-module"] }
 
 [lints]

@@ -1,0 +1,23 @@
+language = "C"
+header = "/* Quip solver C ABI. Generated from src/lib.rs by cbindgen; do not edit. */"
+include_guard = "QUIP_SOLVER_H"
+pragma_once = false
+cpp_compat = true
+documentation = true
+documentation_style = "doxy"
+tab_width = 4
+style = "type"
+
+[export]
+include = [
+    "QuipIsingGraph",
+    "QuipSampleParams",
+    "QuipBackendIdentity",
+    "QuipEmitFn",
+    "QuipSampleFn",
+]
+
+[defines]
+
+[parse]
+parse_deps = false
