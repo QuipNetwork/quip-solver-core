@@ -3,18 +3,20 @@
 This document is the Quip solver contract. A solver in any language
 follows this document.
 
-Sections 2, 3, 5, and 6 are normative for every language. Section 4 is the
-Rust binding of that contract. Section 4 is not the contract itself.
+Sections 2 (The four modes), 3 (The wire contract), 5 (Cancellation), and
+6 (Conformance) are normative for every language. Section 4 (The Rust
+contract) is the Rust binding of that contract. Section 4 is not the
+contract itself.
 
-## What a Quip solver is
+## 1. What a Quip solver is
 
 A Quip solver is a binary that accepts Ising problems and returns spin
 configurations with their energies. Each configuration is a vector of spins
 in {-1, +1} together with the energy of that assignment.
 
-## The three modes
+## 2. The four modes
 
-A solver binary supports three modes.
+A solver binary supports four modes.
 
 ### `--capabilities`
 
@@ -27,6 +29,11 @@ This mode reads one problem as JSON on stdin. It writes the solutions as JSON
 on stdout, then exits.
 
 XQSA and IsingMark use `--solve`.
+
+### `--check`
+
+This mode opens the device and exits. Exit 0 means the device is runnable.
+Exit 69 means the host cannot run this solver. It does not start a session.
 
 ### Session mode
 
@@ -44,7 +51,20 @@ The solver dials that Unix socket. The solver must not listen on the socket.
 `quip-solver-drive` launches a solver that accepts those two arguments and
 speaks the proto.
 
-## The wire contract
+### Exit codes
+
+These codes apply to all four modes. They are the same values that
+`Fatal.exit_code` carries.
+
+| Code | Name | Meaning |
+|---|---|---|
+| 0 | Clean | Clean exit. |
+| 64 | ConfigInvalid | Missing or invalid command-line flags or config. Examples: no `--quip-coordinator`, a bad Welcome. |
+| 69 | EnvIncompatible | The host cannot run this solver. `--check` failed. |
+| 70 | InternalFatal | Unexpected internal failure. |
+| 77 | TokenRejected | `QUIP_SESSION_TOKEN` is missing, empty, or rejected. |
+
+## 3. The wire contract
 
 `proto/quip/v1/miner.proto` is the normative message definition.
 
@@ -60,8 +80,9 @@ Messages flow in this order:
 1. The solver sends `Hello`.
 2. The coordinator sends `Welcome`.
 3. The coordinator sends `Configure`.
-4. The coordinator may send `Topology` and `SetTarget` if a round is live.
-5. The solver sends `Ready`.
+4. The solver sends `Ready`.
+5. The coordinator may send `Topology` and `SetTarget` before or after
+   `Ready`. A round that never sends them is valid.
 6. The solver and the coordinator exchange `JobRequest` and `Job` until
    `Shutdown`.
 
@@ -89,12 +110,13 @@ M is the solver. C is the coordinator.
 | `GetCapabilities` | C→M | Ask for the `Capabilities` message. |
 | `Capabilities` | M→C | Reply with what this solver supports. |
 
-## The Rust contract
+## 4. The Rust contract
 
 This section is the Rust binding of the language-neutral contract. This
 section is not the contract itself.
 
-Sections 2, 3, 5, and 6 are normative for every language. This section is
+Sections 2 (The four modes), 3 (The wire contract), 5 (Cancellation), and
+6 (Conformance) are normative for every language. This section is
 normative only for Rust solvers.
 
 A Rust solver supplies a `Sampler` and calls `run`.
@@ -125,7 +147,7 @@ The six defaulted methods are:
 On `DeviceFault`, the session rejects the job, sends `Fatal` with
 `exit_code = 70`, and ends.
 
-## Cancellation
+## 5. Cancellation
 
 This section is normative for every language, so it is stated on the wire
 first. The Rust binding follows.
@@ -152,7 +174,7 @@ In the Rust binding, the watermark reaches the solver as
 `CancelToken::is_cancelled(watermark)`. The `CancelToken` itself is never
 optional; the `None` belongs to the job's watermark.
 
-## Conformance
+## 6. Conformance
 
 A solver is conformant when both of these hold:
 
@@ -175,7 +197,7 @@ async fn solver_is_conformant() {
 }
 ```
 
-## Versioning
+## 7. Versioning
 
 Pin a tag. Never a branch, and never a bare revision.
 
@@ -197,16 +219,23 @@ A change to any of these is a minor version:
 The contract is close to frozen by design. A solver repository that pins a
 tag and never moves it keeps working.
 
-## The `--capabilities` JSON mapping
+## 8. The `--capabilities` JSON mapping
 
 The `--capabilities` output is the protobuf JSON mapping of the
 `Capabilities` message. Field names are lowerCamelCase:
 
+<!-- vale Microsoft.Avoid = NO -->
+- `backend`
+- `algorithm`
+<!-- vale Microsoft.Avoid = YES -->
 - `supportedKinds`
 - `maxNodes`
 - `maxEdges`
+- `features`
 - `protocolVersion`
 - `streamWidth`
+- `nativeTopologyHash` (omitted when unset). The value is standard base64
+  because protobuf JSON maps `bytes` that way.
 
 This changed in 0.3.0. The previous hand-written output used
 `supported_kinds`, `max_nodes`, and `max_edges`.
@@ -217,10 +246,10 @@ This changed in 0.3.0. The previous hand-written output used
 `--capabilities` and the `Capabilities` message on the session stream are
 the same message. One message must not have two spellings.
 
-## Adding a solver in another language
+## 9. Adding a solver in another language
 
-The normative wire contract is `proto/quip/v1/miner.proto`. The session-mode
-command line is in section 2.
+The normative wire contract is `proto/quip/v1/miner.proto`. Section 2 (The
+four modes) states the session-mode command line.
 
 `quip-miner-dwave` is the working example of a solver built this way today.
 
