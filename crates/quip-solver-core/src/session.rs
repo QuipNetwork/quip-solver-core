@@ -847,7 +847,17 @@ pub fn run<S: Sampler>(
                 bytes.push(b'\n');
                 StdExitCode::from(write_and_map(&mut std::io::stdout(), &bytes) as u8)
             }
-            Err(e) => {
+            // The stdin pre-parse above already rejects malformed JSON with
+            // ConfigInvalid, so Malformed is unreachable here in practice;
+            // this still maps it correctly for a direct caller of `solve`.
+            Err(crate::driver::SolveError::Malformed(detail)) => {
+                tracing::error!(
+                    "[quip-solver-{}] malformed problem JSON on stdin: {detail}",
+                    id.backend
+                );
+                StdExitCode::from(ExitCode::ConfigInvalid as u8)
+            }
+            Err(e @ crate::driver::SolveError::Sample(_)) => {
                 tracing::error!("[quip-solver-{}] solve failed: {e}", id.backend);
                 StdExitCode::from(ExitCode::InternalFatal as u8)
             }
