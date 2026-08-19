@@ -48,6 +48,12 @@ impl CancelToken {
         let _ = self.0.fetch_max(watermark, Ordering::Relaxed);
     }
 
+    /// The highest watermark abandoned so far. `0` means nothing is abandoned.
+    #[must_use]
+    pub fn abandoned(&self) -> u64 {
+        self.0.load(Ordering::Relaxed)
+    }
+
     /// True when this job's watermark has been abandoned.
     #[must_use]
     pub fn is_cancelled(&self, watermark: Option<u64>) -> bool {

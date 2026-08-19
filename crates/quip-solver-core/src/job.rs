@@ -126,12 +126,17 @@ pub(crate) fn miner(msg: miner_msg::Msg) -> MinerMsg {
     MinerMsg { msg: Some(msg) }
 }
 
-pub(crate) fn status_msg(miner_id: &str, jobs_done: u64, utilization: f64) -> MinerMsg {
+pub(crate) fn status_msg(
+    miner_id: &str,
+    jobs_done: u64,
+    utilization: f64,
+    abandoned_generation: u64,
+) -> MinerMsg {
     miner(miner_msg::Msg::Status(Status {
         miner_id: miner_id.into(),
         utilization,
         jobs_done,
-        abandoned_generation: 0,
+        abandoned_generation,
         sampler_stats: HashMap::default(),
     }))
 }
@@ -728,5 +733,24 @@ mod tests {
                 "a chain job must carry its generation as the watermark"
             );
         }
+    }
+
+    #[test]
+    fn status_carries_the_abandoned_watermark() {
+        let Some(miner_msg::Msg::Status(status)) = status_msg("miner", 3, 0.5, 7).msg else {
+            panic!("expected Status");
+        };
+        assert_eq!(
+            status.abandoned_generation, 7,
+            "a non-zero watermark must be carried into Status"
+        );
+
+        let Some(miner_msg::Msg::Status(status)) = status_msg("miner", 3, 0.5, 0).msg else {
+            panic!("expected Status");
+        };
+        assert_eq!(
+            status.abandoned_generation, 0,
+            "a zero watermark must stay zero"
+        );
     }
 }

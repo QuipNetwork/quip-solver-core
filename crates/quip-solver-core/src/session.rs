@@ -677,6 +677,7 @@ async fn run_session<S: Sampler>(
                             miner_id,
                             jobs_done.load(Ordering::Relaxed),
                             sampler.utilization(),
+                            cancel.abandoned(),
                         ))
                         .await?;
                 }
@@ -686,6 +687,7 @@ async fn run_session<S: Sampler>(
                             miner_id,
                             jobs_done.load(Ordering::Relaxed),
                             sampler.utilization(),
+                            cancel.abandoned(),
                         ))
                         .await?;
                 }
