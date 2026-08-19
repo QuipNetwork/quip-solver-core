@@ -10,7 +10,7 @@ written today writes its own state machine. A Rust solver conforms today by
 supplying a `Sampler` and calling `run`.
 
 The full contract is in [SPEC.md](SPEC.md).
-[CHANGELOG.md](CHANGELOG.md) lists the 0.3.0 changes.
+[CHANGELOG.md](CHANGELOG.md) lists the 0.0.0-rc1 changes.
 [MIGRATING.md](MIGRATING.md) covers the move from `quip-miner-core`.
 
 ## Crates
@@ -27,9 +27,9 @@ The full contract is in [SPEC.md](SPEC.md).
 
 ```toml
 [dependencies]
-quip-solver-core = { git = "https://gitlab.com/quip.network/quip-solver-core.git", tag = "v0.3.0" }
-quip-proto = { git = "https://gitlab.com/quip.network/quip-solver-core.git", tag = "v0.3.0" }
+quip-solver-core = { git = "https://gitlab.com/quip.network/quip-solver-core.git", tag = "v0.0.0-rc1" }
+quip-proto = { git = "https://gitlab.com/quip.network/quip-solver-core.git", tag = "v0.0.0-rc1" }
 
 [dev-dependencies]
-quip-solver-conformance = { git = "https://gitlab.com/quip.network/quip-solver-core.git", tag = "v0.3.0" }
+quip-solver-conformance = { git = "https://gitlab.com/quip.network/quip-solver-core.git", tag = "v0.0.0-rc1" }
 ```

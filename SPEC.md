@@ -237,7 +237,7 @@ The `--capabilities` output is the protobuf JSON mapping of the
 - `nativeTopologyHash` (omitted when unset). The value is standard base64
   because protobuf JSON maps `bytes` that way.
 
-This changed in 0.3.0. The previous hand-written output used
+This changed in 0.0.0-rc1. The previous hand-written output used
 `supported_kinds`, `max_nodes`, and `max_edges`.
 <!-- vale Microsoft.Avoid = NO -->
 `backend` and `algorithm` keep the same spelling.
