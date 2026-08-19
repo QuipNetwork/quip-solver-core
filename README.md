@@ -8,6 +8,8 @@ Python wheel named `quip_proto`. A solver written in either language can
 conform.
 
 The full contract is in [SPEC.md](SPEC.md).
+[CHANGELOG.md](CHANGELOG.md) lists the 0.3.0 changes.
+[MIGRATING.md](MIGRATING.md) covers the move from `quip-miner-core`.
 
 ## Crates
 
