@@ -12,6 +12,12 @@ default-members = [
     "crates/quip-solver-conformance",
 ]
 
+[workspace.package]
+version = "0.3.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+repository = "https://gitlab.com/quip.network/quip-solver-core"
+
 [workspace.lints.rust]
 missing-docs          = "warn"
 nonstandard-style     = "warn"

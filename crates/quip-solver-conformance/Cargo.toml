@@ -1,7 +1,9 @@
 [package]
 name = "quip-solver-conformance"
-version = "0.3.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "Golden vectors and the scripted session driver every Quip solver tests against"
 
 [lib]
