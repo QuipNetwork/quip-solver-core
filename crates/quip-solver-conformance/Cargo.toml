@@ -4,7 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
 description = "Golden vectors and the scripted session driver every Quip solver tests against"
+keywords = ["quip", "conformance", "testing", "ising", "grpc"]
+categories = ["development-tools::testing", "network-programming"]
 
 [lib]
 name = "quip_solver_conformance"
@@ -15,8 +19,8 @@ name = "quip-solver-drive"
 path = "src/bin/quip-solver-drive.rs"
 
 [dependencies]
-quip-proto = { path = "../quip-proto" }
-quip-protocol = { path = "../quip-protocol" }
+quip-proto = { workspace = true }
+quip-protocol = { workspace = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tonic = { workspace = true }

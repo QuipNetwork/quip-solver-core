@@ -1,0 +1,26 @@
+{
+  "name": "quip-mock-miner-typescript",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Sample Quip solver in TypeScript, built against the published npm release",
+  "license": "Apache-2.0",
+  "main": "dist/mock_miner.js",
+  "bin": {
+    "quip-mock-miner-typescript": "dist/mock_miner.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc && chmod +x dist/mock_miner.js",
+    "start": "node dist/mock_miner.js"
+  },
+  "dependencies": {
+    "@grpc/grpc-js": "^1.14.4",
+    "@quip.network/quip-solver-core": "^0.0.0-rc0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^7.0.2"
+  }
+}

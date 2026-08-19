@@ -1,0 +1,35 @@
+[package]
+name = "quip-protocol-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+description = "WebAssembly bindings exposing quip-protocol scoring/wire primitives to JavaScript"
+# Ships to npmjs.org as @quip-network/quip-proto, built by wasm-pack, not to
+# crates.io. A cdylib targeting wasm32 has nothing to offer a crates.io consumer.
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# default-features = false drops the `session` module and with it quip-proto,
+# tonic, and prost, none of which build for wasm32. What remains is the
+# golden-pinned consensus math, which is the whole point of shipping WASM
+# instead of reimplementing it in TypeScript.
+#
+# Declared directly rather than with `workspace = true`: Cargo ignores a
+# member's `default-features = false` when the dependency is inherited from
+# [workspace.dependencies], which silently drags tonic and tokio back in and
+# breaks the wasm32 build.
+quip-protocol = { path = "../quip-protocol", default-features = false }
+wasm-bindgen = "0.2.127"
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3.77"
+
+# wasm-bindgen's macro expands to unsafe extern blocks, which the workspace's
+# `unsafe-code = "deny"` would reject. This crate is a thin generated-glue layer
+# over quip-protocol, which keeps the strict lints.

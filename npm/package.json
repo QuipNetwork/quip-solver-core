@@ -1,0 +1,47 @@
+{
+  "name": "@quip.network/quip-solver-core",
+  "version": "0.0.0-rc1",
+  "description": "Quip solver SDK: WebAssembly consensus primitives and the generated gRPC stubs",
+  "license": "Apache-2.0",
+  "homepage": "https://quip.network",
+  "repository": {
+    "type": "git",
+    "url": "git+https://gitlab.com/quip.network/quip-solver-core.git"
+  },
+  "keywords": [
+    "quip",
+    "ising",
+    "grpc",
+    "wasm",
+    "solver"
+  ],
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "wasm",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build:wasm": "wasm-pack build ../crates/quip-protocol-wasm --release --target nodejs --out-dir ../../npm/wasm && rm -f wasm/.gitignore wasm/package.json",
+    "build:stubs": "protoc -I ../proto --plugin=protoc-gen-ts_proto=./node_modules/.bin/protoc-gen-ts_proto --ts_proto_out=./src/generated --ts_proto_opt=outputServices=grpc-js,esModuleInterop=true,useExactTypes=false ../proto/quip/v1/miner.proto",
+    "build": "npm run build:wasm && tsc",
+    "prepack": "npm run build && cp ../LICENSE ./LICENSE && cp ../NOTICE ./NOTICE",
+    "test": "node --test \"test/**/*.test.mjs\""
+  },
+  "dependencies": {
+    "@bufbuild/protobuf": "^2.14.0",
+    "@grpc/grpc-js": "^1.14.4"
+  },
+  "devDependencies": {
+    "ts-proto": "^2.12.0",
+    "typescript": "^7.0.2"
+  }
+}

@@ -1,7 +1,7 @@
 import os
 from dataclasses import dataclass
 
-from quip_proto import miner_pb2
+from quip_solver_core import miner_pb2
 
 # Protocol version this SDK speaks. Welcome.protocol_version must equal this.
 PROTOCOL_VERSION = 1

@@ -3,11 +3,11 @@ requires = ["maturin>=1,<2"]
 build-backend = "maturin"
 
 [project]
-name = "quip_proto"
+name = "quip-solver-core"
 version = "0.0.0rc1"
 description = "Quip solver SDK: PyO3 consensus primitives and the generated gRPC stubs"
 readme = "README.md"
-license = "AGPL-3.0-or-later"
+license = "Apache-2.0"
 requires-python = ">=3.11"
 dependencies = ["grpcio>=1.82.1", "protobuf>=7.35.1,<8"]
 
@@ -20,11 +20,11 @@ dev = ["pytest>=8.0,<9", "pytest-asyncio>=0.23.0", "numpy>=1.24", "blake3>=1.0.5
 [tool.maturin]
 manifest-path = "crates/quip-protocol-py/Cargo.toml"
 python-source = "python"
-module-name = "quip_proto._core"
+module-name = "quip_solver_core._core"
 features = ["pyo3/extension-module"]
-# maturin auto-bundles the package matching module-name (quip_proto). The
+# maturin auto-bundles the package matching module-name (quip_solver_core). The
 # generated gRPC stubs live in the sibling `quip` package (python/quip), which
-# quip_proto/__init__.py imports; include it so the wheel is self-contained.
+# quip_solver_core/__init__.py imports; include it so the wheel is self-contained.
 include = [{ path = "quip/**/*.py", format = "wheel" }]
 
 [tool.pytest.ini_options]

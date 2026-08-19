@@ -1,0 +1,9 @@
+# Present on purpose: without an .npmignore, npm falls back to the repository
+# .gitignore, which excludes npm/wasm/ and npm/dist/ as build artifacts and so
+# would publish a package whose WASM binary is missing. The "files" allowlist in
+# package.json is what actually selects the payload.
+node_modules/
+src/
+scripts/
+test/
+tsconfig.json

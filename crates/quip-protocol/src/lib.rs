@@ -8,5 +8,14 @@
 pub mod chacha8;
 pub mod derive;
 pub mod scoring;
-pub mod session;
 pub mod wire;
+
+/// Handshake negotiation over the generated protobuf types.
+///
+/// Behind the default `session` feature because it is the only module that
+/// reaches for `quip-proto`, and so the only one that cannot build for
+/// `wasm32-unknown-unknown`. The consensus primitives above need nothing but
+/// `blake3`, so `--no-default-features` yields a WASM-ready crate with the
+/// golden-pinned math intact.
+#[cfg(feature = "session")]
+pub mod session;
