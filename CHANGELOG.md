@@ -5,6 +5,27 @@ This file documents changes to the Quip solver contract.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.0.1-rc2
+
+Release-pipeline fixes from the v0.0.1-rc1 recon: an anchored tag rule, a
+guard job for malformed tags, and a lint gate on releases.
+
+### Fixed
+
+- The release-tag rule matched any tag that starts with `v` and a digit. A
+  malformed tag such as `v0.0.1-typo` started the whole publish sequence and
+  failed only at the version check. The rule now requires a full
+  `v<major>.<minor>.<patch>` with an optional prerelease.
+- `release:validate` now waits for the lint job. A comment excused the gap:
+  four unformatted files predate the job. Those files were reformatted before
+  0.0.0 shipped, so the exemption had outlived its reason.
+
+### Added
+
+- `release:tag-guard`, which fails the pipeline of any tag outside the release
+  pattern. Before this job, such a tag skipped every release job while
+  `release:validate` ran and passed: a green pipeline that published nothing.
+
 ## 0.0.1-rc1
 
 Packaging and conformance fixes for the 0.0.0 release: the sdist installs

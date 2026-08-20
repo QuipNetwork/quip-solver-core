@@ -373,9 +373,33 @@ smoke:typescript:
 # environments reachable only from a Maintainer-pushed tag.
 # ---------------------------------------------------------------------------
 
+# Anchored to a full version with an optional prerelease. The old `/^v\d/`
+# accepted any tag that started with `v` and a digit, so a malformed tag such
+# as `v0.0.1-typo x` started the whole publish sequence and failed only at
+# scripts/check-release-version.py. Keep this pattern and the one in
+# release:tag-guard identical.
 .on-release-tag: &on-release-tag
   rules:
-    - if: $CI_COMMIT_TAG =~ /^v\d/
+    - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?$/
+
+# Fails the pipeline of a tag that does not name a release. Without this, a
+# tag outside the pattern above (for example `0.0.2`, missing the `v`) skips
+# every release job while release:validate runs and passes: a green pipeline
+# that published nothing.
+release:tag-guard:
+  stage: validate
+  # python:3.11 because the runners already cache it for the lint and
+  # conformance jobs. The script is two echoes and an exit.
+  image: python:3.11
+  tags: [linux, amd64]
+  rules:
+    - if: $CI_COMMIT_TAG && $CI_COMMIT_TAG !~ /^v\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?$/
+  needs: []
+  dependencies: []
+  script:
+    - echo "Tag '$CI_COMMIT_TAG' does not match v<major>.<minor>.<patch>[-<prerelease>], so no release job runs."
+    - echo "Delete the tag, then push one shaped like v0.0.1 or v0.0.1-rc2."
+    - exit 1
 
 # Runs on every pipeline. This is the gate everything downstream hangs off.
 #
@@ -395,14 +419,12 @@ release:validate:
   # while the Python conformance suite and the stub drift guard were still
   # running, or had already failed.
   #
-  # The lint job is deliberately absent. `ruff format --check` reports four
-  # files that predate that job, so adding it here would block every release
-  # until they are reformatted. Add it once they are.
   needs:
     - job: rust
     - job: wasm
     - job: conformance
     - job: docs
+    - job: lint
   # Without this GitLab downloads every prior stage's artifacts by default.
   dependencies: []
   timeout: 60m
