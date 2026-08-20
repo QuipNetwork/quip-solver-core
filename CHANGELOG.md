@@ -5,6 +5,17 @@ This file documents changes to the Quip solver contract.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Changed
+
+- A tag now moves the npm `latest` dist-tag to the version it publishes. The
+  job previously published under `rc`, which left `latest` on whatever was
+  published first. Moving the tag after the fact is not possible here: OIDC
+  authorises `npm publish` and `npm stage publish` and nothing else, so
+  `npm dist-tag add` would need a stored npm token, and this pipeline holds no
+  registry secrets.
+
 ## 0.0.0-rc6
 
 Use 0.0.0-rc6, the first version present on all three registries. 0.0.0-rc1 and

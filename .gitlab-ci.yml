@@ -489,7 +489,14 @@ release:npm:
     - cd npm
     - npm ci
     # prepack runs the wasm and TypeScript builds and copies LICENSE/NOTICE.
-    # --tag rc keeps prereleases off the `latest` dist-tag.
+    #
+    # --tag latest, so a release tag moves the `latest` dist-tag to the version
+    # it publishes. It has to be explicit twice over. npm refuses to publish a
+    # prerelease without --tag at all, on the grounds that a prerelease should
+    # not become the default install. And moving the tag afterwards is not
+    # possible here: OIDC authorises `npm publish` and `npm stage publish` and
+    # nothing else, so `npm dist-tag add` would need a stored npm token, and
+    # this pipeline holds no registry secrets.
     #
     # --no-provenance is required, not a preference. npm turns provenance on by
     # itself when publishing through trusted publishing, and npm only accepts a
@@ -501,7 +508,7 @@ release:npm:
     #
     # Restoring provenance means moving this one job to a GitLab-hosted runner.
     # It changes nothing about the published package otherwise.
-    - npm publish --tag rc --no-provenance
+    - npm publish --tag latest --no-provenance
 
 # The C library ships as a release asset rather than through a registry,
 # because a C consumer wants the compiled object and the header.
