@@ -137,12 +137,6 @@ test:
 # duplicate its result.
 #
 # shfmt is called with no style flags so it reads .editorconfig.
-#
-# `ruff format --check` currently reports four files under conformance/ and
-# python/quip_solver_core/ that predate this target and have never been run
-# through ruff. This target fails until they are reformatted. Reformatting them
-# is a separate change, because it touches no logic and would otherwise be
-# buried in this one.
 .PHONY: lint
 lint:
 	shellcheck scripts/*.sh
