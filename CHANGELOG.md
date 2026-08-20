@@ -5,11 +5,32 @@ This file documents changes to the Quip solver contract.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.0.0-rc3
+
+0.0.0-rc1 and 0.0.0-rc2 reached crates.io only. Use 0.0.0-rc3, which is the
+first version present on all three registries.
+
+### Changed
+
+- crates.io now publishes last, in its own stage, and waits for PyPI and npm to
+  succeed. crates.io is the only one of the three that can never accept a
+  second upload of a version, so publishing it first spent a version number
+  every time a later job failed. Publishing it last leaves the version
+  untouched when anything else fails, so the same tag can be fixed and pushed
+  again.
+
+### Fixed
+
+- The npm publish, which failed on provenance after authenticating. The
+  explicit `--provenance` flag is gone, because npm generates provenance on its
+  own through trusted publishing, and the flag turned a missing attestation
+  token into a failed publish. `SIGSTORE_ID_TOKEN` is now declared for the
+  automatic path.
+- The order of the PyPI job, which ran `twine check` before installing twine.
+
 ## 0.0.0-rc2
 
-0.0.0-rc1 reached crates.io only. Two release jobs failed after the crates were
-already published, and a crates.io version cannot be uploaded again. Use
-0.0.0-rc2, which is the first version present on all three registries.
+0.0.0-rc2 reached crates.io only.
 
 ### Fixed
 

@@ -1,4 +1,4 @@
-# Migrating to quip-solver-core 0.0.0-rc2
+# Migrating to quip-solver-core 0.0.0-rc3
 
 This note is for maintainers of `quip-miner-cpu` and `quip-miner-cuda`.
 Two public types change in this release. A build that still names the old
