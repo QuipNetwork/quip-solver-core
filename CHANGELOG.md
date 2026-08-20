@@ -21,6 +21,11 @@ no source distribution.
 
 ### Fixed
 
+- The npm publish, which the registry rejected with 422 because npm accepts a
+  provenance attestation only from a GitLab-hosted runner, and every runner
+  here is self-hosted. Trusted publishing turns provenance on by itself, so the
+  job now disables it. Published packages carry no provenance attestation until
+  this job moves to a hosted runner.
 - The PyPI upload, which reported a bare `400 Bad Request` and discarded the
   response body. The upload now runs with `--verbose`, which prints the reason.
 
