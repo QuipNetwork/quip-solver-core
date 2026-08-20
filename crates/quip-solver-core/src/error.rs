@@ -35,8 +35,12 @@ impl SampleError {
     }
 
     /// True when the session must end rather than request more work.
+    ///
+    /// Public because a backend that implements its own `sample_stream` pump
+    /// re-derives this classification; matching on variants there drifts
+    /// silently when one is added.
     #[must_use]
-    pub(crate) fn is_fatal(&self) -> bool {
+    pub fn is_fatal(&self) -> bool {
         matches!(self, Self::DeviceFault(_))
     }
 }

@@ -169,6 +169,20 @@ fn advertised_capabilities<S: Sampler>(id: &BackendIdentity) -> Capabilities {
     capabilities(id, S::declared_stream_width())
 }
 
+/// The `Capabilities` the in-session reply carries.
+///
+/// Identical to [`advertised_capabilities`] except for a device-dependent
+/// declaration: a backend that declares `0` (width unknown until the device
+/// opens) gets the live width filled in, because the session holds the device
+/// open. The static `--capabilities` answer keeps the `0`.
+fn session_capabilities<S: Sampler>(id: &BackendIdentity, live_width: usize) -> Capabilities {
+    let mut caps = advertised_capabilities::<S>(id);
+    if caps.stream_width == 0 {
+        caps.stream_width = u32::try_from(live_width).unwrap_or(u32::MAX);
+    }
+    caps
+}
+
 /// Render [`Capabilities`] in the protobuf JSON mapping.
 ///
 /// The generated prost types carry no serde derives, and adding them to
@@ -663,8 +677,13 @@ async fn run_session<S: Sampler>(
     // The advertised width comes from `declared_stream_width` so `--capabilities`
     // can answer with the device closed. A backend that overrides only the live
     // one advertises a number its sampler contradicts, which is a misdeclaration
-    // the operator has to fix in the backend.
-    if usize::try_from(S::declared_stream_width()) != Ok(width) {
+    // the operator has to fix in the backend. Declaring 0 is the honest opt-out
+    // for a width that is a property of the opened device: no static answer
+    // exists, so nothing is misdeclared, and the in-session reply carries the
+    // live width instead.
+    if S::declared_stream_width() == 0 {
+        tracing::debug!(live = width, "device-dependent stream width resolved");
+    } else if usize::try_from(S::declared_stream_width()) != Ok(width) {
         tracing::error!(
             declared = S::declared_stream_width(),
             live = width,
@@ -1010,10 +1029,12 @@ async fn run_session<S: Sampler>(
                     }
                 }
                 Some(coord_msg::Msg::GetCapabilities(_)) => {
-                    // Same message `--capabilities` prints, same values.
+                    // Same message `--capabilities` prints, same values —
+                    // except a device-dependent width declaration (0), which
+                    // the open device resolves.
                     if ctrl_tx
                         .send(miner(miner_msg::Msg::Capabilities(
-                            advertised_capabilities::<S>(id),
+                            session_capabilities::<S>(id, width),
                         )))
                         .await
                         .is_err()
@@ -1766,6 +1787,35 @@ mod tests {
         assert_eq!(v.get("streamWidth"), Some(&serde_json::json!(8)));
         // And the features the identity declares travel with it.
         assert_eq!(reply.features, vec!["streaming"]);
+    }
+
+    /// A backend whose width depends on the opened device declares 0. The
+    /// static answer keeps the 0; the in-session reply reports the resolved
+    /// width.
+    #[test]
+    fn a_device_dependent_width_declaration_resolves_in_session() {
+        struct DeviceWidthSampler;
+        impl Sampler for DeviceWidthSampler {
+            fn sample(
+                &self,
+                _graph: &crate::IsingGraph,
+                _params: &crate::ising::SampleParams,
+            ) -> Result<Vec<crate::SamplerResult>, crate::SampleError> {
+                Ok(vec![])
+            }
+            fn stream_width(&self) -> usize {
+                6
+            }
+            fn declared_stream_width() -> u32 {
+                0
+            }
+        }
+
+        let id = test_identity();
+        let flag = advertised_capabilities::<DeviceWidthSampler>(&id);
+        assert_eq!(flag.stream_width, 0);
+        let reply = session_capabilities::<DeviceWidthSampler>(&id, 6);
+        assert_eq!(reply.stream_width, 6);
     }
 
     #[test]

@@ -258,6 +258,13 @@ pub trait Sampler: Send + Sync + 'static {
     /// [`stream_width`](Sampler::stream_width) with the same value. The session
     /// logs an error when they disagree, because the advertised number is then
     /// a misdeclaration.
+    ///
+    /// A backend whose width is a property of the opened device — a lane count
+    /// derived from the GPU's multiprocessor count, say — has no honest static
+    /// answer and declares `0`: width unknown until the device opens. The
+    /// session then skips the mismatch check, and the in-session
+    /// `Capabilities` reply carries the live width while `--capabilities`
+    /// keeps the `0`.
     #[must_use]
     fn declared_stream_width() -> u32
     where

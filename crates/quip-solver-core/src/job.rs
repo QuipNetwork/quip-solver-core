@@ -1068,6 +1068,49 @@ mod tests {
         }
     }
 
+    /// The doubled gibbs budget must reach the wire: `SamplerMeta.sweeps`
+    /// echoes what `prepare_job` resolved, one hop past the previous test.
+    #[test]
+    fn a_finalized_gibbs_result_reports_the_doubled_sweeps() {
+        let sampler = StubSampler;
+        let gibbs_id = identity("gibbs");
+        let Prepared::Sample {
+            job,
+            num_reads,
+            num_sweeps,
+        } = prepare_job(edges_job(1), &sampler, &gibbs_id, 64, None, None, None)
+        else {
+            panic!("expected Sample");
+        };
+
+        let mut jobs_done = 0;
+        let msgs = finalize_result(
+            StreamResult {
+                job_id: job.job_id,
+                outcome: StreamOutcome::Completed(Ok(vec![SamplerResult {
+                    spins: vec![1, -1],
+                    energy_milli: -1000,
+                }])),
+                device_access_time_us: 7,
+            },
+            num_reads,
+            num_sweeps,
+            &mut jobs_done,
+        );
+
+        let sweeps: Vec<u32> = msgs
+            .iter()
+            .filter_map(|m| {
+                if let Some(miner_msg::Msg::Result(r)) = &m.msg {
+                    r.meta.as_ref().map(|meta| meta.sweeps)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(sweeps, vec![64 * GIBBS_SWEEP_MULTIPLIER]);
+    }
+
     #[test]
     fn back_to_back_jobs_get_different_os_entropy_seeds() {
         let sampler = StubSampler;

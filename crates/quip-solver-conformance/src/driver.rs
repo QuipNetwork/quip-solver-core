@@ -47,7 +47,19 @@ const OUTCOME_TIMEOUT: Duration = Duration::from_secs(5);
 /// `num_sweeps` the script pushes through `Configure.backend_toml`. Chosen
 /// different from the SDK default (64) so an implementation that ignores
 /// `backend_toml` and reports its default cannot pass by coincidence.
-const CONFIGURED_SWEEPS: u32 = 512;
+///
+/// Public so a solver repository's tests can state expectations against the
+/// same budget instead of mirroring the literal.
+pub const CONFIGURED_SWEEPS: u32 = 512;
+
+/// Sweep multiplier a `gibbs` solver applies to the configured budget.
+///
+/// SPEC.md: the pin is a sweep budget, not a literal count — a Gibbs solver
+/// runs, and reports, twice the pinned number because Gibbs converges slower
+/// per sweep. Mirrors the session's `GIBBS_SWEEP_MULTIPLIER` in
+/// quip-solver-core, which this crate cannot depend on without a publish
+/// cycle.
+pub const GIBBS_SWEEP_MULTIPLIER: u32 = 2;
 
 /// Generation carried by every ordinary job in the walk.
 const LIVE_GENERATION: u64 = 2;
@@ -238,12 +250,26 @@ impl DriverReport {
         })
     }
 
-    /// Every `SamplerMeta` reports the sweep budget the script configured.
+    /// The `SamplerMeta.sweeps` a conformant solver reports: the configured
+    /// budget, doubled when the `Hello` advertised the `gibbs` algorithm.
+    ///
+    /// Before a `Hello` arrives no `Result` can have arrived either, so the
+    /// un-doubled budget is the right default.
+    #[must_use]
+    pub fn expected_meta_sweeps(&self) -> u32 {
+        if self.hello.as_ref().is_some_and(|h| h.algorithm == "gibbs") {
+            CONFIGURED_SWEEPS * GIBBS_SWEEP_MULTIPLIER
+        } else {
+            CONFIGURED_SWEEPS
+        }
+    }
+
+    /// Every `SamplerMeta` reports the sweep budget the script configured,
+    /// adjusted for the advertised algorithm ([`Self::expected_meta_sweeps`]).
     #[must_use]
     pub fn sweeps_honoured(&self) -> bool {
-        self.results
-            .iter()
-            .all(|r| r.meta_sweeps == CONFIGURED_SWEEPS)
+        let expected = self.expected_meta_sweeps();
+        self.results.iter().all(|r| r.meta_sweeps == expected)
     }
 
     /// The returned `Capabilities` agrees with the identity the miner
@@ -1565,6 +1591,37 @@ mod tests {
             "a solver that ignores Configure.backend_toml must fail"
         );
         assert!(!r.is_conformant(), "{r:?}");
+    }
+
+    #[test]
+    fn a_gibbs_solver_reporting_the_doubled_budget_is_conformant() {
+        // SPEC.md: the pin is a budget, and a gibbs solver runs — and reports
+        // — twice it. The driver must expect the doubled echo rather than
+        // fail the solver for following the spec.
+        let mut r = conformant_report();
+        if let Some(h) = r.hello.as_mut() {
+            h.algorithm = "gibbs".to_owned();
+        }
+        if let Some(c) = r.capabilities_received.as_mut() {
+            c.algorithm = "gibbs".to_owned();
+        }
+        for result in &mut r.results {
+            result.meta_sweeps = CONFIGURED_SWEEPS * GIBBS_SWEEP_MULTIPLIER;
+        }
+        assert!(r.is_conformant(), "{r:?}");
+    }
+
+    #[test]
+    fn a_gibbs_solver_echoing_the_raw_budget_fails() {
+        // The un-doubled echo means the solver skipped its own 2x rule.
+        let mut r = conformant_report();
+        if let Some(h) = r.hello.as_mut() {
+            h.algorithm = "gibbs".to_owned();
+        }
+        if let Some(c) = r.capabilities_received.as_mut() {
+            c.algorithm = "gibbs".to_owned();
+        }
+        assert!(!r.sweeps_honoured(), "{r:?}");
     }
 
     #[test]

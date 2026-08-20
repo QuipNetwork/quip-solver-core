@@ -5,6 +5,40 @@ This file documents changes to the Quip solver contract.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.0.1-rc1
+
+Packaging and conformance fixes for the 0.0.0 release: the sdist installs
+correctly, PyPI covers macOS arm64 and Linux aarch64, and a gibbs solver can
+pass the conformance driver.
+
+### Fixed
+
+- The sdist now carries the generated `quip` gRPC stub package. 0.0.0 marked
+  it wheel-only, so an install that fell back to the sdist built successfully
+  and then failed at first import with `ModuleNotFoundError: No module named
+  'quip'`. `make check-python-dist` now fails when the stubs are missing from
+  the tarball.
+- The conformance driver expects the doubled sweep echo from a `gibbs`
+  solver. SPEC.md pins a sweep budget and a Gibbs solver runs — and reports —
+  twice it, but `sweeps_honoured()` compared every solver against the raw
+  budget, so no gibbs backend could pass `is_conformant()`.
+
+### Added
+
+- PyPI wheels for macOS arm64 and Linux aarch64, built on the group's Apple
+  Silicon and arm64 docker runners. 0.0.0 shipped only the linux/amd64 wheel,
+  which sent every other platform to the broken sdist.
+- `CONFIGURED_SWEEPS`, `GIBBS_SWEEP_MULTIPLIER`, and
+  `DriverReport::expected_meta_sweeps()` are public, so a solver repository's
+  tests can state sweep expectations without mirroring the literals.
+- `SampleError::is_fatal()` is public, so a backend with its own
+  `sample_stream` pump reuses the session's fatality rule instead of
+  matching variants.
+- `Sampler::declared_stream_width()` accepts `0`: a device-dependent width,
+  unknown until the device opens. `--capabilities` keeps the `0`, the
+  in-session `Capabilities` reply carries the live width, and the session
+  logs no misdeclaration for a width it could never state.
+
 ## 0.0.0
 
 The first release. Use 0.0.0 rather than any release candidate: the rc tags
