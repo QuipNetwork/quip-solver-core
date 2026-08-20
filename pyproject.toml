@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "quip-solver-core"
-version = "0.0.0"
+version = "0.0.1rc1"
 description = "Quip solver SDK: PyO3 consensus primitives and the generated gRPC stubs"
 readme = "README.md"
 license = "Apache-2.0"
@@ -24,9 +24,12 @@ module-name = "quip_solver_core._core"
 features = ["pyo3/extension-module"]
 # maturin auto-bundles the package matching module-name (quip_solver_core). The
 # generated gRPC stubs live in the sibling `quip` package (python/quip), which
-# quip_solver_core/__init__.py imports; include it so the wheel is self-contained.
+# quip_solver_core/__init__.py imports; include it in both distribution formats
+# so the wheel is self-contained and a from-sdist build produces a working
+# install. (0.0.0 marked it wheel-only, so every sdist install built fine and
+# then failed at import with `No module named 'quip'`.)
 include = [
-    { path = "quip/**/*.py", format = "wheel" },
+    { path = "quip/**/*.py", format = ["sdist", "wheel"] },
     # maturin writes `License-File: LICENSE` and `License-File: NOTICE` into the
     # sdist metadata but packs neither file, because both sit at the repository
     # root rather than inside the crate. PyPI validates that every declared

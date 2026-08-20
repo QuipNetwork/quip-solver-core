@@ -69,6 +69,7 @@ check-python-dist:
 	# files it names exist. PyPI checks that at upload time and rejects the
 	# sdist with 400, after the wheel of the same version has been accepted.
 	bash scripts/check-sdist-license-files.sh dist/python/*.tar.gz
+	bash scripts/check-sdist-stub-package.sh dist/python/*.tar.gz
 
 # Two steps, for the same reason check-crate-publish uses `cargo package`.
 #
