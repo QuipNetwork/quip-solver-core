@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "quip-solver-core"
-version = "0.0.0rc5"
+version = "0.0.0rc6"
 description = "Quip solver SDK: PyO3 consensus primitives and the generated gRPC stubs"
 readme = "README.md"
 license = "Apache-2.0"
@@ -25,7 +25,16 @@ features = ["pyo3/extension-module"]
 # maturin auto-bundles the package matching module-name (quip_solver_core). The
 # generated gRPC stubs live in the sibling `quip` package (python/quip), which
 # quip_solver_core/__init__.py imports; include it so the wheel is self-contained.
-include = [{ path = "quip/**/*.py", format = "wheel" }]
+include = [
+    { path = "quip/**/*.py", format = "wheel" },
+    # maturin writes `License-File: LICENSE` and `License-File: NOTICE` into the
+    # sdist metadata but packs neither file, because both sit at the repository
+    # root rather than inside the crate. PyPI validates that every declared
+    # License-File exists and rejects the upload with 400. twine check does not
+    # catch it, because the metadata itself is well formed.
+    { path = "LICENSE", format = "sdist" },
+    { path = "NOTICE", format = "sdist" },
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

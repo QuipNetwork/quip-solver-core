@@ -5,11 +5,26 @@ This file documents changes to the Quip solver contract.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## 0.0.0-rc5
+## 0.0.0-rc6
 
-Use 0.0.0-rc5, the first version present on all three registries. 0.0.0-rc1 and
+Use 0.0.0-rc6, the first version present on all three registries. 0.0.0-rc1 and
 0.0.0-rc2 reached crates.io only. 0.0.0-rc3 reached PyPI only, as a wheel with
-no source distribution. 0.0.0-rc4 published nowhere.
+no source distribution. 0.0.0-rc4 published nowhere. 0.0.0-rc5 reached npm only.
+
+### Fixed
+
+- The source distribution, which declared `License-File: LICENSE` and
+  `License-File: NOTICE` and contained neither. Both files sit at the
+  repository root rather than inside the crate, so maturin named them in the
+  metadata and packed neither, and PyPI rejected the upload with 400 after
+  accepting the wheel of the same version.
+
+### Added
+
+- `scripts/check-sdist-license-files.sh`, which fails when a source
+  distribution names a license file it does not contain. `twine check` accepts
+  that combination, because the metadata itself is well formed, so nothing
+  before the upload caught it.
 
 ### Changed
 
