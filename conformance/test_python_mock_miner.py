@@ -11,7 +11,6 @@ import sys
 from pathlib import Path
 
 import pytest
-
 from quip.v1 import miner_pb2
 from quip_solver_core import wire
 
@@ -89,6 +88,7 @@ def test_inline_edges_stay_dense():
     h, j, edges = mock_miner.decode_problem(ising, {})
     assert edges == [(0, 1)]
     assert h == [1.0, -1.0]
+    assert j == [0.5]
 
 
 @pytest.mark.asyncio

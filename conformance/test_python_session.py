@@ -1,5 +1,4 @@
 import pytest
-
 from quip.v1 import miner_pb2
 from quip_solver_core import session
 from quip_solver_core._core import ExitCode

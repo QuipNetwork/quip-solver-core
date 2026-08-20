@@ -37,7 +37,7 @@ def main(argv: list[str]) -> int:
         return 2
 
     tag = argv[1]
-    version = tag[1:] if tag.startswith("v") else tag
+    version = tag.removeprefix("v")
     root = Path(__file__).resolve().parent.parent
 
     cargo = tomllib.loads((root / "Cargo.toml").read_text())

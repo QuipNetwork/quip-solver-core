@@ -149,7 +149,10 @@ lint:
     - apt-get update && apt-get install -y --no-install-recommends make shellcheck
     # shfmt is not packaged in bookworm at a version worth pinning to, so it
     # comes from the upstream release, checksummed the same way protoc is.
-    - pip install --quiet ruff
+    # Pinned: ruff's default rule set grows between minors, so an unpinned
+    # install turns upstream releases into red pipelines. Bump deliberately
+    # and fix the new findings in the same change.
+    - pip install --quiet ruff==0.16.2
     - |
       set -euo pipefail
       curl -fsSLo /usr/local/bin/shfmt \

@@ -9,7 +9,6 @@ import json
 from pathlib import Path
 
 import pytest
-
 from quip_solver_core._core import scoring, wire
 
 VECTORS = Path(__file__).resolve().parents[1] / "crates/quip-solver-conformance/vectors"

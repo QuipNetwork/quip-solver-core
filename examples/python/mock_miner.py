@@ -35,7 +35,6 @@ from dataclasses import dataclass, field
 
 import grpc
 from google.protobuf.json_format import MessageToDict
-
 from quip_solver_core import ExitCode, miner_pb2, miner_pb2_grpc, scoring, session, wire
 
 BACKEND = "mock-python"
