@@ -1,4 +1,4 @@
-# Migrating to quip-solver-core 0.0.1-rc1
+# Migrating to quip-solver-core 0.0.1-rc2
 
 This note is for maintainers of `quip-miner-cpu` and `quip-miner-cuda`, and
 for C and C++ solver authors building against `libquip_solver_c`. Two public
