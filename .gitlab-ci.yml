@@ -15,13 +15,17 @@ stages:
   - validate
   - smoke
   - release
-  # crates.io runs last, in its own stage, because it is the least forgiving of
-  # the three registries. PyPI accepts a re-upload through --skip-existing and
-  # an unpublished npm version can be published later, but a crates.io version
-  # can never be uploaded again, only yanked. Publishing it first means any
-  # later failure spends a version number that cannot be reused. Publishing it
-  # last means a failure anywhere else leaves the version untouched, so the
-  # same tag can be fixed and pushed again.
+  # The three registries publish in order of how hard each is to undo, easiest
+  # first, so a failure strands as little as possible.
+  #
+  #   npm    an unwanted version can be unpublished within 72 hours
+  #   pypi   a release can be deleted, but its filenames can never be reused
+  #   crates a version can only be yanked, never replaced or re-uploaded
+  #
+  # Every earlier attempt published the hardest one first and failed on the
+  # easier ones behind it, which spent a version number that could not be
+  # reclaimed. In this order the first failure stops everything after it.
+  - pypi
   - crates
   - notes
 
@@ -379,7 +383,7 @@ release:crates:
     - cargo publish --locked --workspace
 
 release:pypi:
-  stage: release
+  stage: pypi
   # entrypoint: [""] because this image sets ENTRYPOINT ["maturin"]. GitLab runs
   # the job script through the entrypoint, so every command arrives as an
   # argument to maturin and the job dies on `maturin sh` before the first line
@@ -389,6 +393,7 @@ release:pypi:
     entrypoint: [""]
   tags: [linux, amd64]
   <<: *on-release-tag
+  # Waits for npm, the one registry whose publish can still be undone.
   needs:
     - job: release:validate
       artifacts: true
@@ -396,6 +401,7 @@ release:pypi:
     - job: smoke:cpp
     - job: smoke:python
     - job: smoke:typescript
+    - job: release:npm
   # Matches the environment registered on the PyPI trusted publisher. PyPI
   # rejects the OIDC exchange when the two disagree.
   environment:
@@ -426,7 +432,10 @@ release:pypi:
         -d "{\"token\": \"${PYPI_ID_TOKEN}\"}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')
       # --skip-existing so a re-run after a partial failure is safe. cargo has
       # no equivalent, which is why the registries are separate jobs.
-      TWINE_USERNAME=__token__ TWINE_PASSWORD="$MINTED" twine upload --skip-existing dist/python/*
+      # --verbose because twine prints the HTTP status and hides the body. The
+      # rc3 upload created the project from the wheel and then failed the sdist
+      # with a bare "400 Bad Request", which says nothing about the cause.
+      TWINE_USERNAME=__token__ TWINE_PASSWORD="$MINTED" twine upload --verbose --skip-existing dist/python/*
   artifacts:
     paths:
       - dist/python/*.whl

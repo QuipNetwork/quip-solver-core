@@ -5,10 +5,28 @@ This file documents changes to the Quip solver contract.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.0.0-rc4
+
+Use 0.0.0-rc4, the first version present on all three registries. 0.0.0-rc1 and
+0.0.0-rc2 reached crates.io only. 0.0.0-rc3 reached PyPI only, as a wheel with
+no source distribution.
+
+### Changed
+
+- The registries now publish in order of how hard each one is to undo: npm,
+  then PyPI, then crates.io. An unwanted npm version can be unpublished within
+  72 hours, a PyPI release can be deleted but never reuses its filenames, and a
+  crates.io version can only be yanked. The first failure now stops everything
+  after it, so a broken release strands as little as possible.
+
+### Fixed
+
+- The PyPI upload, which reported a bare `400 Bad Request` and discarded the
+  response body. The upload now runs with `--verbose`, which prints the reason.
+
 ## 0.0.0-rc3
 
-0.0.0-rc1 and 0.0.0-rc2 reached crates.io only. Use 0.0.0-rc3, which is the
-first version present on all three registries.
+0.0.0-rc3 reached PyPI only, and only as a wheel.
 
 ### Changed
 

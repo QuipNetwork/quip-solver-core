@@ -10,7 +10,7 @@ written today writes its own state machine. A Rust solver conforms today by
 supplying a `Sampler` and calling `run`.
 
 The full contract is in [SPEC.md](SPEC.md).
-[CHANGELOG.md](CHANGELOG.md) lists the 0.0.0-rc3 changes.
+[CHANGELOG.md](CHANGELOG.md) lists the 0.0.0-rc4 changes.
 [MIGRATING.md](MIGRATING.md) covers the move from `quip-miner-core`.
 
 ## Crates
@@ -34,10 +34,10 @@ artifact, because a C consumer wants the compiled object and the header.
 
 ```toml
 [dependencies]
-quip-solver-core = "0.0.0-rc3"
+quip-solver-core = "0.0.0-rc4"
 
 [dev-dependencies]
-quip-solver-conformance = "0.0.0-rc3"
+quip-solver-conformance = "0.0.0-rc4"
 ```
 
 One dependency is enough. `quip-solver-core` re-exports `quip_proto` and
