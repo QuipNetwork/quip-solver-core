@@ -5,11 +5,11 @@ This file documents changes to the Quip solver contract.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## 0.0.0-rc4
+## 0.0.0-rc5
 
-Use 0.0.0-rc4, the first version present on all three registries. 0.0.0-rc1 and
+Use 0.0.0-rc5, the first version present on all three registries. 0.0.0-rc1 and
 0.0.0-rc2 reached crates.io only. 0.0.0-rc3 reached PyPI only, as a wheel with
-no source distribution.
+no source distribution. 0.0.0-rc4 published nowhere.
 
 ### Changed
 
