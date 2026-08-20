@@ -1,6 +1,6 @@
 {
   "name": "@quip.network/quip-solver-core",
-  "version": "0.0.0-rc2",
+  "version": "0.0.0-rc3",
   "description": "Quip solver SDK: WebAssembly consensus primitives and the generated gRPC stubs",
   "license": "Apache-2.0",
   "homepage": "https://quip.network",

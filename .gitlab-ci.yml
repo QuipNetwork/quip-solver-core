@@ -15,6 +15,15 @@ stages:
   - validate
   - smoke
   - release
+  # crates.io runs last, in its own stage, because it is the least forgiving of
+  # the three registries. PyPI accepts a re-upload through --skip-existing and
+  # an unpublished npm version can be published later, but a crates.io version
+  # can never be uploaded again, only yanked. Publishing it first means any
+  # later failure spends a version number that cannot be reused. Publishing it
+  # last means a failure anywhere else leaves the version untouched, so the
+  # same tag can be fixed and pushed again.
+  - crates
+  - notes
 
 variables:
   CARGO_TERM_COLOR: always
@@ -334,10 +343,13 @@ release:validate:
     expire_in: 1 week
 
 release:crates:
-  stage: release
+  stage: crates
   image: rust:1.97.1
   tags: [linux, amd64]
   <<: *on-release-tag
+  # Depends on the other two registries, not only on the gates. This is the
+  # irreversible publish, so it must not run until the reversible ones have
+  # succeeded.
   needs:
     - job: release:validate
       artifacts: true
@@ -345,6 +357,8 @@ release:crates:
     - job: smoke:cpp
     - job: smoke:python
     - job: smoke:typescript
+    - job: release:npm
+    - job: release:pypi
   environment:
     name: crates-io
     url: https://crates.io/crates/quip-solver-core
@@ -396,6 +410,10 @@ release:pypi:
     # dist/python/, matching `make check-python-dist`. A bare dist/ would also
     # match the C library tarball and any stale wheel from an earlier name.
     - rm -rf dist/python && mkdir -p dist/python
+    # twine is not in the maturin image, and it is used twice: to check the
+    # built distributions and to upload them. Install it before the first use,
+    # not between them.
+    - python3 -m pip install --disable-pip-version-check twine
     - maturin build --release --out dist/python
     - maturin sdist --out dist/python
     - twine check dist/python/*
@@ -406,7 +424,6 @@ release:pypi:
       MINTED=$(curl -fsSL -X POST https://pypi.org/_/oidc/mint-token \
         -H 'Content-Type: application/json' \
         -d "{\"token\": \"${PYPI_ID_TOKEN}\"}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')
-      pip install twine
       # --skip-existing so a re-run after a partial failure is safe. cargo has
       # no equivalent, which is why the registries are separate jobs.
       TWINE_USERNAME=__token__ TWINE_PASSWORD="$MINTED" twine upload --skip-existing dist/python/*
@@ -431,9 +448,16 @@ release:npm:
   environment:
     name: npm
     url: https://www.npmjs.com/package/@quip.network/quip-solver-core
+  # Two tokens, for two separate exchanges. NPM_ID_TOKEN authenticates the
+  # publish. SIGSTORE_ID_TOKEN signs the provenance attestation, which npm
+  # generates on its own when publishing through trusted publishing. Declaring
+  # it costs nothing if npm does not use it, and its absence is what failed the
+  # rc2 publish after authentication had already succeeded.
   id_tokens:
     NPM_ID_TOKEN:
       aud: npm:registry.npmjs.org
+    SIGSTORE_ID_TOKEN:
+      aud: sigstore
   timeout: 30m
   before_script:
     - !reference [.setup-protoc, script]
@@ -457,10 +481,13 @@ release:npm:
     - cd npm
     - npm ci
     # prepack runs the wasm and TypeScript builds and copies LICENSE/NOTICE.
-    # --tag rc keeps prereleases off the `latest` dist-tag. --provenance lives
-    # here rather than in package.json, because it needs a recognised CI
-    # provider and hard-fails any local `npm publish`.
-    - npm publish --tag rc --provenance
+    # --tag rc keeps prereleases off the `latest` dist-tag.
+    #
+    # No --provenance. npm generates provenance on its own when publishing
+    # through trusted publishing, and the explicit flag makes it mandatory:
+    # rc2 authenticated and then failed the publish outright on a provenance
+    # problem. SIGSTORE_ID_TOKEN stays declared above for the automatic path.
+    - npm publish --tag rc
 
 # The C library ships as a release asset rather than through a registry,
 # because a C consumer wants the compiled object and the header.
@@ -496,7 +523,7 @@ release:clib:
 # release. Uses the declarative `release:` keyword, so CI_JOB_TOKEN is enough
 # and a re-run does not error when the release already exists.
 release:notes:
-  stage: release
+  stage: notes
   image: registry.gitlab.com/gitlab-org/release-cli:latest
   tags: [linux, amd64]
   <<: *on-release-tag
