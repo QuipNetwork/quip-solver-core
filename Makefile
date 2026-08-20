@@ -71,13 +71,13 @@ check-python-dist:
 
 # Two steps, for the same reason check-crate-publish uses `cargo package`.
 #
-# `npm publish --dry-run` validates the publish path, including the prerelease
-# tag rule, but writes no tarball. `npm pack` writes the tarball the smoke test
-# installs. Neither proves authentication: provenance and OIDC need a real CI
-# provider, so only the publish job exercises those.
+# `npm publish --dry-run` validates the publish path but writes no tarball.
+# `npm pack` writes the tarball the smoke test installs. Neither proves
+# authentication: OIDC needs a real CI provider, so only the publish job
+# exercises that.
 .PHONY: check-npm-dist
 check-npm-dist:
-	cd npm && rm -f ./*.tgz && npm ci && npm publish --dry-run --tag rc && npm pack
+	cd npm && rm -f ./*.tgz && npm ci && npm publish --dry-run --tag latest && npm pack
 	@ls -la npm/*.tgz
 
 # The C library ships as a release asset, so packing it is part of the release
