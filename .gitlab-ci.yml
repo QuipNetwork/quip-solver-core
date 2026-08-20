@@ -451,6 +451,77 @@ release:validate:
       - quip-solver-drive
     expire_in: 1 week
 
+# ---------------------------------------------------------------------------
+# Platform wheels.
+#
+# release:validate builds the linux/amd64 wheel; these build the other
+# platforms consumers run (Apple Silicon machines, arm64 Linux containers).
+# Both feed release:pypi, so a broken platform build stops the release
+# instead of shipping an amd64-only version, and both run on every pipeline
+# for the same reason release:validate does: a regression should surface on
+# the merge request, not on the tag.
+#
+# Neither installs protoc: the wheel's crate chain (quip-protocol-py ->
+# quip-protocol -> quip-proto) has no build script; protoc is only a
+# dev-dependency of the stub drift guard test.
+# ---------------------------------------------------------------------------
+
+# Native arm64 build on the group's arm64 docker runner. Produces
+# manylinux_2_34_aarch64, the same glibc floor as the amd64 wheel.
+wheel:linux-aarch64:
+  stage: validate
+  image: rust:1.97.1
+  tags: [arm64, docker]
+  needs: []
+  timeout: 30m
+  before_script:
+    - apt-get update && apt-get install -y --no-install-recommends python3 python3-venv
+    - python3 -m venv /opt/wheelenv
+    - /opt/wheelenv/bin/pip install --quiet maturin
+  script:
+    - /opt/wheelenv/bin/maturin build --release --out dist/python
+    - /opt/wheelenv/bin/pip install --quiet dist/python/*.whl
+    - /opt/wheelenv/bin/python -c "import quip, quip_solver_core; print(quip_solver_core.__file__)"
+  artifacts:
+    paths:
+      - dist/python/*.whl
+    expire_in: 1 week
+
+# The macOS wheel cannot be cross-compiled from Linux: PyO3 needs the Apple
+# linker and SDK. Runs on the group's Apple Silicon shell runners, where
+# `image:` does not apply and a container-flavoured before_script would fail,
+# so the job carries its own (same pattern as quip-miner-dwave's macOS build).
+wheel:macos-arm64:
+  stage: validate
+  tags: [macos, arm64]
+  needs: []
+  timeout: 30m
+  variables:
+    # --no-modify-path below: CARGO_HOME sits inside the build directory, so
+    # the `source $CARGO_HOME/env` line rustup appends to the runner's shell
+    # profile would break every later login shell once the job's directory is
+    # cleaned up.
+    CARGO_HOME: $CI_PROJECT_DIR/.cargo
+  before_script:
+    - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.97.1 --no-modify-path
+    - source "$CARGO_HOME/env"
+    # The runner's system python3 sits below the >= 3.11 floor.
+    - brew install python@3.12
+    - python3.12 -m venv .venv-wheel
+    - .venv-wheel/bin/pip install --quiet maturin
+  script:
+    # Shell executor: the workspace persists between jobs, and dist/ is
+    # gitignored, so a stale wheel from a previous run would otherwise ride
+    # along in the artifacts.
+    - rm -rf dist/python
+    - .venv-wheel/bin/maturin build --release --out dist/python
+    - .venv-wheel/bin/pip install --quiet dist/python/*.whl
+    - .venv-wheel/bin/python -c "import quip, quip_solver_core; print(quip_solver_core.__file__)"
+  artifacts:
+    paths:
+      - dist/python/*.whl
+    expire_in: 1 week
+
 release:crates:
   stage: crates
   image: rust:1.97.1
@@ -507,6 +578,10 @@ release:pypi:
   # Waits for npm, the one registry whose publish can still be undone.
   needs:
     - job: release:validate
+      artifacts: true
+    - job: wheel:linux-aarch64
+      artifacts: true
+    - job: wheel:macos-arm64
       artifacts: true
     - job: smoke:rust
     - job: smoke:cpp
