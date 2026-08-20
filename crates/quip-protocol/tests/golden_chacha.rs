@@ -1,4 +1,5 @@
-//! Golden `ChaCha8` keystream and Ising draw order vs `conformance/golden_vectors.json`.
+//! Golden `ChaCha8` keystream, Ising draw order, and nonce derivation vs
+//! `conformance/golden_vectors.json`.
 #![expect(
     clippy::indexing_slicing,
     reason = "golden JSON keys and 64-char hex slices are fixed by the fixture"
@@ -9,6 +10,7 @@
 )]
 
 use quip_protocol::chacha8::{draw_ising_milli, ChaCha8Rng};
+use quip_protocol::derive::derive_nonce;
 use serde_json::Value;
 
 #[expect(
@@ -28,6 +30,28 @@ fn hex32(s: &str) -> [u8; 32] {
         .map(|i| u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).unwrap())
         .collect();
     bytes.try_into().unwrap()
+}
+
+// The `derive_nonce` section had no reader: the only check was a hardcoded copy
+// of case[0] inside src/derive.rs, so editing the fixture could not fail a test
+// and cases beyond the first were never executed. This loads the section and
+// asserts every case, which is what makes the fixture the source of truth.
+#[test]
+fn derive_nonce_matches_golden() {
+    let g = golden();
+    let cases = g["derive_nonce"].as_array().unwrap();
+    assert!(!cases.is_empty(), "derive_nonce section must not be empty");
+    for (index, case) in cases.iter().enumerate() {
+        let last_proof = hex32(case["last_proof_hex"].as_str().unwrap());
+        let miner = hex32(case["miner_hex"].as_str().unwrap());
+        let salt = hex32(case["salt_hex"].as_str().unwrap());
+        let expected = hex32(case["nonce_hex"].as_str().unwrap());
+        assert_eq!(
+            derive_nonce(last_proof, miner, salt),
+            expected,
+            "derive_nonce case {index}"
+        );
+    }
 }
 
 #[test]

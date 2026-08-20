@@ -1,0 +1,20 @@
+# shfmt reads this file when it is called without style flags, so `make lint`
+# and an editor agree on one shell style instead of two.
+#
+# The values below describe the style scripts/ already uses. They are a record
+# of the existing convention, not a new one.
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+[*.sh]
+indent_style = space
+indent_size = 4
+# `case` patterns are indented one level inside the `case` body.
+switch_case_indent = true
+# A continued command may start a line with `&&` or `||`.
+binary_next_line = true

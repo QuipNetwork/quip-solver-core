@@ -30,7 +30,6 @@ examples/*/target/
 examples/*/dist/
 examples/*/node_modules/
 examples/cpp/mock_miner
-crates/quip-solver-c/include/
 crates/quip-protocol-wasm/pkg/
 npm/*.tgz
 # Regenerated once @quip.network/quip-solver-core is live on npm. Committing it

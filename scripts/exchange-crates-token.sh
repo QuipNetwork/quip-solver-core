@@ -20,15 +20,23 @@ set -euo pipefail
 
 : "${CRATES_IO_ID_TOKEN:?CRATES_IO_ID_TOKEN is unset. Declare it under id_tokens: with aud: crates.io}"
 
+# The request body is built by jq from the environment and piped in on stdin
+# (`--data @-`), so the OIDC token never appears in a process argument list.
+# Anything on argv is world-readable through /proc on the runner and is echoed
+# by a shell trace, which would leak a live publish credential.
+#
+# `env.CRATES_IO_ID_TOKEN` rather than `--arg`: --arg would put the token back
+# on jq's own command line, which is the thing being avoided.
+#
 # --retry without --retry-all-errors, so only transient failures are retried. A
 # 400 means the token or the publisher registration is wrong, and retrying that
 # just delays the error.
-RESPONSE=$(curl --fail-with-body --silent --show-error \
+RESPONSE=$(jq -n '{jwt: env.CRATES_IO_ID_TOKEN}' | curl --fail-with-body --silent --show-error \
     --retry 3 \
     -X POST 'https://crates.io/api/v1/trusted_publishing/tokens' \
     -H 'Content-Type: application/json' \
     -H 'User-Agent: quip-solver-core release pipeline (https://gitlab.com/quip.network/quip-solver-core)' \
-    -d "{\"jwt\": \"${CRATES_IO_ID_TOKEN}\"}") || {
+    --data @-) || {
     echo "crates.io rejected the OIDC exchange. Check that a Trusted Publisher is registered for every crate." >&2
     echo "Response: ${RESPONSE:-<none>}" >&2
     exit 1

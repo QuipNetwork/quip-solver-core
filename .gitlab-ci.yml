@@ -34,6 +34,23 @@ variables:
   CARGO_INCREMENTAL: "0"
   # Must match the protoc that generated npm/src/generated. See the wasm job.
   PROTOC_VERSION: "35.1"
+  # sha256 of protoc-35.1-linux-x86_64.zip, as published in the GitHub release
+  # asset digest for tag v35.1 and confirmed against the downloaded file. Bump
+  # it together with PROTOC_VERSION; the release page carries the new digest.
+  PROTOC_SHA256: "6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7"
+  # wasm-pack is installed from crates.io at a pinned version rather than
+  # through the upstream `curl | sh` installer, which resolves whatever release
+  # is current at pipeline time and is not checksummed.
+  WASM_PACK_VERSION: "0.15.0"
+  # The nodesource channel, asserted after install so a silent channel change
+  # cannot leave an unexpected major on PATH.
+  NODE_MAJOR: "24"
+  # shfmt for the lint job. Pinned because a shfmt release can change the
+  # formatting it considers canonical, which would fail the lint job on
+  # untouched files. The sha256 is the GitHub release asset digest for
+  # v3.13.1, confirmed against the downloaded binary.
+  SHFMT_VERSION: "3.13.1"
+  SHFMT_SHA256: "fb096c5d1ac6beabbdbaa2874d025badb03ee07929f0c9ff67563ce8c75398b1"
 
 # ---------------------------------------------------------------------------
 # Shared setup fragments.
@@ -50,6 +67,10 @@ variables:
   script:
     - apt-get update && apt-get install -y --no-install-recommends curl unzip make
     - curl -fsSLo /tmp/protoc.zip https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-x86_64.zip
+    # Verify before unzipping. protoc generates the wire types every artifact
+    # in this repository is built from, so a substituted compiler would be
+    # signed and published by the release jobs downstream.
+    - echo "${PROTOC_SHA256}  /tmp/protoc.zip" | sha256sum -c -
     - unzip -q -o /tmp/protoc.zip -d /usr/local
     - protoc --version
 
@@ -64,13 +85,35 @@ variables:
   script:
     - export RUSTUP_TOOLCHAIN=1.97.1
     - rustup target add wasm32-unknown-unknown
-    - curl -sSf https://rustwasm.github.io/wasm-pack/installer/init.sh | sh
+    # `cargo install` at a pinned version, not the upstream `curl | sh`
+    # installer. The installer is unversioned and unchecksummed, so it fetched
+    # whatever release was current when the pipeline ran, and a pipe to sh hides
+    # a download failure behind sh's exit status. --locked builds wasm-pack
+    # against its own committed lock file.
+    - cargo install wasm-pack --version "${WASM_PACK_VERSION}" --locked
+    - wasm-pack --version
 
 .setup-node:
   script:
-    - curl -fsSL https://deb.nodesource.com/setup_24.x | bash -
+    # One block with pipefail, because `curl ... | bash -` reports only bash's
+    # status. bash reading an empty stdin exits 0, so a failed or truncated
+    # download left the pipeline believing the repository had been added and
+    # failed later, somewhere unrelated.
+    - |
+      set -euo pipefail
+      curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash -
     - apt-get install -y --no-install-recommends nodejs
     - node --version
+    # Assert the major rather than printing it. The nodesource script is what
+    # chooses the version, so this is the only place that can catch it
+    # installing something other than what the jobs below assume.
+    - |
+      set -euo pipefail
+      HAVE="$(node --version)"
+      if [ "${HAVE%%.*}" != "v${NODE_MAJOR}" ]; then
+          echo "expected node ${NODE_MAJOR}.x, got ${HAVE}" >&2
+          exit 1
+      fi
 
 # The contract must build with no device present. That is the test for what
 # belongs in this repository: anything needing special hardware to build
@@ -80,12 +123,45 @@ rust:
   image: rust:1.97.1
   tags: [linux, amd64]
   before_script:
-    - apt-get update && apt-get install -y --no-install-recommends protobuf-compiler
+    # make, because the script below calls the Makefile. python3, because
+    # `make test` clippy-checks quip-protocol-py and the pyo3 build script
+    # probes an interpreter even for a check-only build.
+    - apt-get update && apt-get install -y --no-install-recommends protobuf-compiler make python3
     - rustup component add clippy rustfmt
   script:
-    - cargo fmt --all -- --check
-    - cargo clippy --workspace --exclude quip-protocol-py --all-targets -- -D warnings
-    - cargo test --workspace --exclude quip-protocol-py
+    # `make test`, not the commands inline. They used to be copied here and had
+    # drifted: the Makefile excluded quip-protocol-wasm from clippy and test
+    # while this job did not, so a local `make test` and a green pipeline no
+    # longer meant the same thing. One definition, in the Makefile.
+    - make test
+
+# The shell and Python linters. Rust is covered by the rust job through
+# `make test`, and TypeScript by the wasm job, which runs tsc under
+# `strict: true` as part of `npm run build`.
+#
+# Runs the same `make lint` a developer runs, for the same reason the rust job
+# runs `make test`.
+lint:
+  stage: test
+  image: python:3.11
+  tags: [linux, amd64]
+  before_script:
+    - apt-get update && apt-get install -y --no-install-recommends make shellcheck
+    # shfmt is not packaged in bookworm at a version worth pinning to, so it
+    # comes from the upstream release, checksummed the same way protoc is.
+    # Pinned: ruff's default rule set grows between minors, so an unpinned
+    # install turns upstream releases into red pipelines. Bump deliberately
+    # and fix the new findings in the same change.
+    - pip install --quiet ruff==0.16.2
+    - |
+      set -euo pipefail
+      curl -fsSLo /usr/local/bin/shfmt \
+        "https://github.com/mvdan/sh/releases/download/v${SHFMT_VERSION}/shfmt_v${SHFMT_VERSION}_linux_amd64"
+      echo "${SHFMT_SHA256}  /usr/local/bin/shfmt" | sha256sum -c -
+      chmod +x /usr/local/bin/shfmt
+    - shfmt --version
+  script:
+    - make lint
 
 docs:
   stage: test
@@ -109,7 +185,13 @@ conformance:
     # gencode 7.35.0). A newer grpcio-tools stamps a different gencode version
     # and trips the diff. Bump this pin and regenerate the stubs together.
     - pip install maturin "grpcio-tools==1.82.1"
-    - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+    # Download, then run. Piping the installer into sh reports only sh's exit
+    # status, and sh reading an empty stdin exits 0, so a failed download left
+    # this job continuing without a Rust toolchain.
+    - |
+      set -euo pipefail
+      curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/rustup-init.sh
+      sh /tmp/rustup-init.sh -y --profile minimal
     - . "$HOME/.cargo/env"
     - maturin develop -E dev
   script:
@@ -306,9 +388,21 @@ release:validate:
   image: rust:1.97.1
   tags: [linux, amd64]
   # No `rules:` on purpose. See the header: the dry run always runs.
+  #
+  # `needs:` starts a job as soon as its own needs are met and ignores stage
+  # order, so a job left off this list is not waited for at all. conformance
+  # and docs were missing, which meant a tag could reach all three registries
+  # while the Python conformance suite and the stub drift guard were still
+  # running, or had already failed.
+  #
+  # The lint job is deliberately absent. `ruff format --check` reports four
+  # files that predate that job, so adding it here would block every release
+  # until they are reformatted. Add it once they are.
   needs:
     - job: rust
     - job: wasm
+    - job: conformance
+    - job: docs
   # Without this GitLab downloads every prior stage's artifacts by default.
   dependencies: []
   timeout: 60m
@@ -328,6 +422,17 @@ release:validate:
     # the short SHA otherwise, so a branch artifact is never mistaken for a
     # release one.
     - export TAG="${CI_COMMIT_TAG:-$CI_COMMIT_SHORT_SHA}"
+    # On a tag pipeline the tag IS the version, so the three manifests must
+    # already agree with it. Checked here, before anything is built, because
+    # this is the last point where the answer costs nothing: a mismatch found
+    # after release:npm has run has already spent a version number.
+    - |
+      set -euo pipefail
+      if [ -n "${CI_COMMIT_TAG:-}" ]; then
+          python3 scripts/check-release-version.py "$CI_COMMIT_TAG"
+      else
+          echo "Not a tag pipeline; skipping the tag/manifest version check."
+      fi
     - make check-release TAG="$TAG"
     - mv dist/quip-solver-clib-*.tar.gz dist/quip-solver-clib-*.tar.gz.sha256 .
     # The smoke jobs drive the samples with this, rather than each rebuilding
@@ -377,20 +482,26 @@ release:crates:
     - apt-get install -y --no-install-recommends jq
   script:
     # Exchange the GitLab OIDC token for a 30-minute crates.io token.
-    - export CARGO_REGISTRY_TOKEN="$(bash scripts/exchange-crates-token.sh)"
+    #
+    # Assignment and export are separate statements. `export VAR=$(cmd)` takes
+    # its exit status from `export`, which succeeds whatever the command did, so
+    # a rejected token exchange used to continue to `cargo publish` with an
+    # empty token and fail there with an authentication error instead of the
+    # script's own diagnostic.
+    - CARGO_REGISTRY_TOKEN="$(bash scripts/exchange-crates-token.sh)"
+    - export CARGO_REGISTRY_TOKEN
     # Cargo resolves the inter-crate order itself and waits for the index
     # between uploads. The three publish = false crates are skipped.
     - cargo publish --locked --workspace
 
 release:pypi:
   stage: pypi
-  # entrypoint: [""] because this image sets ENTRYPOINT ["maturin"]. GitLab runs
-  # the job script through the entrypoint, so every command arrives as an
-  # argument to maturin and the job dies on `maturin sh` before the first line
-  # of the script runs.
-  image:
-    name: ghcr.io/pyo3/maturin:latest
-    entrypoint: [""]
+  # A plain Python image, because this job no longer builds anything. It
+  # promotes the wheel and sdist release:validate built and smoke:python
+  # installed and ran. Rebuilding here would have uploaded artifacts that no
+  # smoke test ever exercised, from a `:latest` image that could differ from the
+  # one the gate used, which is the same mistake release:clib already avoids.
+  image: python:3.11
   tags: [linux, amd64]
   <<: *on-release-tag
   # Waits for npm, the one registry whose publish can still be undone.
@@ -413,23 +524,35 @@ release:pypi:
       aud: pypi
   timeout: 30m
   script:
-    # dist/python/, matching `make check-python-dist`. A bare dist/ would also
-    # match the C library tarball and any stale wheel from an earlier name.
-    - rm -rf dist/python && mkdir -p dist/python
-    # twine is not in the maturin image, and it is used twice: to check the
-    # built distributions and to upload them. Install it before the first use,
-    # not between them.
     - python3 -m pip install --disable-pip-version-check twine
-    - maturin build --release --out dist/python
-    - maturin sdist --out dist/python
+    # The wheel and sdist arrive as release:validate's artifacts. Nothing here
+    # writes to dist/python, so what is uploaded is byte for byte what
+    # smoke:python installed and ran the sample solver against.
+    - ls -la dist/python/
     - twine check dist/python/*
     # Exchange the short-lived GitLab token for a PyPI API token. The endpoint
     # is single-use per token, so this mints once and uploads once.
+    #
+    # Minted in-process by python3 rather than by curl. The OIDC token is a
+    # live credential, and `curl -d "{...token...}"` put it in a process
+    # argument list, readable through /proc and echoed by any shell trace. Here
+    # it is read from the environment and never becomes an argument.
     - |
       set -euo pipefail
-      MINTED=$(curl -fsSL -X POST https://pypi.org/_/oidc/mint-token \
-        -H 'Content-Type: application/json' \
-        -d "{\"token\": \"${PYPI_ID_TOKEN}\"}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')
+      MINTED=$(python3 - <<'PY'
+      import json
+      import os
+      import urllib.request
+
+      request = urllib.request.Request(
+          "https://pypi.org/_/oidc/mint-token",
+          data=json.dumps({"token": os.environ["PYPI_ID_TOKEN"]}).encode(),
+          headers={"Content-Type": "application/json"},
+      )
+      with urllib.request.urlopen(request) as response:
+          print(json.load(response)["token"])
+      PY
+      )
       # --skip-existing so a re-run after a partial failure is safe. cargo has
       # no equivalent, which is why the registries are separate jobs.
       # --verbose because twine prints the HTTP status and hides the body. The
@@ -444,6 +567,8 @@ release:pypi:
 
 release:npm:
   stage: release
+  # Kept on the rust image only because .setup-node expects a Debian base with
+  # curl already present. Nothing in this job compiles Rust any more.
   image: rust:1.97.1
   tags: [linux, amd64]
   <<: *on-release-tag
@@ -468,11 +593,11 @@ release:npm:
       aud: sigstore
   timeout: 30m
   before_script:
-    - !reference [.setup-protoc, script]
+    # No protoc and no wasm toolchain. This job publishes the tarball
+    # release:validate packed, so it builds nothing and needs only node and npm.
     - !reference [.setup-node, script]
     # 11.5.1 is the floor for OIDC trusted publishing.
     - npm install -g npm@latest
-    - !reference [.setup-wasm, script]
   script:
     # Preflight, because npm reports a rejected or missing OIDC token as
     # ENEEDAUTH: "You need to authorize this machine using `npm login`". That
@@ -482,21 +607,64 @@ release:npm:
     # trusted publisher configuration.
     - |
       set -euo pipefail
-      echo "node $(node --version), npm $(npm --version)"
-      echo "npm requires node >= 22.14.0 and npm >= 11.5.1 for trusted publishing."
+      # sort -V puts the lower version first. If that is not the floor, what is
+      # installed is below it. An equal version sorts first and passes.
+      require_min() {
+          local what="$1" have="$2" want="$3"
+          if [ "$(printf '%s\n%s\n' "$want" "$have" | sort -V | head -n1)" != "$want" ]; then
+              echo "$what $have is below the $want that npm trusted publishing requires." >&2
+              exit 1
+          fi
+      }
+      NODE_HAVE="$(node --version)"
+      NPM_HAVE="$(npm --version)"
+      echo "node ${NODE_HAVE}, npm ${NPM_HAVE}"
+      require_min node "${NODE_HAVE#v}" 22.14.0
+      require_min npm "${NPM_HAVE}" 11.5.1
       : "${NPM_ID_TOKEN:?NPM_ID_TOKEN is unset. Declare it under id_tokens: with aud: npm:registry.npmjs.org}"
       echo "NPM_ID_TOKEN is present (${#NPM_ID_TOKEN} chars)."
     - cd npm
-    - npm ci
-    # prepack runs the wasm and TypeScript builds and copies LICENSE/NOTICE.
+    # Exactly one tarball, or the glob below would publish an arbitrary one.
+    # release:validate packs it after `rm -f ./*.tgz`, so a second file here
+    # means the artifact set is not what this job expects.
+    - |
+      set -euo pipefail
+      set -- ./quip.network-quip-solver-core-*.tgz
+      if [ "$#" -ne 1 ] || [ ! -f "$1" ]; then
+          echo "expected exactly one packed tarball, found: $*" >&2
+          exit 1
+      fi
+      TARBALL="$1"
+      export TARBALL
+      echo "publishing $TARBALL"
+    # Derive the dist-tag from the version rather than hard-coding `latest`.
     #
-    # --tag latest, so a release tag moves the `latest` dist-tag to the version
-    # it publishes. It has to be explicit twice over. npm refuses to publish a
-    # prerelease without --tag at all, on the grounds that a prerelease should
-    # not become the default install. And moving the tag afterwards is not
-    # possible here: OIDC authorises `npm publish` and `npm stage publish` and
-    # nothing else, so `npm dist-tag add` would need a stored npm token, and
-    # this pipeline holds no registry secrets.
+    # A hard-coded --tag latest moved `latest` onto whatever was published
+    # last, so tagging an rc after a stable release made the prerelease the
+    # default install for everyone running a bare `npm install`. A semver
+    # prerelease is exactly a version with a hyphen after the version core.
+    #
+    # The flag stays mandatory either way: npm refuses to publish a prerelease
+    # with no --tag at all, and the tag cannot be moved afterwards, because
+    # OIDC authorises `npm publish` and `npm stage publish` and nothing else.
+    # `npm dist-tag add` would need a stored npm token, and this pipeline holds
+    # no registry secrets.
+    - |
+      set -euo pipefail
+      VERSION="${CI_COMMIT_TAG#v}"
+      case "$VERSION" in
+          *-*) DIST_TAG="next" ;;
+          *) DIST_TAG="latest" ;;
+      esac
+      export DIST_TAG
+      echo "version $VERSION publishes under dist-tag $DIST_TAG"
+    # Publishing the packed tarball, not the directory.
+    #
+    # `npm publish` on a directory reruns prepack, which reruns wasm-pack and
+    # tsc, so the published package was a fresh build that no smoke test had
+    # seen. Publishing the tarball skips prepack entirely, which makes this a
+    # promotion of the artifact smoke:typescript installed and drove, the same
+    # way release:clib promotes the tarball smoke:cpp compiled against.
     #
     # --no-provenance is required, not a preference. npm turns provenance on by
     # itself when publishing through trusted publishing, and npm only accepts a
@@ -508,7 +676,7 @@ release:npm:
     #
     # Restoring provenance means moving this one job to a GitLab-hosted runner.
     # It changes nothing about the published package otherwise.
-    - npm publish --tag latest --no-provenance
+    - npm publish "$TARBALL" --tag "$DIST_TAG" --no-provenance
 
 # The C library ships as a release asset rather than through a registry,
 # because a C consumer wants the compiled object and the header.

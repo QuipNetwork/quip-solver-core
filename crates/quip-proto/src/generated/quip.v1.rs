@@ -144,19 +144,13 @@ pub struct EdgeList {
     #[prost(uint32, repeated, tag = "2")]
     pub v: ::prost::alloc::vec::Vec<u32>,
 }
-#[derive(Clone, Copy, PartialEq, ::prost::Message)]
-pub struct QualityGates {
-    #[prost(int64, tag = "1")]
-    pub min_energy_milli: i64,
-    #[prost(uint32, tag = "2")]
-    pub min_diversity_milli: u32,
-    #[prost(uint32, tag = "3")]
-    pub min_solutions: u32,
-}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct IsingProblem {
     #[prost(bytes = "vec", tag = "3")]
     pub h_milli_le32: ::prost::alloc::vec::Vec<u8>,
+    /// Coupling coefficients, little-endian int32 milli-units. Normative
+    /// invariant: len(j_milli_le32) == len(edges) after decoding (one i32 per
+    /// edge, in the same order as EdgeList.u/v or the cached Topology edges).
     #[prost(bytes = "vec", tag = "4")]
     pub j_milli_le32: ::prost::alloc::vec::Vec<u8>,
     /// per-job override; 0 = unset -> SetTarget/adapt

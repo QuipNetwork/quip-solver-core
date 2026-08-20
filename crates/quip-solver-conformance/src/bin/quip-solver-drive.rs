@@ -33,7 +33,8 @@ async fn main() -> ExitCode {
         reason = "user-facing CLI prints the conformance report"
     )]
     {
-        println!("{report:?}");
+        println!("conformance report for {bin_path}:");
+        print!("{}", report.summary());
     }
     if report.is_conformant() {
         ExitCode::SUCCESS

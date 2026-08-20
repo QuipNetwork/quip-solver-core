@@ -258,4 +258,42 @@ mod tests {
         assert_eq!(p.num_sweeps, 256);
         assert_eq!(p.num_reads, 64);
     }
+
+    #[test]
+    fn adapt_params_floor_factor_raises_num_reads() {
+        // Same CUDA-style envelope as the test above, but with a positive
+        // reads_solution_floor_factor. Existing golden cases leave that factor
+        // at 0, so num_reads.max(floor) is never load-bearing there.
+        let bounds = AdaptBounds {
+            min_sweeps: 256,
+            max_sweeps: 2048,
+            min_reads: 64,
+            max_reads: 256,
+            reads_solution_min_factor: 0,
+            reads_solution_max_factor: 0,
+            reads_solution_floor_factor: 10,
+        };
+        // Difficulty 0 -> interpolated reads = min_reads = 64.
+        // floor = min_solutions * 10 = 100, which must raise num_reads.
+        let p = adapt_params(0, 10, 4577, 41515, &[-1000, 0, 1000], &bounds);
+        assert_eq!(p.num_reads, 100);
+    }
+
+    #[test]
+    fn energy_to_difficulty_is_finite_on_degenerate_graphs() {
+        // expected_solution_energy returns 0 when n==0 or m==0, so the energy
+        // range collapses. Targets must still map to a finite non-NaN difficulty
+        // rather than dividing by a zero span.
+        let graphs = [(0usize, 0usize), (8usize, 0usize)];
+        let targets = [i64::MIN, -1_000_000, -1, 0, 1, 1_000_000, i64::MAX];
+        for &(num_nodes, num_edges) in &graphs {
+            for &target in &targets {
+                let d = energy_to_difficulty(target, num_nodes, num_edges, &[]);
+                assert!(
+                    d.is_finite() && !d.is_nan(),
+                    "n={num_nodes} m={num_edges} target={target}: {d}"
+                );
+            }
+        }
+    }
 }

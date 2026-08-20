@@ -10,6 +10,7 @@ help:
 	@echo "  check-clib           build the C library and pack the release tarball"
 	@echo "check-examples       conformance gate for all four sample solvers"
 	@echo "test                 fmt, clippy and the Rust test suite"
+	@echo "lint                 shell and Python linters"
 
 # -- Release preflight ------------------------------------------------------
 #
@@ -89,7 +90,7 @@ check-clib:
 	rm -rf dist/clib && mkdir -p dist/clib/include
 	cp target/release/libquip_solver_c.so dist/clib/
 	cp target/release/libquip_solver_c.a dist/clib/
-	cp crates/quip-solver-c/include/quip_solver.h dist/clib/include/
+	cp target/release/quip_solver.h dist/clib/include/
 	cp LICENSE NOTICE dist/clib/
 	cd dist/clib && tar czf ../quip-solver-clib-$(TAG)-linux-amd64.tar.gz .
 	cd dist && sha256sum quip-solver-clib-$(TAG)-linux-amd64.tar.gz > quip-solver-clib-$(TAG)-linux-amd64.tar.gz.sha256
@@ -107,11 +108,46 @@ check-examples:
 
 # -- Test -------------------------------------------------------------------
 
+# The CI rust job runs this target rather than repeating the commands, so a
+# green local run and a green pipeline cover the same crates.
+#
+# quip-protocol-py is the only crate left out of the workspace run. It is a PyO3
+# cdylib, so linking it needs a Python interpreter that this target does not
+# assume. Clippy is a separate step below because it stops before linking and
+# therefore needs no interpreter.
+#
+# quip-protocol-wasm is NOT excluded. It builds for the host like any other
+# crate; only its published artifact is wasm32. Excluding it here while CI
+# included it meant a clippy failure in that crate reached the pipeline.
 .PHONY: test
 test:
 	cargo fmt --all -- --check
-	cargo clippy --workspace --exclude quip-protocol-py --exclude quip-protocol-wasm --all-targets -- -D warnings
-	cargo test --workspace --exclude quip-protocol-py --exclude quip-protocol-wasm
+	cargo clippy --workspace --exclude quip-protocol-py --all-targets -- -D warnings
+	cargo clippy -p quip-protocol-py --all-targets -- -D warnings
+	cargo test --workspace --exclude quip-protocol-py
+
+# -- Lint -------------------------------------------------------------------
+
+# The non-Rust linters. `test` covers Rust through cargo fmt and clippy.
+#
+# TypeScript is deliberately absent. `npm run build` runs tsc under
+# `strict: true`, and the wasm job already runs it as a release gate, so a
+# second type check here would either repeat that job's wasm-pack build or
+# duplicate its result.
+#
+# shfmt is called with no style flags so it reads .editorconfig.
+#
+# `ruff format --check` currently reports four files under conformance/ and
+# python/quip_solver_core/ that predate this target and have never been run
+# through ruff. This target fails until they are reformatted. Reformatting them
+# is a separate change, because it touches no logic and would otherwise be
+# buried in this one.
+.PHONY: lint
+lint:
+	shellcheck scripts/*.sh
+	shfmt -d scripts/
+	ruff check .
+	ruff format --check .
 
 .PHONY: clean
 clean:

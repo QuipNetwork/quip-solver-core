@@ -88,6 +88,12 @@ Messages flow in this order:
 
 A `Welcome` whose protocol version is not `1` ends the session.
 
+`SetTarget` may pin `num_sweeps`. A pinned value is the budget for simulated
+annealing. A solver whose advertised algorithm is `gibbs` runs twice that
+number of sweeps, because Gibbs needs more sweeps to converge. The pin is a
+sweep budget, not a literal sweep count. A Gibbs solver reports double the
+sweep count the coordinator pinned.
+
 M is the solver. C is the coordinator.
 
 | Message | Direction | Purpose |
@@ -261,21 +267,31 @@ These pieces exist now:
 - The `quip-solver-core` wheel: protocol primitives, scoring, wire encoding, and
   exit codes.
 - `quip-solver-drive` as the conformance gate for a solver in any language.
+- C and C++ through a C ABI with a registered callback. `quip_solver_run`
+  carries the session loop and calls the sampler callback the solver
+  registers. The artifact is `libquip_solver_c` plus `quip_solver.h`, attached
+  to each release. `examples/cpp` is a conformant solver built on it.
 
 The `quip-solver-core` wheel carries protocol primitives and handshake helpers. It
 does not carry the session loop. A Python solver written today must write
 the state machine itself.
 
+The release pipeline builds the C library on `rust:1.97.1`, which links
+glibc 2.39. The artifact requires a host with glibc 2.39 or later. A solver on an older distribution must build
+the crate itself rather than use the attached artifact. The smoke test
+compiles against the released tarball on that same image, so it proves the
+header matches the object but not the floor. A smoke image on an older glibc
+is future work.
+
 ### Next
 
-Next work adds first-class bindings that carry the session loop. A solver in
-another language then supplies only a sampler.
+Next work adds the remaining first-class bindings that carry the session loop.
+A solver in that language then supplies only a sampler.
 
 - Python through PyO3.
-- C and C++ through a C ABI with a registered callback.
 - Node through a napi-rs addon.
 
-All three wrap the one Rust loop. They do not reimplement the loop.
+Both wrap the one Rust loop. They do not reimplement the loop.
 
 ### Not planned
 

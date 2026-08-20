@@ -208,7 +208,7 @@ export interface Topology {
  */
 export interface SetTarget {
   /** acceptance ceiling AND adapt target */
-  maxEnergyMilli: number;
+  maxEnergyMilli: bigint;
   minSolutions: number;
   minDiversityMilli: number;
   /** 0 = unset */
@@ -224,16 +224,15 @@ export interface EdgeList {
   v: number[];
 }
 
-export interface QualityGates {
-  minEnergyMilli: number;
-  minDiversityMilli: number;
-  minSolutions: number;
-}
-
 export interface IsingProblem {
   topologyHash?: Uint8Array | undefined;
   edges?: EdgeList | undefined;
   hMilliLe32: Uint8Array;
+  /**
+   * Coupling coefficients, little-endian int32 milli-units. Normative
+   * invariant: len(j_milli_le32) == len(edges) after decoding (one i32 per
+   * edge, in the same order as EdgeList.u/v or the cached Topology edges).
+   */
   jMilliLe32: Uint8Array;
   /** per-job override; 0 = unset -> SetTarget/adapt */
   numReads: number;
@@ -253,8 +252,8 @@ export interface Job {
   jobId: Uint8Array;
   kind: JobKind;
   /** PoW cancellation scope; 0 for mempool */
-  generation: number;
-  deadlineMs: number;
+  generation: bigint;
+  deadlineMs: bigint;
   ising: IsingProblem | undefined;
   provenance: Provenance | undefined;
 }
@@ -264,7 +263,7 @@ export interface JobRequest {
 }
 
 export interface Cancel {
-  maxGeneration: number;
+  maxGeneration: bigint;
 }
 
 export interface Ping {
@@ -277,14 +276,14 @@ export interface Shutdown {
 export interface Solution {
   /** one byte/spin: 0x01=+1, 0xFF=-1 */
   spinsBytes: Uint8Array;
-  energyMilli: number;
+  energyMilli: bigint;
 }
 
 export interface SamplerMeta {
   reads: number;
   sweeps: number;
-  deviceAccessTimeUs: number;
-  qpuAccessUs: number;
+  deviceAccessTimeUs: bigint;
+  qpuAccessUs: bigint;
   extra: { [key: string]: string };
 }
 
@@ -307,9 +306,9 @@ export interface Reject {
 export interface Status {
   minerId: string;
   utilization: number;
-  jobsDone: number;
+  jobsDone: bigint;
   /** cancelled in-flight work reported here, not in Result */
-  abandonedGeneration: number;
+  abandonedGeneration: bigint;
   samplerStats: { [key: string]: string };
 }
 
@@ -1415,12 +1414,15 @@ export const Topology: MessageFns<Topology> = {
 };
 
 function createBaseSetTarget(): SetTarget {
-  return { maxEnergyMilli: 0, minSolutions: 0, minDiversityMilli: 0, numReads: 0, numSweeps: 0, annealTimeUs: 0 };
+  return { maxEnergyMilli: 0n, minSolutions: 0, minDiversityMilli: 0, numReads: 0, numSweeps: 0, annealTimeUs: 0 };
 }
 
 export const SetTarget: MessageFns<SetTarget> = {
   encode(message: SetTarget, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
-    if (message.maxEnergyMilli !== 0) {
+    if (message.maxEnergyMilli !== 0n) {
+      if (BigInt.asIntN(64, message.maxEnergyMilli) !== message.maxEnergyMilli) {
+        throw new globalThis.Error("value provided for field message.maxEnergyMilli of type int64 too large");
+      }
       writer.uint32(8).int64(message.maxEnergyMilli);
     }
     if (message.minSolutions !== 0) {
@@ -1453,7 +1455,7 @@ export const SetTarget: MessageFns<SetTarget> = {
             break;
           }
 
-          message.maxEnergyMilli = longToNumber(reader.int64());
+          message.maxEnergyMilli = reader.int64() as bigint;
           continue;
         }
         case 2: {
@@ -1508,10 +1510,10 @@ export const SetTarget: MessageFns<SetTarget> = {
   fromJSON(object: any): SetTarget {
     return {
       maxEnergyMilli: isSet(object.maxEnergyMilli)
-        ? globalThis.Number(object.maxEnergyMilli)
+        ? BigInt(object.maxEnergyMilli)
         : isSet(object.max_energy_milli)
-        ? globalThis.Number(object.max_energy_milli)
-        : 0,
+        ? BigInt(object.max_energy_milli)
+        : 0n,
       minSolutions: isSet(object.minSolutions)
         ? globalThis.Number(object.minSolutions)
         : isSet(object.min_solutions)
@@ -1542,8 +1544,8 @@ export const SetTarget: MessageFns<SetTarget> = {
 
   toJSON(message: SetTarget): unknown {
     const obj: any = {};
-    if (message.maxEnergyMilli !== 0) {
-      obj.maxEnergyMilli = Math.round(message.maxEnergyMilli);
+    if (message.maxEnergyMilli !== 0n) {
+      obj.maxEnergyMilli = message.maxEnergyMilli.toString();
     }
     if (message.minSolutions !== 0) {
       obj.minSolutions = Math.round(message.minSolutions);
@@ -1568,7 +1570,9 @@ export const SetTarget: MessageFns<SetTarget> = {
   },
   fromPartial(object: DeepPartial<SetTarget>): SetTarget {
     const message = createBaseSetTarget();
-    message.maxEnergyMilli = object.maxEnergyMilli ?? 0;
+    message.maxEnergyMilli = (object.maxEnergyMilli !== undefined && object.maxEnergyMilli !== null)
+      ? BigInt(object.maxEnergyMilli)
+      : 0n;
     message.minSolutions = object.minSolutions ?? 0;
     message.minDiversityMilli = object.minDiversityMilli ?? 0;
     message.numReads = object.numReads ?? 0;
@@ -1674,110 +1678,6 @@ export const EdgeList: MessageFns<EdgeList> = {
     const message = createBaseEdgeList();
     message.u = object.u?.map((e) => e) || [];
     message.v = object.v?.map((e) => e) || [];
-    return message;
-  },
-};
-
-function createBaseQualityGates(): QualityGates {
-  return { minEnergyMilli: 0, minDiversityMilli: 0, minSolutions: 0 };
-}
-
-export const QualityGates: MessageFns<QualityGates> = {
-  encode(message: QualityGates, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
-    if (message.minEnergyMilli !== 0) {
-      writer.uint32(8).int64(message.minEnergyMilli);
-    }
-    if (message.minDiversityMilli !== 0) {
-      writer.uint32(16).uint32(message.minDiversityMilli);
-    }
-    if (message.minSolutions !== 0) {
-      writer.uint32(24).uint32(message.minSolutions);
-    }
-    return writer;
-  },
-
-  decode(input: BinaryReader | Uint8Array, length?: number): QualityGates {
-    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
-    const end = length === undefined ? reader.len : reader.pos + length;
-    const message = createBaseQualityGates();
-    while (reader.pos < end) {
-      const tag = reader.uint32();
-      switch (tag >>> 3) {
-        case 1: {
-          if (tag !== 8) {
-            break;
-          }
-
-          message.minEnergyMilli = longToNumber(reader.int64());
-          continue;
-        }
-        case 2: {
-          if (tag !== 16) {
-            break;
-          }
-
-          message.minDiversityMilli = reader.uint32();
-          continue;
-        }
-        case 3: {
-          if (tag !== 24) {
-            break;
-          }
-
-          message.minSolutions = reader.uint32();
-          continue;
-        }
-      }
-      if ((tag & 7) === 4 || tag === 0) {
-        break;
-      }
-      reader.skip(tag & 7);
-    }
-    return message;
-  },
-
-  fromJSON(object: any): QualityGates {
-    return {
-      minEnergyMilli: isSet(object.minEnergyMilli)
-        ? globalThis.Number(object.minEnergyMilli)
-        : isSet(object.min_energy_milli)
-        ? globalThis.Number(object.min_energy_milli)
-        : 0,
-      minDiversityMilli: isSet(object.minDiversityMilli)
-        ? globalThis.Number(object.minDiversityMilli)
-        : isSet(object.min_diversity_milli)
-        ? globalThis.Number(object.min_diversity_milli)
-        : 0,
-      minSolutions: isSet(object.minSolutions)
-        ? globalThis.Number(object.minSolutions)
-        : isSet(object.min_solutions)
-        ? globalThis.Number(object.min_solutions)
-        : 0,
-    };
-  },
-
-  toJSON(message: QualityGates): unknown {
-    const obj: any = {};
-    if (message.minEnergyMilli !== 0) {
-      obj.minEnergyMilli = Math.round(message.minEnergyMilli);
-    }
-    if (message.minDiversityMilli !== 0) {
-      obj.minDiversityMilli = Math.round(message.minDiversityMilli);
-    }
-    if (message.minSolutions !== 0) {
-      obj.minSolutions = Math.round(message.minSolutions);
-    }
-    return obj;
-  },
-
-  create(base?: DeepPartial<QualityGates>): QualityGates {
-    return QualityGates.fromPartial(base ?? {});
-  },
-  fromPartial(object: DeepPartial<QualityGates>): QualityGates {
-    const message = createBaseQualityGates();
-    message.minEnergyMilli = object.minEnergyMilli ?? 0;
-    message.minDiversityMilli = object.minDiversityMilli ?? 0;
-    message.minSolutions = object.minSolutions ?? 0;
     return message;
   },
 };
@@ -2057,7 +1957,7 @@ export const Provenance: MessageFns<Provenance> = {
 };
 
 function createBaseJob(): Job {
-  return { jobId: new Uint8Array(0), kind: 0, generation: 0, deadlineMs: 0, ising: undefined, provenance: undefined };
+  return { jobId: new Uint8Array(0), kind: 0, generation: 0n, deadlineMs: 0n, ising: undefined, provenance: undefined };
 }
 
 export const Job: MessageFns<Job> = {
@@ -2068,10 +1968,16 @@ export const Job: MessageFns<Job> = {
     if (message.kind !== 0) {
       writer.uint32(16).int32(message.kind);
     }
-    if (message.generation !== 0) {
+    if (message.generation !== 0n) {
+      if (BigInt.asUintN(64, message.generation) !== message.generation) {
+        throw new globalThis.Error("value provided for field message.generation of type uint64 too large");
+      }
       writer.uint32(24).uint64(message.generation);
     }
-    if (message.deadlineMs !== 0) {
+    if (message.deadlineMs !== 0n) {
+      if (BigInt.asUintN(64, message.deadlineMs) !== message.deadlineMs) {
+        throw new globalThis.Error("value provided for field message.deadlineMs of type uint64 too large");
+      }
       writer.uint32(32).uint64(message.deadlineMs);
     }
     if (message.ising !== undefined) {
@@ -2111,7 +2017,7 @@ export const Job: MessageFns<Job> = {
             break;
           }
 
-          message.generation = longToNumber(reader.uint64());
+          message.generation = reader.uint64() as bigint;
           continue;
         }
         case 4: {
@@ -2119,7 +2025,7 @@ export const Job: MessageFns<Job> = {
             break;
           }
 
-          message.deadlineMs = longToNumber(reader.uint64());
+          message.deadlineMs = reader.uint64() as bigint;
           continue;
         }
         case 5: {
@@ -2155,12 +2061,12 @@ export const Job: MessageFns<Job> = {
         ? bytesFromBase64(object.job_id)
         : new Uint8Array(0),
       kind: isSet(object.kind) ? jobKindFromJSON(object.kind) : 0,
-      generation: isSet(object.generation) ? globalThis.Number(object.generation) : 0,
+      generation: isSet(object.generation) ? BigInt(object.generation) : 0n,
       deadlineMs: isSet(object.deadlineMs)
-        ? globalThis.Number(object.deadlineMs)
+        ? BigInt(object.deadlineMs)
         : isSet(object.deadline_ms)
-        ? globalThis.Number(object.deadline_ms)
-        : 0,
+        ? BigInt(object.deadline_ms)
+        : 0n,
       ising: isSet(object.ising) ? IsingProblem.fromJSON(object.ising) : undefined,
       provenance: isSet(object.provenance) ? Provenance.fromJSON(object.provenance) : undefined,
     };
@@ -2174,11 +2080,11 @@ export const Job: MessageFns<Job> = {
     if (message.kind !== 0) {
       obj.kind = jobKindToJSON(message.kind);
     }
-    if (message.generation !== 0) {
-      obj.generation = Math.round(message.generation);
+    if (message.generation !== 0n) {
+      obj.generation = message.generation.toString();
     }
-    if (message.deadlineMs !== 0) {
-      obj.deadlineMs = Math.round(message.deadlineMs);
+    if (message.deadlineMs !== 0n) {
+      obj.deadlineMs = message.deadlineMs.toString();
     }
     if (message.ising !== undefined) {
       obj.ising = IsingProblem.toJSON(message.ising);
@@ -2196,8 +2102,12 @@ export const Job: MessageFns<Job> = {
     const message = createBaseJob();
     message.jobId = object.jobId ?? new Uint8Array(0);
     message.kind = object.kind ?? 0;
-    message.generation = object.generation ?? 0;
-    message.deadlineMs = object.deadlineMs ?? 0;
+    message.generation = (object.generation !== undefined && object.generation !== null)
+      ? BigInt(object.generation)
+      : 0n;
+    message.deadlineMs = (object.deadlineMs !== undefined && object.deadlineMs !== null)
+      ? BigInt(object.deadlineMs)
+      : 0n;
     message.ising = (object.ising !== undefined && object.ising !== null)
       ? IsingProblem.fromPartial(object.ising)
       : undefined;
@@ -2267,12 +2177,15 @@ export const JobRequest: MessageFns<JobRequest> = {
 };
 
 function createBaseCancel(): Cancel {
-  return { maxGeneration: 0 };
+  return { maxGeneration: 0n };
 }
 
 export const Cancel: MessageFns<Cancel> = {
   encode(message: Cancel, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
-    if (message.maxGeneration !== 0) {
+    if (message.maxGeneration !== 0n) {
+      if (BigInt.asUintN(64, message.maxGeneration) !== message.maxGeneration) {
+        throw new globalThis.Error("value provided for field message.maxGeneration of type uint64 too large");
+      }
       writer.uint32(8).uint64(message.maxGeneration);
     }
     return writer;
@@ -2290,7 +2203,7 @@ export const Cancel: MessageFns<Cancel> = {
             break;
           }
 
-          message.maxGeneration = longToNumber(reader.uint64());
+          message.maxGeneration = reader.uint64() as bigint;
           continue;
         }
       }
@@ -2305,17 +2218,17 @@ export const Cancel: MessageFns<Cancel> = {
   fromJSON(object: any): Cancel {
     return {
       maxGeneration: isSet(object.maxGeneration)
-        ? globalThis.Number(object.maxGeneration)
+        ? BigInt(object.maxGeneration)
         : isSet(object.max_generation)
-        ? globalThis.Number(object.max_generation)
-        : 0,
+        ? BigInt(object.max_generation)
+        : 0n,
     };
   },
 
   toJSON(message: Cancel): unknown {
     const obj: any = {};
-    if (message.maxGeneration !== 0) {
-      obj.maxGeneration = Math.round(message.maxGeneration);
+    if (message.maxGeneration !== 0n) {
+      obj.maxGeneration = message.maxGeneration.toString();
     }
     return obj;
   },
@@ -2325,7 +2238,9 @@ export const Cancel: MessageFns<Cancel> = {
   },
   fromPartial(object: DeepPartial<Cancel>): Cancel {
     const message = createBaseCancel();
-    message.maxGeneration = object.maxGeneration ?? 0;
+    message.maxGeneration = (object.maxGeneration !== undefined && object.maxGeneration !== null)
+      ? BigInt(object.maxGeneration)
+      : 0n;
     return message;
   },
 };
@@ -2438,7 +2353,7 @@ export const Shutdown: MessageFns<Shutdown> = {
 };
 
 function createBaseSolution(): Solution {
-  return { spinsBytes: new Uint8Array(0), energyMilli: 0 };
+  return { spinsBytes: new Uint8Array(0), energyMilli: 0n };
 }
 
 export const Solution: MessageFns<Solution> = {
@@ -2446,7 +2361,10 @@ export const Solution: MessageFns<Solution> = {
     if (message.spinsBytes.length !== 0) {
       writer.uint32(10).bytes(message.spinsBytes);
     }
-    if (message.energyMilli !== 0) {
+    if (message.energyMilli !== 0n) {
+      if (BigInt.asIntN(64, message.energyMilli) !== message.energyMilli) {
+        throw new globalThis.Error("value provided for field message.energyMilli of type int64 too large");
+      }
       writer.uint32(16).int64(message.energyMilli);
     }
     return writer;
@@ -2472,7 +2390,7 @@ export const Solution: MessageFns<Solution> = {
             break;
           }
 
-          message.energyMilli = longToNumber(reader.int64());
+          message.energyMilli = reader.int64() as bigint;
           continue;
         }
       }
@@ -2492,10 +2410,10 @@ export const Solution: MessageFns<Solution> = {
         ? bytesFromBase64(object.spins_bytes)
         : new Uint8Array(0),
       energyMilli: isSet(object.energyMilli)
-        ? globalThis.Number(object.energyMilli)
+        ? BigInt(object.energyMilli)
         : isSet(object.energy_milli)
-        ? globalThis.Number(object.energy_milli)
-        : 0,
+        ? BigInt(object.energy_milli)
+        : 0n,
     };
   },
 
@@ -2504,8 +2422,8 @@ export const Solution: MessageFns<Solution> = {
     if (message.spinsBytes.length !== 0) {
       obj.spinsBytes = base64FromBytes(message.spinsBytes);
     }
-    if (message.energyMilli !== 0) {
-      obj.energyMilli = Math.round(message.energyMilli);
+    if (message.energyMilli !== 0n) {
+      obj.energyMilli = message.energyMilli.toString();
     }
     return obj;
   },
@@ -2516,13 +2434,15 @@ export const Solution: MessageFns<Solution> = {
   fromPartial(object: DeepPartial<Solution>): Solution {
     const message = createBaseSolution();
     message.spinsBytes = object.spinsBytes ?? new Uint8Array(0);
-    message.energyMilli = object.energyMilli ?? 0;
+    message.energyMilli = (object.energyMilli !== undefined && object.energyMilli !== null)
+      ? BigInt(object.energyMilli)
+      : 0n;
     return message;
   },
 };
 
 function createBaseSamplerMeta(): SamplerMeta {
-  return { reads: 0, sweeps: 0, deviceAccessTimeUs: 0, qpuAccessUs: 0, extra: {} };
+  return { reads: 0, sweeps: 0, deviceAccessTimeUs: 0n, qpuAccessUs: 0n, extra: {} };
 }
 
 export const SamplerMeta: MessageFns<SamplerMeta> = {
@@ -2533,10 +2453,16 @@ export const SamplerMeta: MessageFns<SamplerMeta> = {
     if (message.sweeps !== 0) {
       writer.uint32(16).uint32(message.sweeps);
     }
-    if (message.deviceAccessTimeUs !== 0) {
+    if (message.deviceAccessTimeUs !== 0n) {
+      if (BigInt.asUintN(64, message.deviceAccessTimeUs) !== message.deviceAccessTimeUs) {
+        throw new globalThis.Error("value provided for field message.deviceAccessTimeUs of type uint64 too large");
+      }
       writer.uint32(24).uint64(message.deviceAccessTimeUs);
     }
-    if (message.qpuAccessUs !== 0) {
+    if (message.qpuAccessUs !== 0n) {
+      if (BigInt.asUintN(64, message.qpuAccessUs) !== message.qpuAccessUs) {
+        throw new globalThis.Error("value provided for field message.qpuAccessUs of type uint64 too large");
+      }
       writer.uint32(32).uint64(message.qpuAccessUs);
     }
     globalThis.Object.entries(message.extra).forEach(([key, value]: [string, string]) => {
@@ -2573,7 +2499,7 @@ export const SamplerMeta: MessageFns<SamplerMeta> = {
             break;
           }
 
-          message.deviceAccessTimeUs = longToNumber(reader.uint64());
+          message.deviceAccessTimeUs = reader.uint64() as bigint;
           continue;
         }
         case 4: {
@@ -2581,7 +2507,7 @@ export const SamplerMeta: MessageFns<SamplerMeta> = {
             break;
           }
 
-          message.qpuAccessUs = longToNumber(reader.uint64());
+          message.qpuAccessUs = reader.uint64() as bigint;
           continue;
         }
         case 5: {
@@ -2609,15 +2535,15 @@ export const SamplerMeta: MessageFns<SamplerMeta> = {
       reads: isSet(object.reads) ? globalThis.Number(object.reads) : 0,
       sweeps: isSet(object.sweeps) ? globalThis.Number(object.sweeps) : 0,
       deviceAccessTimeUs: isSet(object.deviceAccessTimeUs)
-        ? globalThis.Number(object.deviceAccessTimeUs)
+        ? BigInt(object.deviceAccessTimeUs)
         : isSet(object.device_access_time_us)
-        ? globalThis.Number(object.device_access_time_us)
-        : 0,
+        ? BigInt(object.device_access_time_us)
+        : 0n,
       qpuAccessUs: isSet(object.qpuAccessUs)
-        ? globalThis.Number(object.qpuAccessUs)
+        ? BigInt(object.qpuAccessUs)
         : isSet(object.qpu_access_us)
-        ? globalThis.Number(object.qpu_access_us)
-        : 0,
+        ? BigInt(object.qpu_access_us)
+        : 0n,
       extra: isObject(object.extra)
         ? (globalThis.Object.entries(object.extra) as [string, any][]).reduce(
           (acc: { [key: string]: string }, [key, value]: [string, any]) => {
@@ -2638,11 +2564,11 @@ export const SamplerMeta: MessageFns<SamplerMeta> = {
     if (message.sweeps !== 0) {
       obj.sweeps = Math.round(message.sweeps);
     }
-    if (message.deviceAccessTimeUs !== 0) {
-      obj.deviceAccessTimeUs = Math.round(message.deviceAccessTimeUs);
+    if (message.deviceAccessTimeUs !== 0n) {
+      obj.deviceAccessTimeUs = message.deviceAccessTimeUs.toString();
     }
-    if (message.qpuAccessUs !== 0) {
-      obj.qpuAccessUs = Math.round(message.qpuAccessUs);
+    if (message.qpuAccessUs !== 0n) {
+      obj.qpuAccessUs = message.qpuAccessUs.toString();
     }
     if (message.extra) {
       const entries = globalThis.Object.entries(message.extra) as [string, string][];
@@ -2663,8 +2589,12 @@ export const SamplerMeta: MessageFns<SamplerMeta> = {
     const message = createBaseSamplerMeta();
     message.reads = object.reads ?? 0;
     message.sweeps = object.sweeps ?? 0;
-    message.deviceAccessTimeUs = object.deviceAccessTimeUs ?? 0;
-    message.qpuAccessUs = object.qpuAccessUs ?? 0;
+    message.deviceAccessTimeUs = (object.deviceAccessTimeUs !== undefined && object.deviceAccessTimeUs !== null)
+      ? BigInt(object.deviceAccessTimeUs)
+      : 0n;
+    message.qpuAccessUs = (object.qpuAccessUs !== undefined && object.qpuAccessUs !== null)
+      ? BigInt(object.qpuAccessUs)
+      : 0n;
     message.extra = (globalThis.Object.entries(object.extra ?? {}) as [string, string][]).reduce(
       (acc: { [key: string]: string }, [key, value]: [string, string]) => {
         if (value !== undefined) {
@@ -2935,7 +2865,7 @@ export const Reject: MessageFns<Reject> = {
 };
 
 function createBaseStatus(): Status {
-  return { minerId: "", utilization: 0, jobsDone: 0, abandonedGeneration: 0, samplerStats: {} };
+  return { minerId: "", utilization: 0, jobsDone: 0n, abandonedGeneration: 0n, samplerStats: {} };
 }
 
 export const Status: MessageFns<Status> = {
@@ -2946,10 +2876,16 @@ export const Status: MessageFns<Status> = {
     if (message.utilization !== 0) {
       writer.uint32(17).double(message.utilization);
     }
-    if (message.jobsDone !== 0) {
+    if (message.jobsDone !== 0n) {
+      if (BigInt.asUintN(64, message.jobsDone) !== message.jobsDone) {
+        throw new globalThis.Error("value provided for field message.jobsDone of type uint64 too large");
+      }
       writer.uint32(24).uint64(message.jobsDone);
     }
-    if (message.abandonedGeneration !== 0) {
+    if (message.abandonedGeneration !== 0n) {
+      if (BigInt.asUintN(64, message.abandonedGeneration) !== message.abandonedGeneration) {
+        throw new globalThis.Error("value provided for field message.abandonedGeneration of type uint64 too large");
+      }
       writer.uint32(32).uint64(message.abandonedGeneration);
     }
     globalThis.Object.entries(message.samplerStats).forEach(([key, value]: [string, string]) => {
@@ -2986,7 +2922,7 @@ export const Status: MessageFns<Status> = {
             break;
           }
 
-          message.jobsDone = longToNumber(reader.uint64());
+          message.jobsDone = reader.uint64() as bigint;
           continue;
         }
         case 4: {
@@ -2994,7 +2930,7 @@ export const Status: MessageFns<Status> = {
             break;
           }
 
-          message.abandonedGeneration = longToNumber(reader.uint64());
+          message.abandonedGeneration = reader.uint64() as bigint;
           continue;
         }
         case 5: {
@@ -3026,15 +2962,15 @@ export const Status: MessageFns<Status> = {
         : "",
       utilization: isSet(object.utilization) ? globalThis.Number(object.utilization) : 0,
       jobsDone: isSet(object.jobsDone)
-        ? globalThis.Number(object.jobsDone)
+        ? BigInt(object.jobsDone)
         : isSet(object.jobs_done)
-        ? globalThis.Number(object.jobs_done)
-        : 0,
+        ? BigInt(object.jobs_done)
+        : 0n,
       abandonedGeneration: isSet(object.abandonedGeneration)
-        ? globalThis.Number(object.abandonedGeneration)
+        ? BigInt(object.abandonedGeneration)
         : isSet(object.abandoned_generation)
-        ? globalThis.Number(object.abandoned_generation)
-        : 0,
+        ? BigInt(object.abandoned_generation)
+        : 0n,
       samplerStats: isObject(object.samplerStats)
         ? (globalThis.Object.entries(object.samplerStats) as [string, any][]).reduce(
           (acc: { [key: string]: string }, [key, value]: [string, any]) => {
@@ -3063,11 +2999,11 @@ export const Status: MessageFns<Status> = {
     if (message.utilization !== 0) {
       obj.utilization = message.utilization;
     }
-    if (message.jobsDone !== 0) {
-      obj.jobsDone = Math.round(message.jobsDone);
+    if (message.jobsDone !== 0n) {
+      obj.jobsDone = message.jobsDone.toString();
     }
-    if (message.abandonedGeneration !== 0) {
-      obj.abandonedGeneration = Math.round(message.abandonedGeneration);
+    if (message.abandonedGeneration !== 0n) {
+      obj.abandonedGeneration = message.abandonedGeneration.toString();
     }
     if (message.samplerStats) {
       const entries = globalThis.Object.entries(message.samplerStats) as [string, string][];
@@ -3088,8 +3024,10 @@ export const Status: MessageFns<Status> = {
     const message = createBaseStatus();
     message.minerId = object.minerId ?? "";
     message.utilization = object.utilization ?? 0;
-    message.jobsDone = object.jobsDone ?? 0;
-    message.abandonedGeneration = object.abandonedGeneration ?? 0;
+    message.jobsDone = (object.jobsDone !== undefined && object.jobsDone !== null) ? BigInt(object.jobsDone) : 0n;
+    message.abandonedGeneration = (object.abandonedGeneration !== undefined && object.abandonedGeneration !== null)
+      ? BigInt(object.abandonedGeneration)
+      : 0n;
     message.samplerStats = (globalThis.Object.entries(object.samplerStats ?? {}) as [string, string][]).reduce(
       (acc: { [key: string]: string }, [key, value]: [string, string]) => {
         if (value !== undefined) {
@@ -3613,24 +3551,13 @@ function base64FromBytes(arr: Uint8Array): string {
   }
 }
 
-type Builtin = Date | Function | Uint8Array | string | number | boolean | undefined;
+type Builtin = Date | Function | Uint8Array | string | number | boolean | bigint | undefined;
 
-export type DeepPartial<T> = T extends Builtin ? T
-  : T extends globalThis.Array<infer U> ? globalThis.Array<DeepPartial<U>>
+export type DeepPartial<T> = T extends bigint ? string | number | bigint
+  : T extends Builtin ? T : T extends globalThis.Array<infer U> ? globalThis.Array<DeepPartial<U>>
   : T extends ReadonlyArray<infer U> ? ReadonlyArray<DeepPartial<U>>
   : T extends {} ? { [K in keyof T]?: DeepPartial<T[K]> }
   : Partial<T>;
-
-function longToNumber(int64: { toString(): string }): number {
-  const num = globalThis.Number(int64.toString());
-  if (num > globalThis.Number.MAX_SAFE_INTEGER) {
-    throw new globalThis.Error("Value is larger than Number.MAX_SAFE_INTEGER");
-  }
-  if (num < globalThis.Number.MIN_SAFE_INTEGER) {
-    throw new globalThis.Error("Value is smaller than Number.MIN_SAFE_INTEGER");
-  }
-  return num;
-}
 
 function isObject(value: any): boolean {
   return typeof value === "object" && value !== null;

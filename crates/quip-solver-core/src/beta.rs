@@ -117,6 +117,50 @@ pub fn geometric_beta_schedule(hot: f64, cold: f64, num_betas: usize) -> Vec<f64
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ising::IsingGraph;
+
+    #[test]
+    fn empty_graph_returns_fallback_beta_range() {
+        // n == 0 short-circuits before any field walk.
+        let g = IsingGraph::new(vec![], vec![], vec![]);
+        assert_eq!(default_ising_beta_range(&g), (0.1, 1.0));
+    }
+
+    #[test]
+    fn all_zero_biases_return_fallback_beta_range() {
+        // n > 0 but every |h| and |J| is 0, so min_gaps is empty.
+        let g = IsingGraph::new(vec![0.0, 0.0], vec![0.0], vec![(0, 1)]);
+        assert_eq!(default_ising_beta_range(&g), (0.1, 1.0));
+    }
+
+    #[test]
+    fn zero_max_eff_is_dominated_by_empty_min_gaps() {
+        // The max_eff == 0.0 arm would set hot_beta = 1.0, but min_gaps is
+        // filled from the same positive magnitudes that feed sum_abs. An
+        // isolated zero-bias node has max_eff == 0.0 and empty min_gaps, so
+        // the empty-min_gaps return fires first. There is no IsingGraph that
+        // reaches hot_beta = 1.0 from that arm.
+        let g = IsingGraph::new(vec![0.0], vec![], vec![]);
+        assert_eq!(default_ising_beta_range(&g), (0.1, 1.0));
+    }
+
+    #[test]
+    fn two_node_range_clamps_cold_to_at_least_hot() {
+        // Two nodes, one coupling. Unclamped cold is ln(200)/(2J) and hot is
+        // ln(2)/(2J); cold is already larger. The return still has to satisfy
+        // cold >= hot, which is the post-condition of cold_beta.max(hot_beta).
+        let g = IsingGraph::new(vec![0.0, 0.0], vec![1.0], vec![(0, 1)]);
+        let (hot, cold) = default_ising_beta_range(&g);
+        assert_ne!(
+            (hot, cold),
+            (0.1, 1.0),
+            "a positive coupling must not take the fallback range"
+        );
+        assert!(
+            cold >= hot,
+            "schedule must be non-decreasing in beta: hot={hot} cold={cold}"
+        );
+    }
 
     #[test]
     fn geometric_schedule_endpoints() {

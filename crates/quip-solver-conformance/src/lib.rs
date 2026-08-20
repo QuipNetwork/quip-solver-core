@@ -12,6 +12,6 @@ pub mod driver;
 mod vectors;
 
 pub use vectors::{
-    adapt_cases, adapt_params_cases, AdaptParamsCase, EnergyToDifficultyCase, GOLDEN_ADAPT,
-    GOLDEN_VECTORS,
+    adapt_cases, adapt_params_cases, golden_wire, AdaptParamsCase, EnergyToDifficultyCase,
+    GoldenWire, GOLDEN_ADAPT, GOLDEN_VECTORS, GOLDEN_WIRE,
 };

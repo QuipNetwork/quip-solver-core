@@ -211,10 +211,27 @@ pub trait Sampler: Send + Sync + 'static {
                 reason = "per-job sample duration in micros fits u64 for any realistic device runtime"
             )]
             let device_access_time_us = t0.elapsed().as_micros() as u64;
+            // A `Cancel` that lands while `sample` runs abandons this job too.
+            // Checking only at dequeue lets the finished samples out as a
+            // `Result` for a generation the coordinator has already moved past,
+            // which SPEC section 5 forbids: an abandoned generation gets no
+            // `Result` at all. The credit is still refunded, by the same
+            // `Cancelled` path the dequeue check uses.
+            //
+            // A device fault is the exception. It describes the device, not the
+            // job, and the session ends on it, so swallowing it here would hide
+            // a wedged device behind an ordinary cancellation.
+            let cancelled =
+                cancel.is_cancelled(j.watermark) && !matches!(&result, Err(e) if e.is_fatal());
+            let outcome = if cancelled {
+                StreamOutcome::Cancelled
+            } else {
+                StreamOutcome::Completed(result)
+            };
             if out
                 .blocking_send(StreamResult {
                     job_id: j.job_id,
-                    outcome: StreamOutcome::Completed(result),
+                    outcome,
                     device_access_time_us,
                 })
                 .is_err()
@@ -226,6 +243,26 @@ pub trait Sampler: Send + Sync + 'static {
 
     /// Number of models the backend keeps in flight. Default 1 (serial).
     fn stream_width(&self) -> usize {
+        1
+    }
+
+    /// The stream width this backend advertises, answered without a device.
+    ///
+    /// `--capabilities` must not open the device, so it cannot call
+    /// [`stream_width`](Sampler::stream_width), which takes `&self`. Both the
+    /// flag and the in-session `Capabilities` reply read this instead, so the
+    /// two answers are the same number by construction — SPEC section 8 says
+    /// they are the same message.
+    ///
+    /// A backend that keeps several models in flight overrides this and
+    /// [`stream_width`](Sampler::stream_width) with the same value. The session
+    /// logs an error when they disagree, because the advertised number is then
+    /// a misdeclaration.
+    #[must_use]
+    fn declared_stream_width() -> u32
+    where
+        Self: Sized,
+    {
         1
     }
 
@@ -386,5 +423,109 @@ mod stream_tests {
         });
         worker.join().expect("worker join");
         assert_eq!(calls.load(Ordering::SeqCst), 1); // sample ran only for the live job
+    }
+
+    /// A sampler that raises the cancel watermark from inside `sample`, which
+    /// is what a `Cancel` arriving mid-job looks like to `sample_stream`.
+    struct CancelWhileSampling {
+        cancel: CancelToken,
+        outcome: Result<Vec<SamplerResult>, SampleError>,
+    }
+
+    impl Sampler for CancelWhileSampling {
+        fn sample(
+            &self,
+            _graph: &IsingGraph,
+            _params: &SampleParams,
+        ) -> Result<Vec<SamplerResult>, SampleError> {
+            self.cancel.cancel_through(9);
+            self.outcome.clone()
+        }
+    }
+
+    /// Drive one job with watermark `Some(5)` through a sampler that cancels
+    /// generation 9 while sampling, and report the outcome.
+    fn outcome_after_cancel_during_sample(
+        result: Result<Vec<SamplerResult>, SampleError>,
+    ) -> StreamOutcome {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("rt");
+        let (job_tx, job_rx) = tokio::sync::mpsc::channel::<StreamJob>(4);
+        let (res_tx, mut res_rx) = tokio::sync::mpsc::channel::<StreamResult>(4);
+        let cancel = CancelToken::default();
+        let sampler = CancelWhileSampling {
+            cancel: cancel.clone(),
+            outcome: result,
+        };
+        let worker = std::thread::spawn(move || sampler.sample_stream(job_rx, res_tx, cancel));
+
+        let outcome = rt.block_on(async {
+            job_tx
+                .send(StreamJob {
+                    job_id: vec![1],
+                    graph: tiny_graph(),
+                    params: SampleParams::default(),
+                    watermark: Some(5),
+                })
+                .await
+                .expect("send");
+            drop(job_tx);
+            let r = res_rx.recv().await.expect("one result");
+            assert!(res_rx.recv().await.is_none(), "exactly one result per job");
+            r.outcome
+        });
+        worker.join().expect("worker join");
+        outcome
+    }
+
+    /// SPEC section 5: a generation abandoned while its job was sampling gets
+    /// no `Result`. Checking the watermark only at dequeue lets the finished
+    /// samples out anyway, which is the bug this pins.
+    #[test]
+    fn a_cancel_arriving_during_sample_suppresses_the_result() {
+        let outcome = outcome_after_cancel_during_sample(Ok(vec![SamplerResult {
+            spins: vec![1i8, -1],
+            energy_milli: -1000,
+        }]));
+        assert!(
+            matches!(outcome, StreamOutcome::Cancelled),
+            "a job cancelled while sampling must not report Completed"
+        );
+    }
+
+    /// The carve-out: a device fault describes the device, not the job. A
+    /// cancellation must not swallow it, or a wedged device keeps taking work.
+    #[test]
+    fn a_cancel_during_sample_still_reports_a_device_fault() {
+        let outcome = outcome_after_cancel_during_sample(Err(SampleError::DeviceFault(
+            "nvml: GPU 0 lost".to_owned(),
+        )));
+        assert!(
+            matches!(
+                outcome,
+                StreamOutcome::Completed(Err(SampleError::DeviceFault(_)))
+            ),
+            "a device fault must survive a concurrent cancel"
+        );
+    }
+
+    /// A non-fatal device error for an abandoned generation is still abandoned:
+    /// the coordinator has moved on, so a stale `Reject` helps nobody.
+    #[test]
+    fn a_cancel_during_sample_suppresses_a_non_fatal_error() {
+        let outcome = outcome_after_cancel_during_sample(Err(SampleError::DeviceBusy));
+        assert!(matches!(outcome, StreamOutcome::Cancelled));
+    }
+
+    /// The advertised width defaults to the live width, so a backend that
+    /// overrides neither cannot advertise a number its sampler contradicts.
+    #[test]
+    fn the_declared_stream_width_defaults_to_the_live_one() {
+        let declared = OneResultSampler::declared_stream_width();
+        assert_eq!(
+            usize::try_from(declared),
+            Ok(OneResultSampler.stream_width())
+        );
     }
 }

@@ -18,11 +18,18 @@ crate-type = ["cdylib", "staticlib"]
 [dependencies]
 quip-solver-core = { workspace = true }
 clap = { version = "4", features = ["derive"] }
+# Already in the tree through quip-solver-core, which installs the subscriber.
+# The C entry point reports a malformed identity through the same sink the
+# session loop uses, so an operator reads one log, not two.
+tracing = "0.1"
 
 [build-dependencies]
 cbindgen = "0.29"
 
-# This crate is the C ABI boundary, so it cannot honour the workspace's
-# `unsafe-code = "deny"`. It stays on default lints and keeps the unsafe surface
-# as small as possible: every extern fn does nothing but validate its pointers
-# and hand off to quip-solver-core, which keeps the strict lints.
+# The C ABI boundary is the last crate that should be running on default lints.
+# It takes the full workspace set, and `src/lib.rs` carries a single
+# crate-level `#![expect(unsafe_code, ...)]` — the one rule this crate exists to
+# break — so pedantic, `unwrap-used`, `panic`, and `indexing-slicing` all still
+# apply to the code holding the raw pointers.
+[lints]
+workspace = true

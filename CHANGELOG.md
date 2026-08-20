@@ -5,10 +5,48 @@ This file documents changes to the Quip solver contract.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## 0.0.0
+
+The first release. Use 0.0.0 rather than any release candidate: the rc tags
+only exercised the deployment pipeline.
+
+### Fixed
+
+- The floating-point energy scorer, which disagreed with the integer-milli
+  consensus rule near a rounding boundary. Scoring now recovers the exact
+  milli values and sums them in 128-bit integers.
+- The C ABI. It read out of bounds when `j` and `edges` disagreed in length,
+  returned 0 (a legal energy) for every invalid call, passed NULL to
+  `slice::from_raw_parts` for empty solutions, and could leave the sampler
+  thread running after `quip_solver_run` returned.
+- Cancelled in-flight jobs no longer emit a `Result`. The session checks the
+  cancel watermark again after sampling, and the writer drops stale results.
+- A panic in the outbound writer now exits 70 rather than 0. An unexpected
+  stream close exits 70 after `Welcome` and 77 before it, in all three sample
+  implementations.
+- The release pipeline. The publish jobs now wait for conformance and the
+  smoke tests, and PyPI and npm promote the exact artifacts the smoke tests
+  ran rather than rebuilding them.
+- `Hello.features` was always empty, and `--capabilities` hardcoded the
+  stream width. Both answers now come from one function.
+
+### Added
+
+- A conformance driver that checks message causality, scores returned spins
+  again, exercises `GetCapabilities`, `Ping`, live cancellation, and
+  `backend_toml`, and keeps a credit ledger.
+- Byte-level wire fixtures (`golden_wire.json`), asserted from the Rust tests.
+- A lint job for shell and Python (shellcheck, shfmt, ruff), run by `make
+  lint` locally and in CI.
+- Tests for the previously untested C ABI crate, and end-to-end tests for
+  exit codes 64, 69, 70, and 77.
 
 ### Changed
 
+- The TypeScript stubs encode 64-bit integers as `bigint` rather than
+  `number`, so watermarks above 2^53 survive the round trip.
+- `max_nodes = 0` and `max_edges = 0` mean unlimited everywhere. The parser
+  previously read 0 as a zero cap while `Hello` advertised unlimited.
 - A tag now moves the npm `latest` dist-tag to the version it publishes. The
   job previously published under `rc`, which left `latest` on whatever was
   published first. Moving the tag after the fact is not possible here: OIDC

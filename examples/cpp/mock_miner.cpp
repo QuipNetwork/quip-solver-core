@@ -42,8 +42,14 @@ std::int32_t sample(void* user_data,
         }
 
         // A real backend would refuse a problem larger than its hardware. This
-        // mirrors that so the Capacity -> RejectReason::TooLarge path is
-        // exercised rather than left dead.
+        // mirrors that so the Capacity -> RejectReason::TooLarge path has a
+        // producer at all.
+        //
+        // In session mode it stays dead: the session validates a job against
+        // the advertised max_nodes before it ever calls this callback, so a
+        // graph this large is rejected upstream. The reachable route is
+        // --solve, which reads a problem straight from stdin and hands it over
+        // without that bound check.
         if (graph->num_nodes > 100000) {
             return QUIP_SAMPLE_CAPACITY;
         }
@@ -51,13 +57,26 @@ std::int32_t sample(void* user_data,
         const std::vector<std::int8_t> spins(graph->num_nodes, 1);
 
         // Score with the shipped consensus scorer, never a local reimplementation.
-        const std::int64_t energy = quip_energy_milli(graph->h,
+        //
+        // The energy arrives through an out-parameter because 0 is a perfectly
+        // legal energy: only the status distinguishes a scored problem from a
+        // rejected one. Reporting an energy this call never produced would put
+        // a wrong score on the wire.
+        std::int64_t energy = 0;
+        const std::int32_t scored = quip_energy_milli(graph->h,
                                                       graph->num_nodes,
                                                       graph->j,
                                                       graph->num_edges,
                                                       graph->edges,
                                                       spins.data(),
-                                                      spins.size());
+                                                      spins.size(),
+                                                      &energy);
+        if (scored != QUIP_ENERGY_OK) {
+            std::fprintf(stderr,
+                         "mock-cpp: cannot score this problem (status %d)\n",
+                         scored);
+            return QUIP_SAMPLE_DEVICE_FAULT;
+        }
 
         for (std::size_t read = 0; read < params->num_reads; ++read) {
             emit(sink, spins.data(), spins.size(), energy);

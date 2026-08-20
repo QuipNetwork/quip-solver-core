@@ -2,11 +2,13 @@
 #
 # QUIP_LIB_DIR must hold libquip_solver_c.so (or .a) and QUIP_INCLUDE_DIR must
 # hold quip_solver.h. Both come from the release artifact; the defaults point at
-# a local `cargo build -p quip-solver-c --release` inside this repository.
+# a local `cargo build -p quip-solver-c --release` inside this repository, which
+# generates the header next to the library it describes rather than into the
+# source tree.
 
 REPO_ROOT       ?= ../..
 QUIP_LIB_DIR    ?= $(REPO_ROOT)/target/release
-QUIP_INCLUDE_DIR?= $(REPO_ROOT)/crates/quip-solver-c/include
+QUIP_INCLUDE_DIR?= $(QUIP_LIB_DIR)
 
 CXX      ?= g++
 CXXFLAGS ?= -std=c++17 -O2 -Wall -Wextra

@@ -18,7 +18,9 @@ fn golden_vectors_text_carries_every_section() {
         "derive_nonce",
         "diversity",
         "energy",
+        "energy_rounding",
         "ising",
+        "sentinel",
         "truncation",
         "version",
     ] {

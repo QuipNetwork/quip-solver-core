@@ -12,25 +12,61 @@ use pyo3::wrap_pyfunction;
 /// Ising energy in milli-units for the given spins, fields, and edges.
 ///
 /// `PyO3` extracts owned `Vec`s from Python; the body only borrows them.
+///
+/// # Errors
+///
+/// Returns a Python `ValueError` when `edges` and `j` differ in length, matching
+/// the WASM binding. Silently scoring a mismatched graph would let a solver
+/// submit a confidently wrong energy.
 #[pyfunction]
 #[expect(
     clippy::needless_pass_by_value,
     reason = "PyO3 extracts owned Vec arguments from Python objects"
 )]
-fn energy_milli(spins: Vec<i8>, h: Vec<f64>, j: Vec<f64>, edges: Vec<(usize, usize)>) -> i64 {
-    quip_protocol::scoring::energy_milli(&spins, &h, &j, &edges)
+fn energy_milli(
+    spins: Vec<i8>,
+    h: Vec<f64>,
+    j: Vec<f64>,
+    edges: Vec<(usize, usize)>,
+) -> PyResult<i64> {
+    if edges.len() != j.len() {
+        return Err(PyValueError::new_err(format!(
+            "edges holds {} pairs but j holds {} couplings; they must match",
+            edges.len(),
+            j.len()
+        )));
+    }
+    Ok(quip_protocol::scoring::energy_milli(&spins, &h, &j, &edges))
 }
 
 /// Pairwise solution-set diversity in \[0, 1\].
 ///
-/// `PyO3` extracts an owned `Vec` of spin vectors from Python.
+/// `PyO3` extracts an owned `Vec` of spin vectors from Python. Each inner
+/// vector is one solution; their common length is the spin width.
+///
+/// # Errors
+///
+/// Returns a Python `ValueError` when the width is zero, or when the inner
+/// vectors do not share a single width. Those are the same packing invariants
+/// the WASM binding enforces on a flat buffer plus `width`.
 #[pyfunction]
 #[expect(
     clippy::needless_pass_by_value,
     reason = "PyO3 extracts owned Vec arguments from Python objects"
 )]
-fn set_diversity(solutions: Vec<Vec<i8>>) -> f64 {
-    quip_protocol::scoring::set_diversity(&solutions)
+fn set_diversity(solutions: Vec<Vec<i8>>) -> PyResult<f64> {
+    if let Some(first) = solutions.first() {
+        let width = first.len();
+        if width == 0 {
+            return Err(PyValueError::new_err("width must be greater than zero"));
+        }
+        if solutions.iter().any(|row| row.len() != width) {
+            return Err(PyValueError::new_err(format!(
+                "solutions rows must share a single width; first row has {width}"
+            )));
+        }
+    }
+    Ok(quip_protocol::scoring::set_diversity(&solutions))
 }
 
 /// Encode `i32` values as little-endian bytes.

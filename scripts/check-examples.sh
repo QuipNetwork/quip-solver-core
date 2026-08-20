@@ -58,12 +58,17 @@ fi
 if ! skipped python; then
     echo "==> building the Python sample"
     # The wheel carries the PyO3 consensus primitives the example calls.
+    #
+    # Removed first, not reused. `python3 -m venv` leaves an existing
+    # environment in place, so a rename or a dropped dependency from an earlier
+    # run stays installed and the sample passes against a wheel nobody ships.
+    rm -rf .venv-examples
     python3 -m venv .venv-examples
     # shellcheck disable=SC1091  # created just above, so it cannot be followed
     . .venv-examples/bin/activate
     pip install --quiet maturin
     maturin develop
-    cat > "$SOCKET_DIR/py_miner" <<EOF
+    cat >"$SOCKET_DIR/py_miner" <<EOF
 #!/bin/sh
 exec "$REPO_ROOT/.venv-examples/bin/python" "$REPO_ROOT/examples/python/mock_miner.py" "\$@"
 EOF
@@ -74,14 +79,17 @@ fi
 
 if ! skipped typescript; then
     echo "==> building the npm package and the TypeScript sample"
-    (cd npm && npm ci && npm run build && npm pack)
+    # The stale tarballs go first, matching `make check-npm-dist`. npm pack
+    # names the file after the version, so a leftover from an earlier version
+    # would leave the install glob below matching two files.
+    (cd npm && rm -f ./*.tgz && npm ci && npm run build && npm pack)
     # Installs the tarball built from this tree rather than the registry, so a
     # change to the npm package is exercised before it is published.
     (cd examples/typescript \
         && npm install ../../npm/quip.network-quip-solver-core-*.tgz \
         && npm install \
         && npm run build)
-    cat > "$SOCKET_DIR/ts_miner" <<EOF
+    cat >"$SOCKET_DIR/ts_miner" <<EOF
 #!/bin/sh
 exec node "$REPO_ROOT/examples/typescript/dist/mock_miner.js" "\$@"
 EOF

@@ -1,6 +1,6 @@
 {
   "name": "@quip.network/quip-solver-core",
-  "version": "0.0.0-rc6",
+  "version": "0.0.0",
   "description": "Quip solver SDK: WebAssembly consensus primitives and the generated gRPC stubs",
   "license": "Apache-2.0",
   "homepage": "https://quip.network",
@@ -17,6 +17,13 @@
   ],
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "require": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
   "files": [
     "dist",
     "wasm",
@@ -31,7 +38,7 @@
   },
   "scripts": {
     "build:wasm": "wasm-pack build ../crates/quip-protocol-wasm --release --target nodejs --out-dir ../../npm/wasm && rm -f wasm/.gitignore wasm/package.json",
-    "build:stubs": "protoc -I ../proto --plugin=protoc-gen-ts_proto=./node_modules/.bin/protoc-gen-ts_proto --ts_proto_out=./src/generated --ts_proto_opt=outputServices=grpc-js,esModuleInterop=true,useExactTypes=false ../proto/quip/v1/miner.proto",
+    "build:stubs": "protoc -I ../proto --plugin=protoc-gen-ts_proto=./node_modules/.bin/protoc-gen-ts_proto --ts_proto_out=./src/generated --ts_proto_opt=outputServices=grpc-js,esModuleInterop=true,useExactTypes=false,forceLong=bigint ../proto/quip/v1/miner.proto",
     "build": "npm run build:wasm && tsc",
     "prepack": "npm run build && cp ../LICENSE ./LICENSE && cp ../NOTICE ./NOTICE",
     "test": "node --test \"test/**/*.test.mjs\""

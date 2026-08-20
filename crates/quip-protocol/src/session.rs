@@ -6,7 +6,11 @@ use quip_proto::v1::{Configure, Hello, JobKind, Welcome};
 pub const PROTOCOL_VERSION: u32 = 1;
 
 /// Errors from building a `Hello` or validating a `Welcome`.
-#[derive(Debug, PartialEq)]
+///
+/// `Copy`, because the session loop both reports one of these and derives the
+/// process exit code from it ([`ExitCode::from`]), and moving it into the
+/// conversion would leave nothing to report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionError {
     /// `QUIP_SESSION_TOKEN` missing or empty.
     MissingToken,
@@ -102,6 +106,12 @@ pub struct BackendCaps {
 
 /// Build the miner `Hello` message, reading `QUIP_SESSION_TOKEN` from the env.
 ///
+/// `features` are the extra capability names this backend advertises (for
+/// example `"streaming"`). They go out in the `Hello` and in `Capabilities`,
+/// which is the whole point of declaring them: a coordinator that routes on a
+/// feature reads the `Hello`, and it reads it before it ever asks for
+/// `Capabilities`. Passing an empty slice advertises none.
+///
 /// # Errors
 /// Returns [`SessionError::MissingToken`] if the env var is unset or empty.
 pub fn build_hello(
@@ -109,6 +119,7 @@ pub fn build_hello(
     backend: &str,
     algorithm: &str,
     supported: &[JobKind],
+    features: &[&str],
     caps: BackendCaps,
 ) -> Result<Hello, SessionError> {
     let token = std::env::var("QUIP_SESSION_TOKEN").map_err(|_| SessionError::MissingToken)?;
@@ -125,7 +136,7 @@ pub fn build_hello(
         max_nodes: caps.max_nodes,
         max_edges: caps.max_edges,
         native_topology_hash: None,
-        features: vec![],
+        features: features.iter().map(|f| (*f).to_owned()).collect(),
     })
 }
 
@@ -146,51 +157,47 @@ mod tests {
     use super::*;
     use quip_proto::v1::{Configure, JobKind, Welcome};
 
+    const NO_CAPS: BackendCaps = BackendCaps {
+        max_nodes: 0,
+        max_edges: 0,
+    };
+
+    /// Covers the declared features as well as the token, deliberately: both
+    /// need `QUIP_SESSION_TOKEN`, and two tests writing a process-wide
+    /// environment variable in parallel race each other.
     #[test]
     fn hello_requires_token() {
         std::env::remove_var("QUIP_SESSION_TOKEN");
         assert!(matches!(
-            build_hello(
-                "cpu-0",
-                "cpu",
-                "sa",
-                &[JobKind::IsingSample],
-                BackendCaps {
-                    max_nodes: 0,
-                    max_edges: 0
-                }
-            ),
+            build_hello("cpu-0", "cpu", "sa", &[JobKind::IsingSample], &[], NO_CAPS),
             Err(SessionError::MissingToken)
         ));
         std::env::set_var("QUIP_SESSION_TOKEN", "tok-123");
-        let h = build_hello(
-            "cpu-0",
-            "cpu",
-            "sa",
-            &[JobKind::IsingSample],
-            BackendCaps {
-                max_nodes: 0,
-                max_edges: 0,
-            },
-        )
-        .unwrap();
+        let h = build_hello("cpu-0", "cpu", "sa", &[JobKind::IsingSample], &[], NO_CAPS).unwrap();
         assert_eq!(h.session_token, "tok-123");
         assert_eq!(h.protocol_version, 1);
         assert_eq!(h.miner_id, "cpu-0");
+        // No features declared stays an empty list, not a placeholder entry.
+        assert!(h.features.is_empty());
+
+        // Declared features reach the `Hello`, not only `Capabilities`: a
+        // coordinator that routes on a feature reads the `Hello` first, and it
+        // reads it before it ever asks for `Capabilities`.
+        let h = build_hello(
+            "cuda-0",
+            "cuda",
+            "sa",
+            &[JobKind::IsingSample],
+            &["streaming", "governor"],
+            NO_CAPS,
+        )
+        .unwrap();
+        assert_eq!(h.features, vec!["streaming", "governor"]);
 
         // An empty (but present) token is treated the same as a missing one.
         std::env::set_var("QUIP_SESSION_TOKEN", "");
         assert!(matches!(
-            build_hello(
-                "cpu-0",
-                "cpu",
-                "sa",
-                &[JobKind::IsingSample],
-                BackendCaps {
-                    max_nodes: 0,
-                    max_edges: 0
-                }
-            ),
+            build_hello("cpu-0", "cpu", "sa", &[JobKind::IsingSample], &[], NO_CAPS),
             Err(SessionError::MissingToken)
         ));
         std::env::remove_var("QUIP_SESSION_TOKEN");

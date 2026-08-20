@@ -915,7 +915,7 @@ dependencies = [
 
 [[package]]
 name = "quip-proto"
-version = "0.0.0-rc6"
+version = "0.0.0"
 dependencies = [
  "prost",
  "tonic",
@@ -924,7 +924,7 @@ dependencies = [
 
 [[package]]
 name = "quip-protocol"
-version = "0.0.0-rc6"
+version = "0.0.0"
 dependencies = [
  "blake3",
  "quip-proto",
@@ -934,7 +934,7 @@ dependencies = [
 
 [[package]]
 name = "quip-protocol-py"
-version = "0.0.0-rc6"
+version = "0.0.0"
 dependencies = [
  "pyo3",
  "quip-protocol",
@@ -942,7 +942,7 @@ dependencies = [
 
 [[package]]
 name = "quip-protocol-wasm"
-version = "0.0.0-rc6"
+version = "0.0.0"
 dependencies = [
  "quip-protocol",
  "wasm-bindgen",
@@ -951,16 +951,17 @@ dependencies = [
 
 [[package]]
 name = "quip-solver-c"
-version = "0.0.0-rc6"
+version = "0.0.0"
 dependencies = [
  "cbindgen",
  "clap",
  "quip-solver-core",
+ "tracing",
 ]
 
 [[package]]
 name = "quip-solver-conformance"
-version = "0.0.0-rc6"
+version = "0.0.0"
 dependencies = [
  "hyper-util",
  "prost",
@@ -976,7 +977,7 @@ dependencies = [
 
 [[package]]
 name = "quip-solver-core"
-version = "0.0.0-rc6"
+version = "0.0.0"
 dependencies = [
  "base64",
  "clap",
@@ -990,6 +991,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-stream",
+ "toml",
  "tonic",
  "tower 0.5.3",
  "tracing",
