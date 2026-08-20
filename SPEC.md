@@ -131,12 +131,13 @@ A Rust solver supplies a `Sampler` and calls `run`.
 `SampleParams`. It returns `Result<Vec<SamplerResult>, SampleError>`.
 `sample` must not panic.
 
-The six defaulted methods are:
+The seven defaulted methods are:
 
 | Method | Default |
 |---|---|
 | `sample_stream` | Serial loop over `sample`. Polls the cancel token at dequeue. |
 | `stream_width` | `1` |
+| `declared_stream_width` | `1`. `0` declares a device-dependent width, resolved when the device opens. |
 | `utilization` | `0.0` |
 | `should_throttle` | `false` |
 | `max_reads` | `u32::MAX` |
@@ -251,6 +252,13 @@ This changed in 0.0.0-rc1. The previous hand-written output used
 
 `--capabilities` and the `Capabilities` message on the session stream are
 the same message. One message must not have two spellings.
+
+`streamWidth: 0` declares a width that is a property of the opened device,
+for example a lane count derived from a GPU's multiprocessor count.
+`--capabilities` answers with the device closed, so `0` is the honest static
+answer. The in-session `Capabilities` reply comes from a session that holds
+the device open, and carries the live width instead. This is the one field
+where the two answers can differ.
 
 ## 9. Adding a solver in another language
 
