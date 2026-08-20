@@ -17,7 +17,7 @@
   },
   "dependencies": {
     "@grpc/grpc-js": "^1.14.4",
-    "@quip.network/quip-solver-core": "0.0.0-rc5"
+    "@quip.network/quip-solver-core": "0.0.0-rc6"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

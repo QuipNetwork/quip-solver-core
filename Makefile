@@ -64,6 +64,10 @@ check-python-dist:
 	maturin build --release --out dist/python
 	maturin sdist --out dist/python
 	twine check dist/python/*
+	# twine check validates that the metadata is well formed, not that the
+	# files it names exist. PyPI checks that at upload time and rejects the
+	# sdist with 400, after the wheel of the same version has been accepted.
+	bash scripts/check-sdist-license-files.sh dist/python/*.tar.gz
 
 # Two steps, for the same reason check-crate-publish uses `cargo package`.
 #
