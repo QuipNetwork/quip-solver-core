@@ -5,12 +5,27 @@ This file documents changes to the Quip solver contract.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.0.0-rc2
+
+0.0.0-rc1 reached crates.io only. Two release jobs failed after the crates were
+already published, and a crates.io version cannot be uploaded again. Use
+0.0.0-rc2, which is the first version present on all three registries.
+
+### Fixed
+
+- The PyPI release job, which never ran a line of its script. The maturin image
+  sets an entrypoint, so each command in the job arrived as an argument to
+  `maturin` instead of running in a shell.
+- The npm release job, which reported a missing login when the cause was an
+  incomplete OIDC exchange. The job now checks the Node and npm versions and
+  the presence of the identity token, and reports which one is missing.
+
 ## 0.0.0-rc1
 
 ### Added
 
-- Published releases. The Rust crates go to crates.io, the `quip_proto` wheel
-  to PyPI, and `@quip.network/quip-solver-core` to npm. The C library ships as
+- Published releases. The Rust crates go to crates.io, the `quip-solver-core`
+  wheel to PyPI, and `@quip.network/quip-solver-core` to npm. The C library ships as
   a release artifact. A tag builds and publishes all four.
 - `quip-solver-c`, a C ABI over the session loop. A C or C++ solver registers
   one sampling callback and calls `quip_solver_run`. It also exports

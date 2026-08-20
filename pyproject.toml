@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "quip-solver-core"
-version = "0.0.0rc1"
+version = "0.0.0rc2"
 description = "Quip solver SDK: PyO3 consensus primitives and the generated gRPC stubs"
 readme = "README.md"
 license = "Apache-2.0"

@@ -366,7 +366,13 @@ release:crates:
 
 release:pypi:
   stage: release
-  image: ghcr.io/pyo3/maturin:latest
+  # entrypoint: [""] because this image sets ENTRYPOINT ["maturin"]. GitLab runs
+  # the job script through the entrypoint, so every command arrives as an
+  # argument to maturin and the job dies on `maturin sh` before the first line
+  # of the script runs.
+  image:
+    name: ghcr.io/pyo3/maturin:latest
+    entrypoint: [""]
   tags: [linux, amd64]
   <<: *on-release-tag
   needs:
@@ -436,6 +442,18 @@ release:npm:
     - npm install -g npm@latest
     - !reference [.setup-wasm, script]
   script:
+    # Preflight, because npm reports a rejected or missing OIDC token as
+    # ENEEDAUTH: "You need to authorize this machine using `npm login`". That
+    # message names a missing password, so it sends you looking for a token
+    # that this pipeline deliberately does not have. Assert the preconditions
+    # from the npm docs here, and the remaining cause is the registry-side
+    # trusted publisher configuration.
+    - |
+      set -euo pipefail
+      echo "node $(node --version), npm $(npm --version)"
+      echo "npm requires node >= 22.14.0 and npm >= 11.5.1 for trusted publishing."
+      : "${NPM_ID_TOKEN:?NPM_ID_TOKEN is unset. Declare it under id_tokens: with aud: npm:registry.npmjs.org}"
+      echo "NPM_ID_TOKEN is present (${#NPM_ID_TOKEN} chars)."
     - cd npm
     - npm ci
     # prepack runs the wasm and TypeScript builds and copies LICENSE/NOTICE.
