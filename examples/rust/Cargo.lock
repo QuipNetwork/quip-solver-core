@@ -698,9 +698,9 @@ dependencies = [
 
 [[package]]
 name = "quip-proto"
-version = "0.0.0-rc6"
+version = "0.0.1-rc1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "41f4def02993a943044e2d73b801edd73742a147d9d41bc60558a32d6a032d18"
+checksum = "59b0d7a03f562e8498bf435580f05ac89e9f3316efba42703019c82c33b1c119"
 dependencies = [
  "prost",
  "tonic",
@@ -708,9 +708,9 @@ dependencies = [
 
 [[package]]
 name = "quip-protocol"
-version = "0.0.0-rc6"
+version = "0.0.1-rc1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "512792a1ff29723c63c78fc20832a612d87c269581e71117a90df59f893afcb6"
+checksum = "d0ab006081e611c06944681dfd1c01362b2b4eaabc610c7faf1b64880b289e31"
 dependencies = [
  "blake3",
  "quip-proto",
@@ -718,9 +718,9 @@ dependencies = [
 
 [[package]]
 name = "quip-solver-conformance"
-version = "0.0.0-rc6"
+version = "0.0.1-rc1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "67368e4e21ef1f67a4c009cb860bae22d71b6cbe17fea47f827ca04ee85cc438"
+checksum = "643e773b25e318e0fcd84668181494cfc4a5b73bd0dd1ea4964e1606df1edae8"
 dependencies = [
  "hyper-util",
  "prost",
@@ -736,9 +736,9 @@ dependencies = [
 
 [[package]]
 name = "quip-solver-core"
-version = "0.0.0-rc6"
+version = "0.0.1-rc1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2ad3782d6462e8a72226b1e2954357a1f2571c5a6577d7fbe44e03ff07a2cedb"
+checksum = "a93faf4b0ab0014a49a43becc87cef099dee34eb6ae2a8fe600a3112ce622ad1"
 dependencies = [
  "base64",
  "clap",
@@ -751,6 +751,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-stream",
+ "toml",
  "tonic",
  "tower 0.5.3",
  "tracing",
@@ -860,6 +861,15 @@ dependencies = [
  "serde",
  "serde_core",
  "zmij",
+]
+
+[[package]]
+name = "serde_spanned"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6662b5879511e06e8999a8a235d848113e942c9124f211511b16466ee2995f26"
+dependencies = [
+ "serde_core",
 ]
 
 [[package]]
@@ -1013,6 +1023,45 @@ dependencies = [
  "pin-project-lite",
  "tokio",
 ]
+
+[[package]]
+name = "toml"
+version = "0.9.12+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf92845e79fc2e2def6a5d828f0801e29a2f8acc037becc5ab08595c7d5e9863"
+dependencies = [
+ "indexmap 2.14.0",
+ "serde_core",
+ "serde_spanned",
+ "toml_datetime",
+ "toml_parser",
+ "toml_writer",
+ "winnow 0.7.15",
+]
+
+[[package]]
+name = "toml_datetime"
+version = "0.7.5+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "92e1cfed4a3038bc5a127e35a2d360f145e1f4b971b551a2ba5fd7aedf7e1347"
+dependencies = [
+ "serde_core",
+]
+
+[[package]]
+name = "toml_parser"
+version = "1.1.3+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d38ac1cf9b95face32296c0a3ede1fdc270627c9d9c02a7274dd6d960dc4d56"
+dependencies = [
+ "winnow 1.0.4",
+]
+
+[[package]]
+name = "toml_writer"
+version = "1.1.2+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d56353a2a665ad0f41a421187180aab746c8c325620617ad883a99a1cbe66d2"
 
 [[package]]
 name = "tonic"
@@ -1277,6 +1326,18 @@ name = "windows_x86_64_msvc"
 version = "0.52.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
+
+[[package]]
+name = "winnow"
+version = "0.7.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df79d97927682d2fd8adb29682d1140b343be4ac0f08fd68b7765d9c059d3945"
+
+[[package]]
+name = "winnow"
+version = "1.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "23b97319f7b8343df12cc98938e5c3eb436064524c8d2b4e30a1d3a36eecdf81"
 
 [[package]]
 name = "zerocopy"
