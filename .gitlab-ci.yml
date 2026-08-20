@@ -457,11 +457,10 @@ release:npm:
   environment:
     name: npm
     url: https://www.npmjs.com/package/@quip.network/quip-solver-core
-  # Two tokens, for two separate exchanges. NPM_ID_TOKEN authenticates the
-  # publish. SIGSTORE_ID_TOKEN signs the provenance attestation, which npm
-  # generates on its own when publishing through trusted publishing. Declaring
-  # it costs nothing if npm does not use it, and its absence is what failed the
-  # rc2 publish after authentication had already succeeded.
+  # NPM_ID_TOKEN authenticates the publish. SIGSTORE_ID_TOKEN signs a
+  # provenance attestation, which this job disables because npm accepts one
+  # only from a GitLab-hosted runner. It stays declared so that moving this job
+  # to a hosted runner is the only change needed to restore provenance.
   id_tokens:
     NPM_ID_TOKEN:
       aud: npm:registry.npmjs.org
@@ -492,11 +491,17 @@ release:npm:
     # prepack runs the wasm and TypeScript builds and copies LICENSE/NOTICE.
     # --tag rc keeps prereleases off the `latest` dist-tag.
     #
-    # No --provenance. npm generates provenance on its own when publishing
-    # through trusted publishing, and the explicit flag makes it mandatory:
-    # rc2 authenticated and then failed the publish outright on a provenance
-    # problem. SIGSTORE_ID_TOKEN stays declared above for the automatic path.
-    - npm publish --tag rc
+    # --no-provenance is required, not a preference. npm turns provenance on by
+    # itself when publishing through trusted publishing, and npm only accepts a
+    # provenance bundle from a GitLab-hosted runner. Every runner here is
+    # self-hosted, so npm signs the bundle, sends it, and the registry rejects
+    # the publish with 422 "Unsupported GitLab CI runner environment". Dropping
+    # the explicit --provenance flag was not enough, because the default is not
+    # what applies under trusted publishing.
+    #
+    # Restoring provenance means moving this one job to a GitLab-hosted runner.
+    # It changes nothing about the published package otherwise.
+    - npm publish --tag rc --no-provenance
 
 # The C library ships as a release asset rather than through a registry,
 # because a C consumer wants the compiled object and the header.
