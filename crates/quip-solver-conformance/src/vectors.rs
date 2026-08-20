@@ -5,6 +5,7 @@
 //! with the version pin.
 
 use serde::Deserialize;
+use std::collections::BTreeMap;
 
 /// Raw `golden_adapt.json`: adaptive-parameter parity with the Python source.
 pub const GOLDEN_ADAPT: &str = include_str!(concat!(
@@ -13,11 +14,49 @@ pub const GOLDEN_ADAPT: &str = include_str!(concat!(
 ));
 
 /// Raw `golden_vectors.json`: consensus parity for `ChaCha8`, nonce derivation,
-/// energy, diversity, the Ising draw, and truncation.
+/// energy, energy rounding, the non-finite sentinel, diversity, the Ising
+/// draw, and truncation.
 pub const GOLDEN_VECTORS: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/vectors/golden_vectors.json"
 ));
+
+/// Raw `golden_wire.json`: byte-level protobuf encodings and enum numbers.
+pub const GOLDEN_WIRE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/vectors/golden_wire.json"
+));
+
+/// The `golden_wire.json` fixture: the canonical bytes of one fully-populated
+/// instance of each message, plus the numeric value of every enum variant.
+///
+/// The other fixtures pin *semantics* — what a solver must compute. This one
+/// pins *representation*: which field lands on which tag, and which number a
+/// variant carries. Renumbering a field or reordering an enum is a silent,
+/// cross-language break that no behavioural test sees, because both sides of a
+/// single-language round trip change together.
+#[derive(Debug, Clone, Deserialize)]
+pub struct GoldenWire {
+    /// Lower-case hex of the canonical encoding of each named message.
+    pub messages: BTreeMap<String, String>,
+    /// Variant name to wire number, keyed by proto enum name.
+    pub enums: BTreeMap<String, BTreeMap<String, i32>>,
+}
+
+/// The parsed `golden_wire.json` fixture.
+///
+/// # Panics
+///
+/// Panics when the embedded JSON does not match the schema. That is a
+/// build-time fixture error, not a runtime condition.
+#[must_use]
+pub fn golden_wire() -> GoldenWire {
+    #[expect(
+        clippy::expect_used,
+        reason = "the fixture is embedded at build time; a schema mismatch is a build error"
+    )]
+    serde_json::from_str(GOLDEN_WIRE).expect("golden_wire.json matches the fixture schema")
+}
 
 /// One `energy_to_difficulty` case: a difficulty target and the graph it is
 /// measured against. Field names are the verbatim JSON keys.

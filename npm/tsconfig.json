@@ -10,6 +10,13 @@
     "outDir": "dist",
     "declaration": true,
     "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    // verbatimModuleSyntax is omitted: this package emits CommonJS
+    // (package.json has no "type":"module", and src/index.ts uses require()
+    // so the .wasm binary resolves at runtime). TypeScript rejects ESM
+    // import/export syntax under that flag when the emit is CJS.
     "esModuleInterop": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true

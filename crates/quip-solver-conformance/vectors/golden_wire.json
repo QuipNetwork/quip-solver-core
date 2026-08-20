@@ -1,0 +1,49 @@
+{
+  "_about": [
+    "Byte-level wire pinning for the Quip solver protocol, version 1.",
+    "",
+    "'messages' holds the lower-case hex of the canonical protobuf encoding of one",
+    "fully-populated instance of each message. The exact instances live in the",
+    "crates/quip-solver-conformance/tests/golden_wire.rs constructors of the same",
+    "name; a port to another language must rebuild the same instances and compare",
+    "against these bytes.",
+    "",
+    "Map fields carry exactly one entry. Protobuf does not define an order for map",
+    "entries, and prost writes them in HashMap iteration order, so more than one",
+    "entry would make the encoding non-canonical and this fixture unstable.",
+    "",
+    "'enums' pins the number of every variant. Reordering an enum is",
+    "source-compatible and wire-incompatible: an old peer keeps sending the old",
+    "number, which now means something else.",
+    "",
+    "These bytes were generated from the checked-in prost stubs. Changing them is",
+    "a protocol change: update every language's fixture in the same commit."
+  ],
+  "messages": {
+    "capabilities": "0a0463756461120273611a010120802028808002320973747265616d696e673208676f7665726e6f72380140044a02abcd",
+    "fatal": "0840121c756e737570706f727465642070726f746f636f6c2076657273696f6e1801",
+    "hello": "0a056370752d301203746f6b180122036370752a02736132010138f82340c0b8024a02abcd520973747265616d696e675208676f7665726e6f72",
+    "job": "0a0401020304100118072080d095ffbc312a1e12080a020001120201021a04e80300002204f40100002880013880044014320608011202dead",
+    "reject": "0a04010203041007",
+    "result": "0a040102030412100a0301ff01109ef6ffffffffffffff011a1e08800110800418802020402a110a0c636861696e5f627265616b73120133",
+    "status": "0a056370752d3011000000000000e83f182a20072a0a0a057175657565120132"
+  },
+  "enums": {
+    "JobKind": {
+      "JOB_KIND_UNSPECIFIED": 0,
+      "ISING_SAMPLE": 1,
+      "GATE_CIRCUIT": 2
+    },
+    "RejectReason": {
+      "REJECT_REASON_UNSPECIFIED": 0,
+      "UNSUPPORTED_KIND": 1,
+      "TOO_LARGE": 2,
+      "EXPIRED": 3,
+      "OVERLOADED": 4,
+      "SHUTTING_DOWN": 5,
+      "MALFORMED": 6,
+      "TOPOLOGY_MISMATCH": 7,
+      "TOPOLOGY_MISSING": 8
+    }
+  }
+}

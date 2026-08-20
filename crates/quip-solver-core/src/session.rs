@@ -15,9 +15,11 @@ use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
 use quip_proto::v1::miner_service_client::MinerServiceClient;
 use quip_proto::v1::{
-    coord_msg, miner_msg, Capabilities, CoordMsg, JobKind, JobRequest, MinerMsg, Ready,
+    coord_msg, miner_msg, Capabilities, CoordMsg, Fatal, JobKind, JobRequest, MinerMsg, Ready,
 };
-use quip_protocol::session::{build_hello, BackendCaps, ExitCode, SessionConfig, SessionError};
+use quip_protocol::session::{
+    build_hello, check_welcome, BackendCaps, ExitCode, SessionConfig, SessionError,
+};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::io::Write;
@@ -50,6 +52,71 @@ pub struct BackendIdentity {
 /// Failure to open a device / build a sampler, surfaced as `EnvIncompatible`.
 #[derive(Debug)]
 pub struct OpenError(pub String);
+
+/// A session that ended for a reason with a known exit code, but with no
+/// [`SessionError`] to carry it — an unannounced stream close, a transport
+/// failure, a coordinator that opened with the wrong message.
+///
+/// [`map_err_to_exit`] recovers the code by downcasting to this, so these exits
+/// stay typed instead of being recognized from the text of a `Display` impl
+/// that belongs to another crate.
+#[derive(Debug)]
+struct SessionExit {
+    code: ExitCode,
+    detail: String,
+}
+
+impl SessionExit {
+    fn new(code: ExitCode, detail: impl Into<String>) -> Self {
+        Self {
+            code,
+            detail: detail.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for SessionExit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.detail)
+    }
+}
+
+impl std::error::Error for SessionExit {}
+
+/// Build the `Fatal` the coordinator gets before the miner disconnects.
+///
+/// The conformance driver grades on this message, not only on the process exit
+/// status: the coordinator has to learn why the session ended from the session,
+/// because the miner's exit code is not visible to it.
+fn fatal_msg(code: ExitCode, reason: String) -> MinerMsg {
+    miner(miner_msg::Msg::Fatal(Fatal {
+        #[expect(
+            clippy::cast_sign_loss,
+            reason = "every ExitCode is a small positive sysexits value; Fatal.exit_code is u32"
+        )]
+        exit_code: code.as_i32() as u32,
+        reason,
+        // These are contract/protocol faults, not device faults: restarting the
+        // process changes nothing until the configuration or the peer changes.
+        restart_required: false,
+    }))
+}
+
+/// Name of a `CoordMsg` payload, for logs and handshake diagnostics.
+fn coord_msg_name(msg: Option<&coord_msg::Msg>) -> &'static str {
+    match msg {
+        Some(coord_msg::Msg::Welcome(_)) => "Welcome",
+        Some(coord_msg::Msg::Configure(_)) => "Configure",
+        Some(coord_msg::Msg::Topology(_)) => "Topology",
+        Some(coord_msg::Msg::SetTarget(_)) => "SetTarget",
+        Some(coord_msg::Msg::Job(_)) => "Job",
+        Some(coord_msg::Msg::Cancel(_)) => "Cancel",
+        Some(coord_msg::Msg::Ping(_)) => "Ping",
+        Some(coord_msg::Msg::GetCapabilities(_)) => "GetCapabilities",
+        Some(coord_msg::Msg::Shutdown(_)) => "Shutdown",
+        None => "unset",
+    }
+}
 
 /// Build this solver's [`Capabilities`]. The `--capabilities` flag prints it,
 /// and `GetCapabilities` returns it, so both answers come from one place.
@@ -88,15 +155,25 @@ struct CapabilitiesJson<'a> {
     native_topology_hash: Option<String>,
 }
 
+/// The `Capabilities` this solver advertises, from the one place both answers
+/// come from.
+///
+/// SPEC section 8: `--capabilities` and the in-session `Capabilities` reply are
+/// the same message, so they must carry the same `stream_width`. The flag runs
+/// with the device closed, which rules out `Sampler::stream_width(&self)` and
+/// is why the advertised width is [`Sampler::declared_stream_width`] — an
+/// answer available without an instance. `--capabilities` used to hardcode `1`
+/// here while the session reported the live width, so a multi-lane backend gave
+/// two different numbers for one message.
+fn advertised_capabilities<S: Sampler>(id: &BackendIdentity) -> Capabilities {
+    capabilities(id, S::declared_stream_width())
+}
+
 /// Render [`Capabilities`] in the protobuf JSON mapping.
 ///
 /// The generated prost types carry no serde derives, and adding them to
 /// `quip-proto` would put a serde dependency in the wire crate for one CLI
 /// flag. Nine fields is less code than that.
-fn capabilities_json(id: &BackendIdentity, stream_width: u32) -> String {
-    capabilities_json_from(&capabilities(id, stream_width))
-}
-
 fn capabilities_json_from(c: &Capabilities) -> String {
     let view = CapabilitiesJson {
         backend: &c.backend,
@@ -124,15 +201,16 @@ fn capabilities_json_from(c: &Capabilities) -> String {
     serde_json::to_string(&view).expect("serialize capabilities")
 }
 
-fn print_capabilities(id: &BackendIdentity, stream_width: u32) -> ExitCode {
+fn print_capabilities<S: Sampler>(id: &BackendIdentity) -> ExitCode {
     // The protobuf JSON mapping, so the flag and the session reply agree on
-    // field names. Both answers are built by [`capabilities`].
+    // field names and on every value. Both answers are built by
+    // [`advertised_capabilities`].
     //
     // Routed through `write_and_map` for the same reason `--solve` is:
     // `println!` panics on a closed pipe. Reachability does not depend on the
     // output being large enough to fill the pipe buffer — `--capabilities |
     // false` closes the reader before the write happens, and that panics too.
-    let mut line = capabilities_json(id, stream_width).into_bytes();
+    let mut line = capabilities_json_from(&advertised_capabilities::<S>(id)).into_bytes();
     line.push(b'\n');
     write_and_map(&mut std::io::stdout(), &line)
 }
@@ -165,6 +243,16 @@ const PROGRESS_LOG_INTERVAL: u64 = 10;
 /// practice while still bounding memory if the peer stops reading entirely.
 const CTRL_CHANNEL_DEPTH: usize = 256;
 
+/// How many results the outbound writer handles back-to-back before it serves
+/// the control queue.
+///
+/// The writer prefers results so a busy sampler never backs up, but that
+/// preference must not become starvation: a coordinator that sends `Cancel` and
+/// waits for the `Status` ack, or `Ping` and waits for the reply, is entitled
+/// to an answer while the miner is at full tilt. Eight bounds the wait to a few
+/// results while still amortizing the check.
+const RESULT_BATCH: u32 = 8;
+
 /// How often to send an HTTP/2 PING on an otherwise quiet session.
 ///
 /// A miner grinding one hard nonce sends nothing for minutes at a time, so the
@@ -194,6 +282,10 @@ struct PendingJob {
     /// Session energy threshold, or `None` when no `SetTarget` has arrived.
     max_energy_milli: Option<i64>,
     min_solutions: u32,
+    /// This job's cancellation watermark, as `prepare_job` resolved it. The
+    /// writer re-checks it so a `Result` for a generation the coordinator
+    /// abandoned cannot reach the wire, whatever the backend decided.
+    watermark: Option<u64>,
 }
 
 /// `job_id` → its [`PendingJob`], shared between the session's read loop (which
@@ -310,6 +402,46 @@ fn log_attempt(backend: &str, sr: &StreamResult, pending: Option<&PendingJob>) {
     }
 }
 
+/// What the outbound writer shares with the read loop, gathered so the writer
+/// takes a handful of arguments instead of a list nobody can read.
+struct WriterContext {
+    /// Prepare-time parameters per job, removed as each one finalizes.
+    pending: PendingParams,
+    /// Completed-job counter the read loop publishes in `Status`.
+    jobs_done: Arc<AtomicU64>,
+    /// Set when the writer sends `Fatal` for an unrecoverable device.
+    device_faulted: Arc<AtomicBool>,
+    /// Cancellation watermark, re-checked here so no `Result` for an abandoned
+    /// generation reaches the wire.
+    cancel: CancelToken,
+    /// Backend name for the log lines.
+    backend: &'static str,
+}
+
+/// Send every control reply already queued, without waiting for more.
+///
+/// Returns `false` when the outbound channel closed and the writer must stop.
+/// Clears `ctrl_open` when the read loop is gone, which is what stops the
+/// caller's `select!` from spinning on a closed receiver.
+async fn drain_queued_ctrl(
+    tx: &mpsc::Sender<MinerMsg>,
+    ctrl_rx: &mut mpsc::Receiver<MinerMsg>,
+    ctrl_open: &mut bool,
+) -> bool {
+    while *ctrl_open {
+        match ctrl_rx.try_recv() {
+            Ok(msg) => {
+                if tx.send(msg).await.is_err() {
+                    return false;
+                }
+            }
+            Err(mpsc::error::TryRecvError::Empty) => break,
+            Err(mpsc::error::TryRecvError::Disconnected) => *ctrl_open = false,
+        }
+    }
+    true
+}
+
 /// Outbound half of a session.
 ///
 /// Reading the inbound stream and writing to the outbound one must not live in
@@ -336,11 +468,15 @@ async fn outbound_writer(
     tx: mpsc::Sender<MinerMsg>,
     mut res_rx: mpsc::Receiver<StreamResult>,
     mut ctrl_rx: mpsc::Receiver<MinerMsg>,
-    pending: PendingParams,
-    jobs_done: Arc<AtomicU64>,
-    device_faulted: Arc<AtomicBool>,
-    backend: &'static str,
+    ctx: WriterContext,
 ) {
+    let WriterContext {
+        pending,
+        jobs_done,
+        device_faulted,
+        cancel,
+        backend,
+    } = ctx;
     // Progress logging (mirrors v0.2 mine_work_item's every-N-attempts line).
     let session_start = std::time::Instant::now();
     let mut best_energy_milli: i64 = i64::MAX;
@@ -352,21 +488,66 @@ async fn outbound_writer(
     // releasing `res_tx`, which lasts as long as the last in-flight job. Results
     // still drain: the branch that stays enabled is the one that waits properly.
     let mut ctrl_open = true;
+    // Results handled back-to-back since the control queue was last served.
+    let mut result_streak: u32 = 0;
     loop {
+        // `biased` alone starves the control branch: a sampler that keeps the
+        // result queue non-empty means the first arm is always ready, so Cancel
+        // acks, Ping replies, and Capabilities wait for a lull that a busy
+        // miner never has. Serve whatever control replies are already queued
+        // after every RESULT_BATCH results, which bounds their wait without
+        // giving up the result-first ordering that keeps the sampler unblocked.
+        if result_streak >= RESULT_BATCH {
+            result_streak = 0;
+            if !drain_queued_ctrl(&tx, &mut ctrl_rx, &mut ctrl_open).await {
+                return;
+            }
+            // Same end-of-session test as the control branch below: the read
+            // loop is gone and the sampler has released its sender.
+            if !ctrl_open && res_rx.is_closed() {
+                return;
+            }
+        }
         tokio::select! {
             biased;
             // Drain completed results first so a busy sampler never backs up.
             Some(sr) = res_rx.recv() => {
+                result_streak = result_streak.saturating_add(1);
                 let entry = {
                     let mut p = match pending.lock() {
                         Ok(p) => p,
-                        Err(poisoned) => poisoned.into_inner(),
+                        // Recoverable: the map is a plain HashMap, so a panic
+                        // elsewhere cannot have left it half-updated. Logged
+                        // because a poisoned lock means some task panicked.
+                        Err(poisoned) => {
+                            tracing::error!(
+                                "pending-job map was poisoned by a panicking task; recovering it"
+                            );
+                            poisoned.into_inner()
+                        }
                     };
                     p.remove(&sr.job_id)
                 };
                 let (reads, sweeps) = entry
                     .as_ref()
                     .map_or((0, 0), |e| (e.num_reads, e.num_sweeps));
+                // Defence in depth for SPEC section 5. `sample_stream` already
+                // re-checks the watermark, but a backend that overrides it may
+                // only check at dequeue, and a Result for an abandoned
+                // generation must not reach the wire. Errors are left alone: a
+                // device fault is about the device, not the job.
+                let sr = match sr.outcome {
+                    StreamOutcome::Completed(Ok(_))
+                        if entry.as_ref().is_some_and(|e| cancel.is_cancelled(e.watermark)) =>
+                    {
+                        tracing::debug!(
+                            "[quip-miner-{backend}] dropping a late Result for cancelled job {}",
+                            short_job_id(&sr.job_id),
+                        );
+                        StreamResult { outcome: StreamOutcome::Cancelled, ..sr }
+                    }
+                    _ => sr,
+                };
                 // A Cancelled job neither advances progress nor updates
                 // best energy; finalize_result just refunds its credit.
                 let completed = matches!(sr.outcome, StreamOutcome::Completed(_));
@@ -400,6 +581,7 @@ async fn outbound_writer(
                 }
             }
             ctrl = ctrl_rx.recv(), if ctrl_open => {
+                result_streak = 0;
                 if let Some(msg) = ctrl {
                     if tx.send(msg).await.is_err() {
                         return;
@@ -437,6 +619,7 @@ async fn run_session<S: Sampler>(
         id.backend,
         id.algorithm,
         &[JobKind::IsingSample],
+        id.features,
         BackendCaps {
             max_nodes: id.max_nodes,
             max_edges: id.max_edges,
@@ -477,6 +660,18 @@ async fn run_session<S: Sampler>(
     // Streaming sampler on a blocking thread: it pulls StreamJobs and emits
     // StreamResults in completion order, keeping `stream_width` models in flight.
     let width = sampler.stream_width().max(1);
+    // The advertised width comes from `declared_stream_width` so `--capabilities`
+    // can answer with the device closed. A backend that overrides only the live
+    // one advertises a number its sampler contradicts, which is a misdeclaration
+    // the operator has to fix in the backend.
+    if usize::try_from(S::declared_stream_width()) != Ok(width) {
+        tracing::error!(
+            declared = S::declared_stream_width(),
+            live = width,
+            "Sampler::declared_stream_width disagrees with Sampler::stream_width; \
+             the advertised Capabilities carry the declared value"
+        );
+    }
     // Prefetch a full extra batch beyond the active set: the backend keeps each
     // stream lane's NEXT slot pre-loaded so a completed slot rotates into a
     // ready one with no idle gap while it is downloaded and refilled (the
@@ -520,14 +715,27 @@ async fn run_session<S: Sampler>(
         tx.clone(),
         res_rx,
         ctrl_rx,
-        Arc::clone(&pending),
-        Arc::clone(&jobs_done),
-        Arc::clone(&device_faulted),
-        id.backend,
+        WriterContext {
+            pending: Arc::clone(&pending),
+            jobs_done: Arc::clone(&jobs_done),
+            device_faulted: Arc::clone(&device_faulted),
+            cancel: cancel.clone(),
+            backend: id.backend,
+        },
     ));
     // Set when the `select!` below polls `writer` to completion. A
     // `JoinHandle` must be joined exactly once: awaiting it again panics.
     let mut writer_joined = false;
+    // Why the session ended badly, when it did. Recorded rather than returned
+    // on the spot: every early return here would skip the shutdown path below,
+    // which is what flushes the outbound half and — the part that is not
+    // cosmetic — joins the sampler worker before this function returns.
+    let mut writer_failure: Option<String> = None;
+    let mut handshake_error: Option<SessionError> = None;
+    let mut protocol_failure: Option<SessionExit> = None;
+    // `Welcome` is the first message of a session. Until it arrives, nothing
+    // has agreed on a protocol version.
+    let mut welcome_seen = false;
 
     loop {
         // Read loop: owns the inbound stream and nothing else. Every outbound
@@ -552,7 +760,12 @@ async fn run_session<S: Sampler>(
             biased;
             join = &mut writer => {
                 writer_joined = true;
-                let _ = join;
+                // A panicking writer used to be discarded here, so a miner
+                // whose outbound half died mid-session still exited 0 and the
+                // supervisor saw a clean stop.
+                if let Err(e) = join {
+                    writer_failure = Some(join_error_message(e));
+                }
                 break;
             }
             msg = inbound.message() => msg,
@@ -560,14 +773,82 @@ async fn run_session<S: Sampler>(
         {
             let cm: CoordMsg = match msg {
                 Ok(Some(cm)) => cm,
-                Ok(None) => break,
-                Err(status) => return Err(status.into()),
+                Ok(None) => {
+                    // A close is only clean when `Shutdown` asked for it, and
+                    // that arm breaks the loop itself, so reaching here always
+                    // means the coordinator hung up unannounced. Before
+                    // `Welcome` that is how a rejected session token looks from
+                    // this side: the coordinator reads the `Hello` and drops
+                    // the stream instead of answering.
+                    protocol_failure = Some(if welcome_seen {
+                        SessionExit::new(
+                            ExitCode::InternalFatal,
+                            "coordinator closed the session stream without Shutdown",
+                        )
+                    } else {
+                        SessionExit::new(
+                            ExitCode::TokenRejected,
+                            "coordinator closed the session stream before Welcome; \
+                             the session token was rejected",
+                        )
+                    });
+                    break;
+                }
+                Err(status) => {
+                    // Typed, rather than left for the message-matching fallback
+                    // in `map_err_to_exit`: an authentication failure on the
+                    // transport is how a coordinator refuses a token once the
+                    // stream is open.
+                    let code = match status.code() {
+                        tonic::Code::Unauthenticated | tonic::Code::PermissionDenied => {
+                            ExitCode::TokenRejected
+                        }
+                        _ => ExitCode::InternalFatal,
+                    };
+                    protocol_failure = Some(SessionExit::new(
+                        code,
+                        format!("session stream failed: {status}"),
+                    ));
+                    break;
+                }
             };
+            // Nothing may precede `Welcome`: until it arrives no version has
+            // been agreed, so acting on a `Configure` or a `Job` would mean
+            // running an unchecked protocol. Refuse it the way a bad `Welcome`
+            // is refused.
+            if !welcome_seen && !matches!(cm.msg, Some(coord_msg::Msg::Welcome(_)) | None) {
+                let detail = format!(
+                    "coordinator sent {} before Welcome",
+                    coord_msg_name(cm.msg.as_ref())
+                );
+                if ctrl_tx
+                    .send(fatal_msg(ExitCode::ConfigInvalid, detail.clone()))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+                protocol_failure = Some(SessionExit::new(ExitCode::ConfigInvalid, detail));
+                break;
+            }
             match cm.msg {
                 Some(coord_msg::Msg::Welcome(w)) => {
-                    if w.protocol_version != 1 {
-                        return Err(SessionError::BadWelcome(w.protocol_version).into());
+                    // The canonical check, so a PROTOCOL_VERSION change cannot
+                    // leave a second hand-inlined copy of it behind.
+                    if let Err(e) = check_welcome(&w) {
+                        // The coordinator learns why the session ended from the
+                        // session: it never sees the process exit status.
+                        if ctrl_tx
+                            .send(fatal_msg(ExitCode::from(e), e.to_string()))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                        handshake_error = Some(e);
+                        break;
                     }
+                    welcome_seen = true;
                 }
                 Some(coord_msg::Msg::Configure(c)) => {
                     // Hand the verbatim config subsection to the backend to
@@ -576,7 +857,15 @@ async fn run_session<S: Sampler>(
                     sampler.apply_config(&c.backend_toml);
                     num_sweeps = num_sweeps_from_toml(&c.backend_toml);
                     let config = SessionConfig::from_configure(miner_id.into(), &c);
-                    ctrl_tx.send(miner(miner_msg::Msg::Ready(Ready {}))).await?;
+                    // A closed control channel means the writer is gone; break
+                    // so the shutdown path runs, rather than returning past it.
+                    if ctrl_tx
+                        .send(miner(miner_msg::Msg::Ready(Ready {})))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
                     // Request enough credits to keep the prefetch buffer
                     // full (active + next per lane), so the backend always
                     // has a NEXT slot to rotate into.
@@ -592,11 +881,15 @@ async fn run_session<S: Sampler>(
                     // `depth <= prefetch` unless the coordinator's
                     // `queue_depth` is larger, so clamp to `cap`.
                     let depth = depth.min(u32::try_from(cap).unwrap_or(u32::MAX));
-                    ctrl_tx
+                    if ctrl_tx
                         .send(miner(miner_msg::Msg::JobRequest(JobRequest {
                             credits: depth,
                         })))
-                        .await?;
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
                 }
                 Some(coord_msg::Msg::Topology(t)) => {
                     topology = Some(TopologyCache::from_proto(&t));
@@ -619,10 +912,16 @@ async fn run_session<S: Sampler>(
                             // job, so ask for a replacement credit — same as
                             // a completion — to keep the coordinator's
                             // consume-on-dispatch pool from leaking a slot.
-                            ctrl_tx.send(msg).await?;
-                            ctrl_tx
+                            if ctrl_tx.send(msg).await.is_err() {
+                                break;
+                            }
+                            if ctrl_tx
                                 .send(miner(miner_msg::Msg::JobRequest(JobRequest { credits: 1 })))
-                                .await?;
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
                         }
                         Prepared::Sample {
                             job,
@@ -639,7 +938,17 @@ async fn run_session<S: Sampler>(
                             {
                                 let mut p = match pending.lock() {
                                     Ok(p) => p,
-                                    Err(poisoned) => poisoned.into_inner(),
+                                    // Recoverable: the map is a plain HashMap,
+                                    // so a panic elsewhere cannot have left it
+                                    // half-updated. Logged because a poisoned
+                                    // lock means some task panicked.
+                                    Err(poisoned) => {
+                                        tracing::error!(
+                                            "pending-job map was poisoned by a panicking task; \
+                                             recovering it"
+                                        );
+                                        poisoned.into_inner()
+                                    }
                                 };
                                 let _ = p.insert(
                                     job.job_id.clone(),
@@ -647,6 +956,7 @@ async fn run_session<S: Sampler>(
                                         num_reads,
                                         num_sweeps: ns,
                                         started: std::time::Instant::now(),
+                                        watermark: job.watermark,
                                         // `drive` mode sets no real threshold
                                         // and sends `i64::MAX`. Reporting that
                                         // as a requirement is noise.
@@ -672,32 +982,44 @@ async fn run_session<S: Sampler>(
                     // backends that override sample_stream) aborts the
                     // in-flight one at its next checkpoint.
                     cancel.cancel_through(c.max_generation);
-                    ctrl_tx
+                    if ctrl_tx
                         .send(status_msg(
                             miner_id,
                             jobs_done.load(Ordering::Relaxed),
                             sampler.utilization(),
                             cancel.abandoned(),
                         ))
-                        .await?;
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
                 }
                 Some(coord_msg::Msg::Ping(_)) => {
-                    ctrl_tx
+                    if ctrl_tx
                         .send(status_msg(
                             miner_id,
                             jobs_done.load(Ordering::Relaxed),
                             sampler.utilization(),
                             cancel.abandoned(),
                         ))
-                        .await?;
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
                 }
                 Some(coord_msg::Msg::GetCapabilities(_)) => {
-                    ctrl_tx
-                        .send(miner(miner_msg::Msg::Capabilities(capabilities(
-                            id,
-                            u32::try_from(width).unwrap_or(u32::MAX),
-                        ))))
-                        .await?;
+                    // Same message `--capabilities` prints, same values.
+                    if ctrl_tx
+                        .send(miner(miner_msg::Msg::Capabilities(
+                            advertised_capabilities::<S>(id),
+                        )))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
                 }
                 Some(coord_msg::Msg::Shutdown(s)) => {
                     grace_ms = if s.grace_ms == 0 {
@@ -707,7 +1029,14 @@ async fn run_session<S: Sampler>(
                     };
                     break;
                 }
-                None => {}
+                // An unset oneof: either a coordinator bug or a field number
+                // this build does not know, which prost keeps as an unknown
+                // field and reports as no payload at all. Dropping it silently
+                // made a peer speaking a newer dialect look like a quiet one.
+                None => tracing::warn!(
+                    "ignoring a CoordMsg with no recognized payload \
+                     (unset, or a field this build does not know)"
+                ),
             }
         }
     }
@@ -720,32 +1049,64 @@ async fn run_session<S: Sampler>(
     drop(job_tx);
     drop(ctrl_tx);
     let grace = Duration::from_millis(grace_ms);
-    if !writer_joined && tokio::time::timeout(grace, writer).await.is_err() {
-        tracing::warn!("outbound writer did not finish within the shutdown grace window");
+    if !writer_joined {
+        match tokio::time::timeout(grace, &mut writer).await {
+            Ok(Ok(())) => {}
+            // A panic here is not a clean drain: results the coordinator was
+            // waiting for never went out. Surfaced so the process exits 70.
+            Ok(Err(e)) => writer_failure = Some(join_error_message(e)),
+            Err(_) => {
+                tracing::warn!(
+                    "outbound writer did not finish within the shutdown grace window; aborting it"
+                );
+                // Aborting drops the task, and with it the result receiver.
+                // That is what unparks a sampler worker blocked in
+                // `blocking_send`, which is what makes the join below bounded
+                // for anything short of a backend stuck inside `sample`.
+                writer.abort();
+                let _ = (&mut writer).await;
+            }
+        }
     }
-    // Bounded wait for the sampler worker, then surface panics: a join `Err` is
-    // a panic payload, not a clean drain.
+    // Wait out the grace window without blocking the runtime, so a worker that
+    // finishes normally costs nothing, then join it. The join is not optional:
+    // `sample_stream` runs on a borrow of the caller's `Sampler`, and this
+    // function is reachable from C through `quip_solver_run`, where the caller
+    // frees the `user_data` its sample callback closes over the moment the call
+    // returns. A worker still running at that point calls into freed memory.
     //
-    // `JoinHandle::join` is unbounded and uninterruptible, and the worker is not
-    // guaranteed to return. One parked in `blocking_send` on a result channel
-    // nobody is draining never does, so joining unconditionally made the process
-    // ignore SIGTERM and sit until something external sent SIGKILL — observed as
-    // multi-minute container restarts on a miner that had already stopped
-    // producing. Poll `is_finished` against the same grace window instead and
-    // abandon the thread if it overruns: the process is exiting, so a detached
-    // worker costs nothing, while a hung join costs the entire shutdown.
+    // This thread used to be abandoned when it overran the window, which traded
+    // that use-after-free for a shorter shutdown. The trade is the wrong way
+    // round: a slow exit is visible and survivable, a use-after-free is neither.
+    //
+    // What keeps the join bounded in practice: the outbound writer is finished
+    // or aborted by now, so its `res_rx` is dropped and no `blocking_send` can
+    // park — the case the old comment was written for. What remains unbounded
+    // is a backend wedged inside `sample`, and the escalation below is the only
+    // lever this layer has over it. If that backend ignores the token too, the
+    // process parks here with the error below in the log, waiting for SIGKILL.
     let sampler_deadline = tokio::time::Instant::now() + grace;
     while !sampler_thread.is_finished() && tokio::time::Instant::now() < sampler_deadline {
         tokio::time::sleep(SAMPLER_JOIN_POLL).await;
     }
     if !sampler_thread.is_finished() {
         tracing::error!(
-            "sampler thread did not finish within the shutdown grace window; abandoning it"
+            "sampler thread did not finish within the shutdown grace window; \
+             cancelling every generation and waiting for it to return"
         );
-    } else if let Err(panic) = sampler_thread.join() {
+        // Cooperative stop: a backend that owns its sweep loop polls the token
+        // at its checkpoints, so raising the watermark past every generation
+        // abandons the work in flight.
+        cancel.cancel_through(u64::MAX);
+    }
+    if let Err(panic) = sampler_thread.join() {
         let payload = panic_payload_message(&*panic);
         tracing::error!(panic = %payload, "sampler thread panicked");
-        return Err(format!("sampler thread panicked: {payload}").into());
+        return Err(SessionExit::new(
+            ExitCode::InternalFatal,
+            format!("sampler thread panicked: {payload}"),
+        )
+        .into());
     }
 
     drop(tx);
@@ -753,11 +1114,49 @@ async fn run_session<S: Sampler>(
         while inbound.message().await?.is_some() {}
         Ok::<(), tonic::Status>(())
     };
-    let _ = tokio::time::timeout(grace, drain).await;
+    // Best-effort: the session is over either way, and a peer that errors or
+    // stalls while we drain changes nothing. Logged rather than dropped so a
+    // coordinator that consistently fails here is visible at all.
+    match tokio::time::timeout(grace, drain).await {
+        Ok(Ok(())) => {}
+        Ok(Err(status)) => tracing::debug!(%status, "final inbound drain ended with an error"),
+        Err(_) => tracing::debug!("final inbound drain did not finish within the grace window"),
+    }
+
+    // Ordered by severity: the outbound half failing means results never
+    // reached the coordinator, a protocol failure means the session was never
+    // valid, and a device fault means this process cannot serve more work.
+    if let Some(detail) = writer_failure {
+        tracing::error!(detail, "outbound writer did not finish cleanly");
+        return Err(SessionExit::new(ExitCode::InternalFatal, detail).into());
+    }
+    if let Some(e) = handshake_error {
+        return Err(e.into());
+    }
+    if let Some(e) = protocol_failure {
+        tracing::error!(detail = %e, "session ended without a clean shutdown");
+        return Err(e.into());
+    }
     if device_faulted.load(Ordering::Relaxed) {
-        return Err("device fault: the backend reported an unrecoverable state".into());
+        return Err(SessionExit::new(
+            ExitCode::InternalFatal,
+            "device fault: the backend reported an unrecoverable state",
+        )
+        .into());
     }
     Ok(())
+}
+
+/// Describe a writer-task `JoinError` for the log and the session error.
+fn join_error_message(e: tokio::task::JoinError) -> String {
+    if e.is_panic() {
+        format!(
+            "outbound writer panicked: {}",
+            panic_payload_message(&*e.into_panic())
+        )
+    } else {
+        format!("outbound writer did not run to completion: {e}")
+    }
 }
 
 /// Format a `JoinHandle` panic payload for logging / error messages.
@@ -777,6 +1176,11 @@ fn map_err_to_exit(err: Box<dyn std::error::Error>, backend: &str) -> ExitCode {
     // reference (e.g. BadWelcome -> ConfigInvalid/64, not InternalFatal/70).
     let err = match err.downcast::<SessionError>() {
         Ok(se) => return ExitCode::from(*se),
+        Err(err) => err,
+    };
+    // Ends this session layer chose itself, carrying their own exit code.
+    let err = match err.downcast::<SessionExit>() {
+        Ok(exit) => return exit.code,
         Err(err) => err,
     };
     // Type-erased fallback: the error crossed a boundary that lost the
@@ -822,7 +1226,7 @@ pub fn run_code<S: Sampler>(
     }
 
     if common.capabilities {
-        return print_capabilities(&id, 1);
+        return print_capabilities::<S>(&id);
     }
     if common.solve {
         let sampler = match open() {
@@ -929,6 +1333,66 @@ pub fn run<S: Sampler>(
 mod tests {
     use super::*;
 
+    /// One outbound writer wired to fresh channels, for the writer tests.
+    struct WriterHarness {
+        res_tx: mpsc::Sender<StreamResult>,
+        ctrl_tx: mpsc::Sender<MinerMsg>,
+        out_rx: mpsc::Receiver<MinerMsg>,
+        pending: PendingParams,
+        cancel: CancelToken,
+        writer: tokio::task::JoinHandle<()>,
+    }
+
+    fn spawn_writer(depth: usize) -> WriterHarness {
+        let (tx, out_rx) = mpsc::channel::<MinerMsg>(depth);
+        let (res_tx, res_rx) = mpsc::channel::<StreamResult>(depth);
+        let (ctrl_tx, ctrl_rx) = mpsc::channel::<MinerMsg>(depth);
+        let pending: PendingParams = Arc::new(StdMutex::new(HashMap::new()));
+        let cancel = CancelToken::default();
+        let writer = tokio::spawn(outbound_writer(
+            tx,
+            res_rx,
+            ctrl_rx,
+            WriterContext {
+                pending: Arc::clone(&pending),
+                jobs_done: Arc::new(AtomicU64::new(0)),
+                device_faulted: Arc::new(AtomicBool::new(false)),
+                cancel: cancel.clone(),
+                backend: "test",
+            },
+        ));
+        WriterHarness {
+            res_tx,
+            ctrl_tx,
+            out_rx,
+            pending,
+            cancel,
+            writer,
+        }
+    }
+
+    fn completed_result(job_id: u8) -> StreamResult {
+        StreamResult {
+            job_id: vec![job_id],
+            outcome: StreamOutcome::Completed(Ok(vec![crate::SamplerResult {
+                spins: vec![1i8, -1],
+                energy_milli: -1000,
+            }])),
+            device_access_time_us: 0,
+        }
+    }
+
+    fn pending_job(watermark: Option<u64>) -> PendingJob {
+        PendingJob {
+            num_reads: 1,
+            num_sweeps: 1,
+            started: std::time::Instant::now(),
+            max_energy_milli: None,
+            min_solutions: 0,
+            watermark,
+        }
+    }
+
     /// The writer waits, rather than spins, once the read loop is gone while the
     /// sampler still holds `res_tx`.
     ///
@@ -944,18 +1408,13 @@ mod tests {
     /// hangs instead of passing.
     #[tokio::test(start_paused = true)]
     async fn writer_parks_when_the_read_loop_closes_before_the_sampler() {
-        let (tx, mut out_rx) = mpsc::channel::<MinerMsg>(16);
-        let (res_tx, res_rx) = mpsc::channel::<StreamResult>(4);
-        let (ctrl_tx, ctrl_rx) = mpsc::channel::<MinerMsg>(4);
-        let writer = tokio::spawn(outbound_writer(
-            tx,
-            res_rx,
-            ctrl_rx,
-            Arc::new(StdMutex::new(HashMap::new())),
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(AtomicBool::new(false)),
-            "test",
-        ));
+        let WriterHarness {
+            res_tx,
+            ctrl_tx,
+            mut out_rx,
+            writer,
+            ..
+        } = spawn_writer(16);
 
         // Read loop exits, as it does on Shutdown; the sampler is still working.
         drop(ctrl_tx);
@@ -1012,7 +1471,7 @@ mod tests {
         let id = test_identity();
         let c = capabilities(&id, 4);
         let v: serde_json::Value =
-            serde_json::from_str(&capabilities_json(&id, 4)).expect("printer emits JSON");
+            serde_json::from_str(&capabilities_json_from(&c)).expect("printer emits JSON");
         assert_eq!(v.get("backend"), Some(&serde_json::json!(c.backend)));
         assert_eq!(v.get("algorithm"), Some(&serde_json::json!(c.algorithm)));
         assert_eq!(v.get("maxNodes"), Some(&serde_json::json!(c.max_nodes)));
@@ -1053,7 +1512,7 @@ mod tests {
                 reads_solution_floor_factor: 0,
             },
         };
-        let json = capabilities_json(&id, 1);
+        let json = capabilities_json_from(&capabilities(&id, 1));
         let v: serde_json::Value =
             serde_json::from_str(&json).expect("quoted feature must produce valid JSON");
         assert_eq!(v.get("features"), Some(&serde_json::json!(["has\"quote"])));
@@ -1086,6 +1545,227 @@ mod tests {
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
         }
+    }
+
+    /// A continuously non-empty result queue must not starve control replies.
+    ///
+    /// `biased` puts results first, which is right until the sampler is fast
+    /// enough that the result branch is always ready. A coordinator that sends
+    /// `Cancel` and waits for the `Status` ack, or `Ping` and waits for the
+    /// reply, then waits behind every result the miner has yet to produce. With
+    /// the queue pre-filled, the unbounded version answers only after all 64.
+    #[tokio::test]
+    async fn control_replies_are_not_starved_by_a_busy_result_queue() {
+        let harness = spawn_writer(128);
+        let WriterHarness {
+            res_tx,
+            ctrl_tx,
+            mut out_rx,
+            writer,
+            ..
+        } = harness;
+
+        // Fill the result queue, then queue one control reply behind it.
+        for i in 0..64u8 {
+            res_tx.send(completed_result(i)).await.expect("send result");
+        }
+        ctrl_tx
+            .send(status_msg("miner", 0, 0.0, 0))
+            .await
+            .expect("send status");
+
+        // Position of the Status among the outbound messages. Each Cancelled
+        // result emits one JobRequest, so the index counts results served
+        // before the control queue was.
+        let mut index = 0_u32;
+        loop {
+            let msg = out_rx.recv().await.expect("writer keeps sending");
+            if matches!(msg.msg, Some(miner_msg::Msg::Status(_))) {
+                break;
+            }
+            index = index.saturating_add(1);
+        }
+        // An absolute bound, deliberately not written in terms of
+        // RESULT_BATCH: expressing it relative to the constant would let a
+        // raised constant make this assertion vacuous, which is exactly the
+        // regression it exists to catch.
+        assert!(
+            index <= 16,
+            "a control reply waited behind {index} results; RESULT_BATCH is {RESULT_BATCH}"
+        );
+
+        drop(res_tx);
+        drop(ctrl_tx);
+        let _ = tokio::time::timeout(Duration::from_secs(5), writer).await;
+    }
+
+    /// SPEC section 5, defence in depth: a `Result` whose generation was
+    /// cancelled must not reach the wire even when the backend produced one.
+    /// A backend that only checks the watermark at dequeue does exactly that.
+    #[tokio::test]
+    async fn the_writer_drops_a_result_for_a_cancelled_generation() {
+        let WriterHarness {
+            res_tx,
+            ctrl_tx,
+            mut out_rx,
+            pending,
+            cancel,
+            writer,
+        } = spawn_writer(16);
+
+        {
+            let mut p = pending.lock().expect("fresh mutex");
+            let _ = p.insert(vec![7], pending_job(Some(4)));
+        }
+        cancel.cancel_through(4);
+        res_tx.send(completed_result(7)).await.expect("send result");
+
+        let first = out_rx.recv().await.expect("writer replies");
+        assert!(
+            matches!(first.msg, Some(miner_msg::Msg::JobRequest(jr)) if jr.credits == 1),
+            "a cancelled job refunds exactly one credit and sends no Result"
+        );
+
+        // Nothing else follows: no Result, no Reject.
+        drop(res_tx);
+        drop(ctrl_tx);
+        assert!(
+            out_rx.recv().await.is_none(),
+            "a cancelled generation must produce no further outbound message"
+        );
+        let _ = tokio::time::timeout(Duration::from_secs(5), writer).await;
+    }
+
+    /// The same job, with nothing cancelled, still reports its `Result`. Without
+    /// this the test above passes on a writer that drops every result.
+    #[tokio::test]
+    async fn the_writer_keeps_a_result_for_a_live_generation() {
+        let WriterHarness {
+            res_tx,
+            ctrl_tx,
+            mut out_rx,
+            pending,
+            writer,
+            ..
+        } = spawn_writer(16);
+
+        {
+            let mut p = pending.lock().expect("fresh mutex");
+            let _ = p.insert(vec![7], pending_job(Some(4)));
+        }
+        res_tx.send(completed_result(7)).await.expect("send result");
+
+        let first = out_rx.recv().await.expect("writer replies");
+        assert!(
+            matches!(first.msg, Some(miner_msg::Msg::Result(_))),
+            "a live generation must report its Result"
+        );
+        drop(res_tx);
+        drop(ctrl_tx);
+        let _ = tokio::time::timeout(Duration::from_secs(5), writer).await;
+    }
+
+    /// A panicking writer must not read as a clean session.
+    ///
+    /// The `JoinHandle` result used to be discarded on both paths, so a miner
+    /// whose outbound half died mid-session still exited 0 and its supervisor
+    /// saw a normal stop.
+    #[tokio::test]
+    async fn a_writer_panic_maps_to_internal_fatal() {
+        let handle = tokio::spawn(async { panic!("writer exploded") });
+        let err = handle.await.expect_err("the task panicked");
+        let detail = join_error_message(err);
+        assert!(
+            detail.contains("panicked") && detail.contains("writer exploded"),
+            "the panic payload must survive into the message: {detail}"
+        );
+        assert_eq!(
+            map_err_to_exit(
+                SessionExit::new(ExitCode::InternalFatal, detail).into(),
+                "test"
+            ),
+            ExitCode::InternalFatal
+        );
+    }
+
+    /// Every `SessionError` must reach its documented exit code after being
+    /// boxed as `dyn Error`, which is the only shape `run_code` ever sees.
+    #[test]
+    fn session_errors_round_trip_through_a_boxed_error() {
+        for (err, want) in [
+            (SessionError::MissingToken, ExitCode::TokenRejected),
+            (SessionError::BadWelcome(0), ExitCode::ConfigInvalid),
+            (SessionError::BadWelcome(2), ExitCode::ConfigInvalid),
+        ] {
+            let boxed: Box<dyn std::error::Error> = Box::new(err);
+            assert_eq!(map_err_to_exit(boxed, "test"), want, "for {err:?}");
+        }
+    }
+
+    /// A `SessionExit` carries its own code, so these exits do not depend on
+    /// the wording of anyone's `Display`.
+    #[test]
+    fn session_exits_carry_their_own_code() {
+        for code in [
+            ExitCode::TokenRejected,
+            ExitCode::InternalFatal,
+            ExitCode::ConfigInvalid,
+        ] {
+            let boxed: Box<dyn std::error::Error> =
+                SessionExit::new(code, "coordinator went away").into();
+            assert_eq!(map_err_to_exit(boxed, "test"), code);
+        }
+    }
+
+    /// The text-matching fallback still has to work: errors from crates this
+    /// one does not own arrive with the concrete type erased. These strings are
+    /// the two `SessionError` `Display` forms, so a reword there fails here
+    /// rather than silently turning a token failure into exit 70.
+    #[test]
+    fn the_type_erased_fallback_recovers_the_documented_codes() {
+        let missing: Box<dyn std::error::Error> = SessionError::MissingToken.to_string().into();
+        assert_eq!(map_err_to_exit(missing, "test"), ExitCode::TokenRejected);
+
+        let bad: Box<dyn std::error::Error> = SessionError::BadWelcome(9).to_string().into();
+        assert_eq!(map_err_to_exit(bad, "test"), ExitCode::ConfigInvalid);
+
+        // Anything else is an internal fault, not a guess.
+        let other: Box<dyn std::error::Error> = "transport closed".to_owned().into();
+        assert_eq!(map_err_to_exit(other, "test"), ExitCode::InternalFatal);
+    }
+
+    /// `--capabilities` and the in-session reply are one message, so they carry
+    /// one `stream_width`. The flag used to hardcode `1` while the session
+    /// reported the live width.
+    #[test]
+    fn both_capabilities_answers_carry_the_declared_stream_width() {
+        struct WideSampler;
+        impl Sampler for WideSampler {
+            fn sample(
+                &self,
+                _graph: &crate::IsingGraph,
+                _params: &crate::ising::SampleParams,
+            ) -> Result<Vec<crate::SamplerResult>, crate::SampleError> {
+                Ok(vec![])
+            }
+            fn stream_width(&self) -> usize {
+                8
+            }
+            fn declared_stream_width() -> u32 {
+                8
+            }
+        }
+
+        let id = test_identity();
+        // What GetCapabilities replies with.
+        let reply = advertised_capabilities::<WideSampler>(&id);
+        assert_eq!(reply.stream_width, 8);
+        // What `--capabilities` prints, from the same function.
+        let v: serde_json::Value =
+            serde_json::from_str(&capabilities_json_from(&reply)).expect("printer emits JSON");
+        assert_eq!(v.get("streamWidth"), Some(&serde_json::json!(8)));
+        // And the features the identity declares travel with it.
+        assert_eq!(reply.features, vec!["streaming"]);
     }
 
     #[test]

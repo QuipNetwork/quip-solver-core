@@ -93,3 +93,68 @@ fn sample_error_exits_internal_fatal() {
 
     assert_eq!(out.status.code(), Some(70), "SampleError must exit 70");
 }
+
+#[test]
+fn missing_session_token_exits_token_rejected_before_network() {
+    // Token is resolved before any connect. A missing QUIP_SESSION_TOKEN must
+    // therefore exit 77 even when the coordinator URI cannot be reached. Exit
+    // 70 here would mean the driver attempted the network first.
+    let out = Command::new(example_bin("mock_sampler_miner"))
+        .arg("--quip-coordinator")
+        .arg("unix:///nonexistent")
+        .env_remove("QUIP_SESSION_TOKEN")
+        .output()
+        .expect("spawn missing-token session");
+    assert_eq!(
+        out.status.code(),
+        Some(77),
+        "missing QUIP_SESSION_TOKEN must exit 77, not 70: {:?}",
+        out.status.code()
+    );
+}
+
+#[test]
+fn check_on_working_sampler_exits_clean() {
+    let out = Command::new(example_bin("mock_sampler_miner"))
+        .arg("--check")
+        .output()
+        .expect("spawn --check");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "--check on a working sampler must exit 0: {:?}",
+        out.status.code()
+    );
+}
+
+#[test]
+fn unopenable_sampler_check_exits_env_incompatible() {
+    let out = Command::new(example_bin("mock_sampler_unopenable"))
+        .arg("--check")
+        .output()
+        .expect("spawn unopenable --check");
+    assert_eq!(
+        out.status.code(),
+        Some(69),
+        "open() failure on --check must exit 69: {:?}",
+        out.status.code()
+    );
+}
+
+#[test]
+fn unopenable_sampler_session_exits_env_incompatible() {
+    // Session mode calls open() after the coordinator flag is present and
+    // before the token/network path. A failing open must exit 69, not 77/70.
+    let out = Command::new(example_bin("mock_sampler_unopenable"))
+        .arg("--quip-coordinator")
+        .arg("unix:///nonexistent")
+        .env("QUIP_SESSION_TOKEN", "test-token")
+        .output()
+        .expect("spawn unopenable session");
+    assert_eq!(
+        out.status.code(),
+        Some(69),
+        "open() failure in session mode must exit 69: {:?}",
+        out.status.code()
+    );
+}

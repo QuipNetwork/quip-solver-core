@@ -30,6 +30,8 @@ wasm-bindgen = "0.2.127"
 [dev-dependencies]
 wasm-bindgen-test = "0.3.77"
 
-# wasm-bindgen's macro expands to unsafe extern blocks, which the workspace's
-# `unsafe-code = "deny"` would reject. This crate is a thin generated-glue layer
-# over quip-protocol, which keeps the strict lints.
+# Takes the full workspace lint set. The wasm-bindgen expansion does not trip
+# `unsafe-code = "deny"` — its unsafe blocks are attributed to the macro — so
+# this crate needs no relaxation of it at all; see the note in src/lib.rs.
+[lints]
+workspace = true

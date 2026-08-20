@@ -4,7 +4,10 @@
 //! `energy_milli`, `set_diversity`, the four wire codecs, and the `ExitCode`
 //! constants. Both bindings call the identical Rust functions, so JavaScript,
 //! Python, and Rust cannot disagree about consensus-critical math.
-
+// `unsafe-code = "deny"` needs no relaxation here. The #[wasm_bindgen]
+// expansion does carry unsafe extern blocks, but they are attributed to the
+// macro, so the lint never fires on this crate — checked on both the host and
+// wasm32 targets. No unsafe code is written by hand here either.
 use quip_protocol::{scoring, wire};
 use wasm_bindgen::prelude::*;
 
@@ -26,7 +29,12 @@ pub fn energy_milli(spins: &[i8], h: &[f64], j: &[f64], edges: &[u32]) -> Result
     }
     let pairs: Vec<(usize, usize)> = edges
         .chunks_exact(2)
-        .map(|pair| (pair[0] as usize, pair[1] as usize))
+        .filter_map(|pair| match *pair {
+            [u, v] => Some((u as usize, v as usize)),
+            // chunks_exact(2) yields only length-2 slices; the arm exists so
+            // no index expression is needed.
+            _ => None,
+        })
         .collect();
     if pairs.len() != j.len() {
         return Err(JsError::new(&format!(

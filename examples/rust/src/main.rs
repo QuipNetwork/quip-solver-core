@@ -26,8 +26,15 @@ impl Sampler for MockSampler {
         graph: &IsingGraph,
         params: &SampleParams,
     ) -> Result<Vec<SamplerResult>, SampleError> {
-        // A real backend refuses a problem larger than its hardware. Mirrored
-        // here so the Capacity -> RejectReason::TooLarge path is live, not dead.
+        // A real backend refuses a problem larger than its hardware.
+        //
+        // In session mode this branch never fires. The bound is the same
+        // `max_nodes` advertised below, and the session rejects an oversized
+        // job with `RejectReason::TooLarge` while parsing it, before the
+        // sampler is called. `--solve` reads its problem straight from JSON
+        // and applies no such bound, so that mode is what reaches this check.
+        // A backend whose real capacity is smaller than what it advertises
+        // would hit it from the session too.
         if graph.num_nodes() > 100_000 {
             return Err(SampleError::Capacity);
         }

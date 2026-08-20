@@ -63,6 +63,13 @@ test("malformed input is rejected rather than silently scored", () => {
   assert.throws(() => consensus.setDiversity(Int8Array.from([1, 1, 1]), 2));
 });
 
+test("malformed wire payloads are rejected", () => {
+  // Mirrors conformance/test_pyo3_parity.py: a 3-byte i32 payload and a spin
+  // byte that is neither 0x01 nor 0xFF must throw, not silently decode.
+  assert.throws(() => consensus.decodeI32Le(Uint8Array.from([0x00, 0x00, 0x00])));
+  assert.throws(() => consensus.decodeSpins(Uint8Array.from([0x00])));
+});
+
 test("exit codes match the Python bindings", () => {
   assert.equal(consensus.ExitCode.CLEAN, 0);
   assert.equal(consensus.ExitCode.CONFIG_INVALID, 64);
@@ -76,4 +83,25 @@ test("gRPC stubs expose a bidirectional session", () => {
   assert.equal(typeof MinerServiceClient, "function");
   assert.ok(MinerServiceService.session.requestStream);
   assert.ok(MinerServiceService.session.responseStream);
+});
+
+test("int64 fields round-trip as bigint past Number.MAX_SAFE_INTEGER", () => {
+  const { Job, Cancel } = require(join(here, "..", "dist", "index.js"));
+  const generation = 2n ** 53n + 7n;
+  const decoded = Job.decode(
+    Job.encode({
+      jobId: Uint8Array.from([1]),
+      kind: 1,
+      generation,
+      deadlineMs: 0n,
+      ising: undefined,
+      provenance: undefined,
+    }).finish(),
+  );
+  assert.equal(typeof decoded.generation, "bigint");
+  assert.equal(decoded.generation, generation);
+
+  const cancel = Cancel.decode(Cancel.encode({ maxGeneration: generation }).finish());
+  assert.equal(typeof cancel.maxGeneration, "bigint");
+  assert.equal(cancel.maxGeneration, generation);
 });

@@ -59,6 +59,10 @@ def capabilities_message() -> miner_pb2.Capabilities:
     )
 
 
+class MissingTopology(Exception):
+    """Job names a topology this session never received."""
+
+
 def sample(
     h: list[float],
     j: list[float],
@@ -73,19 +77,63 @@ def sample(
 
 @dataclass
 class Topology:
-    """A cached ``Topology`` a job may reference by hash instead of by edges."""
+    """A cached ``Topology`` a job may reference by hash instead of by edges.
+
+    ``pos`` maps each native (possibly sparse) node id to its dense position in
+    ``nodes``, matching Rust ``TopologyCache``. Scoring always uses dense
+    indices into ``h``.
+    """
 
     nodes: list[int] = field(default_factory=list)
     u: list[int] = field(default_factory=list)
     v: list[int] = field(default_factory=list)
+    pos: dict[int, int] = field(default_factory=dict)
+
+    @classmethod
+    def from_proto(cls, topo: miner_pb2.Topology) -> Topology:
+        nodes = list(topo.nodes)
+        edges = topo.edges
+        return cls(
+            nodes=nodes,
+            u=list(edges.u),
+            v=list(edges.v),
+            pos={node: i for i, node in enumerate(nodes)},
+        )
+
+    def dense_edges(self) -> list[tuple[int, int]]:
+        """Remap native ``u``/``v`` ids onto dense positions in ``h``."""
+        out: list[tuple[int, int]] = []
+        for a, b in zip(self.u, self.v, strict=True):
+            try:
+                out.append((self.pos[a], self.pos[b]))
+            except KeyError as exc:
+                raise ValueError(
+                    "edge references a node not in topology.nodes"
+                ) from exc
+        return out
+
+
+def validate_ising(
+    h: list[float], j: list[float], edges: list[tuple[int, int]]
+) -> None:
+    """Length rules shared by session jobs and ``--solve`` JSON.
+
+    A silent truncation here would submit a confidently wrong energy.
+    """
+    if len(edges) != len(j):
+        raise ValueError(f"{len(edges)} edges but {len(j)} couplings")
+    n = len(h)
+    for a, b in edges:
+        if a < 0 or b < 0 or a >= n or b >= n:
+            raise ValueError("edge references a node outside h")
 
 
 def decode_problem(ising, topologies: dict[bytes, Topology]):
     """Decode an ``IsingProblem`` into ``(h, j, edges)`` in float units.
 
     Raises ``ValueError`` for anything malformed, which the caller turns into
-    ``Reject{MALFORMED}``. Every length rule below is a real wire invariant: a
-    silent truncation here would submit a confidently wrong energy.
+    ``Reject{MALFORMED}``. Raises ``MissingTopology`` when the job names a
+    hash this session never cached.
     """
     if len(ising.h_milli_le32) % 4 != 0:
         raise ValueError("h_milli_le32 length is not a multiple of 4")
@@ -98,23 +146,22 @@ def decode_problem(ising, topologies: dict[bytes, Topology]):
 
     which = ising.WhichOneof("graph")
     if which == "edges":
+        # Inline edges are already dense 0..n-1 ids, same as the Rust path.
         u_list, v_list = list(ising.edges.u), list(ising.edges.v)
+        if len(u_list) != len(v_list):
+            raise ValueError("edge list halves differ in length")
+        edges = list(zip(u_list, v_list, strict=True))
     elif which == "topology_hash":
         topo = topologies.get(bytes(ising.topology_hash))
         if topo is None:
-            raise KeyError("job references a topology this session never sent")
-        u_list, v_list = topo.u, topo.v
+            raise MissingTopology("job references a topology this session never sent")
+        if len(topo.u) != len(topo.v):
+            raise ValueError("edge list halves differ in length")
+        edges = topo.dense_edges()
     else:
         raise ValueError("job carries neither edges nor a topology hash")
 
-    if len(u_list) != len(v_list):
-        raise ValueError("edge list halves differ in length")
-    edges = list(zip(u_list, v_list))
-    if len(edges) != len(j):
-        raise ValueError(f"{len(edges)} edges but {len(j)} couplings")
-    for a, b in edges:
-        if a >= len(h) or b >= len(h):
-            raise ValueError("edge references a node outside h")
+    validate_ising(h, j, edges)
     return h, j, edges
 
 
@@ -139,14 +186,28 @@ class Session:
         self.config = None
         self.jobs_done = 0
         self.abandoned_generation = 0
+        self.got_welcome = False
+        self.got_shutdown = False
 
     async def send_hello(self) -> None:
         hello = session.build_hello(
-            self.miner_id, BACKEND, ALGORITHM, [miner_pb2.ISING_SAMPLE]
+            self.miner_id,
+            BACKEND,
+            ALGORITHM,
+            [miner_pb2.ISING_SAMPLE],
+            MAX_NODES,
+            MAX_EDGES,
         )
-        hello.max_nodes = MAX_NODES
-        hello.max_edges = MAX_EDGES
         await self.call.write(miner_pb2.MinerMsg(hello=hello))
+
+    async def send_fatal(self, exit_code: int, reason: str) -> None:
+        """Emit Fatal on the stream before a non-clean process exit."""
+        await self.call.write(
+            miner_pb2.MinerMsg(
+                fatal=miner_pb2.Fatal(exit_code=exit_code, reason=reason)
+            )
+        )
+        await self.call.done_writing()
 
     async def send_status(self) -> None:
         await self.call.write(
@@ -176,6 +237,14 @@ class Session:
         """Dispose of exactly one job: a Result, or a Reject with a reason."""
         job_id = bytes(job.job_id)
 
+        # Generation 0 is a mempool job: Cancel never abandons it (SPEC §5).
+        # A later job whose generation is at or below the watermark must
+        # produce no Result — only a credit refund so the coordinator pool
+        # does not leak a slot.
+        if job.generation != 0 and job.generation <= self.abandoned_generation:
+            await self.send_credit()
+            return
+
         if job.kind != miner_pb2.ISING_SAMPLE:
             await self.reject(job_id, miner_pb2.UNSUPPORTED_KIND)
             return
@@ -187,7 +256,7 @@ class Session:
 
         try:
             h, j, edges = decode_problem(job.ising, self.topologies)
-        except KeyError:
+        except MissingTopology:
             await self.reject(job_id, miner_pb2.TOPOLOGY_MISSING)
             return
         except ValueError:
@@ -214,7 +283,14 @@ class Session:
                     solutions=[build_solution(s, e) for s, e in solutions],
                     meta=miner_pb2.SamplerMeta(
                         reads=num_reads,
-                        sweeps=job.ising.num_sweeps or 0,
+                        # A per-job pin wins; otherwise the session-wide budget
+                        # the coordinator set through Configure.backend_toml.
+                        sweeps=job.ising.num_sweeps
+                        or (
+                            self.config.num_sweeps
+                            if self.config
+                            else session.DEFAULT_NUM_SWEEPS
+                        ),
                         device_access_time_us=device_us,
                         qpu_access_us=0,
                     ),
@@ -228,7 +304,13 @@ class Session:
         which = msg.WhichOneof("msg")
 
         if which == "welcome":
-            session.check_welcome(msg.welcome)
+            try:
+                session.check_welcome(msg.welcome)
+            except session.BadWelcome as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                await self.send_fatal(ExitCode.CONFIG_INVALID, str(exc))
+                return ExitCode.CONFIG_INVALID
+            self.got_welcome = True
             return None
 
         if which == "configure":
@@ -242,16 +324,14 @@ class Session:
 
         if which == "topology":
             topo = msg.topology
-            self.topologies[bytes(topo.hash)] = Topology(
-                nodes=list(topo.nodes),
-                u=list(topo.edges.u),
-                v=list(topo.edges.v),
-            )
+            self.topologies[bytes(topo.hash)] = Topology.from_proto(topo)
             return None
 
         if which == "set_target":
-            # This mock ignores the difficulty target: it always returns the
-            # same configuration. A real solver adapts its budget here.
+            # Adapt support needs a PyO3 binding that does not exist.
+            # Reimplementing consensus adapt math in Python would drift from
+            # the Rust reference, so this mock ignores the target and keeps
+            # the trivial all-(+1) sampler.
             return None
 
         if which == "job":
@@ -279,6 +359,7 @@ class Session:
         if which == "shutdown":
             # Every earlier write was awaited, so half-closing here cannot drop
             # a queued Reject or JobRequest.
+            self.got_shutdown = True
             await self.call.done_writing()
             return ExitCode.CLEAN
 
@@ -301,6 +382,7 @@ async def run_session(endpoint: str, miner_id: str) -> int:
     # and answers RST_STREAM(PROTOCOL_ERROR) before the handshake completes.
     options = [("grpc.default_authority", "localhost")]
 
+    state: Session | None = None
     try:
         async with grpc.aio.insecure_channel(target, options=options) as channel:
             stub = miner_pb2_grpc.MinerServiceStub(channel)
@@ -315,14 +397,23 @@ async def run_session(endpoint: str, miner_id: str) -> int:
     except session.MissingToken:
         print("error: QUIP_SESSION_TOKEN unset", file=sys.stderr)
         return ExitCode.TOKEN_REJECTED
-    except session.BadWelcome as e:
-        print(f"error: {e}", file=sys.stderr)
-        return ExitCode.CONFIG_INVALID
     except grpc.aio.AioRpcError as e:
         print(f"error: session failed: {e.code()}: {e.details()}", file=sys.stderr)
         return ExitCode.INTERNAL_FATAL
 
-    return ExitCode.CLEAN
+    # The coordinator closed the stream. Shutdown is the only clean close.
+    # Closing before Welcome means the token was rejected.
+    if state is None:
+        return ExitCode.INTERNAL_FATAL
+    if state.got_shutdown:
+        return ExitCode.CLEAN
+    if not state.got_welcome:
+        print(
+            "error: coordinator closed before Welcome (token rejected)", file=sys.stderr
+        )
+        return ExitCode.TOKEN_REJECTED
+    print("error: coordinator closed the stream without Shutdown", file=sys.stderr)
+    return ExitCode.INTERNAL_FATAL
 
 
 def run_solve() -> int:
@@ -333,7 +424,8 @@ def run_solve() -> int:
         j = problem["j"]
         edges = [tuple(e) for e in problem["edges"]]
         num_reads = problem["num_reads"]
-    except (json.JSONDecodeError, KeyError, TypeError) as e:
+        validate_ising(h, j, edges)
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
         print(f"error: malformed problem JSON on stdin: {e}", file=sys.stderr)
         return ExitCode.CONFIG_INVALID
 
@@ -385,4 +477,10 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        raise SystemExit(main())
+    except Exception as exc:
+        # SPEC exit codes only. An unexpected exception must not become the
+        # interpreter's default exit 1.
+        print(f"error: unexpected failure: {exc}", file=sys.stderr)
+        raise SystemExit(ExitCode.INTERNAL_FATAL) from exc

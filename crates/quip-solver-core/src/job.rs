@@ -25,29 +25,64 @@ pub(crate) struct TopologyCache {
     edges: Vec<(u32, u32)>,
     pos: HashMap<u32, usize>,
     allowed_h: Vec<i32>,
+    /// `Some(reason)` when the `Topology` message itself did not validate.
+    ///
+    /// `Topology` arrives outside any job, so there is no message to reject at
+    /// the moment the fault is found; the cache remembers it and every job that
+    /// names this topology is rejected with it. Keeping a silently truncated or
+    /// collapsed cache is the failure this replaces — the miner would sample a
+    /// *different* graph than the coordinator scored against and return
+    /// confident, wrong energies on the live mining path.
+    invalid: Option<RejectReason>,
 }
 
 impl TopologyCache {
     /// Build from a `Topology` message. Node ids map to their received-order
     /// position; edges keep received order (the consensus `j`-zip invariant).
+    ///
+    /// The inline-edge path in [`resolve_edges`] already rejects an unequal
+    /// `u`/`v` pair, and this path now holds the same bar: a cached topology is
+    /// the *more* dangerous of the two, because one bad `Configure` misdirects
+    /// every job in the session rather than one job.
     pub(crate) fn from_proto(t: &Topology) -> Self {
+        let mut invalid = None;
         let mut pos = HashMap::with_capacity(t.nodes.len());
         for (i, &node) in t.nodes.iter().enumerate() {
-            let _ = pos.insert(node, i);
+            // A repeated id collapses two dense positions onto one, leaving
+            // `pos` shorter than `nodes` and silently renumbering every node
+            // after it.
+            if pos.insert(node, i).is_some() {
+                invalid = Some(RejectReason::Malformed);
+            }
         }
-        let edges = t.edges.as_ref().map_or_else(Vec::new, |e| {
-            e.u.iter().zip(&e.v).map(|(&u, &v)| (u, v)).collect()
-        });
+        let edges: Vec<(u32, u32)> = match t.edges.as_ref() {
+            Some(e) => {
+                // `zip` stops at the shorter side, so an unequal u/v pair drops
+                // the tail of the longer one without a trace.
+                if e.u.len() != e.v.len() {
+                    invalid = Some(RejectReason::Malformed);
+                }
+                e.u.iter().zip(&e.v).map(|(&u, &v)| (u, v)).collect()
+            }
+            None => Vec::new(),
+        };
         Self {
             hash: t.hash.clone(),
             edges,
             pos,
             allowed_h: t.allowed_h_milli.clone(),
+            invalid,
         }
     }
 
     pub(crate) fn allowed_h(&self) -> &[i32] {
         &self.allowed_h
+    }
+
+    /// Number of nodes in the cached topology. Equal to `nodes.len()`, since
+    /// [`Self::from_proto`] marks a duplicate id invalid rather than dropping it.
+    pub(crate) fn num_nodes(&self) -> usize {
+        self.pos.len()
     }
 }
 
@@ -94,7 +129,15 @@ pub(crate) const DEFAULT_NUM_SWEEPS: usize = 64;
 // backends (cpu/cuda/metal) sharing this code path.
 const GIBBS_SWEEP_MULTIPLIER: u32 = 2;
 
-pub(crate) fn now_unix_ms() -> u64 {
+/// Wall-clock milliseconds since the Unix epoch, or `None` when the clock is
+/// before the epoch and no deadline can be judged against it.
+///
+/// The `None` is not theoretical: a container that starts before NTP sets the
+/// clock, or a board with a dead RTC, reports a pre-epoch time. Defaulting to
+/// `0` there — which is what this used to do — reads every deadline as "far in
+/// the future" and silently accepts expired work for as long as the clock is
+/// wrong. Callers fail closed instead.
+pub(crate) fn now_unix_ms() -> Option<u64> {
     #[expect(
         clippy::cast_possible_truncation,
         reason = "unix ms since epoch fits u64 for the lifetime of this protocol"
@@ -102,24 +145,33 @@ pub(crate) fn now_unix_ms() -> u64 {
     {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64
+            .ok()
+            .map(|d| d.as_millis() as u64)
     }
 }
 
-/// Fresh per-job seed from OS entropy. Two jobs issued in the same
-/// millisecond must not sample identically, which a wall-clock-derived seed
-/// would cause (solver-core is shared by cpu/cuda/metal).
-fn os_seed() -> u64 {
+/// Fresh per-job seed from OS entropy, or `None` when the OS CSPRNG failed.
+///
+/// Two jobs issued in the same millisecond must not sample identically, which a
+/// wall-clock-derived seed would cause (solver-core is shared by
+/// cpu/cuda/metal), so there is no fallback source: a job without a real seed is
+/// not sampled at all.
+///
+/// Failure here used to panic. A panic unwinds to the process boundary and
+/// exits 101, which is not one of the SPEC section 2 codes a supervisor knows
+/// how to read, and it takes down a miner over a condition that is usually
+/// transient (exhausted descriptors, a seccomp filter, an unseeded early-boot
+/// pool). Rejecting the one job instead keeps the miner up and tells the
+/// coordinator to place the work elsewhere.
+fn os_seed() -> Option<u64> {
     let mut bytes = [0u8; 8];
-    #[expect(
-        clippy::expect_used,
-        reason = "OS CSPRNG failure is unrecoverable at process level; seed is required"
-    )]
-    {
-        getrandom::getrandom(&mut bytes).expect("os rng");
+    match getrandom::getrandom(&mut bytes) {
+        Ok(()) => Some(u64::from_le_bytes(bytes)),
+        Err(e) => {
+            tracing::error!("OS CSPRNG unavailable, rejecting job: {e}");
+            None
+        }
     }
-    u64::from_le_bytes(bytes)
 }
 
 pub(crate) fn miner(msg: miner_msg::Msg) -> MinerMsg {
@@ -179,6 +231,12 @@ fn resolve_edges(
             if *h != cache.hash {
                 return Err(RejectReason::TopologyMismatch);
             }
+            // Hash checked first: it is the more precise answer, and a cache
+            // that failed validation still carries the hash verbatim. Only once
+            // the job really names *this* topology does its validity matter.
+            if let Some(reason) = cache.invalid {
+                return Err(reason);
+            }
             let mut out = Vec::with_capacity(cache.edges.len());
             for &(u, v) in &cache.edges {
                 let pu = *cache.pos.get(&u).ok_or(RejectReason::Malformed)?;
@@ -191,6 +249,43 @@ fn resolve_edges(
     }
 }
 
+/// The shape invariant every Ising problem must satisfy, whichever entry point
+/// it arrived by: exactly one coupling per edge, and every edge endpoint inside
+/// `h`.
+///
+/// This is a memory-safety boundary, not a tidiness check. `CSampler::sample`
+/// (quip-solver-c) hands the C callback `num_edges = j.len()` alongside an
+/// `edges` array built from `edges.len()` pairs, so a problem where those two
+/// disagree makes the callback read `2 * j.len()` u32 out of an array that is
+/// shorter — reproduced under `ASan` as a SEGV driven by a coordinator message.
+/// The `!edges.is_empty() &&` short-circuit this replaces let the worst case
+/// straight through: an `IsingProblem` with no graph oneof at all resolves to
+/// zero edges, so a nonempty `j` was paired with `edges.as_ptr()` on an *empty*
+/// `Vec`, i.e. a dangling pointer.
+///
+/// Both callers reject on any error; the message exists so driver mode can tell
+/// its caller which of the two invariants failed.
+pub(crate) fn validate_shape(
+    h_len: usize,
+    j_len: usize,
+    edges: &[(usize, usize)],
+) -> Result<(), String> {
+    if j_len != edges.len() {
+        return Err(format!(
+            "j has {j_len} couplings but the graph has {} edges",
+            edges.len()
+        ));
+    }
+    for &(u, v) in edges {
+        if u >= h_len || v >= h_len {
+            return Err(format!(
+                "edge ({u}, {v}) references a node outside h (h has {h_len} entries)"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Validate wire fields and build the base Ising graph, or a reject reason.
 fn parse_ising(
     ising: &IsingProblem,
@@ -201,35 +296,78 @@ fn parse_ising(
     let h = decode_milli_f64(&ising.h_milli_le32).map_err(|_| RejectReason::Malformed)?;
     let j = decode_milli_f64(&ising.j_milli_le32).map_err(|_| RejectReason::Malformed)?;
     let edges = resolve_edges(ising, cache)?;
-    if !edges.is_empty() && j.len() != edges.len() {
+    let n = h.len();
+
+    // A topology-hash job names the cached graph, so its biases must cover
+    // exactly that graph's nodes. The endpoint bounds in `validate_shape` only
+    // catch an `h` that is too *short*; an over-long `h` would otherwise sample
+    // a graph padded with phantom, unconnected variables and report an energy
+    // for it. `cache` is always Some here — resolve_edges returned
+    // TopologyMissing otherwise.
+    let is_hash_job = matches!(&ising.graph, Some(ising_problem::Graph::TopologyHash(_)));
+    if is_hash_job && cache.is_some_and(|c| n != c.num_nodes()) {
         return Err(RejectReason::Malformed);
     }
-    let n = h.len();
-    if n > max_nodes as usize || edges.len() > max_edges as usize {
+
+    // Shape before size: a malformed problem is malformed at any size, and
+    // answering TooLarge would invite the coordinator to retry it on a bigger
+    // miner, where it fails exactly the same way.
+    validate_shape(n, j.len(), &edges).map_err(|_| RejectReason::Malformed)?;
+
+    // `0` means "no limit" in the advertised caps (see BackendCaps in
+    // quip_protocol::session; the coordinator's router reads it the same way).
+    // A zero-initialized C identity therefore advertises "unlimited", and must
+    // not then reject every job it is sent as TooLarge.
+    let over_nodes = max_nodes != 0 && n > max_nodes as usize;
+    let over_edges = max_edges != 0 && edges.len() > max_edges as usize;
+    if over_nodes || over_edges {
         return Err(RejectReason::TooLarge);
     }
-    for &(u, v) in &edges {
-        if u >= n || v >= n {
-            return Err(RejectReason::Malformed);
-        }
-    }
+
     Ok(IsingGraph::new(h, j, edges))
 }
 
-/// Best-effort parse of `num_sweeps = N` from `Configure.backend_toml`.
+/// Read the session loop's `num_sweeps` out of `Configure.backend_toml`.
+///
+/// The hand-rolled line scan this replaces was wrong in both directions. It
+/// accepted `num_sweeps_extra = 512` (a prefix match, not a key match) and any
+/// `num_sweeps` nested under a backend's own `[table]`, and it silently
+/// rejected quoted values, underscore separators, and any `#` inside a quoted
+/// string. Every rejection fell through to [`DEFAULT_NUM_SWEEPS`] without a
+/// word, so a coordinator that asked for 512 sweeps and got 64 had no way to
+/// find out — a wrong-answer bug that looks exactly like a slow miner.
+///
+/// The `toml` crate is already compiled in this workspace (cbindgen builds the
+/// quip-solver-c header with it), so the 0.9 line adds no new crate to the
+/// dependency tree — only a direct edge to one already in it.
 pub(crate) fn num_sweeps_from_toml(backend_toml: &str) -> usize {
-    for line in backend_toml.lines() {
-        let line = line.split('#').next().unwrap_or(line).trim();
-        if let Some(rest) = line.strip_prefix("num_sweeps") {
-            let rest = rest.trim().trim_start_matches('=').trim();
-            if let Ok(n) = rest.parse::<usize>() {
-                if n > 0 {
-                    return n;
-                }
-            }
+    let table: toml::Table = match backend_toml.parse() {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!(
+                "config: backend_toml does not parse as TOML ({e}); \
+                 using num_sweeps = {DEFAULT_NUM_SWEEPS}"
+            );
+            return DEFAULT_NUM_SWEEPS;
+        }
+    };
+    // Only a top-level key configures the session loop. A `num_sweeps` under
+    // `[some_backend]` belongs to that backend's own schema.
+    let Some(value) = table.get("num_sweeps") else {
+        return DEFAULT_NUM_SWEEPS;
+    };
+    match value.as_integer().and_then(|n| usize::try_from(n).ok()) {
+        Some(n) if n > 0 => n,
+        // Present but unusable: wrong type, zero, or negative. Warn rather than
+        // quietly substituting the default (see above).
+        _ => {
+            tracing::warn!(
+                "config: num_sweeps = {value} is not a positive integer; \
+                 using {DEFAULT_NUM_SWEEPS}"
+            );
+            DEFAULT_NUM_SWEEPS
         }
     }
-    DEFAULT_NUM_SWEEPS
 }
 
 /// A validated job ready to sample, or an immediate reject reply.
@@ -263,8 +401,22 @@ pub(crate) fn prepare_job<S: Sampler>(
         return Prepared::Reject(reject(job_id, RejectReason::UnsupportedKind));
     }
     // deadline_ms == 0 means "no deadline" (only mempool/chain jobs carry one).
-    if job.deadline_ms != 0 && job.deadline_ms < now_unix_ms() {
-        return Prepared::Reject(reject(job_id, RejectReason::Expired));
+    if job.deadline_ms != 0 {
+        // Fail closed on an unusable clock: it cannot say the job is still
+        // live, and sampling work that has already expired spends device time
+        // on results the coordinator discards.
+        let expired = now_unix_ms().map_or_else(
+            || {
+                tracing::error!(
+                    "system clock is before the Unix epoch; rejecting deadlined jobs as Expired"
+                );
+                true
+            },
+            |now| job.deadline_ms < now,
+        );
+        if expired {
+            return Prepared::Reject(reject(job_id, RejectReason::Expired));
+        }
     }
     let Some(ising) = job.ising else {
         return Prepared::Reject(reject(job_id, RejectReason::Malformed));
@@ -311,10 +463,17 @@ pub(crate) fn prepare_job<S: Sampler>(
         return Prepared::Reject(reject(job_id, RejectReason::TooLarge));
     }
 
+    // Overloaded, not Malformed: the job is fine, this miner just cannot serve
+    // it right now. That is the reason code that asks the coordinator to retry
+    // the work somewhere else.
+    let Some(seed) = os_seed() else {
+        return Prepared::Reject(reject(job_id, RejectReason::Overloaded));
+    };
+
     let params = SampleParams {
         num_reads: num_reads as usize,
         num_sweeps: num_sweeps as usize,
-        seed: os_seed(),
+        seed,
         sweeps_per_beta: sweeps_per_beta.unwrap_or(1),
         ..Default::default()
     };
@@ -461,7 +620,7 @@ mod tests {
             job_id: vec![job_id],
             kind: JobKind::IsingSample as i32,
             generation: 0,
-            deadline_ms: now_unix_ms() + 60_000,
+            deadline_ms: now_unix_ms().map_or(u64::MAX, |now| now + 60_000),
             ising: Some(IsingProblem {
                 graph: Some(Graph::Edges(EdgeList {
                     u: vec![0],
@@ -593,6 +752,271 @@ mod tests {
         let ising = hash_job(vec![7; 32], &[1000, 1000], &[1000]);
         let err = parse_ising(&ising, 100_000, 1_000_000, Some(&cache)).unwrap_err();
         assert_eq!(err, RejectReason::Malformed);
+    }
+
+    /// Build an inline-edge problem straight from parts, bypassing the helpers
+    /// so a test can state a deliberately inconsistent shape.
+    fn inline_job(h_milli: &[i32], j_milli: &[i32], u: Vec<u32>, v: Vec<u32>) -> IsingProblem {
+        IsingProblem {
+            graph: Some(Graph::Edges(EdgeList { u, v })),
+            h_milli_le32: encode_i32_le(h_milli),
+            j_milli_le32: encode_i32_le(j_milli),
+            num_reads: 0,
+            num_sweeps: 0,
+            anneal_time_us: 0,
+        }
+    }
+
+    /// The headline bug (quip-solver-core-3eb). An `IsingProblem` carrying no
+    /// graph oneof resolves to zero edges, and the old
+    /// `!edges.is_empty() && j.len() != edges.len()` guard skipped the length
+    /// check entirely for it. `CSampler::sample` then passed the callback
+    /// `num_edges = 3` against an `edges` array built from an empty `Vec`,
+    /// which is a dangling pointer — an out-of-bounds read reached from a
+    /// coordinator message.
+    #[test]
+    fn a_problem_with_no_graph_but_couplings_is_malformed() {
+        let ising = IsingProblem {
+            graph: None,
+            h_milli_le32: encode_i32_le(&[1000, 1000, 1000]),
+            j_milli_le32: encode_i32_le(&[1000, -1000, 1000]),
+            num_reads: 0,
+            num_sweeps: 0,
+            anneal_time_us: 0,
+        };
+        assert_eq!(
+            parse_ising(&ising, 100_000, 1_000_000, None).unwrap_err(),
+            RejectReason::Malformed,
+            "3 couplings against 0 edges must never reach a sampler"
+        );
+    }
+
+    /// The same invariant from the other side: no graph and no couplings is a
+    /// legitimate (if trivial) problem, so the fix must not reject it.
+    #[test]
+    fn a_problem_with_no_graph_and_no_couplings_is_accepted() {
+        let ising = IsingProblem {
+            graph: None,
+            h_milli_le32: encode_i32_le(&[1000, 1000]),
+            j_milli_le32: encode_i32_le(&[]),
+            num_reads: 0,
+            num_sweeps: 0,
+            anneal_time_us: 0,
+        };
+        let g = parse_ising(&ising, 100_000, 1_000_000, None).expect("an edgeless problem is fine");
+        assert_eq!(g.h.len(), 2);
+        assert!(g.edges.is_empty());
+        assert!(g.j.is_empty());
+    }
+
+    #[test]
+    fn inline_edges_with_unequal_u_and_v_are_malformed() {
+        // resolve_edges rejects the pair before it can zip-truncate.
+        let ising = inline_job(&[1000, 1000, 1000], &[1000, 1000], vec![0, 1], vec![1]);
+        assert_eq!(
+            parse_ising(&ising, 100_000, 1_000_000, None).unwrap_err(),
+            RejectReason::Malformed
+        );
+    }
+
+    #[test]
+    fn inline_edges_with_a_coupling_count_mismatch_are_malformed() {
+        // 2 edges, 1 coupling.
+        let ising = inline_job(&[1000, 1000, 1000], &[1000], vec![0, 1], vec![1, 2]);
+        assert_eq!(
+            parse_ising(&ising, 100_000, 1_000_000, None).unwrap_err(),
+            RejectReason::Malformed
+        );
+        // 1 edge, 2 couplings — the direction that used to reach the C ABI.
+        let ising = inline_job(&[1000, 1000], &[1000, 1000], vec![0], vec![1]);
+        assert_eq!(
+            parse_ising(&ising, 100_000, 1_000_000, None).unwrap_err(),
+            RejectReason::Malformed
+        );
+    }
+
+    #[test]
+    fn an_edge_endpoint_outside_h_is_malformed() {
+        let ising = inline_job(&[1000, 1000], &[1000], vec![0], vec![7]);
+        assert_eq!(
+            parse_ising(&ising, 100_000, 1_000_000, None).unwrap_err(),
+            RejectReason::Malformed
+        );
+    }
+
+    // ---- quip-solver-core-oul: cached topology validation ----
+
+    fn topology(nodes: Vec<u32>, u: Vec<u32>, v: Vec<u32>) -> Topology {
+        Topology {
+            hash: vec![7; 32],
+            nodes,
+            allowed_h_milli: vec![],
+            edges: Some(EdgeList { u, v }),
+        }
+    }
+
+    /// `zip` truncates, so an unequal u/v pair silently dropped the tail. The
+    /// inline path already rejected this; the cached path is worse, because one
+    /// bad Configure misdirects every job for the rest of the session.
+    #[test]
+    fn a_topology_with_unequal_u_and_v_rejects_every_job() {
+        let cache = TopologyCache::from_proto(&topology(vec![0, 1, 2], vec![0, 1], vec![1]));
+        let ising = hash_job(vec![7; 32], &[1000, 1000, 1000], &[1000]);
+        assert_eq!(
+            parse_ising(&ising, 100_000, 1_000_000, Some(&cache)).unwrap_err(),
+            RejectReason::Malformed
+        );
+    }
+
+    /// A repeated node id collapses two dense positions onto one, renumbering
+    /// every node after it — the miner would sample a different graph than the
+    /// coordinator scored.
+    #[test]
+    fn a_topology_with_duplicate_node_ids_rejects_every_job() {
+        let cache = TopologyCache::from_proto(&topology(vec![0, 1, 1], vec![0], vec![1]));
+        let ising = hash_job(vec![7; 32], &[1000, 1000, 1000], &[1000]);
+        assert_eq!(
+            parse_ising(&ising, 100_000, 1_000_000, Some(&cache)).unwrap_err(),
+            RejectReason::Malformed
+        );
+    }
+
+    /// A wrong hash is still reported as a mismatch even when the cache itself
+    /// is invalid: it is the more precise answer, and the hash is copied
+    /// verbatim regardless.
+    #[test]
+    fn an_invalid_cache_still_reports_a_hash_mismatch_first() {
+        let cache = TopologyCache::from_proto(&topology(vec![0, 1, 1], vec![0], vec![1]));
+        let ising = hash_job(vec![9; 32], &[1000, 1000, 1000], &[1000]);
+        assert_eq!(
+            parse_ising(&ising, 100_000, 1_000_000, Some(&cache)).unwrap_err(),
+            RejectReason::TopologyMismatch
+        );
+    }
+
+    /// A hash job names the cached graph, so `h` must cover exactly its nodes.
+    /// An over-long `h` passes every endpoint bound and still samples the wrong
+    /// problem.
+    #[test]
+    fn a_hash_job_whose_h_does_not_cover_the_topology_is_malformed() {
+        let cache = TopologyCache::from_proto(&topology(vec![0, 1, 2], vec![0, 1], vec![1, 2]));
+        for h in [
+            vec![1000, 1000],                   // too short
+            vec![1000, 1000, 1000, 1000],       // too long
+            vec![1000, 1000, 1000, 1000, 1000], // much too long
+        ] {
+            let ising = hash_job(vec![7; 32], &h, &[1000, 1000]);
+            assert_eq!(
+                parse_ising(&ising, 100_000, 1_000_000, Some(&cache)).unwrap_err(),
+                RejectReason::Malformed,
+                "h of {} against a 3-node topology must not sample",
+                h.len()
+            );
+        }
+        // The matching length still works.
+        let ising = hash_job(vec![7; 32], &[1000, 1000, 1000], &[1000, 1000]);
+        let g = parse_ising(&ising, 100_000, 1_000_000, Some(&cache)).expect("matching h");
+        assert_eq!(g.h.len(), 3);
+    }
+
+    // ---- quip-solver-core-vva: `0` means unlimited ----
+
+    #[test]
+    fn a_size_cap_admits_a_job_exactly_at_the_limit_and_rejects_one_past_it() {
+        // 3 nodes, 2 edges.
+        let ising = inline_job(&[1000, 1000, 1000], &[1000, 1000], vec![0, 1], vec![1, 2]);
+        assert!(parse_ising(&ising, 3, 2, None).is_ok(), "n == max_nodes");
+        assert_eq!(
+            parse_ising(&ising, 2, 2, None).unwrap_err(),
+            RejectReason::TooLarge,
+            "n == max_nodes + 1"
+        );
+        assert_eq!(
+            parse_ising(&ising, 3, 1, None).unwrap_err(),
+            RejectReason::TooLarge,
+            "edges == max_edges + 1"
+        );
+    }
+
+    /// `0` is "no limit" in the advertised Hello caps. Treating it as a hard
+    /// zero made a zero-initialized C identity advertise unlimited and then
+    /// reject every job it was sent.
+    #[test]
+    fn a_zero_size_cap_means_unlimited_not_a_zero_ceiling() {
+        let ising = inline_job(&[1000, 1000, 1000], &[1000, 1000], vec![0, 1], vec![1, 2]);
+        assert!(
+            parse_ising(&ising, 0, 0, None).is_ok(),
+            "max_nodes/max_edges of 0 must accept a large problem, not reject every one"
+        );
+        // Each bound is independently unlimited.
+        assert!(parse_ising(&ising, 0, 2, None).is_ok());
+        assert!(parse_ising(&ising, 3, 0, None).is_ok());
+        // A zero cap on one axis does not excuse a real cap on the other.
+        assert_eq!(
+            parse_ising(&ising, 0, 1, None).unwrap_err(),
+            RejectReason::TooLarge
+        );
+    }
+
+    // ---- quip-solver-core-0qb: num_sweeps from backend_toml ----
+
+    #[test]
+    fn num_sweeps_is_read_from_well_formed_toml() {
+        for (input, want) in [
+            ("num_sweeps = 512", 512),
+            ("num_sweeps=512", 512),
+            ("num_sweeps = 512 # trailing comment", 512),
+            // TOML digit separators, which the old line scan could not parse.
+            ("num_sweeps = 1_024", 1024),
+            ("other = 1\nnum_sweeps = 512\n", 512),
+        ] {
+            assert_eq!(num_sweeps_from_toml(input), want, "input: {input:?}");
+        }
+    }
+
+    #[test]
+    fn an_unusable_or_absent_num_sweeps_falls_back_to_the_default() {
+        for input in [
+            "num_sweeps = 0",         // zero is not a sweep budget
+            "num_sweeps = \"128\"",   // a string is not an integer
+            "num_sweeps = -5",        // negative
+            "num_sweeps = 1.5",       // not an integer
+            "",                       // nothing configured
+            "num_sweeps_extra = 512", // prefix match: the old scan took this as num_sweeps
+            "extra_num_sweeps = 512",
+            "not valid toml at all {{{", // unparseable
+        ] {
+            assert_eq!(
+                num_sweeps_from_toml(input),
+                DEFAULT_NUM_SWEEPS,
+                "input: {input:?}"
+            );
+        }
+    }
+
+    /// A `num_sweeps` under a backend's own table belongs to that backend, not
+    /// to the session loop. The old line scan matched it and applied it anyway.
+    #[test]
+    fn num_sweeps_under_another_table_does_not_configure_the_session() {
+        assert_eq!(
+            num_sweeps_from_toml("[other]\nnum_sweeps = 512"),
+            DEFAULT_NUM_SWEEPS
+        );
+        // A top-level key still wins when it precedes a table.
+        assert_eq!(
+            num_sweeps_from_toml("num_sweeps = 128\n[other]\nnum_sweeps = 512"),
+            128
+        );
+    }
+
+    /// A `#` inside a quoted string is not a comment. The old scan cut the line
+    /// there and mangled whatever followed.
+    #[test]
+    fn a_hash_inside_a_quoted_string_is_not_treated_as_a_comment() {
+        assert_eq!(
+            num_sweeps_from_toml("name = \"a # b\"\nnum_sweeps = 512"),
+            512
+        );
     }
 
     #[test]

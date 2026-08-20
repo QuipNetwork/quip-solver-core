@@ -100,18 +100,15 @@ message EdgeList {
   repeated uint32 v = 2;
 }
 
-message QualityGates {
-  int64  min_energy_milli   = 1;
-  uint32 min_diversity_milli = 2;
-  uint32 min_solutions      = 3;
-}
-
 message IsingProblem {
   oneof graph {
     bytes    topology_hash = 1;
     EdgeList edges         = 2;
   }
   bytes  h_milli_le32 = 3;
+  // Coupling coefficients, little-endian int32 milli-units. Normative
+  // invariant: len(j_milli_le32) == len(edges) after decoding (one i32 per
+  // edge, in the same order as EdgeList.u/v or the cached Topology edges).
   bytes  j_milli_le32 = 4;
   uint32 num_reads      = 5; // per-job override; 0 = unset -> SetTarget/adapt
   uint32 num_sweeps     = 7; // per-job override; 0 = unset

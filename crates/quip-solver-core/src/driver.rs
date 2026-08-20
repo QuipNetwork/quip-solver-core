@@ -11,7 +11,14 @@ use crate::Sampler;
 use serde::{Deserialize, Serialize};
 
 /// One problem, as read from stdin.
+///
+/// `deny_unknown_fields` because every field here is required and none carries a
+/// serde default: a caller who misspells one gets a missing-field error rather
+/// than a silent default, and this closes the remaining hole where a *sixth*,
+/// unrecognized key (a typo alongside the real one, or a field from a newer
+/// schema) was accepted and dropped.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProblemJson {
     /// Linear biases, one per variable.
     pub h: Vec<f64>,
@@ -72,10 +79,10 @@ impl From<SampleError> for SolveError {
 ///
 /// # Errors
 ///
-/// Returns [`SolveError::Malformed`] when `input` is not valid problem JSON,
-/// and [`SolveError::Sample`] when the sampler cannot complete the job. A
-/// caller maps each to its own exit code; only the latter is a device
-/// condition.
+/// Returns [`SolveError::Malformed`] when `input` is not valid problem JSON or
+/// does not describe a coherent problem, and [`SolveError::Sample`] when the
+/// sampler cannot complete the job. A caller maps each to its own exit code;
+/// only the latter is a device condition.
 ///
 /// # Panics
 ///
@@ -83,6 +90,37 @@ impl From<SampleError> for SolveError {
 pub fn solve<S: Sampler>(sampler: &S, input: &[u8]) -> Result<Vec<u8>, SolveError> {
     let p: ProblemJson =
         serde_json::from_slice(input).map_err(|e| SolveError::Malformed(e.to_string()))?;
+
+    // Driver mode is a second front door onto the same samplers the session
+    // loop feeds, so it owes them the same guarantees. Deserializing succeeded,
+    // which only means the JSON had the right *shape*; nothing above has
+    // checked that `j` pairs with `edges` or that an endpoint names a real
+    // node, and a sampler behind the C ABI reads out of bounds when they do not
+    // (see `job::validate_shape`).
+    crate::job::validate_shape(p.h.len(), p.j.len(), &p.edges).map_err(SolveError::Malformed)?;
+
+    // A read count of zero asks for no solutions and gets an empty array back,
+    // which is indistinguishable from a sampler that failed to find any.
+    if p.num_reads == 0 {
+        return Err(SolveError::Malformed("num_reads must be at least 1".into()));
+    }
+    // The session path applies this cap in `prepare_job`; a backend with a
+    // device-memory bound is entitled to it here too, before it allocates.
+    let max_reads = usize::try_from(sampler.max_reads()).unwrap_or(usize::MAX);
+    if p.num_reads > max_reads {
+        return Err(SolveError::Malformed(format!(
+            "num_reads {} exceeds this backend's maximum of {max_reads}",
+            p.num_reads
+        )));
+    }
+    // Mirrors the `--sweeps-per-beta` floor in `CommonArgs`: the same field,
+    // reached through the other door. Backends divide the sweep budget by it.
+    if p.sweeps_per_beta == 0 {
+        return Err(SolveError::Malformed(
+            "sweeps_per_beta must be at least 1".into(),
+        ));
+    }
+
     let graph = IsingGraph::new(p.h, p.j, p.edges);
     let params = SampleParams {
         num_reads: p.num_reads,

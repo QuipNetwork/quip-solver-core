@@ -1,70 +1,120 @@
-//! Local (non-consensus) energy and diversity scoring helpers.
+//! Energy and diversity scoring in integer-milli arithmetic.
 //!
-//! `energy_milli` accumulates in `f64` for miner-side ranking/logging only.
-//! Coordinator/chain re-score with integer-milli arithmetic.
+//! Wire coefficients travel as `i32` milli (`wire::decode_i32_le`). `energy_milli`
+//! keeps the historical `f64` signature, but recovers each coefficient's exact
+//! milli value and accumulates in integers, so it agrees with the integer-milli
+//! re-score the coordinator and chain perform (`quantum_validation`) instead of
+//! approximating it. A miner-reported `energy_milli` is still never the basis for
+//! the accept decision — the coordinator always re-scores — but the two no longer
+//! disagree on ordinary problems.
 
-/// Map a spin to ±1.0 for the local `f64` energy path (`s > 0` → `+1.0`).
-fn sign(s: i8) -> f64 {
+/// The value [`energy_milli`] returns when a coefficient it reads is not finite.
+///
+/// Deliberately distinct from `i64::MAX` / `i64::MIN`, which mean "finite but out
+/// of `i64` range", so a caller can tell a malformed problem from a saturated
+/// score. Pinned by the `sentinel` section of `conformance/golden_vectors.json`
+/// so every language binding reports the same number.
+pub const ENERGY_MILLI_NON_FINITE: i64 = 1 << 62;
+
+/// Map a spin to ±1 (`s > 0` → `+1`), matching the wire's sign convention.
+fn sign(s: i8) -> i64 {
     if s > 0 {
-        1.0
+        1
     } else {
-        -1.0
+        -1
     }
 }
 
-/// Reference `energy_milli`: `Σ h_i·s_i + Σ j_k·s_u·s_v`, scaled to milli and
-/// truncated toward zero.
+/// Recover the exact integer-milli value of a wire coefficient.
 ///
-/// This SDK path accumulates in `f64` and is a **local, non-consensus** score
-/// (miner-side ranking / logging). The coordinator and chain re-score spins with
-/// integer-milli arithmetic (`quantum_validation`), which can differ from this
-/// `f64` accumulation on pathological inputs (e.g. many small terms summing with
-/// rounding). Never trust a miner-reported `energy_milli` for the accept/submit
-/// decision — the coordinator always re-scores.
+/// Every coefficient reaching this crate was produced as `v as f64 / 1000.0` from
+/// an `i32` milli value `v`. That division rounds to nearest, so the stored `h`
+/// differs from the real `v/1000` by at most half an ulp; scaling back by 1000
+/// adds at most half an ulp more. The combined relative error stays below
+/// `2^-52`, so `|h * 1000.0 - v| < 0.5` for every `|v|` up to roughly `2e15` —
+/// a million times the `i32` range the wire can actually carry. Rounding to
+/// nearest therefore reproduces `v` exactly for every representable coefficient.
 ///
-/// Range edges are *not* Python-`int()`-identical: a non-finite accumulator
-/// (overflow to ±inf) returns the sentinel `1 << 62`, and finite values saturate
-/// on the `as i64` cast (Python's arbitrary-precision `int()` never saturates).
+/// Truncation does not. `v/1000.0` is exact only when `v` is a multiple of 125,
+/// so an ordinary 0.1 field is stored slightly low or high; ten of them summed in
+/// `f64` reach 0.999999999999999889, and truncating that yields 999 milli where
+/// the coordinator computes 1000. Recovering `v` per coefficient and summing in
+/// integers removes the error at its source rather than at the end.
+///
+/// Returns `None` for a non-finite coefficient, which [`energy_milli`] turns into
+/// [`ENERGY_MILLI_NON_FINITE`]. A coefficient that is finite but large enough
+/// that `c * 1000.0` overflows to infinity saturates on the cast instead, which
+/// preserves the documented "finite values saturate" edge.
+fn coefficient_milli(c: f64) -> Option<i64> {
+    if !c.is_finite() {
+        return None;
+    }
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "round() is exact over the i32 wire range; larger finite values saturate by design"
+    )]
+    Some((c * 1000.0).round() as i64)
+}
+
+/// Ising energy `Σ h_i·s_i + Σ j_k·s_u·s_v`, in milli.
+///
+/// Coefficients are read as exact integer milli (see `coefficient_milli`) and
+/// summed in `i128`, so the result is the same integer the coordinator computes.
+/// Entries with no matching spin, and edges naming an out-of-range node, are
+/// skipped rather than treated as zero-valued terms.
+///
+/// # Edges
+///
+/// - A non-finite coefficient that is actually read returns
+///   [`ENERGY_MILLI_NON_FINITE`]. Coefficients skipped by the bounds checks above
+///   are never inspected, so they cannot trigger the sentinel.
+/// - A finite sum outside `i64` saturates to `i64::MAX` / `i64::MIN`. Python's
+///   arbitrary-precision `int()` never saturates, so the bindings replicate this
+///   clamp deliberately.
 #[must_use]
 pub fn energy_milli(spins: &[i8], h: &[f64], j: &[f64], edges: &[(usize, usize)]) -> i64 {
-    let mut e = 0.0f64;
+    let mut acc: i128 = 0;
     for (i, &s) in spins.iter().enumerate() {
-        if i < h.len() {
-            #[expect(clippy::indexing_slicing, reason = "i < h.len() just checked")]
-            {
-                e += h[i] * sign(s);
-            }
+        // `get` keeps the length check and the read in one step: a field with no
+        // matching spin index simply contributes nothing.
+        if let Some(&coeff) = h.get(i) {
+            let Some(milli) = coefficient_milli(coeff) else {
+                return ENERGY_MILLI_NON_FINITE;
+            };
+            acc = acc.saturating_add(i128::from(milli) * i128::from(sign(s)));
         }
     }
     for (k, &(u, v)) in edges.iter().enumerate() {
-        if k < j.len() && u < spins.len() && v < spins.len() {
-            #[expect(
-                clippy::indexing_slicing,
-                reason = "k/u/v bounds checked in the if guard"
-            )]
-            {
-                e += j[k] * sign(spins[u]) * sign(spins[v]);
-            }
-        }
+        // An edge is scored only when its coupling and both endpoints exist.
+        let (Some(&coeff), Some(&su), Some(&sv)) = (j.get(k), spins.get(u), spins.get(v)) else {
+            continue;
+        };
+        let Some(milli) = coefficient_milli(coeff) else {
+            return ENERGY_MILLI_NON_FINITE;
+        };
+        acc = acc.saturating_add(i128::from(milli) * i128::from(sign(su)) * i128::from(sign(sv)));
     }
-    if !e.is_finite() {
-        return 1i64 << 62;
-    }
-    // Truncation toward zero, matches Python int(energy*1000). Saturates at
-    // i64 bounds on overflow of the cast (documented above).
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "Python-parity int(energy*1000) truncation toward zero"
-    )]
-    {
-        (e * 1000.0) as i64
-    }
+    // i128 holds any sum the i64-bounded terms can reach; clamp to the wire type.
+    i64::try_from(acc).unwrap_or(if acc.is_negative() {
+        i64::MIN
+    } else {
+        i64::MAX
+    })
 }
 
-/// Flip-invariant Hamming distance between two spin vectors (min of raw and
-/// its complement), as `u32`.
+/// Flip-invariant Hamming distance between two spin vectors, `min(d, n - d)`.
+///
+/// Returns `0` when the vectors differ in width. Mismatched widths are a caller
+/// bug with no sound answer: the previous behaviour compared only the common
+/// prefix while normalizing by `a.len()`, which reports a confidently wrong
+/// distance. This signature has no way to fail loudly, so it returns the one
+/// value that cannot inflate a diversity score, matching the zero-width guard in
+/// [`set_diversity`].
 #[must_use]
 pub fn hamming_flip_invariant(a: &[i8], b: &[i8]) -> u32 {
+    if a.len() != b.len() {
+        return 0;
+    }
     let n = a.len();
     let raw = a
         .iter()
@@ -74,7 +124,7 @@ pub fn hamming_flip_invariant(a: &[i8], b: &[i8]) -> u32 {
         .count();
     #[expect(
         clippy::cast_possible_truncation,
-        reason = "API returns u32; distance is at most min(a.len(), b.len()) / 2"
+        reason = "API returns u32; distance is at most a.len() / 2"
     )]
     {
         raw.min(n - raw) as u32
@@ -82,35 +132,39 @@ pub fn hamming_flip_invariant(a: &[i8], b: &[i8]) -> u32 {
 }
 
 /// Mean pairwise flip-invariant Hamming distance over a solution set, normalized
-/// by spin width. Returns `0.0` for fewer than two solutions or zero width.
+/// by spin width.
+///
+/// The result lies in `[0.0, 0.5]`: [`hamming_flip_invariant`] never exceeds half
+/// the width, so a normalized pair distance never exceeds 0.5 and neither does
+/// their mean.
+///
+/// Returns `0.0` for fewer than two solutions, for zero width, and for a ragged
+/// set. A set whose vectors disagree in width has no single width to normalize
+/// by; taking `solutions[0].len()` as the set width, as this previously did,
+/// silently rescales every pair against one arbitrary member and can report a
+/// value outside the range above.
 #[must_use]
 pub fn set_diversity(solutions: &[Vec<i8>]) -> f64 {
+    let Some(first) = solutions.first() else {
+        return 0.0;
+    };
     if solutions.len() < 2 {
         return 0.0;
     }
-    #[expect(
-        clippy::indexing_slicing,
-        reason = "solutions.len() >= 2 checked above"
-    )]
-    let n = solutions[0].len();
-    if n == 0 {
+    let width = first.len();
+    if width == 0 || solutions.iter().any(|s| s.len() != width) {
         return 0.0;
     }
     #[expect(
         clippy::cast_precision_loss,
-        reason = "spin width n is problem-sized; f64 mantissa holds typical N"
+        reason = "spin width is problem-sized; f64 mantissa holds typical N"
     )]
-    let n = n as f64;
+    let width = width as f64;
     let mut sum = 0.0f64;
     let mut pairs = 0u64;
-    for i in 0..solutions.len() {
-        for k in (i + 1)..solutions.len() {
-            #[expect(
-                clippy::indexing_slicing,
-                reason = "i and k range over 0..solutions.len()"
-            )]
-            let dist = hamming_flip_invariant(&solutions[i], &solutions[k]);
-            sum += f64::from(dist) / n;
+    for (i, a) in solutions.iter().enumerate() {
+        for b in solutions.iter().skip(i + 1) {
+            sum += f64::from(hamming_flip_invariant(a, b)) / width;
             pairs += 1;
         }
     }
@@ -119,6 +173,7 @@ pub fn set_diversity(solutions: &[Vec<i8>]) -> f64 {
         reason = "pair count fits exact integer f64 for practical solution-set sizes"
     )]
     {
+        // `solutions.len() >= 2` guarantees at least one pair.
         sum / pairs as f64
     }
 }
@@ -128,27 +183,124 @@ mod tests {
     use super::*;
 
     #[test]
-    fn energy_positive_sign_and_truncation() {
+    fn energy_sign_and_scaling() {
         // spins [+1,-1]; h=[1.0, -0.5]; edge (0,1) J=2.0
-        // E = (1*1) + (-0.5*-1) + (2.0 * 1 * -1) = 1 + 0.5 - 2.0 = -0.5 -> -500 milli
+        // E = (1000*1) + (-500*-1) + (2000 * 1 * -1) = 1000 + 500 - 2000 = -500 milli
         let e = energy_milli(&[1, -1], &[1.0, -0.5], &[2.0], &[(0, 1)]);
         assert_eq!(e, -500);
     }
 
     #[test]
-    fn energy_truncates_toward_zero() {
-        // E = 0.0015 -> int(1.5) -> 1 (truncation, not round to 2)
-        let e = energy_milli(&[1], &[0.0015], &[], &[]);
-        assert_eq!(e, 1);
+    fn energy_agrees_with_integer_milli_on_tenths() {
+        // The consensus bug this module was fixed for: ten 100-milli fields with
+        // +1 spins sum to 1000 in integer milli, but 0.1 is not representable in
+        // binary, so f64 accumulation reached 0.999999999999999889 and truncated
+        // to 999 — rejecting every solver on any ordinary 0.1-valued field.
+        assert_eq!(energy_milli(&[1; 10], &[0.1; 10], &[], &[]), 1000);
+        // Three 37-milli fields: the smallest case that diverged (111 vs 110).
+        assert_eq!(energy_milli(&[1; 3], &[0.037; 3], &[], &[]), 111);
+    }
+
+    #[test]
+    fn energy_matches_integer_milli_over_the_i32_wire_range() {
+        // Rounding recovers the wire value exactly across the i32 extremes, which
+        // is the precondition the coefficient_milli doc argues for.
+        for v in [i32::MIN, i32::MAX, 999, 1, -1, 123_456_789, -2_147_483_647] {
+            let coeff = f64::from(v) / 1000.0;
+            assert_eq!(
+                energy_milli(&[1], &[coeff], &[], &[]),
+                i64::from(v),
+                "coefficient {v} milli did not round-trip"
+            );
+        }
+    }
+
+    #[test]
+    fn energy_rounds_sub_milli_input_to_nearest() {
+        // 0.0015 is 1.5 milli, which no i32-milli wire value can express. Such an
+        // input is out of contract; it resolves to the nearest milli (ties away
+        // from zero) rather than truncating, because the integer recovery step
+        // rounds. This replaces the old truncate-toward-zero behaviour.
+        assert_eq!(energy_milli(&[1], &[0.0015], &[], &[]), 2);
+        assert_eq!(energy_milli(&[1], &[-0.0015], &[], &[]), -2);
+        assert_eq!(energy_milli(&[1], &[0.9999], &[], &[]), 1000);
     }
 
     #[test]
     fn energy_oob_edge_is_skipped_not_panicking() {
         // edge (0, 5) references node 5, out of range for a 2-spin problem; must
         // be skipped like a length-mismatched h/j entry, not panic.
-        // E = (1*1) + (1*-1) = 0 -> 0 milli
+        // E = (1000*1) + (1000*-1) = 0 milli
         let e = energy_milli(&[1, -1], &[1.0, 1.0], &[1.0], &[(0, 5)]);
         assert_eq!(e, 0);
+    }
+
+    #[test]
+    fn energy_skipped_non_finite_coefficient_is_never_read() {
+        // The coupling is non-finite but its edge names an out-of-range node, so
+        // it is skipped before inspection and cannot raise the sentinel.
+        let e = energy_milli(&[1, -1], &[1.0, 1.0], &[f64::NAN], &[(0, 5)]);
+        assert_eq!(e, 0);
+    }
+
+    #[test]
+    fn energy_milli_saturates_at_i64_boundary() {
+        // 1e16 -> 1e19 milli, past i64::MAX (~9.223e18) -> saturates.
+        assert_eq!(energy_milli(&[1], &[1e16], &[], &[]), i64::MAX);
+        // Finite but so large that c*1000.0 overflows to infinity; the cast
+        // saturates rather than reporting the non-finite sentinel, because the
+        // input the caller supplied was finite.
+        assert_eq!(energy_milli(&[1], &[1e308], &[], &[]), i64::MAX);
+        // Two saturating terms accumulate in i128 and clamp once at the end.
+        assert_eq!(energy_milli(&[1, 1], &[1e308, 1e308], &[], &[]), i64::MAX);
+    }
+
+    #[test]
+    fn energy_milli_saturates_at_negative_i64_boundary() {
+        // Ground states are negative-energy, so the negative overflow path is
+        // realistic; it must saturate to i64::MIN, not wrap.
+        assert_eq!(energy_milli(&[1], &[-1e16], &[], &[]), i64::MIN);
+        assert_eq!(energy_milli(&[1], &[-1e308], &[], &[]), i64::MIN);
+        assert_eq!(energy_milli(&[1, 1], &[-1e308, -1e308], &[], &[]), i64::MIN);
+    }
+
+    #[test]
+    fn energy_milli_non_finite_input_returns_sentinel() {
+        // A non-finite *input* coefficient is a malformed problem, reported with
+        // the sentinel so it is distinguishable from a saturated finite score.
+        assert_eq!(
+            energy_milli(&[1], &[f64::INFINITY], &[], &[]),
+            ENERGY_MILLI_NON_FINITE
+        );
+        assert_eq!(
+            energy_milli(&[1], &[f64::NEG_INFINITY], &[], &[]),
+            ENERGY_MILLI_NON_FINITE
+        );
+        assert_eq!(
+            energy_milli(&[1], &[f64::NAN], &[], &[]),
+            ENERGY_MILLI_NON_FINITE
+        );
+        // A non-finite coupling on an in-range edge reports it too.
+        assert_eq!(
+            energy_milli(&[1, 1], &[0.0, 0.0], &[f64::NAN], &[(0, 1)]),
+            ENERGY_MILLI_NON_FINITE
+        );
+        assert_eq!(ENERGY_MILLI_NON_FINITE, 1i64 << 62);
+    }
+
+    #[test]
+    fn hamming_equal_width_is_flip_invariant() {
+        assert_eq!(hamming_flip_invariant(&[1, 1, 1], &[-1, 1, 1]), 1);
+        // Exact inverse: raw distance 3, complement 0 -> 0.
+        assert_eq!(hamming_flip_invariant(&[1, 1, 1], &[-1, -1, -1]), 0);
+    }
+
+    #[test]
+    fn hamming_ragged_width_is_zero_not_a_prefix_distance() {
+        // The old code zipped the common prefix (distance 2) but normalized by
+        // a.len() = 4, reporting 2 for vectors it never fully compared.
+        assert_eq!(hamming_flip_invariant(&[1, 1, 1, 1], &[-1, -1]), 0);
+        assert_eq!(hamming_flip_invariant(&[-1, -1], &[1, 1, 1, 1]), 0);
     }
 
     #[test]
@@ -168,35 +320,36 @@ mod tests {
 
     #[test]
     fn diversity_zero_width_solutions_is_zero_not_nan() {
-        // Two zero-length solution vectors would divide by n=0; must return
+        // Two zero-length solution vectors would divide by width 0; must return
         // 0.0, matching the shared reference (not NaN).
         #[expect(clippy::float_cmp, reason = "exact golden equality for zero-width")]
         {
             assert_eq!(set_diversity(&[vec![], vec![]]), 0.0);
+            assert_eq!(set_diversity(&[]), 0.0);
         }
     }
 
     #[test]
-    fn energy_milli_saturates_at_i64_boundary() {
-        // e = 1e16 -> e*1000 = 1e19, overflows i64::MAX (~9.223e18) -> saturates.
-        assert_eq!(energy_milli(&[1], &[1e16], &[], &[]), i64::MAX);
-        // Far past the boundary; must saturate, not panic or produce garbage.
-        assert_eq!(energy_milli(&[1], &[1e308], &[], &[]), i64::MAX);
+    fn diversity_ragged_widths_is_zero() {
+        // The bead's case: widths 2 and 4. The old code took width 2 from
+        // solutions[0] and compared only the 2-element prefix.
+        #[expect(clippy::float_cmp, reason = "exact golden equality for ragged sets")]
+        {
+            assert_eq!(set_diversity(&[vec![1, 1], vec![1, 1, 1, 1]]), 0.0);
+            // Ragged in the other direction, and ragged past the first pair.
+            assert_eq!(set_diversity(&[vec![1, 1, 1, 1], vec![1, 1]]), 0.0);
+            assert_eq!(
+                set_diversity(&[vec![1, 1], vec![-1, 1], vec![1, 1, 1]]),
+                0.0
+            );
+        }
     }
 
     #[test]
-    fn energy_milli_saturates_at_negative_i64_boundary() {
-        // Ground states are negative-energy, so the negative overflow path is
-        // realistic; it must saturate to i64::MIN, not wrap. Mirrors the Python
-        // parity test's -1e16 case.
-        assert_eq!(energy_milli(&[1], &[-1e16], &[], &[]), i64::MIN);
-        assert_eq!(energy_milli(&[1], &[-1e308], &[], &[]), i64::MIN);
-    }
-
-    #[test]
-    fn energy_milli_non_finite_returns_sentinel() {
-        // An accumulator that overflows to +inf mid-sum returns the exact
-        // sentinel 1<<62, distinct from the i64::MAX/MIN saturation values.
-        assert_eq!(energy_milli(&[1, 1], &[1e308, 1e308], &[], &[]), 1i64 << 62);
+    fn diversity_never_exceeds_one_half() {
+        // Maximally different equal-width solutions still cap at 0.5, because the
+        // distance is flip-invariant.
+        let d = set_diversity(&[vec![1, 1, -1, -1], vec![1, -1, 1, -1], vec![1, 1, 1, -1]]);
+        assert!((0.0..=0.5).contains(&d), "diversity {d} outside [0, 0.5]");
     }
 }
