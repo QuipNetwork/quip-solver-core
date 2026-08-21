@@ -5,6 +5,35 @@ This file documents changes to the Quip solver contract.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.0.1
+
+Packaging, conformance, and release-pipeline fixes. This section consolidates
+the two release candidates below. Nothing shipped in 0.0.1 that was not in
+0.0.1-rc2.
+
+### Fixed
+
+- The sdist now carries the generated `quip` gRPC stub package, so an install
+  that falls back to the sdist works. 0.0.0 marked it wheel-only, and a
+  from-sdist install failed at first import.
+- The conformance driver expects the doubled sweep echo from a `gibbs`
+  solver, so a gibbs solver can pass `is_conformant()`.
+- The release-tag rule requires a full `v<major>.<minor>.<patch>` with an
+  optional prerelease. The old rule matched any tag that starts with `v` and
+  a digit.
+- `release:validate` waits for the lint job.
+
+### Added
+
+- PyPI wheels for macOS arm64 and Linux aarch64.
+- `CONFIGURED_SWEEPS`, `GIBBS_SWEEP_MULTIPLIER`,
+  `DriverReport::expected_meta_sweeps()`, and `SampleError::is_fatal()` are
+  public.
+- `Sampler::declared_stream_width()` accepts `0` for a device-dependent width
+  that is unknown until the device opens.
+- `release:tag-guard`, which fails the pipeline of any tag outside the
+  release pattern instead of skipping every release job on a green pipeline.
+
 ## 0.0.1-rc2
 
 Release-pipeline fixes from the v0.0.1-rc1 recon: an anchored tag rule, a
