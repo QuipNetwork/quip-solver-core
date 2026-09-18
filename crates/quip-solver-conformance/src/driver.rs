@@ -349,8 +349,8 @@ impl DriverReport {
     /// which a cold anneal of the same budget does not reach.
     ///
     /// A solver that does not advertise the feature passes: it may ignore the
-    /// field, and the seeded `job-seeded` in [`REQUIRED_RESULTS`] already proves
-    /// it still answers a seeded job.
+    /// field. The seeded `job-seeded`, which every solver must answer, already
+    /// proves it still answers a seeded job.
     #[must_use]
     pub fn warm_start_conformant(&self) -> bool {
         if !self.advertises_initial_spins() {
