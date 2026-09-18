@@ -2,7 +2,7 @@
 //! `Result`/`Reject`.
 
 use crate::adapt::adapt_params;
-use crate::ising::{IsingGraph, SampleParams};
+use crate::ising::{IsingGraph, SampleParams, WarmStart};
 use crate::session::BackendIdentity;
 use crate::Sampler;
 use crate::{StreamJob, StreamOutcome, StreamResult};
@@ -11,7 +11,7 @@ use quip_proto::v1::{
     RejectReason, Result as JobResult, SamplerMeta, Solution, Status, Topology,
 };
 use quip_protocol::session::ExitCode;
-use quip_protocol::wire::{decode_i32_le, encode_spins, WireError};
+use quip_protocol::wire::{decode_i32_le, decode_spins_packed, encode_spins, WireError};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -327,6 +327,47 @@ fn parse_ising(
     Ok(IsingGraph::new(h, j, edges))
 }
 
+/// Validate the warm-start fields (`IsingProblem` 9 to 12) against a job of
+/// `num_nodes` variables, and decode them when `decode` is set.
+///
+/// Validation runs for every solver, so one malformed job gets the same
+/// `Malformed` everywhere, whether or not the solver uses the states. Decoding
+/// runs only for a solver that does. The start-point fields mean nothing
+/// without a state, so a job with no state yields `None` whatever they hold.
+/// The states are cut to `num_reads`: a state past the last read has no read to
+/// seed.
+fn parse_warm_start(
+    ising: &IsingProblem,
+    num_nodes: usize,
+    num_reads: usize,
+    decode: bool,
+) -> Result<Option<WarmStart>, RejectReason> {
+    if ising.initial_spins.is_empty() {
+        return Ok(None);
+    }
+    // `s` is a fraction of the anneal, strictly inside (0, 1); 0 means unset.
+    if ising.reversal_s_milli >= 1000 {
+        return Err(RejectReason::Malformed);
+    }
+    let mut spins = Vec::new();
+    for packed in &ising.initial_spins {
+        let state = decode_spins_packed(packed, num_nodes).map_err(|_| RejectReason::Malformed)?;
+        if decode && spins.len() < num_reads {
+            spins.push(state);
+        }
+    }
+    if !decode {
+        return Ok(None);
+    }
+    let milli = |v: u32| (v != 0).then(|| f64::from(v) / 1000.0);
+    Ok(Some(WarmStart {
+        spins,
+        start_beta: milli(ising.start_beta_milli),
+        reversal_s: milli(ising.reversal_s_milli),
+        reversal_pause_us: (ising.reversal_pause_us != 0).then_some(ising.reversal_pause_us),
+    }))
+}
+
 /// Read the session loop's `num_sweeps` out of `Configure.backend_toml`.
 ///
 /// The hand-rolled line scan this replaces was wrong in both directions. It
@@ -378,6 +419,9 @@ pub(crate) enum Prepared {
     /// values, carried so [`finalize_result`] can build `SamplerMeta`.
     Sample {
         job: StreamJob,
+        /// Decoded start states, `Some` only for a seeded job sent to a
+        /// sampler whose `accepts_warm_start` is true.
+        warm_start: Option<WarmStart>,
         num_reads: u32,
         num_sweeps: u32,
     },
@@ -459,6 +503,17 @@ pub(crate) fn prepare_job<S: Sampler>(
         num_sweeps
     };
 
+    // Shape before size, as in parse_ising.
+    let warm_start = match parse_warm_start(
+        &ising,
+        graph.num_nodes(),
+        num_reads as usize,
+        S::accepts_warm_start(),
+    ) {
+        Ok(w) => w,
+        Err(reason) => return Prepared::Reject(reject(job_id, reason)),
+    };
+
     if num_reads > sampler.max_reads() {
         return Prepared::Reject(reject(job_id, RejectReason::TooLarge));
     }
@@ -487,6 +542,7 @@ pub(crate) fn prepare_job<S: Sampler>(
             // CancelToken.
             watermark: (job.generation != 0).then_some(job.generation),
         },
+        warm_start,
         num_reads,
         num_sweeps,
     }
@@ -631,6 +687,7 @@ mod tests {
                 num_reads: 0,
                 num_sweeps: 0,
                 anneal_time_us: 0,
+                ..Default::default()
             }),
             provenance: None,
         }
@@ -644,6 +701,7 @@ mod tests {
             num_reads: 0,
             num_sweeps: 0,
             anneal_time_us: 0,
+            ..Default::default()
         }
     }
 
@@ -764,6 +822,7 @@ mod tests {
             num_reads: 0,
             num_sweeps: 0,
             anneal_time_us: 0,
+            ..Default::default()
         }
     }
 
@@ -783,6 +842,7 @@ mod tests {
             num_reads: 0,
             num_sweeps: 0,
             anneal_time_us: 0,
+            ..Default::default()
         };
         assert_eq!(
             parse_ising(&ising, 100_000, 1_000_000, None).unwrap_err(),
@@ -802,6 +862,7 @@ mod tests {
             num_reads: 0,
             num_sweeps: 0,
             anneal_time_us: 0,
+            ..Default::default()
         };
         let g = parse_ising(&ising, 100_000, 1_000_000, None).expect("an edgeless problem is fine");
         assert_eq!(g.h.len(), 2);
@@ -1078,6 +1139,7 @@ mod tests {
             job,
             num_reads,
             num_sweeps,
+            ..
         } = prepare_job(edges_job(1), &sampler, &gibbs_id, 64, None, None, None)
         else {
             panic!("expected Sample");
@@ -1218,6 +1280,110 @@ mod tests {
         assert_eq!(
             status.abandoned_generation, 0,
             "a zero watermark must stay zero"
+        );
+    }
+
+    /// A sampler that opts in to warm starts. `sample` is never reached here;
+    /// these tests stop at `prepare_job`.
+    struct WarmSampler;
+
+    impl Sampler for WarmSampler {
+        fn sample(
+            &self,
+            _graph: &IsingGraph,
+            _params: &SampleParams,
+        ) -> Result<Vec<SamplerResult>, crate::SampleError> {
+            Ok(vec![])
+        }
+
+        fn accepts_warm_start() -> bool {
+            true
+        }
+    }
+
+    /// `edges_job` (2 nodes) carrying the given packed states and start point,
+    /// with `num_reads` pinned.
+    fn seeded_job(states: Vec<Vec<u8>>, num_reads: u32, start: (u32, u32, u32)) -> Job {
+        let mut job = edges_job(1);
+        if let Some(ising) = job.ising.as_mut() {
+            ising.initial_spins = states;
+            ising.num_reads = num_reads;
+            ising.start_beta_milli = start.0;
+            ising.reversal_s_milli = start.1;
+            ising.reversal_pause_us = start.2;
+        }
+        job
+    }
+
+    fn prepared_warm_start<S: Sampler>(job: Job, sampler: &S) -> Result<Option<WarmStart>, i32> {
+        match prepare_job(job, sampler, &identity("sa"), 64, None, None, None) {
+            Prepared::Sample { warm_start, .. } => Ok(warm_start),
+            Prepared::Reject(MinerMsg {
+                msg: Some(miner_msg::Msg::Reject(r)),
+            }) => Err(r.reason),
+            // A reject with no Reject payload; no reason code can match -1.
+            Prepared::Reject(_) => Err(-1),
+        }
+    }
+
+    #[test]
+    fn a_warm_sampler_gets_decoded_states_cut_to_num_reads() {
+        // Node 0 is bit 0: 0b01 = [+1, -1], 0b10 = [-1, +1], 0b11 = [+1, +1].
+        let job = seeded_job(vec![vec![0b01], vec![0b10], vec![0b11]], 2, (2500, 400, 7));
+        let warm = prepared_warm_start(job, &WarmSampler)
+            .expect("a valid seeded job samples")
+            .expect("a warm sampler receives the states");
+        assert_eq!(warm.spins, vec![vec![1, -1], vec![-1, 1]]);
+        assert_eq!(warm.start_beta, Some(2.5));
+        assert_eq!(warm.reversal_s, Some(0.4));
+        assert_eq!(warm.reversal_pause_us, Some(7));
+    }
+
+    #[test]
+    fn unset_start_point_fields_decode_to_none() {
+        let warm = prepared_warm_start(seeded_job(vec![vec![0b01]], 1, (0, 0, 0)), &WarmSampler)
+            .expect("samples")
+            .expect("seeded");
+        assert_eq!(
+            (warm.start_beta, warm.reversal_s, warm.reversal_pause_us),
+            (None, None, None)
+        );
+    }
+
+    #[test]
+    fn a_plain_sampler_never_receives_the_states() {
+        let job = seeded_job(vec![vec![0b01]], 1, (2500, 0, 0));
+        assert_eq!(prepared_warm_start(job, &StubSampler), Ok(None));
+    }
+
+    #[test]
+    fn a_start_point_without_a_state_is_a_cold_job() {
+        let job = seeded_job(vec![], 1, (2500, 400, 7));
+        assert_eq!(prepared_warm_start(job, &WarmSampler), Ok(None));
+    }
+
+    /// Validation is the same for every solver on this version, so one
+    /// malformed job gets one answer whether or not the solver uses the states.
+    #[test]
+    fn a_malformed_state_is_rejected_by_every_sampler() {
+        let malformed = RejectReason::Malformed as i32;
+        for states in [
+            vec![vec![0b01, 0x00]],        // 2 bytes for 2 nodes
+            vec![vec![]],                  // empty entry
+            vec![vec![0b01], vec![0b100]], // padding bit set in the second state
+        ] {
+            let job = || seeded_job(states.clone(), 1, (0, 0, 0));
+            assert_eq!(prepared_warm_start(job(), &WarmSampler), Err(malformed));
+            assert_eq!(prepared_warm_start(job(), &StubSampler), Err(malformed));
+        }
+    }
+
+    #[test]
+    fn a_reversal_point_outside_the_anneal_is_malformed() {
+        let job = seeded_job(vec![vec![0b01]], 1, (0, 1000, 0));
+        assert_eq!(
+            prepared_warm_start(job, &WarmSampler),
+            Err(RejectReason::Malformed as i32)
         );
     }
 }

@@ -10,7 +10,9 @@ use crate::job::{
     finalize_result, miner, num_sweeps_from_toml, prepare_job, status_msg, Prepared, SessionTarget,
     TopologyCache, DEFAULT_NUM_SWEEPS,
 };
-use crate::{CancelToken, Sampler, StreamJob, StreamOutcome, StreamResult};
+use crate::{
+    CancelToken, Sampler, StreamJob, StreamOutcome, StreamResult, WarmStart, WarmStreamJob,
+};
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
 use quip_proto::v1::miner_service_client::MinerServiceClient;
@@ -166,7 +168,55 @@ struct CapabilitiesJson<'a> {
 /// here while the session reported the live width, so a multi-lane backend gave
 /// two different numbers for one message.
 fn advertised_capabilities<S: Sampler>(id: &BackendIdentity) -> Capabilities {
-    capabilities(id, S::declared_stream_width())
+    let mut caps = capabilities(id, S::declared_stream_width());
+    caps.features = advertised_features::<S>(id)
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    caps
+}
+
+/// Feature string for a solver that uses `IsingProblem.initial_spins`.
+pub const INITIAL_SPINS_FEATURE: &str = "initial-spins";
+
+/// The features `Hello` and `Capabilities` carry: the identity's own list, plus
+/// [`INITIAL_SPINS_FEATURE`] when [`Sampler::accepts_warm_start`] is true.
+/// Deriving it from the trait keeps the advertisement and the behaviour from
+/// drifting apart.
+fn advertised_features<S: Sampler>(id: &BackendIdentity) -> Vec<&'static str> {
+    let mut features = id.features.to_vec();
+    if S::accepts_warm_start() && !features.contains(&INITIAL_SPINS_FEATURE) {
+        features.push(INITIAL_SPINS_FEATURE);
+    }
+    features
+}
+
+/// The receiving half matching [`JobSender`], moved into the sampler thread.
+enum JobReceiver {
+    Plain(mpsc::Receiver<StreamJob>),
+    Warm(mpsc::Receiver<WarmStreamJob>),
+}
+
+/// The sending half of the channel into the sampler thread. Which one depends
+/// on [`Sampler::accepts_warm_start`], fixed for the session.
+enum JobSender {
+    /// Feeds [`Sampler::sample_stream`]; warm starts are dropped.
+    Plain(mpsc::Sender<StreamJob>),
+    /// Feeds [`Sampler::sample_stream_warm`].
+    Warm(mpsc::Sender<WarmStreamJob>),
+}
+
+impl JobSender {
+    /// Send one job. `Err` means the sampler thread is gone.
+    async fn send(&self, job: StreamJob, warm_start: Option<WarmStart>) -> Result<(), ()> {
+        match self {
+            Self::Plain(tx) => tx.send(job).await.map_err(|_| ()),
+            Self::Warm(tx) => tx
+                .send(WarmStreamJob { job, warm_start })
+                .await
+                .map_err(|_| ()),
+        }
+    }
 }
 
 /// The `Capabilities` the in-session reply carries.
@@ -633,7 +683,7 @@ async fn run_session<S: Sampler>(
         id.backend,
         id.algorithm,
         &[JobKind::IsingSample],
-        id.features,
+        &advertised_features::<S>(id),
         BackendCaps {
             max_nodes: id.max_nodes,
             max_edges: id.max_edges,
@@ -698,7 +748,13 @@ async fn run_session<S: Sampler>(
     // stalls every cycle waiting for the next job to arrive over the wire.
     let prefetch = width.saturating_mul(2);
     let cap = prefetch.max(8);
-    let (job_tx, job_rx) = mpsc::channel::<StreamJob>(cap);
+    let (job_tx, job_rx) = if S::accepts_warm_start() {
+        let (tx, rx) = mpsc::channel::<WarmStreamJob>(cap);
+        (JobSender::Warm(tx), JobReceiver::Warm(rx))
+    } else {
+        let (tx, rx) = mpsc::channel::<StreamJob>(cap);
+        (JobSender::Plain(tx), JobReceiver::Plain(rx))
+    };
     let (res_tx, res_rx) = mpsc::channel::<StreamResult>(cap);
     // Control-plane cancellation watermark: bumped here on `Cancel`, read by the
     // sampler thread to skip/abort jobs from generations the coordinator
@@ -714,7 +770,10 @@ async fn run_session<S: Sampler>(
         // 15 bytes, which is what Linux stores in `/proc/<pid>/task/*/comm`.
         std::thread::Builder::new()
             .name("quip-sampler".to_owned())
-            .spawn(move || s.sample_stream(job_rx, res_tx, cancel))?
+            .spawn(move || match job_rx {
+                JobReceiver::Plain(rx) => s.sample_stream(rx, res_tx, cancel),
+                JobReceiver::Warm(rx) => s.sample_stream_warm(rx, res_tx, cancel),
+            })?
     };
 
     let mut grace_ms: u64 = 5000;
@@ -944,6 +1003,7 @@ async fn run_session<S: Sampler>(
                         }
                         Prepared::Sample {
                             job,
+                            warm_start,
                             num_reads,
                             num_sweeps: ns,
                         } => {
@@ -989,7 +1049,7 @@ async fn run_session<S: Sampler>(
                                     },
                                 );
                             }
-                            if job_tx.send(job).await.is_err() {
+                            if job_tx.send(job, warm_start).await.is_err() {
                                 break;
                             }
                         }
@@ -1787,6 +1847,54 @@ mod tests {
         assert_eq!(v.get("streamWidth"), Some(&serde_json::json!(8)));
         // And the features the identity declares travel with it.
         assert_eq!(reply.features, vec!["streaming"]);
+    }
+
+    /// `initial-spins` is derived from `accepts_warm_start`, once, so the
+    /// advertisement cannot drift from the behaviour.
+    #[test]
+    fn a_warm_sampler_advertises_initial_spins_once() {
+        struct Warm;
+        impl Sampler for Warm {
+            fn sample(
+                &self,
+                _graph: &crate::IsingGraph,
+                _params: &crate::ising::SampleParams,
+            ) -> Result<Vec<crate::SamplerResult>, crate::SampleError> {
+                Ok(vec![])
+            }
+            fn accepts_warm_start() -> bool {
+                true
+            }
+        }
+        struct Cold;
+        impl Sampler for Cold {
+            fn sample(
+                &self,
+                _graph: &crate::IsingGraph,
+                _params: &crate::ising::SampleParams,
+            ) -> Result<Vec<crate::SamplerResult>, crate::SampleError> {
+                Ok(vec![])
+            }
+        }
+
+        let id = test_identity();
+        assert_eq!(
+            advertised_capabilities::<Warm>(&id).features,
+            vec!["streaming", INITIAL_SPINS_FEATURE]
+        );
+        assert_eq!(
+            advertised_capabilities::<Cold>(&id).features,
+            vec!["streaming"]
+        );
+        // An identity that already lists the feature does not get it twice.
+        let listed = BackendIdentity {
+            features: &[INITIAL_SPINS_FEATURE],
+            ..test_identity()
+        };
+        assert_eq!(
+            advertised_features::<Warm>(&listed),
+            vec![INITIAL_SPINS_FEATURE]
+        );
     }
 
     /// A backend whose width depends on the opened device declares 0. The

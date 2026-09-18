@@ -240,6 +240,31 @@ export interface IsingProblem {
   numSweeps: number;
   /** per-job override; 0 = unset */
   annealTimeUs: number;
+  /**
+   * Optional warm-start states, one entry per seeded read, best state first.
+   * Each entry is bit-packed in topology node order: node i is bit (i % 8) of
+   * byte (i / 8), LSB first; bit 1 = spin +1, bit 0 = spin -1. An entry is
+   * exactly ceil(num_nodes / 8) bytes and its padding bits are 0. Empty =
+   * unset: the solver picks its own start. A solver that does not advertise
+   * the `initial-spins` feature ignores this field and fields 10 to 12.
+   */
+  initialSpins: Uint8Array[];
+  /**
+   * Seeded SA: inverse temperature the anneal starts from, milli-units.
+   * 0 = the solver picks. Ignored when initial_spins is empty.
+   */
+  startBetaMilli: number;
+  /**
+   * Seeded QPU: anneal fraction s the reverse anneal backs off to, in
+   * milli-units (1..999). 0 = the solver picks. Ignored when initial_spins is
+   * empty.
+   */
+  reversalSMilli: number;
+  /**
+   * Seeded QPU: pause at the reversal point, microseconds. 0 = the solver
+   * picks. Ignored when initial_spins is empty.
+   */
+  reversalPauseUs: number;
 }
 
 export interface Provenance {
@@ -1691,6 +1716,10 @@ function createBaseIsingProblem(): IsingProblem {
     numReads: 0,
     numSweeps: 0,
     annealTimeUs: 0,
+    initialSpins: [],
+    startBetaMilli: 0,
+    reversalSMilli: 0,
+    reversalPauseUs: 0,
   };
 }
 
@@ -1716,6 +1745,18 @@ export const IsingProblem: MessageFns<IsingProblem> = {
     }
     if (message.annealTimeUs !== 0) {
       writer.uint32(64).uint32(message.annealTimeUs);
+    }
+    for (const v of message.initialSpins) {
+      writer.uint32(74).bytes(v!);
+    }
+    if (message.startBetaMilli !== 0) {
+      writer.uint32(80).uint32(message.startBetaMilli);
+    }
+    if (message.reversalSMilli !== 0) {
+      writer.uint32(88).uint32(message.reversalSMilli);
+    }
+    if (message.reversalPauseUs !== 0) {
+      writer.uint32(96).uint32(message.reversalPauseUs);
     }
     return writer;
   },
@@ -1783,6 +1824,38 @@ export const IsingProblem: MessageFns<IsingProblem> = {
           message.annealTimeUs = reader.uint32();
           continue;
         }
+        case 9: {
+          if (tag !== 74) {
+            break;
+          }
+
+          message.initialSpins.push(reader.bytes());
+          continue;
+        }
+        case 10: {
+          if (tag !== 80) {
+            break;
+          }
+
+          message.startBetaMilli = reader.uint32();
+          continue;
+        }
+        case 11: {
+          if (tag !== 88) {
+            break;
+          }
+
+          message.reversalSMilli = reader.uint32();
+          continue;
+        }
+        case 12: {
+          if (tag !== 96) {
+            break;
+          }
+
+          message.reversalPauseUs = reader.uint32();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -1825,6 +1898,26 @@ export const IsingProblem: MessageFns<IsingProblem> = {
         : isSet(object.anneal_time_us)
         ? globalThis.Number(object.anneal_time_us)
         : 0,
+      initialSpins: globalThis.Array.isArray(object?.initialSpins)
+        ? object.initialSpins.map((e: any) => bytesFromBase64(e))
+        : globalThis.Array.isArray(object?.initial_spins)
+        ? object.initial_spins.map((e: any) => bytesFromBase64(e))
+        : [],
+      startBetaMilli: isSet(object.startBetaMilli)
+        ? globalThis.Number(object.startBetaMilli)
+        : isSet(object.start_beta_milli)
+        ? globalThis.Number(object.start_beta_milli)
+        : 0,
+      reversalSMilli: isSet(object.reversalSMilli)
+        ? globalThis.Number(object.reversalSMilli)
+        : isSet(object.reversal_s_milli)
+        ? globalThis.Number(object.reversal_s_milli)
+        : 0,
+      reversalPauseUs: isSet(object.reversalPauseUs)
+        ? globalThis.Number(object.reversalPauseUs)
+        : isSet(object.reversal_pause_us)
+        ? globalThis.Number(object.reversal_pause_us)
+        : 0,
     };
   },
 
@@ -1851,6 +1944,18 @@ export const IsingProblem: MessageFns<IsingProblem> = {
     if (message.annealTimeUs !== 0) {
       obj.annealTimeUs = Math.round(message.annealTimeUs);
     }
+    if (message.initialSpins?.length) {
+      obj.initialSpins = message.initialSpins.map((e) => base64FromBytes(e));
+    }
+    if (message.startBetaMilli !== 0) {
+      obj.startBetaMilli = Math.round(message.startBetaMilli);
+    }
+    if (message.reversalSMilli !== 0) {
+      obj.reversalSMilli = Math.round(message.reversalSMilli);
+    }
+    if (message.reversalPauseUs !== 0) {
+      obj.reversalPauseUs = Math.round(message.reversalPauseUs);
+    }
     return obj;
   },
 
@@ -1868,6 +1973,10 @@ export const IsingProblem: MessageFns<IsingProblem> = {
     message.numReads = object.numReads ?? 0;
     message.numSweeps = object.numSweeps ?? 0;
     message.annealTimeUs = object.annealTimeUs ?? 0;
+    message.initialSpins = object.initialSpins?.map((e) => e) || [];
+    message.startBetaMilli = object.startBetaMilli ?? 0;
+    message.reversalSMilli = object.reversalSMilli ?? 0;
+    message.reversalPauseUs = object.reversalPauseUs ?? 0;
     return message;
   },
 };

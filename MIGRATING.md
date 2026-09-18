@@ -1,3 +1,19 @@
+# Migrating to quip-solver-core 0.0.2-rc1
+
+A solver built against 0.0.1 compiles and runs unchanged. The new `Sampler`
+methods have defaults, and `SampleParams`, `StreamJob`, and `IsingGraph` do
+not change. Two changes can stop a build:
+
+- A struct literal of the generated `IsingProblem` must name the four new
+  fields, or end with `..Default::default()`.
+- An exhaustive `match` on `quip_protocol::wire::WireError` must handle
+  `BadPackedLength` and `NonZeroPadding`.
+
+To use warm starts, return `true` from `accepts_warm_start` and override
+`sample_warm`. A solver that keeps more than one model in flight
+overrides `sample_stream_warm` instead. The session then advertises `initial-spins`.
+Do not add the feature to `BackendIdentity.features` by hand.
+
 # Migrating to quip-solver-core 0.0.1
 
 This note is for maintainers of `quip-miner-cpu` and `quip-miner-cuda`, and

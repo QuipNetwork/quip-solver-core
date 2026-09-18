@@ -47,6 +47,33 @@ fn unique_socket(tag: &str) -> String {
     format!("/tmp/quip-core-{tag}-{}-{nanos}.sock", std::process::id())
 }
 
+/// A solver that uses warm starts is graded on them and passes.
+#[tokio::test]
+async fn warm_sampler_passes_the_initial_spins_grade() {
+    let bin = example_bin("mock_sampler_warm");
+    let socket = unique_socket("warm");
+    let report = drive_miner(&bin, &format!("unix://{socket}")).await;
+    assert!(report.advertises_initial_spins(), "{report:?}");
+    assert!(report.warm_start_conformant(), "{}", report.summary());
+    assert!(report.is_conformant(), "{}", report.summary());
+}
+
+/// A solver that advertises `initial-spins` but samples cold fails the grade:
+/// it never reaches the proof ring's planted ground state.
+#[tokio::test]
+async fn a_solver_that_ignores_its_seeds_fails_the_initial_spins_grade() {
+    let bin = example_bin("mock_sampler_warm_ignored");
+    let socket = unique_socket("warm-ignored");
+    let report = drive_miner(&bin, &format!("unix://{socket}")).await;
+    assert!(report.advertises_initial_spins(), "{report:?}");
+    assert!(
+        report.has_reject(b"job-bad-seed", RejectReason::Malformed),
+        "core rejects the malformed seed whatever the sampler does"
+    );
+    assert!(!report.warm_start_conformant(), "{}", report.summary());
+    assert!(!report.is_conformant());
+}
+
 #[tokio::test]
 async fn mock_sampler_passes_loop_conformance() {
     let bin = example_bin("mock_sampler_miner");
