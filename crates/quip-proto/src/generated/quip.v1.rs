@@ -108,6 +108,7 @@ pub struct Topology {
     pub hash: ::prost::alloc::vec::Vec<u8>,
     #[prost(uint32, repeated, tag = "2")]
     pub nodes: ::prost::alloc::vec::Vec<u32>,
+    /// u/v are native node ids from Topology.nodes, not positions
     #[prost(message, optional, tag = "3")]
     pub edges: ::core::option::Option<EdgeList>,
     /// for the miner's adapt difficulty band
@@ -171,6 +172,7 @@ pub mod ising_problem {
     pub enum Graph {
         #[prost(bytes, tag = "1")]
         TopologyHash(::prost::alloc::vec::Vec<u8>),
+        /// u/v are dense positions into h_milli_le32, not node ids
         #[prost(message, tag = "2")]
         Edges(super::EdgeList),
     }
