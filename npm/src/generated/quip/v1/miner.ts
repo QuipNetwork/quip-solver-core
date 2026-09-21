@@ -193,6 +193,7 @@ export interface Ready {
 export interface Topology {
   hash: Uint8Array;
   nodes: number[];
+  /** u/v are native node ids from Topology.nodes, not positions */
   edges:
     | EdgeList
     | undefined;
@@ -225,7 +226,10 @@ export interface EdgeList {
 }
 
 export interface IsingProblem {
-  topologyHash?: Uint8Array | undefined;
+  topologyHash?:
+    | Uint8Array
+    | undefined;
+  /** u/v are dense positions into h_milli_le32, not node ids */
   edges?: EdgeList | undefined;
   hMilliLe32: Uint8Array;
   /**

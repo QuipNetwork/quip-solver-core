@@ -51,6 +51,11 @@ variables:
   # v3.13.1, confirmed against the downloaded binary.
   SHFMT_VERSION: "3.13.1"
   SHFMT_SHA256: "fb096c5d1ac6beabbdbaa2874d025badb03ee07929f0c9ff67563ce8c75398b1"
+  # uv fetches the Python interpreter for the macOS wheel job. Pinned by URL
+  # rather than the floating installer, so an upstream release cannot land
+  # mid-pipeline. Not checksummed, unlike protoc and shfmt above: astral.sh
+  # publishes no per-version digest for install.sh.
+  UV_VERSION: "0.12.10"
 
 # ---------------------------------------------------------------------------
 # Shared setup fragments.
@@ -527,9 +532,24 @@ wheel:macos-arm64:
   before_script:
     - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.97.1 --no-modify-path
     - source "$CARGO_HOME/env"
-    # The runner's system python3 sits below the >= 3.11 floor.
-    - brew install python@3.12
-    - python3.12 -m venv .venv-wheel
+    # The runner's system python3 sits below the >= 3.11 floor, and Homebrew is
+    # the wrong way to clear it on a shared runner. `brew install` writes into
+    # the Homebrew prefix even for a formula already present, so it fails on any
+    # host whose prefix belongs to another user, and on `cray` brew is not on
+    # the runner user's non-interactive PATH at all. uv fetches a
+    # python-build-standalone interpreter into $HOME instead, so prefix
+    # ownership stops mattering and a new macos+arm64 host needs no preparation.
+    # quip-miner-dwave made this same move in !35 after three tags died on it.
+    #
+    # Always install, never "install only if missing": that guard exists for
+    # brew's shared prefix, and skipping here would leave whatever uv the host
+    # already carries, which defeats the pin.
+    - export PATH="$HOME/.local/bin:$PATH"
+    - curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | sh
+    - uv --version
+    # uv downloads 3.12 when the host does not already have it. --seed because
+    # a uv venv carries no pip, and the lines below drive .venv-wheel/bin/pip.
+    - uv venv --seed --python 3.12 .venv-wheel
     - .venv-wheel/bin/pip install --quiet maturin
   script:
     # Shell executor: the workspace persists between jobs, and dist/ is

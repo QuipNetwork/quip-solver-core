@@ -78,7 +78,7 @@ message Ready {}
 message Topology {
   bytes  hash  = 1;
   repeated uint32 nodes = 2;
-  EdgeList edges = 3;
+  EdgeList edges = 3; // u/v are native node ids from Topology.nodes, not positions
   repeated int32 allowed_h_milli = 4; // for the miner's adapt difficulty band
 }
 
@@ -103,7 +103,7 @@ message EdgeList {
 message IsingProblem {
   oneof graph {
     bytes    topology_hash = 1;
-    EdgeList edges         = 2;
+    EdgeList edges         = 2; // u/v are dense positions into h_milli_le32, not node ids
   }
   bytes  h_milli_le32 = 3;
   // Coupling coefficients, little-endian int32 milli-units. Normative
