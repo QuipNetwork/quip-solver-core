@@ -6,7 +6,7 @@ help:
 	@echo "check-release        every publish path, dry-run only (no registry writes)"
 	@echo "  check-crate-publish  cargo publish --dry-run for the whole workspace"
 	@echo "  check-python-dist    build the wheel and sdist, then twine check"
-	@echo "  check-npm-dist       build the wasm and TypeScript, then npm publish --dry-run"
+	@echo "  check-npm-dist       build the wasm and TypeScript, then npm pack"
 	@echo "  check-clib           build the C library and pack the release tarball"
 	@echo "check-examples       conformance gate for all four sample solvers"
 	@echo "test                 fmt, clippy and the Rust test suite"
@@ -71,15 +71,19 @@ check-python-dist:
 	bash scripts/check-sdist-license-files.sh dist/python/*.tar.gz
 	bash scripts/check-sdist-stub-package.sh dist/python/*.tar.gz
 
-# Two steps, for the same reason check-crate-publish uses `cargo package`.
+# `npm pack`, for the same reason check-crate-publish uses `cargo package`. It
+# runs the same prepack build the publish path runs and writes the tarball the
+# smoke test installs, but stays entirely local, so this gate cannot fail on
+# registry state. `npm publish --dry-run` used to run alongside it and did: it
+# asks the registry, which refuses once the version in the tree is published,
+# and the tree names a published version from every release tag until the next
+# bump lands. The release job runs the real `npm publish`.
 #
-# `npm publish --dry-run` validates the publish path but writes no tarball.
-# `npm pack` writes the tarball the smoke test installs. Neither proves
-# authentication: OIDC needs a real CI provider, so only the publish job
-# exercises that.
+# It does not prove authentication either: OIDC needs a real CI provider, so
+# only the publish job exercises that.
 .PHONY: check-npm-dist
 check-npm-dist:
-	cd npm && rm -f ./*.tgz && npm ci && npm publish --dry-run --tag latest && npm pack
+	cd npm && rm -f ./*.tgz && npm ci && npm pack
 	@ls -la npm/*.tgz
 
 # The C library ships as a release asset, so packing it is part of the release
