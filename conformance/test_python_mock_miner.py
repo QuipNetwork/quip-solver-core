@@ -7,6 +7,8 @@ shadow an installed wheel.
 from __future__ import annotations
 
 import importlib.util
+import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -39,8 +41,10 @@ def _ising_from_dense(
     h_milli: list[int], j_milli: list[int], edges: list[tuple[int, int]]
 ):
     return miner_pb2.IsingProblem(
-        h_milli_le32=bytes(wire.encode_i32_le(h_milli)),
-        j_milli_le32=bytes(wire.encode_i32_le(j_milli)),
+        encoding=miner_pb2.COEFFICIENT_ENCODING_I32,
+        scale=1000,
+        h=bytes(wire.encode_i32_le(h_milli)),
+        j=bytes(wire.encode_i32_le(j_milli)),
         edges=miner_pb2.EdgeList(u=[u for u, _ in edges], v=[v for _, v in edges]),
         num_reads=1,
     )
@@ -53,8 +57,10 @@ def test_validate_ising_rejects_length_mismatch():
 
 def test_missing_topology_is_not_keyerror():
     ising = miner_pb2.IsingProblem(
-        h_milli_le32=bytes(wire.encode_i32_le([1000, -1000])),
-        j_milli_le32=bytes(wire.encode_i32_le([500])),
+        encoding=miner_pb2.COEFFICIENT_ENCODING_I32,
+        scale=1000,
+        h=bytes(wire.encode_i32_le([1000, -1000])),
+        j=bytes(wire.encode_i32_le([500])),
         topology_hash=b"unknown-hash",
         num_reads=1,
     )
@@ -72,8 +78,10 @@ def test_sparse_topology_remaps_native_ids():
         )
     )
     ising = miner_pb2.IsingProblem(
-        h_milli_le32=bytes(wire.encode_i32_le([1000, 0, -1000])),
-        j_milli_le32=bytes(wire.encode_i32_le([500, 250])),
+        encoding=miner_pb2.COEFFICIENT_ENCODING_I32,
+        scale=1000,
+        h=bytes(wire.encode_i32_le([1000, 0, -1000])),
+        j=bytes(wire.encode_i32_le([500, 250])),
         topology_hash=b"sparse",
         num_reads=1,
     )
@@ -131,7 +139,7 @@ async def test_generation_zero_is_never_cancelled():
 async def test_bad_welcome_sends_fatal_then_exits_64():
     call = FakeCall()
     state = mock_miner.Session("mock-0", call)
-    msg = miner_pb2.CoordMsg(welcome=miner_pb2.Welcome(protocol_version=2))
+    msg = miner_pb2.CoordMsg(welcome=miner_pb2.Welcome(protocol_version=1))
     code = await state.handle(msg)
     assert code == mock_miner.ExitCode.CONFIG_INVALID
     assert call.written[0].WhichOneof("msg") == "fatal"
@@ -147,3 +155,96 @@ async def test_get_capabilities_and_ping_are_answered():
     await state.handle(miner_pb2.CoordMsg(ping=miner_pb2.Ping()))
     kinds = [msg.WhichOneof("msg") for msg in call.written]
     assert kinds == ["capabilities", "status"]
+    caps = call.written[0].capabilities
+    assert caps.protocol_version == 2
+    assert caps.backend == miner_pb2.BACKEND_MOCK
+    assert caps.algorithm == miner_pb2.ALGORITHM_SA
+    assert list(caps.encodings) == [miner_pb2.COEFFICIENT_ENCODING_I32]
+
+
+@pytest.mark.asyncio
+async def test_hello_advertises_v2_capabilities(monkeypatch):
+    monkeypatch.setenv("QUIP_SESSION_TOKEN", "tok-abc")
+    call = FakeCall()
+    state = mock_miner.Session("mock-0", call)
+    await state.send_hello()
+    hello = call.written[0].hello
+    assert hello.capabilities.protocol_version == 2
+    assert hello.capabilities.backend == miner_pb2.BACKEND_MOCK
+    assert hello.capabilities.algorithm == miner_pb2.ALGORITHM_SA
+    assert list(hello.capabilities.encodings) == [miner_pb2.COEFFICIENT_ENCODING_I32]
+
+
+@pytest.mark.asyncio
+async def test_result_spins_are_bit_packed():
+    call = FakeCall()
+    state = mock_miner.Session("mock-0", call)
+    job = miner_pb2.Job(
+        job_id=b"packed",
+        kind=miner_pb2.ISING_SAMPLE,
+        generation=0,
+        ising=_ising_from_dense([1000, -1000], [500], [(0, 1)]),
+    )
+    await state.handle_job(job)
+    result = next(
+        msg.result
+        for msg in call.written
+        if msg != "done_writing" and msg.WhichOneof("msg") == "result"
+    )
+    # The sampler returns all-+1. Two spins, LSB first, are bits 0 and 1.
+    assert result.solutions[0].spins == bytes([0b0000_0011])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("encoding", miner_pb2.COEFFICIENT_ENCODING_F64),
+        ("scale", 1),
+    ],
+)
+async def test_rejects_coefficients_that_are_not_i32_at_scale_1000(field, value):
+    call = FakeCall()
+    state = mock_miner.Session("mock-0", call)
+    ising = _ising_from_dense([1000, -1000], [500], [(0, 1)])
+    setattr(ising, field, value)
+    job = miner_pb2.Job(
+        job_id=b"bad-coeff",
+        kind=miner_pb2.ISING_SAMPLE,
+        generation=0,
+        ising=ising,
+    )
+    await state.handle_job(job)
+    rejects = [
+        msg.reject
+        for msg in call.written
+        if msg != "done_writing" and msg.WhichOneof("msg") == "reject"
+    ]
+    assert [r.reason for r in rejects] == [miner_pb2.MALFORMED]
+
+
+def test_capabilities_flag_prints_lowercase_identity_names():
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "examples" / "python" / "mock_miner.py"),
+            "--capabilities",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    data = json.loads(proc.stdout)
+    assert data == {
+        "supportedKinds": ["ISING_SAMPLE"],
+        "maxNodes": 100_000,
+        "maxEdges": 1_000_000,
+        "protocolVersion": 2,
+        "streamWidth": 1,
+        "encodings": ["COEFFICIENT_ENCODING_I32"],
+        "backend": "mock",
+        "algorithm": "sa",
+        "features": [],
+        "generators": [],
+    }

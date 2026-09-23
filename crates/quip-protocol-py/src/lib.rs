@@ -125,6 +125,36 @@ fn decode_spins(b: Vec<u8>) -> PyResult<Vec<i8>> {
     quip_protocol::wire::decode_spins(&b).map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
+/// Encode `{-1,+1}` spins to the bit-packed form `Solution.spins` carries.
+///
+/// `PyO3` extracts an owned `Vec` from Python.
+#[pyfunction]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "PyO3 extracts owned Vec arguments from Python objects"
+)]
+fn encode_spins_packed(spins: Vec<i8>) -> Vec<u8> {
+    quip_protocol::wire::encode_spins_packed(&spins)
+}
+
+/// Decode `num_spins` bit-packed spins.
+///
+/// # Errors
+///
+/// Returns a Python `ValueError` when the byte length is not
+/// `ceil(num_spins / 8)`, or when a padding bit is set.
+///
+/// `PyO3` extracts an owned `Vec` from Python.
+#[pyfunction]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "PyO3 extracts owned Vec arguments from Python objects"
+)]
+fn decode_spins_packed(b: Vec<u8>, num_spins: usize) -> PyResult<Vec<i8>> {
+    quip_protocol::wire::decode_spins_packed(&b, num_spins)
+        .map_err(|e| PyValueError::new_err(e.to_string()))
+}
+
 /// Python module `quip_solver_core._core`: scoring, wire, and `ExitCode`.
 #[pymodule]
 fn _core(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -138,6 +168,8 @@ fn _core(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     wire.add_function(wrap_pyfunction!(decode_i32_le, &wire)?)?;
     wire.add_function(wrap_pyfunction!(encode_spins, &wire)?)?;
     wire.add_function(wrap_pyfunction!(decode_spins, &wire)?)?;
+    wire.add_function(wrap_pyfunction!(encode_spins_packed, &wire)?)?;
+    wire.add_function(wrap_pyfunction!(decode_spins_packed, &wire)?)?;
     m.add_submodule(&wire)?;
 
     let exit_code = PyModule::new(py, "ExitCode")?;

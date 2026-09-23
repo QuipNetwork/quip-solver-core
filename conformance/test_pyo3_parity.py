@@ -46,6 +46,24 @@ def test_decode_spins_bad_byte_raises():
         wire.decode_spins(b"\x00")
 
 
+def test_packed_spins_round_trip_one_eight_and_nine():
+    for spins in (
+        [1],
+        [1, -1, -1, -1, -1, -1, -1, 1],
+        [1, -1, -1, -1, -1, -1, -1, 1, -1],
+    ):
+        assert (
+            wire.decode_spins_packed(wire.encode_spins_packed(spins), len(spins))
+            == spins
+        )
+
+
+def test_decode_spins_packed_wrong_length_raises():
+    # 8 spins occupy one byte. Two bytes is WireError::BadPackedLength.
+    with pytest.raises(ValueError):
+        wire.decode_spins_packed(b"\x00\x00", 8)
+
+
 def test_energy_milli_j_edges_mismatch_raises():
     # WASM rejects a j/edges length mismatch rather than silently dropping
     # extra couplings. The PyO3 binding must raise the same class of error.

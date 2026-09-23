@@ -38,23 +38,23 @@ from google.protobuf.json_format import MessageToDict
 from quip_solver_core import ExitCode, miner_pb2, miner_pb2_grpc, scoring, session, wire
 
 BACKEND = "mock-python"
-ALGORITHM = "sa"
 MAX_NODES = 100_000
 MAX_EDGES = 1_000_000
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 
 
 def capabilities_message() -> miner_pb2.Capabilities:
     """What this solver supports. Must answer without touching the device."""
     return miner_pb2.Capabilities(
-        backend=BACKEND,
-        algorithm=ALGORITHM,
+        backend=miner_pb2.BACKEND_MOCK,
+        algorithm=miner_pb2.ALGORITHM_SA,
         supported_kinds=[miner_pb2.ISING_SAMPLE],
         max_nodes=MAX_NODES,
         max_edges=MAX_EDGES,
         features=[],
         protocol_version=PROTOCOL_VERSION,
         stream_width=1,
+        encodings=[miner_pb2.COEFFICIENT_ENCODING_I32],
     )
 
 
@@ -134,14 +134,17 @@ def decode_problem(ising, topologies: dict[bytes, Topology]):
     ``Reject{MALFORMED}``. Raises ``MissingTopology`` when the job names a
     hash this session never cached.
     """
-    if len(ising.h_milli_le32) % 4 != 0:
-        raise ValueError("h_milli_le32 length is not a multiple of 4")
-    if len(ising.j_milli_le32) % 4 != 0:
-        raise ValueError("j_milli_le32 length is not a multiple of 4")
+    # I32 at scale 1000 is the only coefficient form this sample decodes.
+    if ising.encoding != miner_pb2.COEFFICIENT_ENCODING_I32 or ising.scale != 1000:
+        raise ValueError("coefficients must be I32 at scale 1000")
+    if len(ising.h) % 4 != 0:
+        raise ValueError("h length is not a multiple of 4")
+    if len(ising.j) % 4 != 0:
+        raise ValueError("j length is not a multiple of 4")
 
     # Decoding through the wheel keeps Python byte-identical with Rust.
-    h = [v / 1000.0 for v in wire.decode_i32_le(ising.h_milli_le32)]
-    j = [v / 1000.0 for v in wire.decode_i32_le(ising.j_milli_le32)]
+    h = [v / 1000.0 for v in wire.decode_i32_le(ising.h)]
+    j = [v / 1000.0 for v in wire.decode_i32_le(ising.j)]
 
     which = ising.WhichOneof("graph")
     if which == "edges":
@@ -165,9 +168,9 @@ def decode_problem(ising, topologies: dict[bytes, Topology]):
 
 
 def build_solution(spins: list[int], energy_milli: int) -> miner_pb2.Solution:
-    """Pack one solution. ``encode_spins`` is the wheel's Rust codec."""
+    """Pack one solution. ``encode_spins_packed`` is the wheel's Rust codec."""
     return miner_pb2.Solution(
-        spins_bytes=bytes(wire.encode_spins(spins)),
+        spins=bytes(wire.encode_spins_packed(spins)),
         energy_milli=energy_milli,
     )
 
@@ -189,14 +192,7 @@ class Session:
         self.got_shutdown = False
 
     async def send_hello(self) -> None:
-        hello = session.build_hello(
-            self.miner_id,
-            BACKEND,
-            ALGORITHM,
-            [miner_pb2.ISING_SAMPLE],
-            MAX_NODES,
-            MAX_EDGES,
-        )
+        hello = session.build_hello(self.miner_id, capabilities_message())
         await self.call.write(miner_pb2.MinerMsg(hello=hello))
 
     async def send_fatal(self, exit_code: int, reason: str) -> None:
@@ -447,16 +443,17 @@ def main() -> int:
 
     if args.capabilities:
         # SPEC section 8: the protobuf JSON mapping, so field names are
-        # lowerCamelCase and this stays identical to the Capabilities message.
-        print(
-            json.dumps(
-                MessageToDict(
-                    capabilities_message(),
-                    always_print_fields_with_no_presence=True,
-                    preserving_proto_field_name=False,
-                )
-            )
+        # lowerCamelCase. backend and algorithm are the stable lowercase
+        # names from the SDK maps, not the protobuf enum labels.
+        message = capabilities_message()
+        payload = MessageToDict(
+            message,
+            always_print_fields_with_no_presence=True,
+            preserving_proto_field_name=False,
         )
+        payload["backend"] = session.BACKEND_NAMES[message.backend]
+        payload["algorithm"] = session.ALGORITHM_NAMES[message.algorithm]
+        print(json.dumps(payload))
         return ExitCode.CLEAN
 
     if args.check:
