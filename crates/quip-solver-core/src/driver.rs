@@ -7,7 +7,7 @@
 
 use crate::coefficient::Coefficient;
 use crate::error::SampleError;
-use crate::ising::{IsingGraph, SampleParams, SamplerResult};
+use crate::ising::{IsingGraph, SampleParams};
 use crate::Sampler;
 use serde::{Deserialize, Serialize};
 
@@ -151,12 +151,18 @@ pub fn solve<S: Sampler<C>, C: Coefficient>(
         beta_range: p.beta_range,
         seed: p.seed,
     };
-    let out: Vec<SolutionJson> = sampler
-        .sample(&graph, &params)?
+    let mut reads = sampler.sample(&graph, &params)?;
+    if !C::EXACT {
+        for read in &mut reads {
+            read.energy_milli =
+                quip_protocol::scoring::energy_milli(&read.spins, &p.h, &p.j, &graph.edges);
+        }
+    }
+    let out: Vec<SolutionJson> = reads
         .into_iter()
-        .map(|r: SamplerResult| SolutionJson {
-            spins: r.spins,
-            energy_milli: r.energy_milli,
+        .map(|read| SolutionJson {
+            spins: read.spins,
+            energy_milli: read.energy_milli,
         })
         .collect();
     #[expect(
@@ -192,5 +198,125 @@ mod tests {
             matches!(err, SolveError::Malformed(_)),
             "a malformed problem document is a caller error, not {err:?}"
         );
+    }
+
+    struct WrongLossy;
+    impl Sampler<crate::coefficient::Fixed<i8, 1>> for WrongLossy {
+        fn sample(
+            &self,
+            graph: &IsingGraph<crate::coefficient::Fixed<i8, 1>>,
+            _: &SampleParams,
+        ) -> Result<Vec<SamplerResult>, SampleError> {
+            Ok(vec![SamplerResult {
+                spins: vec![1; graph.num_nodes()],
+                energy_milli: 777,
+            }])
+        }
+    }
+
+    struct UnchangedFloat;
+    impl Sampler for UnchangedFloat {
+        #[expect(
+            clippy::panic_in_result_fn,
+            reason = "test sampler asserts that JSON floats reach the graph with their exact bits"
+        )]
+        fn sample(
+            &self,
+            graph: &IsingGraph,
+            _: &SampleParams,
+        ) -> Result<Vec<SamplerResult>, SampleError> {
+            assert_eq!(
+                graph
+                    .h
+                    .iter()
+                    .copied()
+                    .map(f64::to_bits)
+                    .collect::<Vec<_>>(),
+                vec![
+                    0.0004_f64.to_bits(),
+                    1e300_f64.to_bits(),
+                    (-0.0_f64).to_bits()
+                ]
+            );
+            Ok(vec![SamplerResult {
+                spins: vec![1; graph.num_nodes()],
+                energy_milli: 777,
+            }])
+        }
+    }
+
+    fn input_with_biases(h: &str) -> Vec<u8> {
+        format!(
+            r#"{{"h":{h},"j":[],"edges":[],"num_reads":1,
+            "num_sweeps":1,"sweeps_per_beta":1,"beta_range":null,"seed":0}}"#
+        )
+        .into_bytes()
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions check behavior while Result propagates unexpected errors"
+    )]
+    fn lossy_json_uses_original_milli_and_full_scoring_range(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        for (biases, expected) in [
+            ("[0.0005]", 1_i64),
+            ("[-0.0005]", -1),
+            ("[0.499,-0.501]", -2),
+            ("[2147483.648]", 2_147_483_648),
+            ("[-2147483.649]", -2_147_483_649),
+            ("[1e300]", i64::MAX),
+            ("[-1e300]", i64::MIN),
+            ("[1e300,-1e300]", -1),
+        ] {
+            let output = solve(&WrongLossy, &input_with_biases(biases))?;
+            let results: serde_json::Value = serde_json::from_slice(&output)?;
+            assert_eq!(
+                results
+                    .pointer("/0/energy_milli")
+                    .and_then(serde_json::Value::as_i64),
+                Some(expected),
+                "{biases}"
+            );
+        }
+        let input = br#"{"h":[0.499,-0.501],"j":[1.501],"edges":[[0,1]],
+            "num_reads":1,"num_sweeps":1,"sweeps_per_beta":1,"beta_range":null,"seed":0}"#;
+        let results: serde_json::Value = serde_json::from_slice(&solve(&WrongLossy, input)?)?;
+        assert_eq!(
+            results
+                .pointer("/0/energy_milli")
+                .and_then(serde_json::Value::as_i64),
+            Some(1499)
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions check behavior while Result propagates unexpected errors"
+    )]
+    fn exact_json_preserves_values_and_sampler_energy() -> Result<(), Box<dyn std::error::Error>> {
+        let output = solve(&UnchangedFloat, &input_with_biases("[0.0004,1e300,-0.0]"))?;
+        let results: serde_json::Value = serde_json::from_slice(&output)?;
+        assert_eq!(
+            results
+                .pointer("/0/energy_milli")
+                .and_then(serde_json::Value::as_i64),
+            Some(777)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn fixed_nonfinite_conversion_is_a_malformed_input() {
+        use crate::coefficient::Fixed;
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(matches!(
+                super::convert_units::<Fixed<i8, 1>>("h", &[value]),
+                Err(SolveError::Malformed(_))
+            ));
+        }
     }
 }
