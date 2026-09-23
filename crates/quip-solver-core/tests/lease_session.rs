@@ -169,6 +169,19 @@ impl Session {
             .unwrap()
             .0
     }
+    async fn identified_sample(&self) -> (tokio::net::UnixStream, Vec<u8>) {
+        use tokio::io::AsyncReadExt as _;
+        let mut stream = self.blocked_sample().await;
+        let id = tokio::time::timeout(Duration::from_secs(10), async {
+            let len = stream.read_u32_le().await.unwrap();
+            let mut id = vec![0; len as usize];
+            let _ = stream.read_exact(&mut id).await.unwrap();
+            id
+        })
+        .await
+        .unwrap();
+        (stream, id)
+    }
     async fn ack(&mut self) {
         self.send(coord_msg::Msg::Ping(wire::Ping {})).await;
         assert!(matches!(self.recv().await, miner_msg::Msg::Status(_)));
@@ -787,18 +800,39 @@ async fn a_sampler_that_ignores_stop_sends_nothing_after_cancel() {
     first(&mut s).await;
     s.send(coord_msg::Msg::Cancel(wire::Cancel { max_generation: 1 }))
         .await;
-    loop {
+    let mut acknowledged = false;
+    let mut done = false;
+    let mut refunded = false;
+    // The local monitor can send completion before the writer sends Status.
+    // Consume the Cancel reply before sending a Ping with its own Status reply.
+    while !(acknowledged && done && refunded) {
         match s.recv().await {
-            miner_msg::Msg::Result(r) => verify(&r),
-            miner_msg::Msg::Status(_) => {}
+            miner_msg::Msg::Result(r) => {
+                assert!(
+                    !acknowledged && !done,
+                    "winner after cancellation or completion"
+                );
+                verify(&r);
+            }
+            miner_msg::Msg::Status(status) => {
+                assert!(!acknowledged, "duplicate Cancel acknowledgement");
+                assert_eq!(status.abandoned_generation, 1);
+                acknowledged = true;
+            }
             miner_msg::Msg::LeaseDone(d) => {
+                assert!(!done, "duplicate lease completion");
+                assert_eq!(d.job_id, b"lease");
                 assert!(d.salts_done >= 1);
-                break;
+                done = true;
+            }
+            miner_msg::Msg::JobRequest(request) => {
+                assert!(done && !refunded, "refund must follow one completion");
+                assert_eq!(request.credits, 1);
+                refunded = true;
             }
             other => panic!("unexpected message: {other:?}"),
         }
     }
-    s.refund().await;
     tokio::time::timeout(Duration::from_secs(10), async {
         while let Some(line) = logs.next_line().await.unwrap() {
             if line.contains("push returned LeaseStopped") {
@@ -894,7 +928,6 @@ async fn stopped_local_workers_cannot_exceed_the_credit_window() {
 
 #[tokio::test]
 async fn width_two_leases_keep_permits_order_and_single_refunds() {
-    use tokio::io::AsyncReadExt as _;
     let mut s = Session::start_mode(false, true, Some("wide")).await;
     s.setup(i64::MAX).await;
     for id in [b"a", b"b"] {
@@ -902,8 +935,8 @@ async fn width_two_leases_keep_permits_order_and_single_refunds() {
         lease.job_id = id.to_vec();
         s.send(coord_msg::Msg::Job(lease)).await;
     }
-    let mut first = s.blocked_sample().await;
-    let mut second = s.blocked_sample().await;
+    let (mut first, _) = s.identified_sample().await;
+    let (mut second, _) = s.identified_sample().await;
     // Both permits are held. A plain job must still reach the sampler.
     s.send(coord_msg::Msg::Job(wire::Job {
         job_id: b"plain".to_vec(),
@@ -918,10 +951,7 @@ async fn width_two_leases_keep_permits_order_and_single_refunds() {
         ..Default::default()
     }))
     .await;
-    let mut plain = s.blocked_sample().await;
-    let len = plain.read_u32_le().await.unwrap();
-    let mut id = vec![0; len as usize];
-    let _ = plain.read_exact(&mut id).await.unwrap();
+    let (mut plain, id) = s.identified_sample().await;
     assert_eq!(
         id,
         [vec![0], b"plain".to_vec()].concat(),
@@ -950,7 +980,9 @@ async fn width_two_leases_keep_permits_order_and_single_refunds() {
             refunds += 1;
         }
         if next < 2 {
-            release(&mut s.blocked_sample().await).await;
+            // Read the worker's frame before dropping the temporary socket.
+            // Otherwise release can race its write and cause a broken pipe.
+            release(&mut s.identified_sample().await.0).await;
         } else if next == 2 {
             release(&mut first).await;
         }
@@ -969,9 +1001,47 @@ async fn local_shutdown_closes_an_unreturned_worker_at_grace_deadline() {
     let _blocked = s.blocked_sample().await;
     s.send(coord_msg::Msg::Shutdown(wire::Shutdown { grace_ms: 100 }))
         .await;
-    assert!(matches!(s.recv().await, miner_msg::Msg::LeaseDone(d) if d.salts_done == 0));
-    s.refund().await;
-    assert!(s.inbound.message().await.unwrap().is_none());
+    // Stop rules permit grace expiry to end transport before a summary arrives.
+    // The monitor's exact summary/refund behavior is covered with paused time.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let mut done = false;
+        let mut refunded = false;
+        loop {
+            let message = match s.inbound.message().await {
+                Ok(Some(message)) => message,
+                Ok(None) => break,
+                Err(error) => {
+                    // At the hard deadline, process exit can interrupt HTTP/2
+                    // before END_STREAM. Still require a clean process exit below.
+                    assert_eq!(error.code(), tonic::Code::Unknown);
+                    assert!(std::error::Error::source(&error).is_some());
+                    break;
+                }
+            };
+            match message.msg.unwrap() {
+                miner_msg::Msg::LeaseDone(summary) => {
+                    assert!(!done, "duplicate lease completion");
+                    assert_eq!(summary.job_id, b"lease");
+                    assert_eq!(summary.salts_done, 0);
+                    done = true;
+                }
+                miner_msg::Msg::JobRequest(request) => {
+                    assert!(done && !refunded, "refund must follow one completion");
+                    assert_eq!(request.credits, 1);
+                    refunded = true;
+                }
+                other => panic!("unexpected message at grace expiry: {other:?}"),
+            }
+        }
+    })
+    .await
+    .unwrap();
     s.tx = mpsc::channel(1).0;
-    assert!(s.child.wait().await.unwrap().success());
+    assert!(
+        tokio::time::timeout(Duration::from_secs(10), s.child.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success()
+    );
 }

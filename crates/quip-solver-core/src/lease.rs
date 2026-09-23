@@ -648,6 +648,74 @@ async fn wait_for_grace(deadline: Option<tokio::time::Instant>) {
 mod tests {
     use super::*;
 
+    #[tokio::test(start_paused = true)]
+    async fn local_monitor_submits_one_summary_and_refund_at_grace_expiry() {
+        use std::future::Future as _;
+
+        let spec =
+            LeaseSpec::new(Generator::Blake3Chacha8V1, [1; 32], [2; 32], [3; 32], 0, 1).unwrap();
+        let state = Arc::new(LeaseState {
+            job_id: b"lease".to_vec(),
+            lease: Lease(spec),
+            topology: Arc::new(TopologyView {
+                num_nodes: 1,
+                edges: vec![],
+                allowed_h_milli: vec![1000],
+                allowed_j_milli: vec![],
+            }),
+            watermark: Some(1),
+            deadline_ms: 0,
+            aborted: Arc::new(AtomicBool::new(false)),
+            progress: Mutex::new(Progress {
+                dispatched: 0,
+                finished: 0,
+                salts_done: 0,
+                best_energy_milli: i64::MAX,
+                closed: false,
+                done_sent: false,
+            }),
+        });
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(100);
+        let (_shutdown_tx, shutdown) = watch::channel(Some(deadline));
+        let (tx, mut rx) = mpsc::channel(2);
+        let cancel = CancelToken::default();
+        let monitor = monitor_local(
+            Arc::clone(&state),
+            cancel.clone(),
+            shutdown.clone(),
+            tx.clone(),
+        );
+        tokio::pin!(monitor);
+
+        // Keep the worker unreturned and the transport unpolled throughout grace.
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(monitor.as_mut().poll(&mut context).is_pending());
+        tokio::time::advance(std::time::Duration::from_millis(99)).await;
+        assert!(monitor.as_mut().poll(&mut context).is_pending());
+        assert!(!state.progress().closed);
+        assert!(rx.try_recv().is_err());
+
+        tokio::time::advance(std::time::Duration::from_millis(1)).await;
+        assert!(monitor.as_mut().poll(&mut context).is_ready());
+        assert_eq!(tokio::time::Instant::now(), deadline);
+        assert!(state.progress().closed);
+        assert_eq!(
+            rx.try_recv().unwrap().msg,
+            Some(miner_msg::Msg::LeaseDone(LeaseDone {
+                job_id: b"lease".to_vec(),
+                salts_done: 0,
+                best_energy_milli: i64::MAX,
+            }))
+        );
+        assert_eq!(
+            rx.try_recv().unwrap().msg,
+            Some(miner_msg::Msg::JobRequest(JobRequest { credits: 1 }))
+        );
+        // A later observer must not submit a second completion or refund.
+        monitor_local(state, cancel, shutdown, tx).await;
+        assert!(rx.try_recv().is_err());
+    }
+
     #[test]
     #[ignore = "manual release-mode timing check on an Advantage2-sized synthetic topology"]
     #[expect(clippy::print_stdout, reason = "manual timing result for --nocapture")]
