@@ -9,6 +9,7 @@
 pub mod adapt;
 pub mod beta;
 pub mod cli;
+pub mod coefficient;
 pub mod config;
 pub mod csr;
 mod display;
