@@ -1,5 +1,5 @@
-//! `QuIP` consensus SDK: wire codec, `ChaCha8` draw, energy scoring, diversity, and
-//! `derive_nonce`.
+//! `QuIP` consensus SDK: wire codec, `ChaCha8` draw, energy scoring, diversity,
+//! proof target checks, and `derive_nonce`.
 //!
 //! These primitives are golden-pinned for cross-language consensus. The Rust
 //! implementations in this crate are the source of truth mirrored by the `PyO3`
@@ -7,7 +7,9 @@
 
 pub mod chacha8;
 pub mod derive;
+pub mod diversity;
 pub mod scoring;
+pub mod target;
 pub mod wire;
 
 /// Handshake negotiation over the generated protobuf types.
