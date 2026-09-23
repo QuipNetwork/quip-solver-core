@@ -1,8 +1,8 @@
 //! Base Ising problem type and per-job sampling knobs, shared by all backends.
 //!
-//! The base [`IsingGraph`] holds the wire-parsed `(h, j, edges)`. Backends
-//! derive their own representation from it: the CPU miner builds an adjacency
-//! list, the GPU miners build [`crate::csr::CsrGraph`].
+//! The base [`IsingGraph`] holds the wire's `(h, j, edges)` in integer milli
+//! units. Backends derive their own representation from it: the CPU miner
+//! builds an adjacency list, the GPU miners build [`crate::csr::CsrGraph`].
 
 /// Sampling algorithm selected by the binary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,28 +78,57 @@ pub struct SamplerResult {
 }
 
 /// Wire-parsed Ising problem: dense biases, flat couplings, and edge list.
+///
+/// Coefficients stay in the wire's integer milli units, where 1000 is 1.0.
+/// Score a read with `quip_protocol::scoring::energy_from_milli`.
 #[derive(Clone, Debug)]
 pub struct IsingGraph {
-    /// Linear biases, one per variable.
-    pub h: Vec<f64>,
-    /// Couplings aligned with `edges`.
-    pub j: Vec<f64>,
+    /// Linear biases in milli units, one per variable.
+    pub h_milli: Vec<i32>,
+    /// Couplings in milli units, aligned with `edges`.
+    pub j_milli: Vec<i32>,
     /// Undirected edge list `(u, v)` in received order.
     pub edges: Vec<(usize, usize)>,
 }
 
 impl IsingGraph {
-    /// Store flat `h` / `j` / edge lists as the base problem.
+    /// Store flat milli `h` / `j` and the edge list as the base problem.
     #[must_use]
-    pub fn new(h: Vec<f64>, j: Vec<f64>, edges: Vec<(usize, usize)>) -> Self {
-        Self { h, j, edges }
+    pub fn new(h_milli: Vec<i32>, j_milli: Vec<i32>, edges: Vec<(usize, usize)>) -> Self {
+        Self {
+            h_milli,
+            j_milli,
+            edges,
+        }
     }
 
-    /// Number of variables (length of `h`).
+    /// Number of variables (length of `h_milli`).
     #[must_use]
     pub fn num_nodes(&self) -> usize {
-        self.h.len()
+        self.h_milli.len()
     }
+
+    /// Biases as unit floats, `v / 1000.0` per entry. Allocates.
+    ///
+    /// For a surface that carries floats to another language, such as the C
+    /// ABI or `--solve` JSON. Do not call it on the job path.
+    #[must_use]
+    pub fn h_f64(&self) -> Vec<f64> {
+        milli_to_f64(&self.h_milli)
+    }
+
+    /// Couplings as unit floats, `v / 1000.0` per entry. Allocates.
+    ///
+    /// For a surface that carries floats to another language, such as the C
+    /// ABI or `--solve` JSON. Do not call it on the job path.
+    #[must_use]
+    pub fn j_f64(&self) -> Vec<f64> {
+        milli_to_f64(&self.j_milli)
+    }
+}
+
+fn milli_to_f64(milli: &[i32]) -> Vec<f64> {
+    milli.iter().map(|&v| f64::from(v) / 1000.0).collect()
 }
 
 /// One graph from the `energy` or `ising` section of `golden_vectors.json`,
@@ -136,8 +165,7 @@ pub(crate) fn golden_graph(section: &str, index: usize) -> IsingGraph {
             (end(0), end(1))
         })
         .collect();
-    let unit = |v: Vec<i32>| -> Vec<f64> { v.into_iter().map(|m| f64::from(m) / 1000.0).collect() };
-    IsingGraph::new(unit(milli("h_milli")), unit(milli("j_milli")), edges)
+    IsingGraph::new(milli("h_milli"), milli("j_milli"), edges)
 }
 
 /// Every golden graph the pinned beta and CSR tests cover, as
@@ -162,11 +190,22 @@ mod tests {
     #[test]
     fn num_nodes_counts_biases() {
         let g = IsingGraph::new(
-            vec![1.0, -0.5, 0.0, 0.25],
-            vec![1.0, -1.0, -1.0, 1.0],
+            vec![1000, -500, 0, 250],
+            vec![1000, -1000, -1000, 1000],
             vec![(0, 1), (1, 2), (2, 3), (0, 3)],
         );
         assert_eq!(g.num_nodes(), 4);
         assert_eq!(g.edges.len(), 4);
+    }
+
+    #[test]
+    fn float_accessors_divide_each_entry_by_1000() {
+        let g = IsingGraph::new(
+            vec![1, -1000, i32::MAX],
+            vec![500, i32::MIN],
+            vec![(0, 1), (1, 2)],
+        );
+        assert_eq!(g.h_f64(), vec![0.001, -1.0, 2_147_483.647]);
+        assert_eq!(g.j_f64(), vec![0.5, -2_147_483.648]);
     }
 }

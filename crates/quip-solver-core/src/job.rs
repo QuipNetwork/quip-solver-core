@@ -11,7 +11,7 @@ use quip_proto::v1::{
     RejectReason, Result as JobResult, SamplerMeta, Solution, Status, Topology,
 };
 use quip_protocol::session::ExitCode;
-use quip_protocol::wire::{decode_i32_le, decode_spins_packed, encode_spins, WireError};
+use quip_protocol::wire::{decode_i32_le, decode_spins_packed, encode_spins};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -200,14 +200,6 @@ pub(crate) fn reject(job_id: Vec<u8>, reason: RejectReason) -> MinerMsg {
     }))
 }
 
-/// Milli-int-encoded field → float vector.
-fn decode_milli_f64(bytes: &[u8]) -> Result<Vec<f64>, WireError> {
-    Ok(decode_i32_le(bytes)?
-        .iter()
-        .map(|&v| f64::from(v) / 1000.0)
-        .collect())
-}
-
 fn resolve_edges(
     ising: &IsingProblem,
     cache: Option<&TopologyCache>,
@@ -293,10 +285,10 @@ fn parse_ising(
     max_edges: u32,
     cache: Option<&TopologyCache>,
 ) -> Result<IsingGraph, RejectReason> {
-    let h = decode_milli_f64(&ising.h_milli_le32).map_err(|_| RejectReason::Malformed)?;
-    let j = decode_milli_f64(&ising.j_milli_le32).map_err(|_| RejectReason::Malformed)?;
+    let h_milli = decode_i32_le(&ising.h_milli_le32).map_err(|_| RejectReason::Malformed)?;
+    let j_milli = decode_i32_le(&ising.j_milli_le32).map_err(|_| RejectReason::Malformed)?;
     let edges = resolve_edges(ising, cache)?;
-    let n = h.len();
+    let n = h_milli.len();
 
     // A topology-hash job names the cached graph, so its biases must cover
     // exactly that graph's nodes. The endpoint bounds in `validate_shape` only
@@ -312,7 +304,7 @@ fn parse_ising(
     // Shape before size: a malformed problem is malformed at any size, and
     // answering TooLarge would invite the coordinator to retry it on a bigger
     // miner, where it fails exactly the same way.
-    validate_shape(n, j.len(), &edges).map_err(|_| RejectReason::Malformed)?;
+    validate_shape(n, j_milli.len(), &edges).map_err(|_| RejectReason::Malformed)?;
 
     // `0` means "no limit" in the advertised caps (see BackendCaps in
     // quip_protocol::session; the coordinator's router reads it the same way).
@@ -324,7 +316,7 @@ fn parse_ising(
         return Err(RejectReason::TooLarge);
     }
 
-    Ok(IsingGraph::new(h, j, edges))
+    Ok(IsingGraph::new(h_milli, j_milli, edges))
 }
 
 /// Validate the warm-start fields (`IsingProblem` 9 to 12) against a job of
@@ -478,7 +470,7 @@ pub(crate) fn prepare_job<S: Sampler>(
         adapt_params(
             t.max_energy_milli,
             t.min_solutions.max(1),
-            graph.h.len(),
+            graph.num_nodes(),
             graph.edges.len(),
             allowed_h,
             &id.adapt,
@@ -740,8 +732,8 @@ mod tests {
         let ising = hash_job(vec![7; 32], &[1000, -1000, 1000], &[1000, -1000]);
         let g = parse_ising(&ising, 100_000, 1_000_000, Some(&cache)).unwrap();
         assert_eq!(g.edges, vec![(0, 1), (1, 2)]);
-        assert_eq!(g.h, vec![1.0, -1.0, 1.0]);
-        assert_eq!(g.j, vec![1.0, -1.0]);
+        assert_eq!(g.h_milli, vec![1000, -1000, 1000]);
+        assert_eq!(g.j_milli, vec![1000, -1000]);
     }
 
     #[test]
@@ -865,9 +857,9 @@ mod tests {
             ..Default::default()
         };
         let g = parse_ising(&ising, 100_000, 1_000_000, None).expect("an edgeless problem is fine");
-        assert_eq!(g.h.len(), 2);
+        assert_eq!(g.num_nodes(), 2);
         assert!(g.edges.is_empty());
-        assert!(g.j.is_empty());
+        assert!(g.j_milli.is_empty());
     }
 
     #[test]
@@ -977,7 +969,7 @@ mod tests {
         // The matching length still works.
         let ising = hash_job(vec![7; 32], &[1000, 1000, 1000], &[1000, 1000]);
         let g = parse_ising(&ising, 100_000, 1_000_000, Some(&cache)).expect("matching h");
-        assert_eq!(g.h.len(), 3);
+        assert_eq!(g.num_nodes(), 3);
     }
 
     // ---- quip-solver-core-vva: `0` means unlimited ----

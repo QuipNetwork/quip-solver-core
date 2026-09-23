@@ -390,14 +390,14 @@ mod stream_tests {
             _params: &SampleParams,
         ) -> Result<Vec<SamplerResult>, SampleError> {
             Ok(vec![SamplerResult {
-                spins: vec![1i8; graph.h.len()],
+                spins: vec![1i8; graph.num_nodes()],
                 energy_milli: 0,
             }])
         }
     }
 
     fn tiny_graph() -> IsingGraph {
-        IsingGraph::new(vec![1.0, -1.0], vec![1.0], vec![(0, 1)])
+        IsingGraph::new(vec![1000, -1000], vec![1000], vec![(0, 1)])
     }
 
     #[test]
@@ -451,7 +451,7 @@ mod stream_tests {
             use std::sync::atomic::Ordering;
             let _ = self.0.fetch_add(1, Ordering::SeqCst);
             Ok(vec![SamplerResult {
-                spins: vec![1i8; graph.h.len()],
+                spins: vec![1i8; graph.num_nodes()],
                 energy_milli: 0,
             }])
         }
@@ -614,7 +614,7 @@ mod stream_tests {
             _params: &SampleParams,
         ) -> Result<Vec<SamplerResult>, SampleError> {
             Ok(vec![SamplerResult {
-                spins: vec![1i8; graph.h.len()],
+                spins: vec![1i8; graph.num_nodes()],
                 energy_milli: 0,
             }])
         }
