@@ -109,16 +109,18 @@ pub type QuipSampleFn = unsafe extern "C" fn(
 /// What the solver advertises in `--capabilities` and `Hello`.
 ///
 /// `backend` and `algorithm` are NUL-terminated strings, and may be NULL to
-/// take the default. `features` is an array of NUL-terminated strings with
+/// take the default. An unknown non-NULL identity string ends the run with
+/// `ConfigInvalid` (64), with a message that lists the accepted names.
+/// `features` is an array of NUL-terminated strings with
 /// `num_features` entries, and may be NULL only when `num_features` is 0. Bytes
 /// that are not UTF-8 end the run with the config-invalid exit code rather than
 /// falling back to a default. All strings are copied during [`quip_solver_run`],
 /// so the caller may free them once it returns.
 #[repr(C)]
 pub struct QuipBackendIdentity {
-    /// Backend name, for example `"cpu"`. NULL means `"c"`.
+    /// Backend name, for example `"cpu"`. NULL becomes `BACKEND_UNSPECIFIED`.
     pub backend: *const c_char,
-    /// Algorithm name, for example `"sa"`. NULL means `"custom"`.
+    /// Algorithm name, for example `"sa"`. NULL becomes `ALGORITHM_EXTERNAL`.
     pub algorithm: *const c_char,
     /// Largest node count this solver accepts.
     pub max_nodes: u32,

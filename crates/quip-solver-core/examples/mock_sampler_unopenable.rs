@@ -21,8 +21,16 @@ impl Sampler for UnopenableSampler {
     }
 }
 
+static CLI_VERSION: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    format!(
+        "{} protocol {}",
+        env!("CARGO_PKG_VERSION"),
+        quip_protocol::session::PROTOCOL_VERSION
+    )
+});
+
 #[derive(Parser)]
-#[command(version = concat!(env!("CARGO_PKG_VERSION"), " protocol 1"))]
+#[command(version = CLI_VERSION.as_str())]
 struct Cli {
     #[command(flatten)]
     common: CommonArgs,

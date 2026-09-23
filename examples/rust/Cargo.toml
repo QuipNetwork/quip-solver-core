@@ -14,12 +14,12 @@ description = "Sample Quip solver in Rust, built against the published crates.io
 # One dependency, and the published release rather than a path into this
 # repository. quip-solver-core re-exports quip_proto and quip_protocol, so the
 # consensus scorer needs no second crate that must move in lockstep.
-quip-solver-core = "=0.0.2-rc2"
+quip-solver-core = "=0.0.2-rc3"
 clap = { version = "4", features = ["derive"] }
 
 [dev-dependencies]
 # The conformance gate from SPEC section 6.
-quip-solver-conformance = "=0.0.2-rc2"
+quip-solver-conformance = "=0.0.2-rc3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 
 [[bin]]

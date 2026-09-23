@@ -5,6 +5,41 @@ This file documents changes to the Quip solver contract.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.0.2-rc3
+
+### Added
+
+- `ISING_GENERATE` salt leases, `IsingProblemGenerator`, and `LeaseDone`.
+  The default Rust and C session generates problems and reports winning salts.
+- Optional Rust `generates_locally`, `sample_lease`, `Lease`, and `LeaseSink` APIs.
+  The host verifies candidate winners from local generation.
+- `CoefficientEncoding` and integer scales, with `I32`, `I16`, `I8`, `F16`, `F32`, and `F64` wire forms.
+- `Topology.allowed_j_milli`, `SetTarget.max_proof_solutions`, and the `TARGET_MISSING` reject reason.
+- Shared `meets_target` and `verify_lease_result` checks, with validator-derived golden vectors.
+- The [coordinator upgrade guide](docs/coordinator-upgrade-v2.md).
+
+### Changed
+
+- Protocol version 2 requires a coordinated upgrade of solvers and coordinators.
+  `Hello.capabilities` carries the capability message.
+- `Backend` and `Algorithm` identities use enums. Command-line identity names remain lowercase.
+- `Solution.spins` uses bit-packed spins. Lease results add `salt` and `nonce`.
+- The session checks coefficient exactness per problem and rescores only lossy conversions.
+  Matching encoding and scale permit direct decoding without a retained milli copy.
+- Python and TypeScript stubs and example miners use v2 plain jobs.
+- Example version output reports protocol 2.
+  C identity comments describe enum defaults and invalid names.
+  Python codec comments distinguish one byte per spin from bit-packed spins.
+
+### Removed
+
+- The duplicated v1 `Hello` fields.
+  These cover the version and identity, supported kinds, limits, topology hash, and features.
+- The v1 string fields at `Capabilities` numbers 1 and 2.
+- `IsingProblem.h_milli_le32`, `IsingProblem.j_milli_le32`, and `Solution.spins_bytes`.
+  Their old names and numbers remain reserved.
+  `IsingProblem.gates` also has a reserved name alongside its already reserved number 6.
+
 ## 0.0.2-rc2
 
 ### Added
@@ -36,7 +71,7 @@ wire interfaces keep their existing forms.
 
 ## 0.0.2-rc1
 
-Optional warm-start states on `IsingProblem`, for quantum processing unit (QPU) reverse anneal and
+Optional warm-start states on `IsingProblem`, for quantum processing unit reverse anneal and
 seeded SA.
 
 ### Added
@@ -58,9 +93,8 @@ seeded SA.
 
 ### Changed
 
-- The session rejects a job with `MALFORMED` when a start state has the
-  wrong length or a padding bit set, or when `reversal_s_milli` is 1000 or
-  more. This applies to every solver, including one that does not use the
+- The session rejects a start state with the wrong length or a padding bit set with `MALFORMED`.
+  It also rejects `reversal_s_milli` values of 1000 or more. This applies to every solver, including one that does not use the
   states.
 
 ## 0.0.1
@@ -104,8 +138,8 @@ guard job for malformed tags, and a lint gate on releases.
   failed only at the version check. The rule now requires a full
   `v<major>.<minor>.<patch>` with an optional prerelease.
 - `release:validate` now waits for the lint job. A comment excused the gap:
-  four unformatted files predate the job. Those files were reformatted before
-  0.0.0 shipped, so the exemption had outlived its reason.
+  four unformatted files predate the job.
+  The 0.0.0 release already includes those format fixes.
 
 ### Added
 
@@ -115,9 +149,9 @@ guard job for malformed tags, and a lint gate on releases.
 
 ## 0.0.1-rc1
 
-Packaging and conformance fixes for the 0.0.0 release: the sdist installs
-correctly, PyPI covers macOS arm64 and Linux aarch64, and a gibbs solver can
-pass the conformance driver.
+This release fixes packaging and conformance in 0.0.0.
+The sdist installs correctly. PyPI covers macOS arm64 and Linux aarch64.
+A Gibbs solver can pass the conformance driver.
 
 ### Fixed
 
@@ -127,9 +161,8 @@ pass the conformance driver.
   'quip'`. `make check-python-dist` now fails when the stubs are missing from
   the tarball.
 - The conformance driver expects the doubled sweep echo from a `gibbs`
-  solver. SPEC.md pins a sweep budget and a Gibbs solver runs — and reports —
-  twice it, but `sweeps_honoured()` compared every solver against the raw
-  budget, so no gibbs backend could pass `is_conformant()`.
+  solver. `SPEC.md` pins a sweep budget. A Gibbs solver runs and reports twice that budget.
+  `sweeps_honoured()` compared every solver with the raw budget, so no Gibbs solver could pass `is_conformant()`.
 
 ### Added
 
@@ -139,7 +172,7 @@ pass the conformance driver.
 - `CONFIGURED_SWEEPS`, `GIBBS_SWEEP_MULTIPLIER`, and
   `DriverReport::expected_meta_sweeps()` are public, so a solver repository's
   tests can state sweep expectations without mirroring the literals.
-- `SampleError::is_fatal()` is public, so a backend with its own
+- `SampleError::is_fatal()` is public, so a solver with its own
   `sample_stream` pump reuses the session's fatality rule instead of
   matching variants.
 - `Sampler::declared_stream_width()` accepts `0`: a device-dependent width,
@@ -157,18 +190,17 @@ only exercised the deployment pipeline.
 - The floating-point energy scorer, which disagreed with the integer-milli
   consensus rule near a rounding boundary. Scoring now recovers the exact
   milli values and sums them in 128-bit integers.
-- The C ABI. It read out of bounds when `j` and `edges` disagreed in length,
-  returned 0 (a legal energy) for every invalid call, passed NULL to
-  `slice::from_raw_parts` for empty solutions, and could leave the sampler
-  thread running after `quip_solver_run` returned.
+- The C binary interface read out of bounds when `j` and `edges` had different lengths.
+  It also returned the legal energy 0 for invalid calls.
+  It passed `NULL` to `slice::from_raw_parts` for empty solutions.
+  It could leave the sampler thread running after `quip_solver_run` returned.
 - Cancelled in-flight jobs no longer emit a `Result`. The session checks the
   cancel watermark again after sampling, and the writer drops stale results.
 - A panic in the outbound writer now exits 70 rather than 0. An unexpected
-  stream close exits 70 after `Welcome` and 77 before it, in all three sample
-  implementations.
-- The release pipeline. The publish jobs now wait for conformance and the
-  smoke tests, and PyPI and npm promote the exact artifacts the smoke tests
-  ran rather than rebuilding them.
+  stream close exits 70 after `Welcome` and 77 before it, in all three example
+  programs.
+- The release pipeline. The publish jobs now wait for conformance and the smoke tests.
+  PyPI and npm promote the exact artifacts the smoke tests ran.
 - `Hello.features` was always empty, and `--capabilities` hardcoded the
   stream width. Both answers now come from one function.
 
@@ -177,24 +209,21 @@ only exercised the deployment pipeline.
 - A conformance driver that checks message causality, scores returned spins
   again, exercises `GetCapabilities`, `Ping`, live cancellation, and
   `backend_toml`, and keeps a credit ledger.
-- Byte-level wire fixtures (`golden_wire.json`), asserted from the Rust tests.
-- A lint job for shell and Python (shellcheck, shfmt, ruff), run by `make
-  lint` locally and in CI.
-- Tests for the previously untested C ABI crate, and end-to-end tests for
-  exit codes 64, 69, 70, and 77.
+- Byte-level wire fixtures in `golden_wire.json`, which the Rust tests check.
+- A lint job for shell and Python, with shellcheck, shfmt, and ruff.
+  Run `make lint` locally or in CI.
+- Tests for the C binding crate and exit codes 64, 69, 70, and 77.
 
 ### Changed
 
 - The TypeScript stubs encode 64-bit integers as `bigint` rather than
-  `number`, so watermarks above 2^53 survive the round trip.
+  `number`, so watermarks greater than 2^53 survive the round trip.
 - `max_nodes = 0` and `max_edges = 0` mean unlimited everywhere. The parser
-  previously read 0 as a zero cap while `Hello` advertised unlimited.
-- A tag now moves the npm `latest` dist-tag to the version it publishes. The
-  job previously published under `rc`, which left `latest` on whatever was
-  published first. Moving the tag after the fact is not possible here: OIDC
-  authorises `npm publish` and `npm stage publish` and nothing else, so
-  `npm dist-tag add` would need a stored npm token, and this pipeline holds no
-  registry secrets.
+  read 0 as a zero cap while `Hello` advertised unlimited.
+- A tag now moves the npm `latest` dist-tag to the version it publishes.
+  The job used `rc`, which left `latest` on the first version.
+  OpenID Connect permits only `npm publish` and `npm stage publish` here.
+  A later `npm dist-tag add` needs a stored token, which the pipeline does not hold.
 
 ## 0.0.0-rc6
 
@@ -204,11 +233,10 @@ no source distribution. 0.0.0-rc4 published nowhere. 0.0.0-rc5 reached npm only.
 
 ### Fixed
 
-- The source distribution, which declared `License-File: LICENSE` and
-  `License-File: NOTICE` and contained neither. Both files sit at the
-  repository root rather than inside the crate, so maturin named them in the
-  metadata and packed neither, and PyPI rejected the upload with 400 after
-  accepting the wheel of the same version.
+- The source distribution declared `License-File: LICENSE` and `License-File: NOTICE`, but contained neither file.
+  Both files sit at the repository root.
+  Maturin named them in the metadata without packing them.
+  PyPI rejected the source upload with 400 after accepting the wheel.
 
 ### Added
 
@@ -219,17 +247,16 @@ no source distribution. 0.0.0-rc4 published nowhere. 0.0.0-rc5 reached npm only.
 
 ### Changed
 
-- The registries now publish in order of how hard each one is to undo: npm,
-  then PyPI, then crates.io. An unwanted npm version can be unpublished within
-  72 hours, a PyPI release can be deleted but never reuses its filenames, and a
-  crates.io version can only be yanked. The first failure now stops everything
-  after it, so a broken release strands as little as possible.
+- The registries publish in order of recovery cost, starting with npm, then PyPI, then crates.io.
+  An operator can unpublish an npm version within 72 hours.
+  An operator can delete a PyPI release, but cannot reuse its filenames.
+  An operator can only yank a crates.io version.
+  The first failure stops the remaining jobs.
 
 ### Fixed
 
-- The npm publish, which the registry rejected with 422 because npm accepts a
-  provenance attestation only from a GitLab-hosted runner, and every runner
-  here is self-hosted. Trusted publishing turns provenance on by itself, so the
+- The npm registry rejected the publish with 422.
+  It accepts provenance attestations only from GitLab-hosted runners, and every runner here is self-hosted. Trusted publishing turns provenance on by itself, so the
   job now disables it. Published packages carry no provenance attestation until
   this job moves to a hosted runner.
 - The PyPI upload, which reported a bare `400 Bad Request` and discarded the
@@ -241,19 +268,18 @@ no source distribution. 0.0.0-rc4 published nowhere. 0.0.0-rc5 reached npm only.
 
 ### Changed
 
-- crates.io now publishes last, in its own stage, and waits for PyPI and npm to
-  succeed. crates.io is the only one of the three that can never accept a
-  second upload of a version, so publishing it first spent a version number
-  every time a later job failed. Publishing it last leaves the version
-  untouched when anything else fails, so the same tag can be fixed and pushed
-  again.
+- crates.io publishes last and waits for PyPI and npm to succeed.
+  It cannot accept a second upload of a version.
+  Publishing it first spent a version number when a later job failed.
+  Publishing it last keeps that version free after an earlier failure.
+  The operator can then fix and push the tag again.
 
 ### Fixed
 
 - The npm publish, which failed on provenance after authenticating. The
-  explicit `--provenance` flag is gone, because npm generates provenance on its
-  own through trusted publishing, and the flag turned a missing attestation
-  token into a failed publish. `SIGSTORE_ID_TOKEN` is now declared for the
+  job drops the explicit `--provenance` flag.
+  Trusted publishing generates provenance itself.
+  The flag turned a missing attestation token into a failed publish. `SIGSTORE_ID_TOKEN` is now declared for the
   automatic path.
 - The order of the PyPI job, which ran `twine check` before installing twine.
 
@@ -267,7 +293,7 @@ no source distribution. 0.0.0-rc4 published nowhere. 0.0.0-rc5 reached npm only.
   sets an entrypoint, so each command in the job arrived as an argument to
   `maturin` instead of running in a shell.
 - The npm release job, which reported a missing login when the cause was an
-  incomplete OIDC exchange. The job now checks the Node and npm versions and
+  incomplete OpenID Connect exchange. The job now checks the Node and npm versions and
   the presence of the identity token, and reports which one is missing.
 
 ## 0.0.0-rc1
@@ -277,17 +303,17 @@ no source distribution. 0.0.0-rc4 published nowhere. 0.0.0-rc5 reached npm only.
 - Published releases. The Rust crates go to crates.io, the `quip-solver-core`
   wheel to PyPI, and `@quip.network/quip-solver-core` to npm. The C library ships as
   a release artifact. A tag builds and publishes all four.
-- `quip-solver-c`, a C ABI over the session loop. A C or C++ solver registers
+- `quip-solver-c`, a C binary interface over the session loop. A C or C++ solver registers
   one sampling callback and calls `quip_solver_run`. It also exports
   `quip_energy_milli` so a C solver scores with the shipped scorer.
 - `@quip.network/quip-solver-core`, the npm package. It carries the consensus
   primitives as WebAssembly and the generated gRPC stubs.
 - `run_code`, which returns the `ExitCode` enum. `run` stays as a thin wrapper
   for a Rust `main`. A foreign function interface needs the numeric code, and
-  `std::process::ExitCode` cannot be read back into a number.
+  `std::process::ExitCode` has no numeric accessor.
 - `quip-solver-core` re-exports `quip_proto` and `quip_protocol`. A solver now
   names one dependency instead of two that must move in lockstep.
-- Sample solvers in Rust, C++, Python, and TypeScript under `examples/`. Each
+- Example solvers in Rust, C++, Python, and TypeScript under `examples/`. Each
   one passes the conformance gate.
 - The `quip-solver-conformance` crate. It holds the golden vectors and the
   scripted session driver.
@@ -301,9 +327,9 @@ no source distribution. 0.0.0-rc4 published nowhere. 0.0.0-rc5 reached npm only.
 
 ### Changed
 
-- **Breaking:** The licence changes from AGPL-3.0-or-later to Apache-2.0.
-  Apache-2.0 adds an express patent grant and stays compatible with AGPLv3, so
-  this code can still be combined into an AGPLv3 work.
+- **Breaking:** the licence changes from `AGPL-3.0-or-later` to Apache-2.0.
+  Apache-2.0 adds an express patent grant and stays compatible with `AGPLv3`.
+  A developer can combine this code into an `AGPLv3` work.
 - `quip-proto` ships its generated stubs instead of running `tonic-build` from
   a build script. A consumer no longer needs `protoc` on the build host. A test
   regenerates the stubs and fails when the checked-in copy is stale.

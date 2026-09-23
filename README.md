@@ -1,29 +1,31 @@
-# quip-solver-core
+# `quip-solver-core`
 
 This repository is the shared Quip solver contract. A solver binary accepts
 Ising problems and returns spin configurations with their energies.
 
-The contract has two bindings. One is a Rust crate workspace. The other is a
-Python wheel named `quip-solver-core`. The wheel carries the consensus primitives
-and the generated gRPC stubs, not the session loop, so a Python solver
-written today writes its own state machine. A Rust solver conforms today by
-supplying a `Sampler` and calling `run`.
+Rust solvers supply a `Sampler` and call `run`.
+C and C++ solvers register sampling callbacks with the C library.
+The Python wheel and npm package carry consensus primitives and generated gRPC stubs.
+Python and TypeScript solvers provide their own session loops.
 
 The full contract is in [SPEC.md](SPEC.md).
-[CHANGELOG.md](CHANGELOG.md) lists the 0.0.2-rc2 changes.
-[MIGRATING.md](MIGRATING.md) covers the move from `quip-miner-core`.
+[CHANGELOG.md](CHANGELOG.md) lists the 0.0.2-rc3 changes.
+[MIGRATING.md](MIGRATING.md) covers solver API changes.
+Release `0.0.2-rc3` requires protocol version 2.
+Update the coordinator and solvers together using the
+[coordinator upgrade guide](docs/coordinator-upgrade-v2.md).
 
 ## Crates
 
 | Crate | What it holds |
 | -- | -- |
-| `quip-solver-core` | The `Sampler` trait, Ising and CSR types, beta ladder, adaptive budget, session loop |
+| `quip-solver-core` | The `Sampler` trait, Ising and compressed sparse row types, inverse-temperature ladder, adaptive budget, session loop |
 | `quip-proto` | Generated tonic and prost stubs for `proto/quip/v1/miner.proto` |
 | `quip-protocol` | Wire codec, energy and diversity scoring, handshake, ChaCha8 draw, nonce derivation |
 | `quip-solver-conformance` | Golden vectors and the scripted session driver |
 | `quip-protocol-py` | PyO3 bindings exposing `quip-protocol` scoring and wire primitives to Python |
 | `quip-protocol-wasm` | WebAssembly bindings behind the npm package |
-| `quip-solver-c` | C ABI over the session loop, shipped as a release artifact |
+| `quip-solver-c` | C binary interface over the session loop, shipped as a release artifact |
 
 ## Install
 
@@ -34,10 +36,10 @@ artifact, because a C consumer wants the compiled object and the header.
 
 ```toml
 [dependencies]
-quip-solver-core = "0.0.2-rc2"
+quip-solver-core = "0.0.2-rc3"
 
 [dev-dependencies]
-quip-solver-conformance = "0.0.2-rc2"
+quip-solver-conformance = "0.0.2-rc3"
 ```
 
 One dependency is enough. `quip-solver-core` re-exports `quip_proto` and
@@ -56,13 +58,13 @@ The Rust example shows this choice.
 pip install quip-solver-core
 ```
 
-### JavaScript and TypeScript
+### Node packages
 
 ```sh
 npm install @quip.network/quip-solver-core@rc
 ```
 
-### C and C++
+### Native libraries
 
 Download `quip-solver-clib-<tag>-linux-amd64.tar.gz` from the release page. It
 holds `libquip_solver_c.so`, `libquip_solver_c.a`, and `include/quip_solver.h`.

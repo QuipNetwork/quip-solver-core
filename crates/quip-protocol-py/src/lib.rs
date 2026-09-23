@@ -97,7 +97,7 @@ fn decode_i32_le(b: Vec<u8>) -> PyResult<Vec<i32>> {
     quip_protocol::wire::decode_i32_le(&b).map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
-/// Encode spins as packed bytes (`+1`/`-1` → bit representation).
+/// Encode spins with one byte per spin (`+1` = `0x01`, `-1` = `0xFF`).
 ///
 /// `PyO3` extracts an owned `Vec` from Python.
 #[pyfunction]
@@ -109,7 +109,7 @@ fn encode_spins(spins: Vec<i8>) -> Vec<u8> {
     quip_protocol::wire::encode_spins(&spins)
 }
 
-/// Decode packed spin bytes.
+/// Decode one byte per spin (`0x01` = `+1`, `0xFF` = `-1`).
 ///
 /// # Errors
 ///
