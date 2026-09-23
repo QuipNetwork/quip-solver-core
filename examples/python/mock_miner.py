@@ -134,17 +134,25 @@ def decode_problem(ising, topologies: dict[bytes, Topology]):
     ``Reject{MALFORMED}``. Raises ``MissingTopology`` when the job names a
     hash this session never cached.
     """
-    # I32 at scale 1000 is the only coefficient form this sample decodes.
-    if ising.encoding != miner_pb2.COEFFICIENT_ENCODING_I32 or ising.scale != 1000:
-        raise ValueError("coefficients must be I32 at scale 1000")
+    if ising.encoding != miner_pb2.COEFFICIENT_ENCODING_I32 or ising.scale == 0:
+        raise ValueError("coefficients must be I32 with a positive scale")
     if len(ising.h) % 4 != 0:
         raise ValueError("h length is not a multiple of 4")
     if len(ising.j) % 4 != 0:
         raise ValueError("j length is not a multiple of 4")
 
     # Decoding through the wheel keeps Python byte-identical with Rust.
-    h = [v / 1000.0 for v in wire.decode_i32_le(ising.h)]
-    j = [v / 1000.0 for v in wire.decode_i32_le(ising.j)]
+    def decode_coefficients(data):
+        values = []
+        for value in wire.decode_i32_le(data):
+            milli, remainder = divmod(value * 1000, ising.scale)
+            if remainder or not -(2**31) <= milli < 2**31:
+                raise ValueError("coefficient is not exact i32 milli")
+            values.append(milli / 1000.0)
+        return values
+
+    h = decode_coefficients(ising.h)
+    j = decode_coefficients(ising.j)
 
     which = ising.WhichOneof("graph")
     if which == "edges":

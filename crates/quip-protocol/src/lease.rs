@@ -374,11 +374,18 @@ pub fn verify_lease_result(
         .as_slice()
         .try_into()
         .map_err(|_| VerifyError::SaltOutsideLease)?;
+    if lease.index_of(&salt).is_none() {
+        return Err(VerifyError::SaltOutsideLease);
+    }
     let nonce = result
         .nonce
         .as_slice()
         .try_into()
         .map_err(|_| VerifyError::NonceMismatch)?;
+    if crate::derive::derive_nonce(lease.last_proof_block_hash, lease.miner_account, salt) != nonce
+    {
+        return Err(VerifyError::NonceMismatch);
+    }
     let mut solutions = Vec::with_capacity(result.solutions.len());
     for (index, solution) in result.solutions.iter().enumerate() {
         let spins = crate::wire::decode_spins_packed(&solution.spins, topology.num_nodes)
@@ -506,6 +513,57 @@ mod tests {
         let v = verify_lease_solutions(&s, &topo, &EASY, &salt, &nonce, &sols).unwrap();
         assert_eq!(v.salt, salt);
         assert_eq!(v.stats.valid_solution_count, 1);
+    }
+
+    #[test]
+    fn empty_required_values_report_draw_error() {
+        let s = spec(5, 4);
+        let mut topo = tiny_topology();
+        topo.allowed_h_milli.clear();
+        assert!(matches!(
+            verify_lease_solutions(
+                &s,
+                &topo,
+                &EASY,
+                &s.salt(0).unwrap(),
+                &s.nonce(0).unwrap(),
+                &[]
+            ),
+            Err(VerifyError::Draw(_))
+        ));
+    }
+
+    #[cfg(feature = "session")]
+    #[test]
+    fn wire_membership_and_nonce_precede_malformed_spins() {
+        let s = spec(5, 4);
+        let generator = quip_proto::v1::IsingProblemGenerator {
+            algorithm: 1,
+            last_proof_block_hash: s.last_proof_block_hash.to_vec(),
+            miner_account: s.miner_account.to_vec(),
+            base_salt: s.base_salt.to_vec(),
+            salt_start: 5,
+            salt_count: 4,
+            ..Default::default()
+        };
+        let mut result = quip_proto::v1::Result {
+            salt: salt_with_counter(&s.base_salt, 100).to_vec(),
+            nonce: vec![0; 32],
+            solutions: vec![quip_proto::v1::Solution {
+                spins: vec![],
+                energy_milli: 0,
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            verify_lease_result(&generator, &tiny_topology(), &EASY, &result).err(),
+            Some(VerifyError::SaltOutsideLease)
+        );
+        result.salt = s.salt(0).unwrap().to_vec();
+        assert_eq!(
+            verify_lease_result(&generator, &tiny_topology(), &EASY, &result).err(),
+            Some(VerifyError::NonceMismatch)
+        );
     }
 
     #[test]

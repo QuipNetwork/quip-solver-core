@@ -1,7 +1,7 @@
 //! Default salt expansion and lease completion accounting.
 use crate::coefficient::Coefficient;
 use crate::job::{miner, now_unix_ms, os_seed, pick_param, ExactEnergy, SessionTarget};
-use crate::session::{BackendIdentity, JobSender, PendingJob, PendingParams};
+use crate::session::{BackendIdentity, Control, JobSender, PendingJob, PendingParams};
 use crate::{
     CancelToken, IsingGraph, SampleError, SampleParams, Sampler, SamplerResult, StreamJob,
     StreamOutcome, StreamResult,
@@ -71,18 +71,35 @@ impl LeaseState {
     pub(crate) fn expired(&self) -> bool {
         expired(self.deadline_ms)
     }
-    fn stopped(&self, cancel: &CancelToken) -> bool {
+    pub(crate) fn stopped(&self, cancel: &CancelToken) -> bool {
         self.aborted.load(Ordering::Relaxed)
             || cancel.is_cancelled(self.watermark)
             || self.expired()
     }
-    fn try_finish(&self) -> Option<MinerMsg> {
-        self.finish_locked(&mut self.progress())
+    pub(crate) fn send_local(
+        &self,
+        msg: MinerMsg,
+        permit: mpsc::Permit<'_, MinerMsg>,
+        cancel: &CancelToken,
+        grace_expired: bool,
+    ) {
+        // Serialize the final send with fault(), which aborts under this lock.
+        let _progress = self.progress();
+        if self.aborted.load(Ordering::Relaxed)
+            || (matches!(msg.msg, Some(miner_msg::Msg::Result(_)))
+                && (self.stopped(cancel) || grace_expired))
+        {
+            return;
+        }
+        permit.send(msg);
     }
-    fn finish_locked(&self, p: &mut Progress) -> Option<MinerMsg> {
+    fn try_finish(&self) -> Option<MinerMsg> {
+        self.finish_locked(&mut self.progress(), false)
+    }
+    fn finish_locked(&self, p: &mut Progress, grace_expired: bool) -> Option<MinerMsg> {
         if self.aborted.load(Ordering::Relaxed)
             || !p.closed
-            || p.finished != p.dispatched
+            || (!grace_expired && p.finished != p.dispatched)
             || p.done_sent
         {
             return None;
@@ -94,10 +111,13 @@ impl LeaseState {
             best_energy_milli: p.best_energy_milli,
         })))
     }
-    pub(crate) async fn send_done(&self, tx: &mpsc::Sender<MinerMsg>) -> Result<(), ()> {
+    pub(crate) async fn send_done<T: From<MinerMsg>>(
+        &self,
+        tx: &mpsc::Sender<T>,
+    ) -> Result<(), ()> {
         if let Some(done) = self.try_finish() {
-            tx.send(done).await.map_err(|_| ())?;
-            tx.send(miner(miner_msg::Msg::JobRequest(JobRequest { credits: 1 })))
+            tx.send(done.into()).await.map_err(|_| ())?;
+            tx.send(miner(miner_msg::Msg::JobRequest(JobRequest { credits: 1 })).into())
                 .await
                 .map_err(|_| ())?;
         }
@@ -119,8 +139,8 @@ pub(crate) struct Expander<C: Coefficient> {
     pub(crate) pending: PendingParams,
     pub(crate) slots: Arc<Semaphore>,
     pub(crate) cancel: CancelToken,
-    pub(crate) shutdown: watch::Receiver<bool>,
-    pub(crate) ctrl: mpsc::Sender<MinerMsg>,
+    pub(crate) shutdown: watch::Receiver<Option<tokio::time::Instant>>,
+    pub(crate) ctrl: mpsc::Sender<Control>,
 }
 
 pub(crate) type CachedLeaseTopology = (Vec<u8>, Result<Arc<TopologyView>, RejectReason>);
@@ -232,7 +252,7 @@ impl<C: Coefficient> Expander<C> {
         let mut tick = tokio::time::interval(std::time::Duration::from_millis(50));
         for index in 0..state.lease.salt_count() {
             let permit = loop {
-                if state.stopped(&self.cancel) || *self.shutdown.borrow() {
+                if state.stopped(&self.cancel) || self.shutdown.borrow().is_some() {
                     break None;
                 }
                 tokio::select! {
@@ -245,7 +265,7 @@ impl<C: Coefficient> Expander<C> {
             let Some(permit) = permit else {
                 break;
             };
-            if state.stopped(&self.cancel) || *self.shutdown.borrow() {
+            if state.stopped(&self.cancel) || self.shutdown.borrow().is_some() {
                 break;
             }
             let (graph, exact_energy) = match draw_graph::<C>(&state, index) {
@@ -389,12 +409,14 @@ impl std::error::Error for LeaseStopped {}
 
 /// Receives locally generated salts and verifies winning reads on the host.
 pub struct LeaseSink {
+    #[cfg(test)]
+    pub(crate) before_send: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
     pub(crate) state: Arc<LeaseState>,
     pub(crate) cancel: CancelToken,
-    pub(crate) shutdown: watch::Receiver<bool>,
+    pub(crate) shutdown: watch::Receiver<Option<tokio::time::Instant>>,
     pub(crate) target: watch::Receiver<Option<SessionTarget>>,
     // An uncooperative worker must not keep the control queue open after cancellation.
-    pub(crate) ctrl: mpsc::WeakSender<MinerMsg>,
+    pub(crate) ctrl: mpsc::WeakSender<Control>,
     pub(crate) device_faulted: Arc<AtomicBool>,
     pub(crate) params: SampleParams,
 }
@@ -403,18 +425,29 @@ impl LeaseSink {
     #[must_use]
     pub fn is_stopped(&self) -> bool {
         self.state.stopped(&self.cancel)
-            || *self.shutdown.borrow()
+            || self.shutdown.borrow().is_some()
+            || self.ctrl.upgrade().is_none_or(|tx| tx.is_closed())
+            || self.state.progress().closed
+    }
+
+    fn rejects_push(&self) -> bool {
+        self.state.stopped(&self.cancel)
+            || self
+                .shutdown
+                .borrow()
+                .is_some_and(|deadline| tokio::time::Instant::now() >= deadline)
             || self.ctrl.upgrade().is_none_or(|tx| tx.is_closed())
             || self.state.progress().closed
     }
 
     /// Submit all reads for a finished salt from a blocking sampler thread.
+    /// During shutdown, already running work may submit until grace expires.
     ///
     /// # Errors
     /// Returns a stop if the lease has ended, the index is outside its range,
     /// the writer has gone, or host verification detects a device fault.
     pub fn push(&self, salt_index: u64, reads: Vec<SamplerResult>) -> Result<(), LeaseStopped> {
-        if self.is_stopped() || salt_index >= self.state.lease.salt_count() {
+        if self.rejects_push() || salt_index >= self.state.lease.salt_count() {
             return Err(LeaseStopped);
         }
         {
@@ -477,11 +510,19 @@ impl LeaseSink {
                 energy_milli: energy,
             });
         }
-        if self.is_stopped() {
+        if self.rejects_push() {
             return Err(LeaseStopped);
         }
         let target = self.target.borrow().clone();
         if let Some(reply) = winner(&self.state, index, &rescored, target.as_ref(), meta) {
+            #[cfg(test)]
+            if let Some(pause) = &*self
+                .before_send
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+            {
+                pause();
+            }
             self.send(reply)?;
         }
         Ok(())
@@ -491,14 +532,21 @@ impl LeaseSink {
         self.ctrl
             .upgrade()
             .ok_or(LeaseStopped)?
-            .blocking_send(msg)
+            .blocking_send(if matches!(msg.msg, Some(miner_msg::Msg::Fatal(_))) {
+                msg.into()
+            } else {
+                Control::local(msg, Arc::clone(&self.state), self.shutdown.clone())
+            })
             .map_err(|_| LeaseStopped)
     }
 
     fn fault(&self, error: &SampleError) {
-        self.state.progress().closed = true;
-        if !self.device_faulted.swap(true, Ordering::Relaxed) {
+        {
+            let mut progress = self.state.progress();
             self.state.aborted.store(true, Ordering::Relaxed);
+            progress.closed = true;
+        }
+        if !self.device_faulted.swap(true, Ordering::Relaxed) {
             let _ = self.send(miner(miner_msg::Msg::Fatal(quip_proto::v1::Fatal {
                 exit_code: quip_protocol::session::ExitCode::InternalFatal as u32,
                 reason: error.to_string(),
@@ -520,52 +568,79 @@ impl LeaseSink {
                 "lease thread panicked: {payload}"
             )))
         });
-        let Some(ctrl) = self.ctrl.upgrade() else {
-            return;
-        };
+        if let Err(error) = result {
+            if error.is_fatal() {
+                self.fault(&error);
+                return;
+            }
+        }
         let done = {
             let mut progress = self.state.progress();
             progress.closed = true;
-            self.state.finish_locked(&mut progress)
+            self.state.finish_locked(&mut progress, false)
         };
         if let Some(done) = done {
-            let _ = ctrl.blocking_send(done);
-            match result {
-                Err(error) if error.is_fatal() => self.fault(&error),
-                _ => {
-                    let _ = ctrl.blocking_send(miner(miner_msg::Msg::JobRequest(JobRequest {
-                        credits: 1,
-                    })));
-                }
-            }
-        } else if let Err(error) = result {
-            if error.is_fatal() {
-                self.fault(&error);
-            }
+            let _ = self.send(done);
+            let _ = self.send(miner(miner_msg::Msg::JobRequest(JobRequest { credits: 1 })));
         }
     }
 }
 
-/// Close cancelled local leases even when the backend never returns.
+/// Close stopped local leases even when the backend never returns.
 pub(crate) async fn monitor_local(
     state: Arc<LeaseState>,
     cancel: CancelToken,
-    mut shutdown: watch::Receiver<bool>,
-    ctrl: mpsc::Sender<MinerMsg>,
+    mut shutdown: watch::Receiver<Option<tokio::time::Instant>>,
+    tx: mpsc::Sender<MinerMsg>,
 ) {
     let mut tick = tokio::time::interval(std::time::Duration::from_millis(5));
     loop {
-        if state.stopped(&cancel) || *shutdown.borrow() {
-            state.progress().closed = true;
+        let deadline = *shutdown.borrow();
+        let grace_expired = deadline.is_some_and(|d| tokio::time::Instant::now() >= d);
+        let done = {
+            let mut progress = state.progress();
+            if state.stopped(&cancel) || grace_expired {
+                progress.closed = true;
+            }
+            state.finish_locked(&mut progress, grace_expired)
+        };
+        if let Some(done) = done {
+            // Stop summaries bypass queued winners only after cancellation or
+            // grace expiry. The writer drops those winners using the same state.
+            for msg in [
+                done,
+                miner(miner_msg::Msg::JobRequest(JobRequest { credits: 1 })),
+            ] {
+                let control = Control::local(msg, Arc::clone(&state), shutdown.clone());
+                let send = crate::session::send_control(&tx, control, &cancel);
+                tokio::pin!(send);
+                loop {
+                    let deadline = *shutdown.borrow();
+                    tokio::select! {
+                        biased;
+                        _ = &mut send => break,
+                        _ = shutdown.changed() => {},
+                        () = wait_for_grace(deadline) => return,
+                    }
+                }
+            }
         }
-        let _ = state.send_done(&ctrl).await;
         if state.progress().done_sent || state.aborted.load(Ordering::Relaxed) {
             break;
         }
         tokio::select! {
             _ = tick.tick() => {},
             _ = shutdown.changed() => {},
+            () = wait_for_grace(deadline) => {},
         }
+    }
+}
+
+async fn wait_for_grace(deadline: Option<tokio::time::Instant>) {
+    if let Some(deadline) = deadline {
+        tokio::time::sleep_until(deadline).await;
+    } else {
+        std::future::pending::<()>().await;
     }
 }
 
@@ -615,7 +690,7 @@ mod tests {
     async fn shutdown_bounds_an_expander_on_a_full_control_queue() {
         use crate::coefficient::Milli;
         let (ctrl, _stalled_outbound) = mpsc::channel(1);
-        ctrl.send(miner(miner_msg::Msg::JobRequest(JobRequest { credits: 1 })))
+        ctrl.send(miner(miner_msg::Msg::JobRequest(JobRequest { credits: 1 })).into())
             .await
             .unwrap();
         assert_eq!(ctrl.capacity(), 0);
@@ -649,7 +724,7 @@ mod tests {
             pending: Arc::new(Mutex::new(std::collections::HashMap::new())),
             slots: Arc::new(Semaphore::new(1)),
             cancel: CancelToken::default(),
-            shutdown: watch::channel(true).1,
+            shutdown: watch::channel(Some(tokio::time::Instant::now())).1,
             ctrl: ctrl.clone(),
         };
         let mut expanders = tokio::task::JoinSet::new();

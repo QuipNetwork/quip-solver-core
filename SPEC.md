@@ -387,11 +387,16 @@ optional. The `None` belongs to the job's watermark.
 A default sampler must return outstanding salt outcomes before its lease summary can complete.
 A shutdown timeout can prevent that summary from reaching the coordinator.
 
-For local generation, shutdown closes `LeaseSink` immediately.
-New pushes fail with `LeaseStopped`, while already queued messages may drain.
+For local generation, shutdown makes `LeaseSink::is_stopped()` true immediately, so the sampler starts no new salts.
+The sink accepts verified winners from work already running until the grace deadline.
+The lease closes and sends `LeaseDone` when its worker returns or grace expires, whichever comes first.
+Cancellation and lease expiry reject later pushes and queued winners.
 A session task closes cancelled local leases even when the sampler does not return.
-A local sampler panic can emit `LeaseDone` before `Fatal`.
-A fatal run remains failed regardless of a preceding summary.
+A local fatal error or panic sends `Fatal` without `LeaseDone` or a credit refund for that lease.
+
+Live local workers cannot exceed the advertised credit window.
+The session removes finished workers before starting another worker.
+If stopped workers still fill that window, the session sends a device-fault `Fatal` stating that stopped lease workers did not retire.
 
 `Cancel` remains generation-only. It cannot address one lease by job identifier.
 Size the count and absolute Unix deadline for short leases, then renew work.

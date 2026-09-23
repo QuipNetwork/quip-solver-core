@@ -1960,6 +1960,110 @@ mod tests {
     }
 
     #[test]
+    fn lease_fold_rejects_results_after_completion() {
+        let mut o = SessionOutcome {
+            lease: Some(LeaseOutcome {
+                lease_done: Some((4, -1000)),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        fold(&mut o, miner_msg::Msg::Result(lease_result(0)));
+        let lease = o.lease.unwrap();
+        assert_eq!(lease.results, 1);
+        assert_eq!(lease.results_verified, 0);
+        let mut report = lease_report();
+        report.lease = Some(lease);
+        assert!(!report.is_conformant());
+    }
+
+    #[test]
+    fn lease_fold_rejects_wrong_job_id_during_active_lease() {
+        let mut o = SessionOutcome {
+            lease: Some(LeaseOutcome::default()),
+            ..Default::default()
+        };
+        let mut result = lease_result(0);
+        result.job_id = b"wrong-lease".to_vec();
+        fold(&mut o, miner_msg::Msg::Result(result));
+        assert_eq!(o.lease.as_ref().unwrap().results, 0);
+        assert_eq!(o.results.len(), 1);
+        let mut report = lease_report();
+        report.results.extend(o.results);
+        assert!(!report.is_conformant());
+    }
+
+    struct LeaseTrafficCoordinator(Mutex<Option<oneshot::Sender<SessionOutcome>>>);
+    #[tonic::async_trait]
+    impl MinerService for LeaseTrafficCoordinator {
+        type SessionStream = ReceiverStream<Result<CoordMsg, Status>>;
+        async fn session(
+            &self,
+            request: Request<Streaming<MinerMsg>>,
+        ) -> Result<Response<Self::SessionStream>, Status> {
+            let sender = self.0.lock().await.take().unwrap();
+            let (tx, rx) = mpsc::channel(8);
+            let mut inbound = request.into_inner();
+            let _task = tokio::spawn(async move {
+                let mut outcome = SessionOutcome::default();
+                run_lease(&tx, &mut inbound, &mut outcome).await;
+                let _ = sender.send(outcome);
+            });
+            Ok(Response::new(ReceiverStream::new(rx)))
+        }
+    }
+
+    #[tokio::test]
+    async fn lease_collection_timeout_bounds_continuous_traffic() {
+        use quip_proto::v1::miner_service_client::MinerServiceClient;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (done, outcome) = oneshot::channel();
+        let server = tokio::spawn(
+            Server::builder()
+                .add_service(MinerServiceServer::new(LeaseTrafficCoordinator(
+                    Mutex::new(Some(done)),
+                )))
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener)),
+        );
+        let mut client = MinerServiceClient::connect(format!("http://{address}"))
+            .await
+            .unwrap();
+        let (tx, rx) = mpsc::channel(8);
+        let mut inbound = client
+            .session(ReceiverStream::new(rx))
+            .await
+            .unwrap()
+            .into_inner();
+        for _ in 0..3 {
+            assert!(inbound.message().await.unwrap().is_some());
+        }
+        let traffic = tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_millis(10));
+            loop {
+                let _ = tick.tick().await;
+                if tx
+                    .send(MinerMsg {
+                        msg: Some(miner_msg::Msg::Status(MinerStatus::default())),
+                    })
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        let result = tokio::time::timeout(PHASE_TIMEOUT + Duration::from_secs(2), outcome).await;
+        traffic.abort();
+        server.abort();
+        let outcome = result
+            .expect("continuous traffic must not renew the collection budget")
+            .unwrap();
+        assert_eq!(outcome.timed_out_phases, vec!["salt-lease"]);
+        assert!(!outcome.statuses.is_empty());
+    }
+
+    #[test]
     fn unsolicited_lease_results_remain_unexpected_plain_results() {
         let mut o = SessionOutcome::default();
         fold(&mut o, miner_msg::Msg::Result(lease_result(0)));

@@ -13,7 +13,8 @@
   },
   "scripts": {
     "build": "tsc && chmod +x dist/mock_miner.js",
-    "start": "node dist/mock_miner.js"
+    "start": "node dist/mock_miner.js",
+    "test": "npm run build && node --test dist/*.test.js"
   },
   "dependencies": {
     "@grpc/grpc-js": "^1.14.4",

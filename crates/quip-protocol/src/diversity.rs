@@ -3,7 +3,7 @@
 //! The validator selects and scores proof solutions with integer arithmetic in
 //! `quantum-validation` (`select_diverse`, `calculate_diversity`). A miner that
 //! decides locally whether a salt wins must reach the same integers, so these
-//! are line-for-line ports, pinned by `golden_target.json`. The `f64`
+//! are behavioral ports, pinned by the golden vectors in `golden_target.json`. The `f64`
 //! [`crate::scoring::set_diversity`] is a different, display-only measure.
 
 use crate::scoring::hamming_flip_invariant;

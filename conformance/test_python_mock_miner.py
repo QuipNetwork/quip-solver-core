@@ -200,10 +200,11 @@ async def test_result_spins_are_bit_packed():
     ("field", "value"),
     [
         ("encoding", miner_pb2.COEFFICIENT_ENCODING_F64),
-        ("scale", 1),
+        ("scale", 3),
+        ("scale", 0),
     ],
 )
-async def test_rejects_coefficients_that_are_not_i32_at_scale_1000(field, value):
+async def test_rejects_malformed_coefficients(field, value):
     call = FakeCall()
     state = mock_miner.Session("mock-0", call)
     ising = _ising_from_dense([1000, -1000], [500], [(0, 1)])
@@ -248,3 +249,23 @@ def test_capabilities_flag_prints_lowercase_identity_names():
         "features": [],
         "generators": [],
     }
+
+
+@pytest.mark.parametrize(
+    "scale,stored,milli", [(1, 1, 1000), (2000, 2, 1), (3, 3, 1000)]
+)
+def test_accepts_exact_i32_scales(scale, stored, milli):
+    ising = _ising_from_dense([stored, -stored], [stored], [(0, 1)])
+    ising.scale = scale
+    h, j, edges = mock_miner.decode_problem(ising, {})
+    assert h == [milli / 1000, -milli / 1000]
+    assert j == [milli / 1000]
+    assert edges == [(0, 1)]
+
+
+@pytest.mark.parametrize("stored", [2147484, -2147484])
+def test_rejects_milli_overflow(stored):
+    ising = _ising_from_dense([stored], [], [])
+    ising.scale = 1
+    with pytest.raises(ValueError):
+        mock_miner.decode_problem(ising, {})

@@ -269,13 +269,17 @@ Neither repeated nor out-of-order cancellation changes that rule.
 A sampler must cooperate so that outstanding outcomes can drain.
 The shutdown grace limit can end the session before a summary reaches the coordinator.
 
-For local generation, `LeaseSink::is_stopped()` covers cancellation, deadline, shutdown, completion, and a closed writer.
-Later `push` calls fail with `LeaseStopped`.
-Shutdown closes this sink immediately, so local generation cannot submit new reads during the grace window.
-Results already queued for transmission may drain.
+For local generation, `LeaseSink::is_stopped()` covers cancellation, deadlines, shutdown, completion, and a closed writer.
+On shutdown, stop starting salts immediately.
+The sink accepts verified winners from work already running until the grace deadline.
+The lease closes when its worker returns or grace expires, whichever comes first, and sends `LeaseDone`.
+Cancellation and lease expiry reject later pushes and queued winners.
 A session task closes cancelled local leases even if the sampler does not return.
-A local sampler panic can send `LeaseDone` before its fatal message.
-Treat a fatal run as failed regardless of a preceding summary.
+A local fatal error or panic sends `Fatal` without a completion summary or credit refund for that lease.
+
+Live local workers cannot exceed the advertised credit window.
+The session removes finished workers before a new worker starts.
+If stopped workers still fill that window, the session sends a device-fault `Fatal` stating that stopped lease workers did not retire.
 
 ## Plain and mempool jobs
 

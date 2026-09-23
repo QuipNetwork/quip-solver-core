@@ -93,9 +93,15 @@ impl Session {
                 )))))
                 .serve_with_incoming(UnixListenerStream::new(listener)),
         );
-        let local = mode.map(|_| local_binary());
+        let local = mode.map(|mode| {
+            if mode == "wide" {
+                build_example("mock_sampler_lease_wide")
+            } else {
+                local_binary()
+            }
+        });
         let mut command = tokio::process::Command::new(local.as_ref().unwrap_or(&bin));
-        if let Some(mode) = mode {
+        if let Some(mode) = mode.filter(|m| *m != "wide") {
             let _ = command
                 .args(["--mode", mode])
                 .stderr(std::process::Stdio::piped());
@@ -137,7 +143,7 @@ impl Session {
             .supported_kinds
             .contains(&(wire::JobKind::IsingGenerate as i32)));
         if gated {
-            assert_eq!(caps.stream_width, 1);
+            assert_eq!(caps.stream_width, if mode == Some("wide") { 2 } else { 1 });
         }
         assert_eq!(
             caps.generators,
@@ -720,7 +726,7 @@ async fn a_panicking_local_sampler_is_a_device_fault_without_shutdown() {
         loop {
             match s.recv().await {
                 miner_msg::Msg::Fatal(fatal) => break fatal,
-                miner_msg::Msg::LeaseDone(_) | miner_msg::Msg::Status(_) => {}
+                miner_msg::Msg::Status(_) => {}
                 other => panic!("unexpected message: {other:?}"),
             }
         }
@@ -735,6 +741,13 @@ async fn a_panicking_local_sampler_is_a_device_fault_without_shutdown() {
     assert!(fatal
         .reason
         .contains("lease thread panicked: local sampler exploded"));
+    assert!(
+        tokio::time::timeout(Duration::from_secs(10), s.inbound.message())
+            .await
+            .unwrap()
+            .unwrap()
+            .is_none()
+    );
     // Keep the coordinator stream open so only the device fault ends the session.
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(10), s.child.wait())
@@ -818,4 +831,147 @@ async fn capabilities_are_the_same_for_both_paths() {
     };
     assert_eq!(caps(&local_binary()), caps(&default));
     s.finish().await;
+}
+
+#[tokio::test]
+async fn local_shutdown_accepts_a_finished_salt_during_grace() {
+    let mut s = Session::start_mode(false, true, Some("grace")).await;
+    s.setup(i64::MAX).await;
+    s.send(coord_msg::Msg::Job(job(5))).await;
+    let mut salt = s.blocked_sample().await;
+    s.send(coord_msg::Msg::Shutdown(wire::Shutdown { grace_ms: 2000 }))
+        .await;
+    release(&mut salt).await;
+    first(&mut s).await;
+    assert!(matches!(s.recv().await, miner_msg::Msg::LeaseDone(d) if d.salts_done == 1));
+    s.refund().await;
+    assert!(s.inbound.message().await.unwrap().is_none());
+    s.tx = mpsc::channel(1).0;
+    assert!(s.child.wait().await.unwrap().success());
+}
+
+#[tokio::test]
+async fn stopped_local_workers_cannot_exceed_the_credit_window() {
+    let mut s = Session::start_mode(false, false, Some("ignore-stop")).await;
+    s.setup(i64::MAX).await;
+    // Configure requests eight credits, clamped to the session capacity.
+    for generation in 1..=8 {
+        let mut lease = job(u64::MAX - 10);
+        lease.generation = generation;
+        s.send(coord_msg::Msg::Job(lease)).await;
+        first(&mut s).await;
+        s.send(coord_msg::Msg::Cancel(wire::Cancel {
+            max_generation: generation,
+        }))
+        .await;
+        let (mut ack, mut done, mut refund) = (false, false, false);
+        while !(ack && done && refund) {
+            match s.recv().await {
+                miner_msg::Msg::Status(_) => ack = true,
+                miner_msg::Msg::LeaseDone(_) => {
+                    assert!(!done);
+                    done = true;
+                }
+                miner_msg::Msg::JobRequest(r) => {
+                    assert!(done);
+                    assert_eq!(r.credits, 1);
+                    refund = true;
+                }
+                miner_msg::Msg::Result(_) => assert!(!ack),
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+    }
+    let mut lease = job(1);
+    lease.generation = 9;
+    s.send(coord_msg::Msg::Job(lease)).await;
+    assert!(
+        matches!(s.recv().await, miner_msg::Msg::Fatal(f) if f.reason.contains("stopped lease workers did not retire") && f.restart_required)
+    );
+    s.tx = mpsc::channel(1).0;
+    assert_eq!(s.child.wait().await.unwrap().code(), Some(70));
+}
+
+#[tokio::test]
+async fn width_two_leases_keep_permits_order_and_single_refunds() {
+    use tokio::io::AsyncReadExt as _;
+    let mut s = Session::start_mode(false, true, Some("wide")).await;
+    s.setup(i64::MAX).await;
+    for id in [b"a", b"b"] {
+        let mut lease = job(2);
+        lease.job_id = id.to_vec();
+        s.send(coord_msg::Msg::Job(lease)).await;
+    }
+    let mut first = s.blocked_sample().await;
+    let mut second = s.blocked_sample().await;
+    // Both permits are held. A plain job must still reach the sampler.
+    s.send(coord_msg::Msg::Job(wire::Job {
+        job_id: b"plain".to_vec(),
+        kind: wire::JobKind::IsingSample as i32,
+        ising: Some(wire::IsingProblem {
+            encoding: wire::CoefficientEncoding::I32 as i32,
+            scale: 1000,
+            h: quip_protocol::wire::encode_i32_le(&[1000]),
+            num_reads: 1,
+            ..Default::default()
+        }),
+        ..Default::default()
+    }))
+    .await;
+    let mut plain = s.blocked_sample().await;
+    let len = plain.read_u32_le().await.unwrap();
+    let mut id = vec![0; len as usize];
+    let _ = plain.read_exact(&mut id).await.unwrap();
+    assert_eq!(
+        id,
+        [vec![0], b"plain".to_vec()].concat(),
+        "lease salts exceeded the shared permit bound"
+    );
+    release(&mut plain).await;
+    assert!(matches!(s.recv().await, miner_msg::Msg::Result(r) if r.job_id == b"plain"));
+    s.refund().await;
+    // Complete the second salt first, keeping the first permit occupied.
+    release(&mut second).await;
+    let mut winners = std::collections::HashMap::<Vec<u8>, usize>::new();
+    let mut completed = std::collections::HashSet::new();
+    let mut refunds = 1;
+    for next in 0..4 {
+        let miner_msg::Msg::Result(r) = s.recv().await else {
+            panic!("winner must precede completion")
+        };
+        assert!(!completed.contains(&r.job_id));
+        *winners.entry(r.job_id.clone()).or_default() += 1;
+        if winners.get(&r.job_id) == Some(&2) {
+            assert!(
+                matches!(s.recv().await, miner_msg::Msg::LeaseDone(d) if d.job_id == r.job_id && d.salts_done == 2)
+            );
+            assert!(completed.insert(r.job_id));
+            s.refund().await;
+            refunds += 1;
+        }
+        if next < 2 {
+            release(&mut s.blocked_sample().await).await;
+        } else if next == 2 {
+            release(&mut first).await;
+        }
+    }
+    assert_eq!(completed.len(), 2);
+    assert_eq!(refunds, 3);
+    s.ack().await;
+    s.finish().await;
+}
+
+#[tokio::test]
+async fn local_shutdown_closes_an_unreturned_worker_at_grace_deadline() {
+    let mut s = Session::start_mode(false, true, Some("grace")).await;
+    s.setup(i64::MAX).await;
+    s.send(coord_msg::Msg::Job(job(5))).await;
+    let _blocked = s.blocked_sample().await;
+    s.send(coord_msg::Msg::Shutdown(wire::Shutdown { grace_ms: 100 }))
+        .await;
+    assert!(matches!(s.recv().await, miner_msg::Msg::LeaseDone(d) if d.salts_done == 0));
+    s.refund().await;
+    assert!(s.inbound.message().await.unwrap().is_none());
+    s.tx = mpsc::channel(1).0;
+    assert!(s.child.wait().await.unwrap().success());
 }

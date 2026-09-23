@@ -75,6 +75,14 @@ Call `out.push(i, reads)` once per finished salt.
 Poll `out.is_stopped()` to stop for cancellation, deadlines, or shutdown.
 The method takes no `CancelToken` parameter.
 The host redraws and rescores candidate winners. A mismatch or panic ends the run as a device fault.
+A local fatal error sends no `LeaseDone` or credit refund for that lease.
+On shutdown, `out.is_stopped()` becomes true immediately, so start no new salts.
+The sink accepts verified winners from work already running until the grace deadline.
+The lease closes and sends `LeaseDone` when its worker returns or grace expires, whichever comes first.
+Cancellation and lease expiry reject later pushes and queued winners.
+Live local workers cannot exceed the advertised credit window.
+The session removes finished workers before starting another worker.
+If stopped workers still fill that window, the session ends with a device fault.
 
 Report the exact energy of the model your sampler receives.
 The session now checks coefficient conversion per problem and skips rescoring when that conversion is exact.

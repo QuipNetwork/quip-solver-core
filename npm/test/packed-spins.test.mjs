@@ -37,3 +37,7 @@ test("packed spin decode rejects a wrong byte length", () => {
   assert.throws(() => consensus.decodeSpinsPacked(Uint8Array.from([0x55]), 9), /packed spins are \d+ bytes, expected \d+/);
   assert.throws(() => consensus.decodeSpinsPacked(Uint8Array.from([0x55, 0x01, 0x00]), 9), /packed spins are \d+ bytes, expected \d+/);
 });
+
+test("packed spin decode rejects nonzero padding bits", () => {
+  assert.throws(() => consensus.decodeSpinsPacked(Uint8Array.from([0x81]), 1), /padding/);
+});

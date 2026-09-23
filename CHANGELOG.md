@@ -13,6 +13,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   The default Rust and C session generates problems and reports winning salts.
 - Optional Rust `generates_locally`, `sample_lease`, `Lease`, and `LeaseSink` APIs.
   The host verifies candidate winners from local generation.
+  The writer checks local winners for cancellation and lease expiry before transmission.
+  Shutdown stops new salts but accepts verified winners from running work during grace.
+  The local lease closes when its worker returns or grace expires, whichever comes first.
+  Local fatal errors send no lease summary or credit refund.
+  The advertised credit window bounds live local workers.
+  Stopped workers that prevent replacement work cause a device fault.
 - `CoefficientEncoding` and integer scales, with `I32`, `I16`, `I8`, `F16`, `F32`, and `F64` wire forms.
 - `Topology.allowed_j_milli`, `SetTarget.max_proof_solutions`, and the `TARGET_MISSING` reject reason.
 - Shared `meets_target` and `verify_lease_result` checks, with validator-derived golden vectors.

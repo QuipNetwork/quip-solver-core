@@ -10,6 +10,7 @@ use std::process::ExitCode;
 
 struct MockSampler {
     mode: String,
+    gate: Option<std::path::PathBuf>,
 }
 
 impl Sampler<quip_solver_core::coefficient::Milli> for MockSampler {
@@ -33,6 +34,20 @@ impl Sampler<quip_solver_core::coefficient::Milli> for MockSampler {
         for i in 0..lease.salt_count() {
             if self.mode != "ignore-stop" && out.is_stopped() {
                 break;
+            }
+            if self.mode == "grace" {
+                use std::io::Read as _;
+                let mut stream =
+                    std::os::unix::net::UnixStream::connect(self.gate.as_ref().ok_or_else(
+                        || SampleError::DeviceFault("grace mode requires a gate".into()),
+                    )?)
+                    .map_err(|e| SampleError::DeviceFault(e.to_string()))?;
+                stream
+                    .read_exact(&mut [0])
+                    .map_err(|e| SampleError::DeviceFault(e.to_string()))?;
+                while !out.is_stopped() {
+                    std::thread::yield_now();
+                }
             }
             let spins = vec![1; topology.num_nodes];
             let (h, j) = topology
@@ -106,6 +121,8 @@ struct Cli {
     common: CommonArgs,
     #[arg(long, default_value = "honest")]
     mode: String,
+    #[arg(long)]
+    gate: Option<std::path::PathBuf>,
 }
 
 fn main() -> ExitCode {
@@ -128,6 +145,11 @@ fn main() -> ExitCode {
             },
         },
         &cli.common,
-        || Ok(MockSampler { mode: cli.mode }),
+        || {
+            Ok(MockSampler {
+                mode: cli.mode,
+                gate: cli.gate,
+            })
+        },
     )
 }

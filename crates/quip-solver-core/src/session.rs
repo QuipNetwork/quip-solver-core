@@ -551,6 +551,61 @@ struct WriterContext {
     backend: &'static str,
 }
 
+/// Local messages retain their stop state until the writer commits them.
+pub(crate) struct Control {
+    msg: MinerMsg,
+    local: Option<(
+        Arc<lease::LeaseState>,
+        watch::Receiver<Option<tokio::time::Instant>>,
+    )>,
+}
+impl From<MinerMsg> for Control {
+    fn from(msg: MinerMsg) -> Self {
+        Self { msg, local: None }
+    }
+}
+impl Control {
+    pub(crate) fn local(
+        msg: MinerMsg,
+        state: Arc<lease::LeaseState>,
+        shutdown: watch::Receiver<Option<tokio::time::Instant>>,
+    ) -> Self {
+        Self {
+            msg,
+            local: Some((state, shutdown)),
+        }
+    }
+}
+
+pub(crate) async fn send_control(
+    tx: &mpsc::Sender<MinerMsg>,
+    control: Control,
+    cancel: &CancelToken,
+) -> bool {
+    // Ready terminal messages must not yield on a depleted task budget at
+    // the grace boundary. Only wait when the channel is actually full.
+    let permit = match tx.try_reserve() {
+        Ok(permit) => permit,
+        Err(mpsc::error::TrySendError::Closed(())) => return false,
+        Err(mpsc::error::TrySendError::Full(())) => {
+            let Ok(permit) = tx.reserve().await else {
+                return false;
+            };
+            permit
+        }
+    };
+    if let Some((state, shutdown)) = &control.local {
+        let grace_expired = shutdown
+            .borrow()
+            .is_some_and(|deadline| tokio::time::Instant::now() >= deadline);
+        state.send_local(control.msg, permit, cancel, grace_expired);
+        return true;
+    }
+    let fatal = matches!(control.msg.msg, Some(miner_msg::Msg::Fatal(_)));
+    permit.send(control.msg);
+    !fatal
+}
+
 /// Send every control reply already queued, without waiting for more.
 ///
 /// Returns `false` when the outbound channel closed and the writer must stop.
@@ -558,14 +613,14 @@ struct WriterContext {
 /// caller's `select!` from spinning on a closed receiver.
 async fn drain_queued_ctrl(
     tx: &mpsc::Sender<MinerMsg>,
-    ctrl_rx: &mut mpsc::Receiver<MinerMsg>,
+    ctrl_rx: &mut mpsc::Receiver<Control>,
     ctrl_open: &mut bool,
+    cancel: &CancelToken,
 ) -> bool {
     while *ctrl_open {
         match ctrl_rx.try_recv() {
             Ok(msg) => {
-                let fatal = matches!(msg.msg, Some(miner_msg::Msg::Fatal(_)));
-                if tx.send(msg).await.is_err() || fatal {
+                if !send_control(tx, msg, cancel).await {
                     return false;
                 }
             }
@@ -620,7 +675,7 @@ fn rescore_result(sr: &mut StreamResult, entry: Option<&PendingJob>, required: b
 async fn outbound_writer<C: Coefficient>(
     tx: mpsc::Sender<MinerMsg>,
     mut res_rx: mpsc::Receiver<StreamResult>,
-    mut ctrl_rx: mpsc::Receiver<MinerMsg>,
+    mut ctrl_rx: mpsc::Receiver<Control>,
     ctx: WriterContext,
 ) {
     let WriterContext {
@@ -654,7 +709,7 @@ async fn outbound_writer<C: Coefficient>(
         // giving up the result-first ordering that keeps the sampler unblocked.
         if result_streak >= RESULT_BATCH {
             result_streak = 0;
-            if !drain_queued_ctrl(&tx, &mut ctrl_rx, &mut ctrl_open).await {
+            if !drain_queued_ctrl(&tx, &mut ctrl_rx, &mut ctrl_open, &cancel).await {
                 return;
             }
             // Same end-of-session test as the control branch below: the read
@@ -771,8 +826,7 @@ async fn outbound_writer<C: Coefficient>(
             ctrl = ctrl_rx.recv(), if ctrl_open => {
                 result_streak = 0;
                 if let Some(msg) = ctrl {
-                    let fatal = matches!(msg.msg, Some(miner_msg::Msg::Fatal(_)));
-                    if tx.send(msg).await.is_err() || fatal {
+                    if !send_control(&tx, msg, &cancel).await {
                         return;
                     }
                 } else {
@@ -932,11 +986,12 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
     let (target_tx, target_rx) = watch::channel::<Option<SessionTarget>>(None);
     let mut lease_topology = None;
     let slots = Arc::new(Semaphore::new(width));
-    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let (shutdown_tx, shutdown_rx) = watch::channel(None);
     let aborted = Arc::new(AtomicBool::new(false));
     let mut expanders = tokio::task::JoinSet::new();
     let mut lease_threads: Vec<std::thread::JoinHandle<()>> = Vec::new();
     let mut shutdown_requested = false;
+    let mut credit_window = cap;
     // job_id → (num_reads, num_sweeps) resolved at prepare, for the result meta.
     // Shared: the read loop inserts at prepare, the writer task removes at
     // finalize. The lock is never held across an await.
@@ -944,7 +999,7 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
     // Published by the writer, read here for `Status.jobs_done`.
     let jobs_done = Arc::new(AtomicU64::new(0));
 
-    let (ctrl_tx, ctrl_rx) = mpsc::channel::<MinerMsg>(CTRL_CHANNEL_DEPTH);
+    let (ctrl_tx, ctrl_rx) = mpsc::channel::<Control>(CTRL_CHANNEL_DEPTH);
     let device_faulted = Arc::new(AtomicBool::new(false));
     let mut writer = tokio::spawn(outbound_writer::<C>(
         tx.clone(),
@@ -1066,7 +1121,7 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
                     coord_msg_name(cm.msg.as_ref())
                 );
                 if ctrl_tx
-                    .send(fatal_msg(ExitCode::ConfigInvalid, detail.clone()))
+                    .send(fatal_msg(ExitCode::ConfigInvalid, detail.clone()).into())
                     .await
                     .is_err()
                 {
@@ -1083,7 +1138,7 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
                         // The coordinator learns why the session ended from the
                         // session: it never sees the process exit status.
                         if ctrl_tx
-                            .send(fatal_msg(ExitCode::from(e), e.to_string()))
+                            .send(fatal_msg(ExitCode::from(e), e.to_string()).into())
                             .await
                             .is_err()
                         {
@@ -1104,7 +1159,7 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
                     // A closed control channel means the writer is gone; break
                     // so the shutdown path runs, rather than returning past it.
                     if ctrl_tx
-                        .send(miner(miner_msg::Msg::Ready(Ready {})))
+                        .send(miner(miner_msg::Msg::Ready(Ready {})).into())
                         .await
                         .is_err()
                     {
@@ -1125,10 +1180,11 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
                     // `depth <= prefetch` unless the coordinator's
                     // `queue_depth` is larger, so clamp to `cap`.
                     let depth = depth.min(u32::try_from(cap).unwrap_or(u32::MAX));
+                    credit_window = depth as usize;
                     if ctrl_tx
-                        .send(miner(miner_msg::Msg::JobRequest(JobRequest {
-                            credits: depth,
-                        })))
+                        .send(
+                            miner(miner_msg::Msg::JobRequest(JobRequest { credits: depth })).into(),
+                        )
                         .await
                         .is_err()
                     {
@@ -1177,7 +1233,28 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
                                     if writer_failure.is_some() {
                                         break;
                                     }
+                                    if lease_threads.len() >= credit_window {
+                                        aborted.store(true, Ordering::Relaxed);
+                                        device_faulted.store(true, Ordering::Relaxed);
+                                        let reason = crate::SampleError::DeviceFault(
+                                            "stopped lease workers did not retire".into(),
+                                        )
+                                        .to_string();
+                                        let _ = ctrl_tx
+                                            .send(
+                                                miner(miner_msg::Msg::Fatal(Fatal {
+                                                    exit_code: ExitCode::InternalFatal as u32,
+                                                    reason,
+                                                    restart_required: true,
+                                                }))
+                                                .into(),
+                                            )
+                                            .await;
+                                        break;
+                                    }
                                     let sink = crate::LeaseSink {
+                                        #[cfg(test)]
+                                        before_send: StdMutex::new(None),
                                         state: Arc::clone(&state),
                                         cancel: cancel.clone(),
                                         shutdown: shutdown_rx.clone(),
@@ -1202,7 +1279,7 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
                                         state,
                                         cancel.clone(),
                                         shutdown_rx.clone(),
-                                        ctrl_tx.clone(),
+                                        tx.clone(),
                                     ));
                                 } else {
                                     let expander = Expander {
@@ -1218,16 +1295,19 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
                             }
                             Err(reason) => {
                                 if ctrl_tx
-                                    .send(crate::job::reject(job.job_id, reason))
+                                    .send(crate::job::reject(job.job_id, reason).into())
                                     .await
                                     .is_err()
                                 {
                                     break;
                                 }
                                 if ctrl_tx
-                                    .send(miner(miner_msg::Msg::JobRequest(JobRequest {
-                                        credits: 1,
-                                    })))
+                                    .send(
+                                        miner(miner_msg::Msg::JobRequest(JobRequest {
+                                            credits: 1,
+                                        }))
+                                        .into(),
+                                    )
                                     .await
                                     .is_err()
                                 {
@@ -1251,11 +1331,14 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
                             // job, so ask for a replacement credit — same as
                             // a completion — to keep the coordinator's
                             // consume-on-dispatch pool from leaking a slot.
-                            if ctrl_tx.send(msg).await.is_err() {
+                            if ctrl_tx.send(msg.into()).await.is_err() {
                                 break;
                             }
                             if ctrl_tx
-                                .send(miner(miner_msg::Msg::JobRequest(JobRequest { credits: 1 })))
+                                .send(
+                                    miner(miner_msg::Msg::JobRequest(JobRequest { credits: 1 }))
+                                        .into(),
+                                )
                                 .await
                                 .is_err()
                             {
@@ -1327,12 +1410,15 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
                     // in-flight one at its next checkpoint.
                     cancel.cancel_through(c.max_generation);
                     if ctrl_tx
-                        .send(status_msg(
-                            miner_id,
-                            jobs_done.load(Ordering::Relaxed),
-                            sampler.utilization(),
-                            cancel.abandoned(),
-                        ))
+                        .send(
+                            status_msg(
+                                miner_id,
+                                jobs_done.load(Ordering::Relaxed),
+                                sampler.utilization(),
+                                cancel.abandoned(),
+                            )
+                            .into(),
+                        )
                         .await
                         .is_err()
                     {
@@ -1341,12 +1427,15 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
                 }
                 Some(coord_msg::Msg::Ping(_)) => {
                     if ctrl_tx
-                        .send(status_msg(
-                            miner_id,
-                            jobs_done.load(Ordering::Relaxed),
-                            sampler.utilization(),
-                            cancel.abandoned(),
-                        ))
+                        .send(
+                            status_msg(
+                                miner_id,
+                                jobs_done.load(Ordering::Relaxed),
+                                sampler.utilization(),
+                                cancel.abandoned(),
+                            )
+                            .into(),
+                        )
                         .await
                         .is_err()
                     {
@@ -1358,12 +1447,12 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
                     // except a device-dependent width declaration (0), which
                     // the open device resolves.
                     if ctrl_tx
-                        .send(miner(miner_msg::Msg::Capabilities(session_capabilities::<
-                            S,
-                            C,
-                        >(
-                            id, width
-                        ))))
+                        .send(
+                            miner(miner_msg::Msg::Capabilities(session_capabilities::<S, C>(
+                                id, width,
+                            )))
+                            .into(),
+                        )
                         .await
                         .is_err()
                     {
@@ -1400,8 +1489,17 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
         aborted.store(true, Ordering::Relaxed);
     }
     let deadline = tokio::time::Instant::now() + Duration::from_millis(grace_ms);
-    let _ = shutdown_tx.send_replace(true);
-    if let Some(error) = join_expanders(&mut expanders, deadline).await {
+    let _ = shutdown_tx.send_replace(Some(deadline));
+    if S::generates_locally() {
+        // Local monitors enforce their own grace deadline, including blocked
+        // sends. Let them send terminal summaries before ending the writer.
+        while let Some(result) = expanders.join_next().await {
+            if let Err(error) = result {
+                aborted.store(true, Ordering::Relaxed);
+                writer_failure = Some(format!("local lease monitor failed: {error}"));
+            }
+        }
+    } else if let Some(error) = join_expanders(&mut expanders, deadline).await {
         aborted.store(true, Ordering::Relaxed);
         writer_failure = Some(error);
     }
@@ -1709,7 +1807,7 @@ mod tests {
     /// One outbound writer wired to fresh channels, for the writer tests.
     struct WriterHarness {
         res_tx: mpsc::Sender<StreamResult>,
-        ctrl_tx: mpsc::Sender<MinerMsg>,
+        ctrl_tx: mpsc::Sender<Control>,
         out_rx: mpsc::Receiver<MinerMsg>,
         pending: PendingParams,
         cancel: CancelToken,
@@ -1723,7 +1821,7 @@ mod tests {
     fn spawn_writer_for<C: Coefficient>(depth: usize) -> WriterHarness {
         let (tx, out_rx) = mpsc::channel::<MinerMsg>(depth);
         let (res_tx, res_rx) = mpsc::channel::<StreamResult>(depth);
-        let (ctrl_tx, ctrl_rx) = mpsc::channel::<MinerMsg>(depth);
+        let (ctrl_tx, ctrl_rx) = mpsc::channel::<Control>(depth);
         let pending: PendingParams = Arc::new(StdMutex::new(HashMap::new()));
         let cancel = CancelToken::default();
         let writer = tokio::spawn(outbound_writer::<C>(
@@ -1748,6 +1846,173 @@ mod tests {
             cancel,
             writer,
         }
+    }
+
+    #[tokio::test]
+    async fn terminal_control_uses_available_capacity_with_exhausted_task_budget() {
+        use std::future::Future as _;
+        let (tx, mut rx) = mpsc::channel(2);
+        let cancel = CancelToken::default();
+        let message = miner(miner_msg::Msg::JobRequest(JobRequest { credits: 1 }));
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        // Consume the current task budget without yielding to another task.
+        while std::pin::pin!(tokio::task::consume_budget())
+            .poll(&mut context)
+            .is_ready()
+        {}
+        assert!(
+            std::pin::pin!(send_control(&tx, message.into(), &cancel))
+                .poll(&mut context)
+                .is_ready(),
+            "ready terminal send yielded past the grace deadline"
+        );
+        assert!(rx.try_recv().is_ok());
+    }
+
+    struct PausingLocalSampler(Arc<dyn Fn() + Send + Sync>);
+    impl Sampler<crate::coefficient::Milli> for PausingLocalSampler {
+        fn generates_locally() -> bool {
+            true
+        }
+        fn sample(
+            &self,
+            _: &crate::IsingGraph<crate::coefficient::Milli>,
+            _: &crate::SampleParams,
+        ) -> Result<Vec<crate::SamplerResult>, crate::SampleError> {
+            Ok(vec![])
+        }
+        fn sample_lease(
+            &self,
+            _: &crate::Lease,
+            _: &quip_protocol::lease::TopologyView,
+            _: &crate::SampleParams,
+            out: &crate::LeaseSink,
+        ) -> Result<(), crate::SampleError> {
+            let pause = Arc::clone(&self.0);
+            *out.before_send.lock().unwrap() = Some(Box::new(move || pause()));
+            let _ = out.push(
+                0,
+                vec![crate::SamplerResult {
+                    spins: vec![1],
+                    energy_milli: 1000,
+                }],
+            );
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "keep the barrier, real Cancel acknowledgement, and terminal ordering in one regression"
+    )]
+    async fn local_winner_paused_after_stop_check_is_dropped_after_cancel_ack() {
+        let (paused, pause_rx) = tokio::sync::oneshot::channel();
+        let paused = StdMutex::new(Some(paused));
+        let (resume, resume_rx) = std::sync::mpsc::channel();
+        let resume_rx = StdMutex::new(resume_rx);
+        let sampler = Arc::new(PausingLocalSampler(Arc::new(move || {
+            paused.lock().unwrap().take().unwrap().send(()).unwrap();
+            resume_rx.lock().unwrap().recv().unwrap();
+        })));
+        let (input, incoming) = mpsc::channel(8);
+        let (out, mut replies) = mpsc::channel(8);
+        let identity = test_identity();
+        let session = run_connected_session(
+            ReceiverStream::new(incoming),
+            out,
+            "test",
+            &identity,
+            sampler,
+            None,
+        );
+        let coordinator = async move {
+            let send = |msg| input.send(Ok(CoordMsg { msg: Some(msg) }));
+            send(coord_msg::Msg::Welcome(quip_proto::v1::Welcome {
+                protocol_version: 2,
+            }))
+            .await
+            .unwrap();
+            send(coord_msg::Msg::Configure(
+                quip_proto::v1::Configure::default(),
+            ))
+            .await
+            .unwrap();
+            assert!(matches!(
+                replies.recv().await.unwrap().msg,
+                Some(miner_msg::Msg::Ready(_))
+            ));
+            assert!(matches!(
+                replies.recv().await.unwrap().msg,
+                Some(miner_msg::Msg::JobRequest(_))
+            ));
+            send(coord_msg::Msg::Topology(quip_proto::v1::Topology {
+                hash: vec![7; 32],
+                nodes: vec![1],
+                allowed_h_milli: vec![1000],
+                ..Default::default()
+            }))
+            .await
+            .unwrap();
+            send(coord_msg::Msg::SetTarget(quip_proto::v1::SetTarget {
+                max_energy_milli: i64::MAX,
+                min_solutions: 1,
+                max_proof_solutions: 32,
+                num_reads: 1,
+                num_sweeps: 1,
+                ..Default::default()
+            }))
+            .await
+            .unwrap();
+            send(coord_msg::Msg::Job(quip_proto::v1::Job {
+                job_id: b"local".to_vec(),
+                kind: JobKind::IsingGenerate as i32,
+                generation: 1,
+                generator: Some(quip_proto::v1::IsingProblemGenerator {
+                    algorithm: 1,
+                    topology_hash: vec![7; 32],
+                    last_proof_block_hash: vec![1; 32],
+                    miner_account: vec![2; 32],
+                    base_salt: vec![0; 32],
+                    salt_count: 1,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }))
+            .await
+            .unwrap();
+            pause_rx.await.unwrap();
+            send(coord_msg::Msg::Cancel(quip_proto::v1::Cancel {
+                max_generation: 1,
+            }))
+            .await
+            .unwrap();
+            assert!(
+                matches!(replies.recv().await.unwrap().msg, Some(miner_msg::Msg::Status(s)) if s.abandoned_generation == 1)
+            );
+            resume.send(()).unwrap();
+            assert!(
+                matches!(replies.recv().await.unwrap().msg, Some(miner_msg::Msg::LeaseDone(d)) if d.job_id == b"local")
+            );
+            assert!(
+                matches!(replies.recv().await.unwrap().msg, Some(miner_msg::Msg::JobRequest(r)) if r.credits == 1)
+            );
+            send(coord_msg::Msg::Shutdown(quip_proto::v1::Shutdown {
+                grace_ms: 200,
+            }))
+            .await
+            .unwrap();
+            assert!(
+                replies.recv().await.is_none(),
+                "late local winner reached coordinator"
+            );
+        };
+        let (result, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(session, coordinator)
+        })
+        .await
+        .unwrap();
+        result.unwrap();
     }
 
     struct Sampled(StdMutex<Option<tokio::sync::oneshot::Sender<()>>>);
@@ -2071,7 +2336,7 @@ mod tests {
             res_tx.send(completed_result(i)).await.expect("send result");
         }
         ctrl_tx
-            .send(status_msg("miner", 0, 0.0, 0))
+            .send(status_msg("miner", 0, 0.0, 0).into())
             .await
             .expect("send status");
 

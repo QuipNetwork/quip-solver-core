@@ -137,9 +137,17 @@ interface CachedTopology {
   pos: Map<number, number>;
 }
 
-/** Decodes little-endian int32 milli-units into floats via the WASM codec. */
-function decodeMilli(bytes: Uint8Array): number[] {
-  return Array.from(consensus.decodeI32Le(bytes), (v) => v / 1000);
+/** Decodes I32 coefficients through exact milli units via the WASM codec. */
+function decodeMilli(bytes: Uint8Array, scale: number): number[] {
+  return Array.from(consensus.decodeI32Le(bytes), (v) => {
+    // An I32 value times 1000 remains an exact JavaScript integer.
+    const product = v * 1000;
+    const milli = product / scale;
+    if (product % scale !== 0 || milli < -2147483648 || milli > 2147483647) {
+      throw new MalformedProblem("coefficient is not exact i32 milli");
+    }
+    return milli / 1000;
+  });
 }
 
 /**
@@ -150,13 +158,13 @@ function decodeMilli(bytes: Uint8Array): number[] {
  * Topology-hash jobs remap native node ids through `pos` onto dense 0..n-1
  * indices that line up with `h`.
  */
-function decodeProblem(
+export function decodeProblem(
   ising: IsingProblem | undefined,
   topologies: Map<string, CachedTopology>,
 ): { h: number[]; j: number[]; edges: number[] } {
   if (!ising) throw new MalformedProblem("job carries no ising problem");
-  if (ising.encoding !== CoefficientEncoding.COEFFICIENT_ENCODING_I32 || ising.scale !== 1000) {
-    throw new MalformedProblem("coefficients must be I32 at scale 1000");
+  if (ising.encoding !== CoefficientEncoding.COEFFICIENT_ENCODING_I32 || ising.scale === 0) {
+    throw new MalformedProblem("coefficients must be I32 with a positive scale");
   }
   if (ising.h.length % 4 !== 0) {
     throw new MalformedProblem("h length is not a multiple of 4");
@@ -165,8 +173,8 @@ function decodeProblem(
     throw new MalformedProblem("j length is not a multiple of 4");
   }
 
-  const h = decodeMilli(ising.h);
-  const j = decodeMilli(ising.j);
+  const h = decodeMilli(ising.h, ising.scale);
+  const j = decodeMilli(ising.j, ising.scale);
 
   let u: number[];
   let v: number[];
@@ -619,11 +627,13 @@ async function main(): Promise<number> {
   return runSession(coordinator.value, miner.kind === "ok" ? miner.value : `${BACKEND}-0`);
 }
 
-main()
-  .then((code) => {
-    process.exitCode = code;
-  })
-  .catch((e: unknown) => {
-    process.stderr.write(`error: ${e instanceof Error ? e.message : e}\n`);
-    process.exitCode = ExitCode.INTERNAL_FATAL;
-  });
+if (require.main === module) {
+  main()
+    .then((code) => {
+      process.exitCode = code;
+    })
+    .catch((e: unknown) => {
+      process.stderr.write(`error: ${e instanceof Error ? e.message : e}\n`);
+      process.exitCode = ExitCode.INTERNAL_FATAL;
+    });
+}
