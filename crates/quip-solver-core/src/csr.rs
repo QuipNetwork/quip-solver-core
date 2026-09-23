@@ -29,7 +29,7 @@ pub struct CsrGraph {
 impl CsrGraph {
     /// Build CSR adjacency from the base problem.
     ///
-    /// Edges whose endpoints are out of range for `h.len()` are skipped (same
+    /// Edges whose endpoints are out of range for `h_milli.len()` are skipped (same
     /// defensive posture as `energy_milli`). Self-loops `(u, u)` are skipped:
     /// a self-loop in a neighbor row would inject a spurious self-force into
     /// that node's local field, while `energy_milli` scores the loop as an

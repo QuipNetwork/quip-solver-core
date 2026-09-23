@@ -29,7 +29,7 @@ pub fn default_ising_beta_range(graph: &IsingGraph) -> (f64, f64) {
         let a = (f64::from(milli) / 1000.0).abs();
         #[expect(
             clippy::indexing_slicing,
-            reason = "i comes from enumerate over h, which has length n == sum_abs/min_abs len"
+            reason = "i comes from enumerate over h_milli, which has length n == sum_abs/min_abs len"
         )]
         {
             sum_abs[i] += a;

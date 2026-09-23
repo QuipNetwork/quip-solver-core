@@ -114,7 +114,8 @@ pub fn energy_milli(spins: &[i8], h: &[f64], j: &[f64], edges: &[(usize, usize)]
 /// spin greater than zero is `+1` and any other spin is `-1`, and the `i128`
 /// sum saturates to `i64::MIN` or `i64::MAX`. For every input it returns what
 /// [`energy_milli`] returns on the `v / 1000.0` floats. Integer input cannot be
-/// non-finite, so [`ENERGY_MILLI_NON_FINITE`] never occurs.
+/// non-finite, so the non-finite condition cannot arise. A saturated or exact
+/// sum can still equal the [`ENERGY_MILLI_NON_FINITE`] value.
 #[must_use]
 pub fn energy_from_milli(
     spins: &[i8],
