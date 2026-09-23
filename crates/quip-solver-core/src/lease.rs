@@ -508,8 +508,18 @@ impl LeaseSink {
     }
 
     pub(crate) fn run<S: Sampler<C>, C: Coefficient>(&self, sampler: &S) {
-        let result =
-            sampler.sample_lease(&self.state.lease, &self.state.topology, &self.params, self);
+        // A backend may leave its own state inconsistent after a panic. The
+        // fatal path ends the session rather than reusing that sampler.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            sampler.sample_lease(&self.state.lease, &self.state.topology, &self.params, self)
+        }))
+        .unwrap_or_else(|panic| {
+            let payload = crate::session::panic_payload_message(&*panic);
+            tracing::error!(panic = %payload, "lease thread panicked");
+            Err(SampleError::DeviceFault(format!(
+                "lease thread panicked: {payload}"
+            )))
+        });
         let Some(ctrl) = self.ctrl.upgrade() else {
             return;
         };

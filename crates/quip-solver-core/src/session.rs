@@ -935,7 +935,7 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let aborted = Arc::new(AtomicBool::new(false));
     let mut expanders = tokio::task::JoinSet::new();
-    let mut lease_threads = Vec::new();
+    let mut lease_threads: Vec<std::thread::JoinHandle<()>> = Vec::new();
     let mut shutdown_requested = false;
     // job_id → (num_reads, num_sweeps) resolved at prepare, for the result meta.
     // Shared: the read loop inserts at prepare, the writer task removes at
@@ -1162,6 +1162,21 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
                         ) {
                             Ok((state, params)) => {
                                 if S::generates_locally() {
+                                    while let Some(index) = lease_threads
+                                        .iter()
+                                        .position(std::thread::JoinHandle::is_finished)
+                                    {
+                                        if let Err(panic) = lease_threads.swap_remove(index).join()
+                                        {
+                                            writer_failure = Some(format!(
+                                                "lease thread panicked: {}",
+                                                panic_payload_message(&*panic)
+                                            ));
+                                        }
+                                    }
+                                    if writer_failure.is_some() {
+                                        break;
+                                    }
                                     let sink = crate::LeaseSink {
                                         state: Arc::clone(&state),
                                         cancel: cancel.clone(),
@@ -1520,7 +1535,7 @@ fn join_error_message(e: tokio::task::JoinError) -> String {
 }
 
 /// Format a `JoinHandle` panic payload for logging / error messages.
-fn panic_payload_message(panic: &(dyn std::any::Any + Send)) -> String {
+pub(crate) fn panic_payload_message(panic: &(dyn std::any::Any + Send)) -> String {
     if let Some(s) = panic.downcast_ref::<&str>() {
         (*s).to_owned()
     } else if let Some(s) = panic.downcast_ref::<String>() {

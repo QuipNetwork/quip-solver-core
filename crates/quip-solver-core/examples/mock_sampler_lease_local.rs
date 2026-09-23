@@ -1,4 +1,4 @@
-//! Local lease test miner with honest, wrong-draw, and ignore-stop modes.
+//! Local lease test miner with honest, wrong-draw, ignore-stop, and panic modes.
 
 use clap::Parser;
 use quip_protocol::scoring::energy_from_milli;
@@ -17,6 +17,10 @@ impl Sampler<quip_solver_core::coefficient::Milli> for MockSampler {
         true
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "panic mode exercises the lease thread fault boundary"
+    )]
     fn sample_lease(
         &self,
         lease: &Lease,
@@ -24,6 +28,7 @@ impl Sampler<quip_solver_core::coefficient::Milli> for MockSampler {
         _params: &SampleParams,
         out: &LeaseSink,
     ) -> Result<(), SampleError> {
+        assert!(self.mode != "panic", "local sampler exploded");
         let mut logged = false;
         for i in 0..lease.salt_count() {
             if self.mode != "ignore-stop" && out.is_stopped() {

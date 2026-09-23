@@ -711,6 +711,41 @@ async fn a_local_generator_with_a_correct_draw_wins() {
 }
 
 #[tokio::test]
+async fn a_panicking_local_sampler_is_a_device_fault_without_shutdown() {
+    let mut s = Session::start_mode(false, false, Some("panic")).await;
+    s.setup(i64::MAX).await;
+    s.send(coord_msg::Msg::Job(job(5))).await;
+    let fatal = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match s.recv().await {
+                miner_msg::Msg::Fatal(fatal) => break fatal,
+                miner_msg::Msg::LeaseDone(_) | miner_msg::Msg::Status(_) => {}
+                other => panic!("unexpected message: {other:?}"),
+            }
+        }
+    })
+    .await
+    .expect("panicking local sampler must report Fatal without Shutdown");
+    assert!(fatal.restart_required);
+    assert_eq!(
+        fatal.exit_code,
+        quip_protocol::session::ExitCode::InternalFatal as u32
+    );
+    assert!(fatal
+        .reason
+        .contains("lease thread panicked: local sampler exploded"));
+    // Keep the coordinator stream open so only the device fault ends the session.
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(10), s.child.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .code(),
+        Some(quip_protocol::session::ExitCode::InternalFatal as i32)
+    );
+}
+
+#[tokio::test]
 async fn a_wrong_device_draw_is_a_device_fault() {
     let mut s = Session::start_mode(false, false, Some("wrong-draw")).await;
     s.setup(i64::MAX).await;
