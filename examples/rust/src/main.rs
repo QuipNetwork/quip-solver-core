@@ -10,6 +10,7 @@
 
 use clap::Parser;
 use quip_solver_core::adapt::AdaptBounds;
+use quip_solver_core::quip_proto::v1::{Algorithm, Backend};
 // Reached through quip-solver-core rather than a second dependency.
 use quip_solver_core::coefficient::Milli;
 use quip_solver_core::quip_protocol::scoring::energy_from_milli;
@@ -55,8 +56,8 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     run(
         BackendIdentity {
-            backend: "mock-rust",
-            algorithm: "sa",
+            backend: Backend::Mock,
+            algorithm: Algorithm::Sa,
             max_nodes: 100_000,
             max_edges: 1_000_000,
             features: &[],

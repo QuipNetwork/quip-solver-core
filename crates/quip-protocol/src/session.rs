@@ -1,9 +1,9 @@
 //! Miner session handshake: `Hello`/`Welcome`/`Configure` and exit codes.
 
-use quip_proto::v1::{Configure, Hello, JobKind, Welcome};
+use quip_proto::v1::{Algorithm, Backend, Capabilities, Configure, Hello, Welcome};
 
 /// Protocol version this SDK speaks. `Welcome.protocol_version` must equal this.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Errors from building a `Hello` or validating a `Welcome`.
 ///
@@ -94,34 +94,11 @@ impl SessionConfig {
     }
 }
 
-/// Backend size limits advertised in the `Hello`. `0` means "no limit" (the
-/// coordinator's router treats `0` as unlimited).
-#[derive(Debug, Clone, Copy)]
-pub struct BackendCaps {
-    /// Max nodes this backend accepts (`0` = unlimited).
-    pub max_nodes: u32,
-    /// Max edges this backend accepts (`0` = unlimited).
-    pub max_edges: u32,
-}
-
-/// Build the miner `Hello` message, reading `QUIP_SESSION_TOKEN` from the env.
-///
-/// `features` are the extra capability names this backend advertises (for
-/// example `"streaming"`). They go out in the `Hello` and in `Capabilities`,
-/// which is the whole point of declaring them: a coordinator that routes on a
-/// feature reads the `Hello`, and it reads it before it ever asks for
-/// `Capabilities`. Passing an empty slice advertises none.
+/// Build the miner handshake, reading the session token from the environment.
 ///
 /// # Errors
-/// Returns [`SessionError::MissingToken`] if the env var is unset or empty.
-pub fn build_hello(
-    miner_id: &str,
-    backend: &str,
-    algorithm: &str,
-    supported: &[JobKind],
-    features: &[&str],
-    caps: BackendCaps,
-) -> Result<Hello, SessionError> {
+/// Returns [`SessionError::MissingToken`] if the token is missing or empty.
+pub fn build_hello(miner_id: &str, capabilities: Capabilities) -> Result<Hello, SessionError> {
     let token = std::env::var("QUIP_SESSION_TOKEN").map_err(|_| SessionError::MissingToken)?;
     if token.is_empty() {
         return Err(SessionError::MissingToken);
@@ -129,14 +106,7 @@ pub fn build_hello(
     Ok(Hello {
         miner_id: miner_id.into(),
         session_token: token,
-        protocol_version: PROTOCOL_VERSION,
-        backend: backend.into(),
-        algorithm: algorithm.into(),
-        supported_kinds: supported.iter().map(|k| *k as i32).collect(),
-        max_nodes: caps.max_nodes,
-        max_edges: caps.max_edges,
-        native_topology_hash: None,
-        features: features.iter().map(|f| (*f).to_owned()).collect(),
+        capabilities: Some(capabilities),
     })
 }
 
@@ -152,55 +122,112 @@ pub fn check_welcome(w: &Welcome) -> Result<(), SessionError> {
     Ok(())
 }
 
+const BACKEND_NAMES: &[(Backend, &str)] = &[
+    (Backend::Unspecified, "unspecified"),
+    (Backend::Cpu, "cpu"),
+    (Backend::Cuda, "cuda"),
+    (Backend::Metal, "metal"),
+    (Backend::Ane, "ane"),
+    (Backend::DwaveQpu, "dwave-qpu"),
+    (Backend::Exec, "exec"),
+    (Backend::Mock, "mock"),
+];
+/// Stable lowercase name for a wire identity.
+#[must_use]
+pub fn backend_name(value: Backend) -> &'static str {
+    BACKEND_NAMES
+        .iter()
+        .find_map(|&(v, name)| (v == value).then_some(name))
+        .unwrap_or("unspecified")
+}
+/// Parse a stable lowercase wire identity name.
+#[must_use]
+pub fn backend_from_name(name: &str) -> Option<Backend> {
+    BACKEND_NAMES
+        .iter()
+        .find_map(|&(v, n)| (n == name).then_some(v))
+}
+
+const ALGORITHM_NAMES: &[(Algorithm, &str)] = &[
+    (Algorithm::Unspecified, "unspecified"),
+    (Algorithm::Sa, "sa"),
+    (Algorithm::Gibbs, "gibbs"),
+    (Algorithm::QuantumAnneal, "quantum-anneal"),
+    (Algorithm::Fsa, "fsa"),
+    (Algorithm::Msa, "msa"),
+    (Algorithm::Flatiron, "flatiron"),
+    (Algorithm::Mps, "mps"),
+    (Algorithm::Mfa, "mfa"),
+    (Algorithm::Sb, "sb"),
+    (Algorithm::Bsb, "bsb"),
+    (Algorithm::Gbsb, "gbsb"),
+    (Algorithm::Gdsb, "gdsb"),
+    (Algorithm::Ggdsb, "ggdsb"),
+    (Algorithm::Hbsb, "hbsb"),
+    (Algorithm::Hdsb, "hdsb"),
+    (Algorithm::Sbqa, "sbqa"),
+    (Algorithm::Tedsb, "tedsb"),
+    (Algorithm::External, "external"),
+];
+/// Stable lowercase name for a wire identity.
+#[must_use]
+pub fn algorithm_name(value: Algorithm) -> &'static str {
+    ALGORITHM_NAMES
+        .iter()
+        .find_map(|&(v, name)| (v == value).then_some(name))
+        .unwrap_or("unspecified")
+}
+/// Parse a stable lowercase wire identity name.
+#[must_use]
+pub fn algorithm_from_name(name: &str) -> Option<Algorithm> {
+    ALGORITHM_NAMES
+        .iter()
+        .find_map(|&(v, n)| (n == name).then_some(v))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use quip_proto::v1::{Configure, JobKind, Welcome};
+    use quip_proto::v1::{Algorithm, Backend, Capabilities, Configure, Welcome};
 
-    const NO_CAPS: BackendCaps = BackendCaps {
-        max_nodes: 0,
-        max_edges: 0,
-    };
-
-    /// Covers the declared features as well as the token, deliberately: both
-    /// need `QUIP_SESSION_TOKEN`, and two tests writing a process-wide
-    /// environment variable in parallel race each other.
     #[test]
     fn hello_requires_token() {
+        let caps = Capabilities {
+            protocol_version: 2,
+            features: vec!["streaming".into()],
+            ..Default::default()
+        };
         std::env::remove_var("QUIP_SESSION_TOKEN");
-        assert!(matches!(
-            build_hello("cpu-0", "cpu", "sa", &[JobKind::IsingSample], &[], NO_CAPS),
+        assert_eq!(
+            build_hello("cpu-0", caps.clone()),
             Err(SessionError::MissingToken)
-        ));
+        );
         std::env::set_var("QUIP_SESSION_TOKEN", "tok-123");
-        let h = build_hello("cpu-0", "cpu", "sa", &[JobKind::IsingSample], &[], NO_CAPS).unwrap();
-        assert_eq!(h.session_token, "tok-123");
-        assert_eq!(h.protocol_version, 1);
-        assert_eq!(h.miner_id, "cpu-0");
-        // No features declared stays an empty list, not a placeholder entry.
-        assert!(h.features.is_empty());
-
-        // Declared features reach the `Hello`, not only `Capabilities`: a
-        // coordinator that routes on a feature reads the `Hello` first, and it
-        // reads it before it ever asks for `Capabilities`.
-        let h = build_hello(
-            "cuda-0",
-            "cuda",
-            "sa",
-            &[JobKind::IsingSample],
-            &["streaming", "governor"],
-            NO_CAPS,
-        )
-        .unwrap();
-        assert_eq!(h.features, vec!["streaming", "governor"]);
-
-        // An empty (but present) token is treated the same as a missing one.
+        let hello = build_hello("cpu-0", caps.clone()).unwrap();
+        assert_eq!(hello.session_token, "tok-123");
+        assert_eq!(hello.capabilities, Some(caps.clone()));
+        assert_eq!(PROTOCOL_VERSION, 2);
         std::env::set_var("QUIP_SESSION_TOKEN", "");
-        assert!(matches!(
-            build_hello("cpu-0", "cpu", "sa", &[JobKind::IsingSample], &[], NO_CAPS),
-            Err(SessionError::MissingToken)
-        ));
+        assert_eq!(build_hello("cpu-0", caps), Err(SessionError::MissingToken));
         std::env::remove_var("QUIP_SESSION_TOKEN");
+    }
+
+    #[test]
+    fn identity_names_are_unique_and_roundtrip() {
+        let mut names = std::collections::HashSet::new();
+        for raw in 0..=7 {
+            let value = Backend::try_from(raw).unwrap();
+            assert!(names.insert(backend_name(value)));
+            assert_eq!(backend_from_name(backend_name(value)), Some(value));
+        }
+        names.clear();
+        for raw in 0..=18 {
+            let value = Algorithm::try_from(raw).unwrap();
+            assert!(names.insert(algorithm_name(value)));
+            assert_eq!(algorithm_from_name(algorithm_name(value)), Some(value));
+        }
+        assert_eq!(backend_from_name("test"), None);
+        assert_eq!(algorithm_from_name("quantum"), None);
     }
 
     #[test]
@@ -220,16 +247,16 @@ mod tests {
     }
 
     #[test]
-    fn welcome_rejects_non_v1_protocol_version() {
+    fn welcome_rejects_non_v2_protocol_version() {
         assert!(check_welcome(&Welcome {
-            protocol_version: 1
+            protocol_version: 2
         })
         .is_ok());
         assert_eq!(
             check_welcome(&Welcome {
-                protocol_version: 2
+                protocol_version: 1
             }),
-            Err(SessionError::BadWelcome(2))
+            Err(SessionError::BadWelcome(1))
         );
         assert_eq!(
             check_welcome(&Welcome {

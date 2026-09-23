@@ -44,8 +44,8 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     run(
         BackendIdentity {
-            backend: "mock",
-            algorithm: "sa",
+            backend: quip_proto::v1::Backend::Mock,
+            algorithm: quip_proto::v1::Algorithm::Sa,
             max_nodes: 100_000,
             max_edges: 1_000_000,
             features: &[],

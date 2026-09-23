@@ -15,7 +15,7 @@ use quip_proto::v1::{
     Status as MinerStatus, Topology, Welcome,
 };
 use quip_protocol::scoring::energy_milli;
-use quip_protocol::wire::{decode_spins, encode_i32_le, encode_spins_packed};
+use quip_protocol::wire::{decode_spins_packed, encode_i32_le, encode_spins_packed};
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -87,7 +87,7 @@ pub struct ObservedResult {
     pub job_id: Vec<u8>,
     /// `energy_milli` the miner reported for each solution, in arrival order.
     pub solution_energies_milli: Vec<i64>,
-    /// The driver's own score of the returned `spins_bytes` under the problem
+    /// The driver's own score of the returned `spins` under the problem
     /// it sent, in arrival order. `None` for the whole vector when the driver
     /// has no problem on file for this job id (so it cannot re-score);
     /// `None` for one entry when that solution's spins did not decode to the
@@ -287,7 +287,11 @@ impl DriverReport {
     /// un-doubled budget is the right default.
     #[must_use]
     pub fn expected_meta_sweeps(&self) -> u32 {
-        if self.hello.as_ref().is_some_and(|h| h.algorithm == "gibbs") {
+        if self.hello.as_ref().is_some_and(|h| {
+            h.capabilities
+                .as_ref()
+                .is_some_and(|c| c.algorithm == quip_proto::v1::Algorithm::Gibbs as i32)
+        }) {
             CONFIGURED_SWEEPS * GIBBS_SWEEP_MULTIPLIER
         } else {
             CONFIGURED_SWEEPS
@@ -305,12 +309,13 @@ impl DriverReport {
     /// The returned `Capabilities` agrees with the identity the miner
     /// advertised in its own `Hello`.
     ///
-    /// Only the fields both messages carry are compared. `Hello.features` is
-    /// not: the handshake states what the session needs, while `Capabilities`
-    /// states what the host can do, and they are allowed to differ.
+    /// Every field except features and stream width must match the handshake.
     #[must_use]
     pub fn capabilities_conformant(&self) -> bool {
         let (Some(c), Some(h)) = (self.capabilities_received.as_ref(), self.hello.as_ref()) else {
+            return false;
+        };
+        let Some(h) = h.capabilities.as_ref() else {
             return false;
         };
         c.backend == h.backend
@@ -319,6 +324,9 @@ impl DriverReport {
             && c.max_nodes == h.max_nodes
             && c.max_edges == h.max_edges
             && c.supported_kinds == h.supported_kinds
+            && c.native_topology_hash == h.native_topology_hash
+            && c.encodings == h.encodings
+            && c.generators == h.generators
     }
 
     /// Cancellation is honoured: a job at or below the cancelled watermark
@@ -338,9 +346,11 @@ impl DriverReport {
     /// is [`warm_start_conformant`](Self::warm_start_conformant) graded.
     #[must_use]
     pub fn advertises_initial_spins(&self) -> bool {
-        self.hello
-            .as_ref()
-            .is_some_and(|h| h.features.iter().any(|f| f == INITIAL_SPINS_FEATURE))
+        self.hello.as_ref().is_some_and(|h| {
+            h.capabilities
+                .as_ref()
+                .is_some_and(|c| c.features.iter().any(|f| f == INITIAL_SPINS_FEATURE))
+        })
     }
 
     /// A solver that advertises [`INITIAL_SPINS_FEATURE`] rejects a malformed
@@ -618,8 +628,10 @@ fn valid_ising() -> IsingProblem {
             u: vec![0],
             v: vec![1],
         })),
-        h_milli_le32: encode_i32_le(&[1000, -1000]),
-        j_milli_le32: encode_i32_le(&[500]),
+        encoding: quip_proto::v1::CoefficientEncoding::I32 as i32,
+        scale: 1000,
+        h: encode_i32_le(&[1000, -1000]),
+        j: encode_i32_le(&[500]),
         num_reads: 1,
         num_sweeps: 0,
         anneal_time_us: 0,
@@ -641,8 +653,10 @@ fn valid_spec() -> ScoreSpec {
 fn hash_ising() -> IsingProblem {
     IsingProblem {
         graph: Some(ising_problem::Graph::TopologyHash(TOPOLOGY_HASH.to_vec())),
-        h_milli_le32: encode_i32_le(&[1000, -1000]),
-        j_milli_le32: encode_i32_le(&[500]),
+        encoding: quip_proto::v1::CoefficientEncoding::I32 as i32,
+        scale: 1000,
+        h: encode_i32_le(&[1000, -1000]),
+        j: encode_i32_le(&[500]),
         num_reads: 1,
         num_sweeps: 0,
         anneal_time_us: 0,
@@ -658,8 +672,10 @@ fn sparse_ising() -> IsingProblem {
         graph: Some(ising_problem::Graph::TopologyHash(
             SPARSE_TOPOLOGY_HASH.to_vec(),
         )),
-        h_milli_le32: encode_i32_le(&[1000, -1000, 250]),
-        j_milli_le32: encode_i32_le(&[500, -750]),
+        encoding: quip_proto::v1::CoefficientEncoding::I32 as i32,
+        scale: 1000,
+        h: encode_i32_le(&[1000, -1000, 250]),
+        j: encode_i32_le(&[500, -750]),
         num_reads: 1,
         num_sweeps: 0,
         anneal_time_us: 0,
@@ -726,8 +742,10 @@ fn warm_proof_ising() -> IsingProblem {
             u: edges.iter().map(|&(u, _)| as_node_id(u)).collect(),
             v: edges.iter().map(|&(_, v)| as_node_id(v)).collect(),
         })),
-        h_milli_le32: encode_i32_le(&vec![0; WARM_PROOF_NODES]),
-        j_milli_le32: encode_i32_le(&warm_proof_j_milli()),
+        encoding: quip_proto::v1::CoefficientEncoding::I32 as i32,
+        scale: 1000,
+        h: encode_i32_le(&vec![0; WARM_PROOF_NODES]),
+        j: encode_i32_le(&warm_proof_j_milli()),
         num_reads: 1,
         initial_spins: vec![encode_spins_packed(&planted)],
         start_beta_milli: WARM_PROOF_START_BETA_MILLI,
@@ -762,6 +780,7 @@ fn as_node_id(i: usize) -> u32 {
 /// The dense topology `job-hash` resolves against.
 fn dense_topology() -> Topology {
     Topology {
+        allowed_j_milli: vec![],
         hash: TOPOLOGY_HASH.to_vec(),
         nodes: vec![0, 1],
         edges: Some(EdgeList {
@@ -775,6 +794,7 @@ fn dense_topology() -> Topology {
 /// The sparse topology `job-sparse` resolves against.
 fn sparse_topology() -> Topology {
     Topology {
+        allowed_j_milli: vec![],
         hash: SPARSE_TOPOLOGY_HASH.to_vec(),
         nodes: SPARSE_NODES.to_vec(),
         edges: Some(EdgeList {
@@ -799,6 +819,7 @@ fn configure() -> Configure {
 
 fn job_at(job_id: &[u8], deadline_ms: u64, generation: u64, ising: IsingProblem) -> Job {
     Job {
+        generator: None,
         job_id: job_id.to_vec(),
         kind: JobKind::IsingSample as i32,
         generation,
@@ -814,6 +835,7 @@ fn job(job_id: &[u8], deadline_ms: u64, ising: IsingProblem) -> Job {
 
 fn job_kind(job_id: &[u8], deadline_ms: u64, kind: JobKind, ising: IsingProblem) -> Job {
     Job {
+        generator: None,
         job_id: job_id.to_vec(),
         kind: kind as i32,
         generation: LIVE_GENERATION,
@@ -831,7 +853,10 @@ async fn read_hello(inbound: &mut Streaming<MinerMsg>, outcome: &mut SessionOutc
         Ok(Ok(Some(MinerMsg {
             msg: Some(miner_msg::Msg::Hello(h)),
         }))) => {
-            outcome.handshake_ok = h.session_token == "test-token" && h.protocol_version == 1;
+            outcome.handshake_ok = h.session_token == "test-token"
+                && h.capabilities
+                    .as_ref()
+                    .is_some_and(|c| c.protocol_version == 2);
             outcome.hello = Some(h);
             true
         }
@@ -870,7 +895,7 @@ fn fold(outcome: &mut SessionOutcome, m: miner_msg::Msg) {
                         // wrong width for the problem, cannot be re-scored.
                         // Recording `None` keeps it distinguishable from a
                         // genuine score of zero.
-                        decode_spins(&sol.spins_bytes)
+                        decode_spins_packed(&sol.spins, s.h.len())
                             .ok()
                             .filter(|v| v.len() == s.h.len())
                             .map(|v| energy_milli(&v, &s.h, &s.j, &s.edges))
@@ -896,7 +921,7 @@ fn fold(outcome: &mut SessionOutcome, m: miner_msg::Msg) {
         miner_msg::Msg::Fatal(f) => {
             outcome.fatal = Some((f.exit_code.cast_signed(), f.reason));
         }
-        miner_msg::Msg::Hello(_) => {}
+        miner_msg::Msg::Hello(_) | miner_msg::Msg::LeaseDone(_) => {}
     }
 }
 
@@ -991,7 +1016,7 @@ async fn run_script(
     if !send(
         tx,
         coord_msg::Msg::Welcome(Welcome {
-            protocol_version: 1,
+            protocol_version: 2,
         }),
     )
     .await
@@ -1071,10 +1096,11 @@ async fn run_script(
     )
     .await;
     // Only a solver that says it uses the states is held to using them.
-    let advertises_initial_spins = outcome
-        .hello
-        .as_ref()
-        .is_some_and(|h| h.features.iter().any(|f| f == INITIAL_SPINS_FEATURE));
+    let advertises_initial_spins = outcome.hello.as_ref().is_some_and(|h| {
+        h.capabilities
+            .as_ref()
+            .is_some_and(|c| c.features.iter().any(|f| f == INITIAL_SPINS_FEATURE))
+    });
     if advertises_initial_spins {
         let _ = dispatch(
             tx,
@@ -1119,7 +1145,7 @@ async fn run_script(
     // 8. The four rejection paths: h length not a multiple of 4, j length not
     //    a multiple of 4, an unsupported kind, and a deadline in the past.
     let mut malformed_h = valid_ising();
-    malformed_h.h_milli_le32 = vec![0x01, 0x02, 0x03]; // len 3, not a multiple of 4
+    malformed_h.h = vec![0x01, 0x02, 0x03]; // len 3, not a multiple of 4
     let _ = dispatch(
         tx,
         &mut outcome,
@@ -1129,7 +1155,7 @@ async fn run_script(
     .await;
 
     let mut malformed_j = valid_ising();
-    malformed_j.j_milli_le32 = vec![0x01, 0x02, 0x03];
+    malformed_j.j = vec![0x01, 0x02, 0x03];
     let _ = dispatch(
         tx,
         &mut outcome,
@@ -1221,7 +1247,7 @@ async fn run_script_bad_welcome(
     if !send(
         tx,
         coord_msg::Msg::Welcome(Welcome {
-            protocol_version: 2,
+            protocol_version: 1,
         }),
     )
     .await
@@ -1249,7 +1275,7 @@ async fn run_script_one_job(
     if !send(
         tx,
         coord_msg::Msg::Welcome(Welcome {
-            protocol_version: 1,
+            protocol_version: 2,
         }),
     )
     .await
@@ -1305,7 +1331,7 @@ async fn run_script_close(
         && !send(
             &tx,
             coord_msg::Msg::Welcome(Welcome {
-                protocol_version: 1,
+                protocol_version: 2,
             }),
         )
         .await
@@ -1519,30 +1545,25 @@ mod tests {
 
     fn hello(backend: &str) -> Hello {
         Hello {
-            miner_id: "mock-0".to_owned(),
-            session_token: "test-token".to_owned(),
-            protocol_version: 1,
-            backend: backend.to_owned(),
-            algorithm: "sa".to_owned(),
-            supported_kinds: vec![JobKind::IsingSample as i32],
-            max_nodes: 100,
-            max_edges: 200,
-            native_topology_hash: None,
-            features: vec![],
+            miner_id: "mock-0".into(),
+            session_token: "test-token".into(),
+            capabilities: Some(caps(backend)),
         }
     }
 
     fn caps(backend: &str) -> Capabilities {
         Capabilities {
-            backend: backend.to_owned(),
-            algorithm: "sa".to_owned(),
+            backend: quip_protocol::session::backend_from_name(backend).unwrap() as i32,
+            algorithm: quip_proto::v1::Algorithm::Sa as i32,
             supported_kinds: vec![JobKind::IsingSample as i32],
             max_nodes: 100,
             max_edges: 200,
             features: vec!["streaming".to_owned()],
-            protocol_version: 1,
+            protocol_version: 2,
             stream_width: 1,
             native_topology_hash: None,
+            encodings: vec![quip_proto::v1::CoefficientEncoding::I32 as i32],
+            generators: vec![],
         }
     }
 
@@ -1785,10 +1806,10 @@ mod tests {
         // fail the solver for following the spec.
         let mut r = conformant_report();
         if let Some(h) = r.hello.as_mut() {
-            h.algorithm = "gibbs".to_owned();
+            h.capabilities.as_mut().unwrap().algorithm = quip_proto::v1::Algorithm::Gibbs as i32;
         }
         if let Some(c) = r.capabilities_received.as_mut() {
-            c.algorithm = "gibbs".to_owned();
+            c.algorithm = quip_proto::v1::Algorithm::Gibbs as i32;
         }
         for result in &mut r.results {
             result.meta_sweeps = CONFIGURED_SWEEPS * GIBBS_SWEEP_MULTIPLIER;
@@ -1801,10 +1822,10 @@ mod tests {
         // The un-doubled echo means the solver skipped its own 2x rule.
         let mut r = conformant_report();
         if let Some(h) = r.hello.as_mut() {
-            h.algorithm = "gibbs".to_owned();
+            h.capabilities.as_mut().unwrap().algorithm = quip_proto::v1::Algorithm::Gibbs as i32;
         }
         if let Some(c) = r.capabilities_received.as_mut() {
-            c.algorithm = "gibbs".to_owned();
+            c.algorithm = quip_proto::v1::Algorithm::Gibbs as i32;
         }
         assert!(!r.sweeps_honoured(), "{r:?}");
     }
@@ -1812,7 +1833,7 @@ mod tests {
     #[test]
     fn capabilities_must_match_the_hello_identity() {
         let mut r = conformant_report();
-        r.capabilities_received = Some(caps("something-else"));
+        r.capabilities_received = Some(caps("cuda"));
         assert!(
             !r.capabilities_conformant(),
             "Capabilities.backend must agree with Hello.backend"

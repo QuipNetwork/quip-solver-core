@@ -48,7 +48,12 @@ fn capabilities_flag_emits_the_typed_message() {
         .get("maxEdges")
         .and_then(serde_json::Value::as_u64)
         .is_some());
-    assert_eq!(v.get("protocolVersion"), Some(&serde_json::json!(1)));
+    assert_eq!(v.get("protocolVersion"), Some(&serde_json::json!(2)));
+    assert_eq!(
+        v.get("encodings"),
+        Some(&serde_json::json!(["COEFFICIENT_ENCODING_I32"]))
+    );
+    assert_eq!(v.get("generators"), Some(&serde_json::json!([])));
     assert!(v
         .get("streamWidth")
         .and_then(serde_json::Value::as_u64)

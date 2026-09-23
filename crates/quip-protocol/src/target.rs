@@ -19,6 +19,20 @@ pub struct Target {
     pub max_proof_solutions: u32,
 }
 
+#[cfg(feature = "session")]
+impl Target {
+    /// Copy the proof difficulty fields from the wire target.
+    #[must_use]
+    pub const fn from_proto(s: &quip_proto::v1::SetTarget) -> Self {
+        Self {
+            max_energy_milli: s.max_energy_milli,
+            min_solutions: s.min_solutions,
+            min_diversity_milli: s.min_diversity_milli,
+            max_proof_solutions: s.max_proof_solutions,
+        }
+    }
+}
+
 /// The first check a proof set failed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TargetMiss {

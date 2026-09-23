@@ -5,10 +5,62 @@ service MinerService {
   rpc Session(stream MinerMsg) returns (stream CoordMsg);
 }
 
+enum Backend {
+  BACKEND_UNSPECIFIED = 0;
+  BACKEND_CPU = 1;
+  BACKEND_CUDA = 2;
+  BACKEND_METAL = 3;
+  BACKEND_ANE = 4;
+  BACKEND_DWAVE_QPU = 5;
+  BACKEND_EXEC = 6;
+  BACKEND_MOCK = 7;
+}
+
+enum Algorithm {
+  ALGORITHM_UNSPECIFIED = 0;
+  ALGORITHM_SA = 1;
+  ALGORITHM_GIBBS = 2;
+  ALGORITHM_QUANTUM_ANNEAL = 3;
+  ALGORITHM_FSA = 4;
+  ALGORITHM_MSA = 5;
+  ALGORITHM_FLATIRON = 6;
+  ALGORITHM_MPS = 7;
+  ALGORITHM_MFA = 8;
+  ALGORITHM_SB = 9;
+  ALGORITHM_BSB = 10;
+  ALGORITHM_GBSB = 11;
+  ALGORITHM_GDSB = 12;
+  ALGORITHM_GGDSB = 13;
+  ALGORITHM_HBSB = 14;
+  ALGORITHM_HDSB = 15;
+  ALGORITHM_SBQA = 16;
+  ALGORITHM_TEDSB = 17;
+  ALGORITHM_EXTERNAL = 18;
+}
+
+enum CoefficientEncoding {
+  COEFFICIENT_ENCODING_UNSPECIFIED = 0;
+  COEFFICIENT_ENCODING_I32 = 1;
+  COEFFICIENT_ENCODING_I16 = 2;
+  COEFFICIENT_ENCODING_I8 = 3;
+  COEFFICIENT_ENCODING_F16 = 4;
+  COEFFICIENT_ENCODING_F32 = 5;
+  COEFFICIENT_ENCODING_F64 = 6;
+}
+
+enum GeneratorAlgorithm {
+  GENERATOR_ALGORITHM_UNSPECIFIED = 0;
+  // nonce = BLAKE3(last_proof_block_hash || miner_account || salt).
+  // ChaCha8 seeded with the nonce draws h for each node, then j for each
+  // edge, each value allowed[next_u32 % len], in cached Topology order.
+  GENERATOR_ALGORITHM_BLAKE3_CHACHA8_V1 = 1;
+}
+
 enum JobKind {
   JOB_KIND_UNSPECIFIED = 0;
   ISING_SAMPLE = 1;
   GATE_CIRCUIT = 2; // reserved
+  ISING_GENERATE = 3;
 }
 
 enum RejectReason {
@@ -21,6 +73,7 @@ enum RejectReason {
   MALFORMED = 6;
   TOPOLOGY_MISMATCH = 7;
   TOPOLOGY_MISSING = 8;
+  TARGET_MISSING = 9;
 }
 
 message MinerMsg {
@@ -33,6 +86,7 @@ message MinerMsg {
     Status     status      = 6;
     Fatal      fatal       = 7;
     Capabilities capabilities = 8;
+    LeaseDone lease_done = 9;
   }
 }
 
@@ -51,16 +105,12 @@ message CoordMsg {
 }
 
 message Hello {
-  string   miner_id             = 1;
-  string   session_token        = 2;
-  uint32   protocol_version     = 3; // this spec: 1
-  string   backend              = 4; // cpu | cuda | metal | dwave-qpu
-  string   algorithm            = 5; // sa | gibbs | quantum-anneal
-  repeated JobKind supported_kinds = 6;
-  uint32   max_nodes            = 7;
-  uint32   max_edges            = 8;
-  optional bytes native_topology_hash = 9;
-  repeated string features      = 10;
+  string miner_id = 1;
+  string session_token = 2;
+  reserved 3 to 10;
+  reserved "protocol_version", "backend", "algorithm", "supported_kinds",
+    "max_nodes", "max_edges", "native_topology_hash", "features";
+  Capabilities capabilities = 11;
 }
 
 message Welcome { uint32 protocol_version = 1; }
@@ -80,6 +130,7 @@ message Topology {
   repeated uint32 nodes = 2;
   EdgeList edges = 3; // u/v are native node ids from Topology.nodes, not positions
   repeated int32 allowed_h_milli = 4; // for the miner's adapt difficulty band
+  repeated int32 allowed_j_milli = 5;
 }
 
 // Difficulty target, pushed by the coordinator after Topology and re-sent
@@ -93,6 +144,7 @@ message SetTarget {
   uint32 num_reads      = 4; // 0 = unset
   uint32 num_sweeps     = 5; // 0 = unset
   uint32 anneal_time_us = 6; // 0 = unset
+  uint32 max_proof_solutions = 7;
 }
 
 message EdgeList {
@@ -103,17 +155,23 @@ message EdgeList {
 message IsingProblem {
   oneof graph {
     bytes    topology_hash = 1;
-    EdgeList edges         = 2; // u/v are dense positions into h_milli_le32, not node ids
+    EdgeList edges         = 2; // u/v are dense positions into h, not node ids
   }
-  bytes  h_milli_le32 = 3;
-  // Coupling coefficients, little-endian int32 milli-units. Normative
-  // invariant: len(j_milli_le32) == len(edges) after decoding (one i32 per
-  // edge, in the same order as EdgeList.u/v or the cached Topology edges).
-  bytes  j_milli_le32 = 4;
+  reserved 3, 4, 6;
+  reserved "h_milli_le32", "j_milli_le32", "gates";
+  // h and j contain little-endian elements of encoding's type, one per node
+  // and edge respectively, in EdgeList.u/v or cached Topology order.
+  // Integer unit values are stored / scale, with
+  // I32 at scale 1000 the canonical milli form. Float encodings use scale 0.
+  // Reject unspecified encoding, invalid scale, partial elements, non-finite
+  // floats, and values that do not convert exactly to i32 milli-units.
+  CoefficientEncoding encoding = 13;
+  uint32 scale = 14;
+  bytes h = 15;
+  bytes j = 16;
   uint32 num_reads      = 5; // per-job override; 0 = unset -> SetTarget/adapt
   uint32 num_sweeps     = 7; // per-job override; 0 = unset
   uint32 anneal_time_us = 8; // per-job override; 0 = unset
-  reserved 6; // was `gates`; difficulty gates moved to SetTarget
 
   // Optional warm-start states, one entry per seeded read, best state first.
   // Each entry is bit-packed in topology node order: node i is bit (i % 8) of
@@ -146,6 +204,7 @@ message Job {
   uint64  deadline_ms = 4;
   IsingProblem ising  = 5;
   Provenance provenance = 6;
+  IsingProblemGenerator generator = 7; // ISING_GENERATE only
 }
 
 message JobRequest { uint32 credits = 1; }
@@ -157,8 +216,12 @@ message Ping {}
 message Shutdown { uint32 grace_ms = 1; }
 
 message Solution {
-  bytes spins_bytes = 1; // one byte/spin: 0x01=+1, 0xFF=-1
+  reserved 1;
+  reserved "spins_bytes";
   int64 energy_milli = 2;
+  // Node i is bit i % 8 of byte i / 8, LSB first: 1 = +1, 0 = -1.
+  // Exactly ceil(num_nodes / 8) bytes, with zero padding bits.
+  bytes spins = 3;
 }
 
 message SamplerMeta {
@@ -173,6 +236,8 @@ message Result {
   bytes    job_id    = 1;
   repeated Solution solutions = 2;
   SamplerMeta meta   = 3;
+  bytes salt = 4; // ISING_GENERATE only, 32 bytes
+  bytes nonce = 5; // ISING_GENERATE only, 32 bytes
 }
 
 message Reject {
@@ -202,13 +267,32 @@ message GetCapabilities {}
 // What a solver supports on this host. A caller uses it to decide whether to
 // launch the binary at all, so it must answer without touching the device.
 message Capabilities {
-  string   backend              = 1; // cpu | cuda | metal | dwave-qpu
-  string   algorithm            = 2; // sa | gibbs | quantum-anneal
+  reserved 1, 2;
   repeated JobKind supported_kinds = 3;
-  uint32   max_nodes            = 4;
-  uint32   max_edges            = 5;
-  repeated string features      = 6;
-  uint32   protocol_version     = 7; // this spec: 1
-  uint32   stream_width         = 8; // models kept in flight; 1 = serial
+  uint32 max_nodes = 4;
+  uint32 max_edges = 5;
+  repeated string features = 6;   // initial-spins, streaming
+  uint32 protocol_version = 7;    // this spec: 2
+  uint32 stream_width = 8; // models kept in flight; 1 = serial
   optional bytes native_topology_hash = 9;
+  repeated CoefficientEncoding encodings = 10;
+  repeated GeneratorAlgorithm generators = 11;
+  Backend backend = 12;
+  Algorithm algorithm = 13;
+}
+
+message IsingProblemGenerator {
+  GeneratorAlgorithm algorithm = 1;
+  bytes  topology_hash = 2;          // cached Topology
+  bytes  last_proof_block_hash = 3;  // 32 bytes
+  bytes  miner_account = 4;          // 32 bytes
+  bytes  base_salt = 5;              // 32 bytes
+  uint64 salt_start = 6;
+  uint64 salt_count = 7;
+}
+
+message LeaseDone {
+  bytes  job_id = 1;
+  uint64 salts_done = 2;
+  int64  best_energy_milli = 3;
 }

@@ -286,6 +286,108 @@ pub fn verify_lease_solutions(
     })
 }
 
+#[cfg(feature = "session")]
+impl LeaseSpec {
+    /// Decode and validate a wire lease.
+    ///
+    /// # Errors
+    /// Rejects unknown generators, incorrect field lengths, and invalid counters.
+    pub fn from_proto(g: &quip_proto::v1::IsingProblemGenerator) -> Result<Self, LeaseError> {
+        if g.algorithm != quip_proto::v1::GeneratorAlgorithm::Blake3Chacha8V1 as i32 {
+            return Err(LeaseError::UnknownGenerator(g.algorithm));
+        }
+        let fixed = |bytes: &[u8], field| {
+            bytes
+                .try_into()
+                .map_err(|_| LeaseError::BadLength { field })
+        };
+        Self::new(
+            Generator::Blake3Chacha8V1,
+            fixed(&g.last_proof_block_hash, "last_proof_block_hash")?,
+            fixed(&g.miner_account, "miner_account")?,
+            fixed(&g.base_salt, "base_salt")?,
+            g.salt_start,
+            g.salt_count,
+        )
+    }
+}
+
+/// Why a wire topology cannot map node identifiers to positions.
+#[cfg(feature = "session")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TopologyError {
+    /// A node identifier occurs twice in registration order.
+    DuplicateNode(u32),
+    /// An edge names a node outside the registration list.
+    UnknownNode(u32),
+    /// The endpoint arrays have different lengths.
+    UnequalEdgeLists,
+}
+
+#[cfg(feature = "session")]
+impl TopologyView {
+    /// Map registered node identifiers to dense positions without changing order.
+    ///
+    /// # Errors
+    /// Rejects duplicate nodes, unknown endpoints, and unequal endpoint arrays.
+    pub fn from_proto(t: &quip_proto::v1::Topology) -> Result<Self, TopologyError> {
+        let mut positions = std::collections::HashMap::with_capacity(t.nodes.len());
+        for (index, &node) in t.nodes.iter().enumerate() {
+            if positions.insert(node, index).is_some() {
+                return Err(TopologyError::DuplicateNode(node));
+            }
+        }
+        let mut edges = Vec::new();
+        if let Some(e) = &t.edges {
+            if e.u.len() != e.v.len() {
+                return Err(TopologyError::UnequalEdgeLists);
+            }
+            for (&u, &v) in e.u.iter().zip(&e.v) {
+                let u = *positions.get(&u).ok_or(TopologyError::UnknownNode(u))?;
+                let v = *positions.get(&v).ok_or(TopologyError::UnknownNode(v))?;
+                edges.push((u, v));
+            }
+        }
+        Ok(Self {
+            num_nodes: t.nodes.len(),
+            edges,
+            allowed_h_milli: t.allowed_h_milli.clone(),
+            allowed_j_milli: t.allowed_j_milli.clone(),
+        })
+    }
+}
+
+/// Decode a wire result and verify its lease, nonce, energies, and proof set.
+///
+/// # Errors
+/// Returns the first malformed wire field or failed lease verification check.
+#[cfg(feature = "session")]
+pub fn verify_lease_result(
+    lease: &quip_proto::v1::IsingProblemGenerator,
+    topology: &TopologyView,
+    target: &Target,
+    result: &quip_proto::v1::Result,
+) -> Result<Verified, VerifyError> {
+    let lease = LeaseSpec::from_proto(lease).map_err(|_| VerifyError::SaltOutsideLease)?;
+    let salt = result
+        .salt
+        .as_slice()
+        .try_into()
+        .map_err(|_| VerifyError::SaltOutsideLease)?;
+    let nonce = result
+        .nonce
+        .as_slice()
+        .try_into()
+        .map_err(|_| VerifyError::NonceMismatch)?;
+    let mut solutions = Vec::with_capacity(result.solutions.len());
+    for (index, solution) in result.solutions.iter().enumerate() {
+        let spins = crate::wire::decode_spins_packed(&solution.spins, topology.num_nodes)
+            .map_err(|_| VerifyError::MalformedSpins { index })?;
+        solutions.push((spins, solution.energy_milli));
+    }
+    verify_lease_solutions(&lease, topology, target, &salt, &nonce, &solutions)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

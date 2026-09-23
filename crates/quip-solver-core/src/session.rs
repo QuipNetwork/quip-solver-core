@@ -19,10 +19,11 @@ use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
 use quip_proto::v1::miner_service_client::MinerServiceClient;
 use quip_proto::v1::{
-    coord_msg, miner_msg, Capabilities, CoordMsg, Fatal, JobKind, JobRequest, MinerMsg, Ready,
+    coord_msg, miner_msg, Algorithm, Backend, Capabilities, CoefficientEncoding, CoordMsg, Fatal,
+    GeneratorAlgorithm, JobKind, JobRequest, MinerMsg, Ready,
 };
 use quip_protocol::session::{
-    build_hello, check_welcome, BackendCaps, ExitCode, SessionConfig, SessionError,
+    algorithm_name, backend_name, build_hello, check_welcome, ExitCode, SessionConfig, SessionError,
 };
 use serde::Serialize;
 use std::collections::HashMap;
@@ -39,9 +40,9 @@ use tonic::transport::{Endpoint, Uri};
 #[derive(Clone, Copy, Debug)]
 pub struct BackendIdentity {
     /// Backend name advertised in Hello / capabilities (e.g. `"cpu"`, `"cuda"`).
-    pub backend: &'static str,
+    pub backend: Backend,
     /// Algorithm name advertised in Hello / capabilities (e.g. `"sa"`, `"gibbs"`).
-    pub algorithm: &'static str,
+    pub algorithm: Algorithm,
     /// Hard cap on variables accepted for a job.
     pub max_nodes: u32,
     /// Hard cap on edges accepted for a job.
@@ -127,8 +128,8 @@ fn coord_msg_name(msg: Option<&coord_msg::Msg>) -> &'static str {
 #[must_use]
 pub fn capabilities(id: &BackendIdentity, stream_width: u32) -> Capabilities {
     Capabilities {
-        backend: id.backend.to_owned(),
-        algorithm: id.algorithm.to_owned(),
+        backend: id.backend as i32,
+        algorithm: id.algorithm as i32,
         supported_kinds: vec![JobKind::IsingSample as i32],
         max_nodes: id.max_nodes,
         max_edges: id.max_edges,
@@ -136,19 +137,19 @@ pub fn capabilities(id: &BackendIdentity, stream_width: u32) -> Capabilities {
         protocol_version: quip_protocol::session::PROTOCOL_VERSION,
         stream_width,
         native_topology_hash: None,
+        encodings: vec![CoefficientEncoding::I32 as i32],
+        generators: vec![],
     }
 }
 
 /// Protobuf JSON view of [`Capabilities`]. Field order matches the message.
 ///
 /// `native_topology_hash` is omitted when unset, which is the protobuf JSON
-/// mapping and keeps the current eight-field output byte-identical. When set,
+/// mapping. When set,
 /// protobuf JSON maps `bytes` to a standard-base64 string, not a number array.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CapabilitiesJson<'a> {
-    backend: &'a str,
-    algorithm: &'a str,
     supported_kinds: Vec<&'a str>,
     max_nodes: u32,
     max_edges: u32,
@@ -157,6 +158,10 @@ struct CapabilitiesJson<'a> {
     stream_width: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     native_topology_hash: Option<String>,
+    encodings: Vec<&'static str>,
+    generators: Vec<&'static str>,
+    backend: &'static str,
+    algorithm: &'static str,
 }
 
 /// The `Capabilities` this solver advertises, from the one place both answers
@@ -242,11 +247,23 @@ fn session_capabilities<S: Sampler<C>, C: Coefficient>(
 ///
 /// The generated prost types carry no serde derives, and adding them to
 /// `quip-proto` would put a serde dependency in the wire crate for one CLI
-/// flag. Nine fields is less code than that.
+/// flag. This view keeps serialization local to the session layer.
 fn capabilities_json_from(c: &Capabilities) -> String {
     let view = CapabilitiesJson {
-        backend: &c.backend,
-        algorithm: &c.algorithm,
+        backend: backend_name(c.backend()),
+        algorithm: algorithm_name(c.algorithm()),
+        encodings: c
+            .encodings
+            .iter()
+            .filter_map(|&e| CoefficientEncoding::try_from(e).ok())
+            .map(|e| e.as_str_name())
+            .collect(),
+        generators: c
+            .generators
+            .iter()
+            .filter_map(|&g| GeneratorAlgorithm::try_from(g).ok())
+            .map(|g| g.as_str_name())
+            .collect(),
         supported_kinds: c
             .supported_kinds
             .iter()
@@ -708,17 +725,7 @@ async fn run_session<S: Sampler<C>, C: Coefficient>(
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Resolve token before any network I/O so a missing QUIP_SESSION_TOKEN
     // always maps to exit 77 (never InternalFatal from a connect failure).
-    let hello = build_hello(
-        miner_id,
-        id.backend,
-        id.algorithm,
-        &[JobKind::IsingSample],
-        &advertised_features::<S, C>(id),
-        BackendCaps {
-            max_nodes: id.max_nodes,
-            max_edges: id.max_edges,
-        },
-    )?;
+    let hello = build_hello(miner_id, advertised_capabilities::<S, C>(id))?;
 
     let path = uri.strip_prefix("unix://").unwrap_or(uri).to_string();
     let channel = Endpoint::try_from("http://[::]:50051")? // dummy authority for UDS
@@ -828,7 +835,7 @@ async fn run_session<S: Sampler<C>, C: Coefficient>(
             jobs_done: Arc::clone(&jobs_done),
             device_faulted: Arc::clone(&device_faulted),
             cancel: cancel.clone(),
-            backend: id.backend,
+            backend: backend_name(id.backend),
             require_exact_score: !C::EXACT,
         },
     ));
@@ -1041,7 +1048,7 @@ async fn run_session<S: Sampler<C>, C: Coefficient>(
                         } => {
                             tracing::debug!(
                                 "{} received job {}: {} nodes, {} edges | reads={num_reads} sweeps={ns}",
-                                id.backend,
+                                backend_name(id.backend),
                                 short_job_id(&job.job_id),
                                 job.graph.num_nodes(),
                                 job.graph.edges.len(),
@@ -1328,6 +1335,7 @@ pub fn run_code<S: Sampler<C>, C: Coefficient>(
     common: &CommonArgs,
     open: impl FnOnce() -> Result<S, OpenError>,
 ) -> ExitCode {
+    let backend = backend_name(id.backend);
     // Install the subscriber before anything else can log. `--capabilities`
     // writes JSON to stdout and must stay parseable, but the subscriber writes
     // to stderr, so installing first is safe for it too.
@@ -1337,7 +1345,7 @@ pub fn run_code<S: Sampler<C>, C: Coefficient>(
             reason = "the subscriber failed to install, so tracing would discard this"
         )]
         {
-            eprintln!("quip-miner-{}: {e}", id.backend);
+            eprintln!("quip-miner-{backend}: {e}");
         }
         return ExitCode::ConfigInvalid;
     }
@@ -1349,20 +1357,17 @@ pub fn run_code<S: Sampler<C>, C: Coefficient>(
         let sampler = match open() {
             Ok(s) => s,
             Err(OpenError(e)) => {
-                tracing::error!("[quip-solver-{}] cannot open device: {e}", id.backend);
+                tracing::error!("[quip-solver-{}] cannot open device: {e}", backend);
                 return ExitCode::EnvIncompatible;
             }
         };
         let mut input = Vec::new();
         if let Err(e) = std::io::Read::read_to_end(&mut std::io::stdin(), &mut input) {
-            tracing::error!("[quip-solver-{}] cannot read stdin: {e}", id.backend);
+            tracing::error!("[quip-solver-{}] cannot read stdin: {e}", backend);
             return ExitCode::ConfigInvalid;
         }
         if serde_json::from_slice::<crate::driver::ProblemJson>(&input).is_err() {
-            tracing::error!(
-                "[quip-solver-{}] malformed problem JSON on stdin",
-                id.backend
-            );
+            tracing::error!("[quip-solver-{}] malformed problem JSON on stdin", backend);
             return ExitCode::ConfigInvalid;
         }
         return match crate::driver::solve(&sampler, &input) {
@@ -1378,12 +1383,12 @@ pub fn run_code<S: Sampler<C>, C: Coefficient>(
             Err(crate::driver::SolveError::Malformed(detail)) => {
                 tracing::error!(
                     "[quip-solver-{}] malformed problem JSON on stdin: {detail}",
-                    id.backend
+                    backend
                 );
                 ExitCode::ConfigInvalid
             }
             Err(e @ crate::driver::SolveError::Sample(_)) => {
-                tracing::error!("[quip-solver-{}] solve failed: {e}", id.backend);
+                tracing::error!("[quip-solver-{}] solve failed: {e}", backend);
                 ExitCode::InternalFatal
             }
         };
@@ -1392,7 +1397,7 @@ pub fn run_code<S: Sampler<C>, C: Coefficient>(
         return match open() {
             Ok(_) => ExitCode::Clean,
             Err(e) => {
-                tracing::error!("{} check failed: {}", id.backend, e.0);
+                tracing::error!("{} check failed: {}", backend, e.0);
                 ExitCode::EnvIncompatible
             }
         };
@@ -1405,12 +1410,12 @@ pub fn run_code<S: Sampler<C>, C: Coefficient>(
     let miner_id = common
         .miner_id
         .clone()
-        .unwrap_or_else(|| format!("{}-0", id.backend));
+        .unwrap_or_else(|| format!("{backend}-0"));
 
     let sampler = match open() {
         Ok(s) => s,
         Err(e) => {
-            tracing::error!("failed to open {} device: {}", id.backend, e.0);
+            tracing::error!("failed to open {} device: {}", backend, e.0);
             return ExitCode::EnvIncompatible;
         }
     };
@@ -1431,7 +1436,7 @@ pub fn run_code<S: Sampler<C>, C: Coefficient>(
         common.sweeps_per_beta,
     )) {
         Ok(()) => ExitCode::Clean,
-        Err(e) => map_err_to_exit(e, id.backend),
+        Err(e) => map_err_to_exit(e, backend),
     }
 }
 
@@ -1572,8 +1577,8 @@ mod tests {
 
     fn test_identity() -> BackendIdentity {
         BackendIdentity {
-            backend: "mock",
-            algorithm: "sa",
+            backend: Backend::Mock,
+            algorithm: Algorithm::Sa,
             max_nodes: 100,
             max_edges: 200,
             features: &["streaming"],
@@ -1595,8 +1600,14 @@ mod tests {
         let c = capabilities(&id, 4);
         let v: serde_json::Value =
             serde_json::from_str(&capabilities_json_from(&c)).expect("printer emits JSON");
-        assert_eq!(v.get("backend"), Some(&serde_json::json!(c.backend)));
-        assert_eq!(v.get("algorithm"), Some(&serde_json::json!(c.algorithm)));
+        assert_eq!(
+            v.get("backend"),
+            Some(&serde_json::json!(backend_name(c.backend())))
+        );
+        assert_eq!(
+            v.get("algorithm"),
+            Some(&serde_json::json!(algorithm_name(c.algorithm())))
+        );
         assert_eq!(v.get("maxNodes"), Some(&serde_json::json!(c.max_nodes)));
         assert_eq!(v.get("maxEdges"), Some(&serde_json::json!(c.max_edges)));
         assert_eq!(
@@ -1620,8 +1631,8 @@ mod tests {
     #[test]
     fn capabilities_json_escapes_quotes_in_features() {
         let id = BackendIdentity {
-            backend: "mock",
-            algorithm: "sa",
+            backend: Backend::Mock,
+            algorithm: Algorithm::Sa,
             max_nodes: 1,
             max_edges: 1,
             features: &[r#"has"quote"#],
@@ -2017,8 +2028,8 @@ mod tests {
             ..
         } = spawn_writer_with_scoring(16, true);
         let id = BackendIdentity {
-            backend: "narrow",
-            algorithm: "sa",
+            backend: Backend::Mock,
+            algorithm: Algorithm::Sa,
             max_nodes: 0,
             max_edges: 0,
             features: &[],
@@ -2041,7 +2052,9 @@ mod tests {
                 job_id: vec![key],
                 kind: JobKind::IsingSample as i32,
                 ising: Some(quip_proto::v1::IsingProblem {
-                    h_milli_le32: quip_protocol::wire::encode_i32_le(&[coefficient]),
+                    encoding: CoefficientEncoding::I32 as i32,
+                    scale: 1000,
+                    h: quip_protocol::wire::encode_i32_le(&[coefficient]),
                     num_reads: 1,
                     initial_spins: if key == 2 { vec![vec![1]] } else { vec![] },
                     ..Default::default()
