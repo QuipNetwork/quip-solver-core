@@ -175,7 +175,7 @@ The session converts each wire coefficient once when it decodes a job.
 The sealed `Coefficient` trait supports `f64`, `f32`, `half::f16`, and
 `Fixed<T, SCALE>` for `i32`, `i16`, `i8`, and `I4` storage.
 `SCALE` is positive. Fixed-point conversion rounds halfway values away
-from zero and saturates. `I4` stores values from –8 through 7 in one byte.
+from zero and saturates. `I4` stores values from `-8` through `7` in one byte.
 `Milli` is `Fixed<i32, 1000>` and preserves each wire coefficient.
 
 A lossy sampler receives converted coefficients, but the session replaces
