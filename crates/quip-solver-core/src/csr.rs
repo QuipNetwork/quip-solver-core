@@ -2,8 +2,8 @@
 //!
 //! Built from the base [`crate::ising::IsingGraph`] by the GPU backends.
 //! Couplings are stored once per directed half-edge so local-field walks are
-//! O(degree). Value dtype is f32 for kernel dynamics; f64 copies of `h`/`j` are
-//! kept for consensus scoring.
+//! O(degree). Value dtype is f32 for kernel dynamics; `h`/`j` keep the graph's
+//! coefficients in units as f64.
 
 use crate::coefficient::Coefficient;
 use crate::ising::IsingGraph;
