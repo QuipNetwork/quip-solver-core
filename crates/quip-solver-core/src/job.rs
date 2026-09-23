@@ -26,8 +26,6 @@ pub(crate) struct TopologyCache {
     edges: Vec<(u32, u32)>,
     pos: HashMap<u32, usize>,
     allowed_h: Vec<i32>,
-    #[expect(dead_code, reason = "generator support uses this in Task 7")]
-    allowed_j_milli: Vec<i32>,
     /// `Some(reason)` when the `Topology` message itself did not validate.
     ///
     /// `Topology` arrives outside any job, so there is no message to reject at
@@ -74,7 +72,6 @@ impl TopologyCache {
             edges,
             pos,
             allowed_h: t.allowed_h_milli.clone(),
-            allowed_j_milli: t.allowed_j_milli.clone(),
             invalid,
         }
     }
@@ -92,18 +89,26 @@ impl TopologyCache {
 
 /// Session difficulty target from `SetTarget`. The miner adapts its sampling
 /// budget from `max_energy_milli`; the `num_*` fields are optional overrides.
+#[derive(Clone)]
 pub(crate) struct SessionTarget {
     pub(crate) max_energy_milli: i64,
     pub(crate) min_solutions: u32,
-    #[expect(dead_code, reason = "lease targets are applied in Task 7")]
     pub(crate) min_diversity_milli: u32,
-    #[expect(dead_code, reason = "lease targets are applied in Task 7")]
     pub(crate) max_proof_solutions: u32,
     pub(crate) num_reads: u32,
     pub(crate) num_sweeps: u32,
 }
 
 impl SessionTarget {
+    pub(crate) fn to_target(&self) -> quip_protocol::target::Target {
+        quip_protocol::target::Target {
+            max_energy_milli: self.max_energy_milli,
+            min_solutions: self.min_solutions,
+            min_diversity_milli: self.min_diversity_milli,
+            max_proof_solutions: self.max_proof_solutions,
+        }
+    }
+
     // anneal_time_us is ignored on the SA/GPU Rust path (QPU adapt lives in the
     // Python dwave miner).
     pub(crate) fn from_proto(s: &quip_proto::v1::SetTarget) -> Self {
@@ -120,7 +125,7 @@ impl SessionTarget {
 
 /// Resolve one sampling param: per-job override, else `SetTarget` override,
 /// else the adapted value, else the fallback. `0` means "unset".
-fn pick_param(job: u32, target: u32, adapt: Option<u32>, fallback: u32) -> u32 {
+pub(crate) fn pick_param(job: u32, target: u32, adapt: Option<u32>, fallback: u32) -> u32 {
     if job != 0 {
         job
     } else if target != 0 {
@@ -173,7 +178,7 @@ pub(crate) fn now_unix_ms() -> Option<u64> {
 /// transient (exhausted descriptors, a seccomp filter, an unseeded early-boot
 /// pool). Rejecting the one job instead keeps the miner up and tells the
 /// coordinator to place the work elsewhere.
-fn os_seed() -> Option<u64> {
+pub(crate) fn os_seed() -> Option<u64> {
     let mut bytes = [0u8; 8];
     match getrandom::getrandom(&mut bytes) {
         Ok(()) => Some(u64::from_le_bytes(bytes)),

@@ -1,0 +1,562 @@
+//! Lease protocol tests against a real session and deterministic sampler.
+use quip_proto::v1::{
+    self as wire, coord_msg, miner_msg,
+    miner_service_server::{MinerService, MinerServiceServer},
+};
+use quip_protocol::{
+    lease::{verify_lease_result, LeaseSpec, TopologyView},
+    target::Target,
+};
+use std::{
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        OnceLock,
+    },
+    time::{Duration, Instant},
+};
+use tokio::sync::{mpsc, Mutex};
+use tokio_stream::wrappers::{ReceiverStream, UnixListenerStream};
+use tonic::{Request, Response, Status, Streaming};
+
+type Link = (
+    Streaming<wire::MinerMsg>,
+    mpsc::Sender<Result<wire::CoordMsg, Status>>,
+);
+struct Coordinator(Mutex<Option<tokio::sync::oneshot::Sender<Link>>>);
+#[tonic::async_trait]
+#[expect(
+    clippy::unwrap_used,
+    reason = "test coordinator accepts exactly one connection"
+)]
+impl MinerService for Coordinator {
+    type SessionStream = ReceiverStream<Result<wire::CoordMsg, Status>>;
+    async fn session(
+        &self,
+        req: Request<Streaming<wire::MinerMsg>>,
+    ) -> Result<Response<Self::SessionStream>, Status> {
+        let (tx, rx) = mpsc::channel(32);
+        self.0
+            .lock()
+            .await
+            .take()
+            .unwrap()
+            .send((req.into_inner(), tx))
+            .map_err(|_| Status::internal("test ended"))?;
+        Ok(Response::new(ReceiverStream::new(rx)))
+    }
+}
+struct Session {
+    inbound: Streaming<wire::MinerMsg>,
+    tx: mpsc::Sender<Result<wire::CoordMsg, Status>>,
+    child: tokio::process::Child,
+    server: tokio::task::JoinHandle<Result<(), tonic::transport::Error>>,
+    dir: std::path::PathBuf,
+}
+impl Drop for Session {
+    fn drop(&mut self) {
+        self.server.abort();
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+#[expect(
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "fixture failures must fail the session test immediately"
+)]
+impl Session {
+    async fn start(zero: bool) -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        static BIN: OnceLock<std::path::PathBuf> = OnceLock::new();
+        let bin = BIN.get_or_init(|| {
+            assert!(std::process::Command::new(env!("CARGO"))
+                .args([
+                    "build",
+                    "-p",
+                    "quip-solver-core",
+                    "--example",
+                    "mock_sampler_lease"
+                ])
+                .status()
+                .unwrap()
+                .success());
+            let mut path = std::env::current_exe().unwrap();
+            let _ = path.pop();
+            let _ = path.pop();
+            path.join("examples/mock_sampler_lease")
+        });
+        let dir = std::path::PathBuf::from(format!(
+            "target/t7-tmp/{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("s");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let (link_tx, link_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(
+            tonic::transport::Server::builder()
+                .add_service(MinerServiceServer::new(Coordinator(Mutex::new(Some(
+                    link_tx,
+                )))))
+                .serve_with_incoming(UnixListenerStream::new(listener)),
+        );
+        let mut command = tokio::process::Command::new(bin);
+        let _ = command
+            .args([
+                "--quip-coordinator",
+                &format!("unix://{}", socket.display()),
+                "--log-level",
+                "error",
+            ])
+            .env("QUIP_SESSION_TOKEN", "test")
+            .kill_on_drop(true);
+        if zero {
+            let _ = command.arg("--zero");
+        }
+        let child = command.spawn().unwrap();
+        let (inbound, tx) = tokio::time::timeout(Duration::from_secs(30), link_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut s = Self {
+            inbound,
+            tx,
+            child,
+            server,
+            dir,
+        };
+        let miner_msg::Msg::Hello(hello) = s.recv().await else {
+            panic!("expected Hello")
+        };
+        let caps = hello.capabilities.unwrap();
+        assert_eq!(caps.protocol_version, 2);
+        assert!(caps
+            .supported_kinds
+            .contains(&(wire::JobKind::IsingGenerate as i32)));
+        assert_eq!(
+            caps.generators,
+            vec![wire::GeneratorAlgorithm::Blake3Chacha8V1 as i32]
+        );
+        s.send(coord_msg::Msg::Welcome(wire::Welcome {
+            protocol_version: 2,
+        }))
+        .await;
+        s.send(coord_msg::Msg::Configure(wire::Configure {
+            queue_depth: 8,
+            ..Default::default()
+        }))
+        .await;
+        assert!(matches!(s.recv().await, miner_msg::Msg::Ready(_)));
+        assert!(matches!(s.recv().await, miner_msg::Msg::JobRequest(_)));
+        s
+    }
+    async fn send(&self, msg: coord_msg::Msg) {
+        self.tx
+            .send(Ok(wire::CoordMsg { msg: Some(msg) }))
+            .await
+            .unwrap();
+    }
+    async fn recv(&mut self) -> miner_msg::Msg {
+        tokio::time::timeout(Duration::from_secs(10), self.inbound.message())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+            .msg
+            .unwrap()
+    }
+    async fn setup(&self, ceiling: i64) {
+        self.send(coord_msg::Msg::Topology(topology())).await;
+        self.send(coord_msg::Msg::SetTarget(target(ceiling))).await;
+    }
+    async fn refund(&mut self) {
+        assert!(matches!(self.recv().await, miner_msg::Msg::JobRequest(r) if r.credits == 1));
+    }
+    async fn finish(mut self) {
+        self.send(coord_msg::Msg::Shutdown(wire::Shutdown { grace_ms: 2000 }))
+            .await;
+        assert!(
+            tokio::time::timeout(Duration::from_secs(10), self.inbound.message())
+                .await
+                .unwrap()
+                .unwrap()
+                .is_none()
+        );
+        self.tx = mpsc::channel(1).0;
+        assert!(
+            tokio::time::timeout(Duration::from_secs(10), self.child.wait())
+                .await
+                .unwrap()
+                .unwrap()
+                .success()
+        );
+    }
+}
+fn topology() -> wire::Topology {
+    wire::Topology {
+        hash: vec![7; 32],
+        nodes: vec![10, 20],
+        edges: Some(wire::EdgeList {
+            u: vec![10],
+            v: vec![20],
+        }),
+        allowed_h_milli: vec![-1000, 0, 1000],
+        allowed_j_milli: vec![-1000, 1000],
+    }
+}
+fn target(ceiling: i64) -> wire::SetTarget {
+    wire::SetTarget {
+        max_energy_milli: ceiling,
+        min_solutions: 1,
+        min_diversity_milli: 0,
+        max_proof_solutions: 32,
+        num_reads: 1,
+        num_sweeps: 1,
+        ..Default::default()
+    }
+}
+fn job(count: u64) -> wire::Job {
+    wire::Job {
+        job_id: b"lease".to_vec(),
+        kind: wire::JobKind::IsingGenerate as i32,
+        generation: 1,
+        generator: Some(wire::IsingProblemGenerator {
+            algorithm: wire::GeneratorAlgorithm::Blake3Chacha8V1 as i32,
+            topology_hash: vec![7; 32],
+            last_proof_block_hash: vec![1; 32],
+            miner_account: vec![2; 32],
+            base_salt: vec![0; 32],
+            salt_start: 10,
+            salt_count: count,
+        }),
+        ..Default::default()
+    }
+}
+#[expect(
+    clippy::unwrap_used,
+    reason = "verification inputs are fixed valid fixtures"
+)]
+fn verify(result: &wire::Result) {
+    assert_eq!(result.job_id, b"lease");
+    assert!(verify_lease_result(
+        &job(10_000).generator.unwrap(),
+        &TopologyView::from_proto(&topology()).unwrap(),
+        &Target::from_proto(&target(i64::MAX)),
+        result
+    )
+    .is_ok());
+}
+#[expect(clippy::panic, reason = "a missing winner is a test failure")]
+async fn first(s: &mut Session) {
+    let miner_msg::Msg::Result(r) = s.recv().await else {
+        panic!("expected winner")
+    };
+    verify(&r);
+}
+
+#[tokio::test]
+async fn a_lease_reports_winners_then_one_lease_done() {
+    let mut s = Session::start(false).await;
+    s.setup(i64::MAX).await;
+    let j = job(5);
+    let spec = LeaseSpec::from_proto(j.generator.as_ref().unwrap()).unwrap();
+    s.send(coord_msg::Msg::Job(j)).await;
+    let mut salts = Vec::new();
+    for _ in 0..5 {
+        let miner_msg::Msg::Result(r) = s.recv().await else {
+            panic!("expected winner")
+        };
+        verify(&r);
+        salts.push(r.salt);
+    }
+    salts.sort();
+    let mut expected = (0..5)
+        .map(|i| spec.salt(i).unwrap().to_vec())
+        .collect::<Vec<_>>();
+    expected.sort();
+    assert_eq!(salts, expected);
+    assert!(matches!(s.recv().await, miner_msg::Msg::LeaseDone(d) if d.salts_done == 5));
+    s.refund().await;
+    s.finish().await;
+}
+#[tokio::test]
+async fn a_lease_with_no_winners_still_reports_its_count() {
+    let mut s = Session::start(false).await;
+    s.setup(i64::MIN).await;
+    let j = job(5);
+    let spec = LeaseSpec::from_proto(j.generator.as_ref().unwrap()).unwrap();
+    let top = TopologyView::from_proto(&topology()).unwrap();
+    let best = (0..5)
+        .map(|i| {
+            let (h, j) = top.draw(spec.nonce(i).unwrap()).unwrap();
+            quip_protocol::scoring::energy_from_milli(&[1, 1], &h, &j, &top.edges)
+        })
+        .min()
+        .unwrap();
+    s.send(coord_msg::Msg::Job(j)).await;
+    assert!(
+        matches!(s.recv().await, miner_msg::Msg::LeaseDone(d) if d.salts_done == 5 && d.best_energy_milli == best)
+    );
+    s.refund().await;
+    s.finish().await;
+}
+#[tokio::test]
+async fn malformed_leases_are_rejected_before_drawing() {
+    let mut s = Session::start(false).await;
+    s.setup(i64::MAX).await;
+    for variant in 0..4 {
+        let mut j = job(5);
+        let g = j.generator.as_mut().unwrap();
+        match variant {
+            0 => g.salt_count = 0,
+            1 => g.salt_start = u64::MAX,
+            2 => g.base_salt = vec![0; 31],
+            _ => g.algorithm = 0,
+        }
+        s.send(coord_msg::Msg::Job(j)).await;
+        assert!(
+            matches!(s.recv().await, miner_msg::Msg::Reject(r) if r.reason == wire::RejectReason::Malformed as i32)
+        );
+        s.refund().await;
+    }
+    s.finish().await;
+}
+#[tokio::test]
+async fn a_lease_needs_a_topology_and_a_target() {
+    let mut s = Session::start(false).await;
+    for (index, reason) in [
+        wire::RejectReason::TopologyMissing,
+        wire::RejectReason::TargetMissing,
+        wire::RejectReason::TargetMissing,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        s.send(coord_msg::Msg::Job(job(5))).await;
+        assert!(matches!(s.recv().await, miner_msg::Msg::Reject(r) if r.reason == reason as i32));
+        s.refund().await;
+        if index == 0 {
+            s.send(coord_msg::Msg::Topology(topology())).await;
+        }
+        if index == 1 {
+            let mut t = target(i64::MAX);
+            t.max_proof_solutions = 0;
+            s.send(coord_msg::Msg::SetTarget(t)).await;
+        }
+    }
+    s.finish().await;
+}
+#[tokio::test]
+async fn cancel_stops_a_lease_and_reports_what_finished() {
+    let mut s = Session::start(false).await;
+    s.setup(i64::MAX).await;
+    s.send(coord_msg::Msg::Job(job(10_000))).await;
+    first(&mut s).await;
+    let start = Instant::now();
+    s.send(coord_msg::Msg::Cancel(wire::Cancel { max_generation: 1 }))
+        .await;
+    let mut ack = false;
+    let mut done = false;
+    let mut refund = false;
+    while !(ack && done && refund) {
+        match s.recv().await {
+            miner_msg::Msg::Status(v) => {
+                assert_eq!(v.abandoned_generation, 1);
+                ack = true;
+            }
+            miner_msg::Msg::Result(r) => {
+                assert!(!ack);
+                verify(&r);
+            }
+            miner_msg::Msg::LeaseDone(d) => {
+                assert!(!done);
+                assert!(d.salts_done < 10_000);
+                assert!(start.elapsed() < Duration::from_secs(1));
+                done = true;
+            }
+            miner_msg::Msg::JobRequest(r) => {
+                assert!(done);
+                assert_eq!(r.credits, 1);
+                refund = true;
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    s.finish().await;
+}
+#[tokio::test]
+async fn plain_jobs_interleave_with_a_lease() {
+    let mut s = Session::start(false).await;
+    s.setup(i64::MAX).await;
+    s.send(coord_msg::Msg::Job(job(10_000))).await;
+    first(&mut s).await;
+    for id in 0..3 {
+        s.send(coord_msg::Msg::Job(wire::Job {
+            job_id: vec![id],
+            kind: wire::JobKind::IsingSample as i32,
+            ising: Some(wire::IsingProblem {
+                encoding: wire::CoefficientEncoding::I32 as i32,
+                scale: 1000,
+                h: quip_protocol::wire::encode_i32_le(&[1000]),
+                num_reads: 1,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }))
+        .await;
+    }
+    let mut ids = Vec::new();
+    while ids.len() < 3 {
+        let miner_msg::Msg::Result(r) = s.recv().await else {
+            panic!("lease ended before plain jobs")
+        };
+        if r.job_id == b"lease" {
+            verify(&r);
+        } else {
+            ids.push(r.job_id);
+            s.refund().await;
+        }
+    }
+    ids.sort();
+    assert_eq!(ids, vec![vec![0], vec![1], vec![2]]);
+    s.send(coord_msg::Msg::Cancel(wire::Cancel { max_generation: 1 }))
+        .await;
+    let mut ack = false;
+    let mut done = false;
+    let mut refunded = false;
+    while !(ack && done && refunded) {
+        match s.recv().await {
+            miner_msg::Msg::Status(_) => ack = true,
+            miner_msg::Msg::LeaseDone(_) => {
+                assert!(!done);
+                done = true;
+            }
+            miner_msg::Msg::JobRequest(r) => {
+                assert!(done);
+                assert_eq!(r.credits, 1);
+                refunded = true;
+            }
+            miner_msg::Msg::Result(r) => {
+                assert!(!ack);
+                verify(&r);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    s.finish().await;
+}
+#[tokio::test]
+async fn a_new_target_applies_to_later_salts_and_the_topology_is_a_snapshot() {
+    let mut s = Session::start(false).await;
+    s.setup(i64::MAX).await;
+    s.send(coord_msg::Msg::Job(job(40))).await;
+    first(&mut s).await;
+    let mut top = topology();
+    top.hash = vec![8; 32];
+    top.allowed_h_milli = vec![9000];
+    s.send(coord_msg::Msg::Topology(top)).await;
+    // Keep the target permissive until a later winner proves snapshot use.
+    first(&mut s).await;
+    s.send(coord_msg::Msg::SetTarget(target(i64::MIN))).await;
+    s.send(coord_msg::Msg::Ping(wire::Ping {})).await;
+    let mut ack = false;
+    loop {
+        match s.recv().await {
+            miner_msg::Msg::Result(r) => {
+                assert!(!ack);
+                verify(&r);
+            }
+            miner_msg::Msg::Status(_) => ack = true,
+            miner_msg::Msg::LeaseDone(d) => {
+                assert_eq!(d.salts_done, 40);
+                break;
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    assert!(ack);
+    s.refund().await;
+    s.finish().await;
+}
+#[tokio::test]
+async fn zero_read_salts_count_but_never_win() {
+    let mut s = Session::start(true).await;
+    s.setup(i64::MAX).await;
+    s.send(coord_msg::Msg::Job(job(5))).await;
+    assert!(
+        matches!(s.recv().await, miner_msg::Msg::LeaseDone(d) if d.salts_done == 5 && d.best_energy_milli == i64::MAX)
+    );
+    s.refund().await;
+    s.finish().await;
+}
+#[tokio::test]
+async fn shutdown_drains_in_flight_winners_then_lease_done() {
+    let mut s = Session::start(false).await;
+    s.setup(i64::MAX).await;
+    s.send(coord_msg::Msg::Job(job(10_000))).await;
+    first(&mut s).await;
+    s.send(coord_msg::Msg::Shutdown(wire::Shutdown { grace_ms: 2000 }))
+        .await;
+    let mut done = false;
+    while let Some(msg) = tokio::time::timeout(Duration::from_secs(10), s.inbound.message())
+        .await
+        .unwrap()
+        .unwrap()
+    {
+        match msg.msg.unwrap() {
+            miner_msg::Msg::Result(r) => {
+                assert!(!done);
+                verify(&r);
+            }
+            miner_msg::Msg::LeaseDone(d) => {
+                assert!(!done);
+                assert!(d.salts_done < 10_000);
+                done = true;
+            }
+            miner_msg::Msg::JobRequest(r) => {
+                assert!(done);
+                assert_eq!(r.credits, 1);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    assert!(done);
+    s.tx = mpsc::channel(1).0;
+    assert!(s.child.wait().await.unwrap().success());
+}
+#[tokio::test]
+async fn an_expired_lease_is_rejected_and_a_deadline_mid_lease_stops_it() {
+    let mut s = Session::start(false).await;
+    s.setup(i64::MAX).await;
+    let mut j = job(5);
+    j.deadline_ms = 1;
+    s.send(coord_msg::Msg::Job(j)).await;
+    assert!(
+        matches!(s.recv().await, miner_msg::Msg::Reject(r) if r.reason == wire::RejectReason::Expired as i32)
+    );
+    s.refund().await;
+    let start = Instant::now();
+    let mut j = job(10_000);
+    j.deadline_ms = u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap()
+        + 200;
+    s.send(coord_msg::Msg::Job(j)).await;
+    loop {
+        match s.recv().await {
+            miner_msg::Msg::Result(r) => verify(&r),
+            miner_msg::Msg::LeaseDone(d) => {
+                assert!(d.salts_done < 10_000);
+                assert!(start.elapsed() < Duration::from_secs(2));
+                break;
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    s.refund().await;
+    s.finish().await;
+}

@@ -17,6 +17,7 @@ pub mod driver;
 pub mod error;
 pub mod ising;
 mod job;
+mod lease;
 pub mod logging;
 mod session;
 
@@ -24,6 +25,7 @@ pub use cli::CommonArgs;
 pub use csr::CsrGraph;
 pub use error::SampleError;
 pub use ising::{Algorithm, IsingGraph, SampleParams, SamplerResult, WarmStart};
+pub use lease::Lease;
 pub use session::{capabilities, run, run_code, BackendIdentity, OpenError, INITIAL_SPINS_FEATURE};
 
 /// The generated protobuf and tonic stubs for the wire contract.
