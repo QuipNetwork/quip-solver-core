@@ -159,4 +159,45 @@ mod tests {
         assert!(g.j_csr.is_empty());
         assert_eq!(g.nnz(), 0);
     }
+
+    /// FNV-1a over `j_csr` then `h_f32`, each `f32` widened to a `u64` of
+    /// its bits and hashed little-endian.
+    fn upload_digest(g: &CsrGraph) -> u64 {
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for bits in g
+            .j_csr
+            .iter()
+            .chain(&g.h_f32)
+            .map(|x| u64::from(x.to_bits()))
+        {
+            for byte in bits.to_le_bytes() {
+                hash ^= u64::from(byte);
+                hash = hash.wrapping_mul(0x0100_0000_01b3);
+            }
+        }
+        hash
+    }
+
+    /// `upload_digest` for each entry of `GOLDEN_GRAPHS`, captured from
+    /// 0.0.2-rc1, where `IsingGraph` stored `v / 1000.0` floats.
+    const PINNED_UPLOADS: [u64; 9] = [
+        0x3e56_7ffb_92e0_6498,
+        0x3e56_7ffb_92e0_6498,
+        0x3e56_7ffb_92e0_6498,
+        0x4fc5_7a07_f058_afe9,
+        0x4c08_7e86_c6d7_596a,
+        0xcc93_a767_3c4a_fd51,
+        0xfb0d_dc99_1374_076d,
+        0x3e56_7ffb_92e0_6498,
+        0xa2da_55ea_77ad_e2b8,
+    ];
+
+    #[test]
+    fn upload_buffers_are_bit_identical_to_the_f64_graph() {
+        for ((section, index), want) in crate::ising::GOLDEN_GRAPHS.into_iter().zip(PINNED_UPLOADS)
+        {
+            let g = CsrGraph::from_base(&crate::ising::golden_graph(section, index));
+            assert_eq!(upload_digest(&g), want, "{section}[{index}]");
+        }
+    }
 }

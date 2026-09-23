@@ -195,4 +195,32 @@ mod tests {
             assert!((f64::from(f32s[0]) - 0.1).abs() < 1e-5);
         }
     }
+
+    /// `(hot, cold)` as `f64` bits for each entry of `GOLDEN_GRAPHS`, captured
+    /// from 0.0.2-rc1, where `IsingGraph` stored `v / 1000.0` floats.
+    const PINNED_LADDERS: [(u64, u64); 9] = [
+        (0x3fbd_9303_fea2_f7e9, 0x4007_f742_7b73_e391),
+        (0x3fbd_9303_fea2_f7e9, 0x4007_f742_7b73_e391),
+        (0x3fbd_9303_fea2_f7e9, 0x4007_f742_7b73_e391),
+        (0x400b_b9d3_beb8_c86a, 0x4041_44f6_9ff9_ffc4),
+        (0x4022_bbd4_4298_876b, 0x4053_4500_4569_caab),
+        (0x3fc6_2019_f898_909d, 0x40a8_469b_ac56_9410),
+        (0x3fc5_f07a_fcb5_ab00, 0x40a7_6776_ec8f_2c3b),
+        (0x3fbd_9303_fea2_f7e9, 0x4007_f742_7b73_e391),
+        (0x3fbd_9303_fea2_f7e9, 0x400f_2205_79fe_6b92),
+    ];
+
+    #[test]
+    fn ladder_is_bit_identical_to_the_f64_graph() {
+        for ((section, index), (hot_bits, cold_bits)) in
+            crate::ising::GOLDEN_GRAPHS.into_iter().zip(PINNED_LADDERS)
+        {
+            let (hot, cold) = default_ising_beta_range(&crate::ising::golden_graph(section, index));
+            assert_eq!(
+                (hot.to_bits(), cold.to_bits()),
+                (hot_bits, cold_bits),
+                "{section}[{index}]: hot={hot} cold={cold}"
+            );
+        }
+    }
 }

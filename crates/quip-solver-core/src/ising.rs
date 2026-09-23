@@ -102,6 +102,59 @@ impl IsingGraph {
     }
 }
 
+/// One graph from the `energy` or `ising` section of `golden_vectors.json`,
+/// built the way `parse_ising` builds a job's graph.
+#[cfg(test)]
+pub(crate) fn golden_graph(section: &str, index: usize) -> IsingGraph {
+    let golden: serde_json::Value =
+        serde_json::from_str(quip_solver_conformance::GOLDEN_VECTORS).expect("golden JSON");
+    let case = golden
+        .pointer(&format!("/{section}/{index}"))
+        .expect("golden case exists");
+    let milli = |key: &str| -> Vec<i32> {
+        case.get(key)
+            .and_then(serde_json::Value::as_array)
+            .expect("milli array")
+            .iter()
+            .map(|v| i32::try_from(v.as_i64().expect("integer")).expect("i32 milli"))
+            .collect()
+    };
+    let edges = case
+        .get("edges")
+        .and_then(serde_json::Value::as_array)
+        .expect("edges array")
+        .iter()
+        .map(|e| {
+            let end = |i: usize| {
+                usize::try_from(
+                    e.get(i)
+                        .and_then(serde_json::Value::as_u64)
+                        .expect("endpoint"),
+                )
+                .expect("usize endpoint")
+            };
+            (end(0), end(1))
+        })
+        .collect();
+    let unit = |v: Vec<i32>| -> Vec<f64> { v.into_iter().map(|m| f64::from(m) / 1000.0).collect() };
+    IsingGraph::new(unit(milli("h_milli")), unit(milli("j_milli")), edges)
+}
+
+/// Every golden graph the pinned beta and CSR tests cover, as
+/// `(section, index)`.
+#[cfg(test)]
+pub(crate) const GOLDEN_GRAPHS: [(&str, usize); 9] = [
+    ("energy", 0),
+    ("energy", 1),
+    ("energy", 2),
+    ("energy", 3),
+    ("energy", 4),
+    ("energy", 5),
+    ("energy", 6),
+    ("ising", 0),
+    ("ising", 1),
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
