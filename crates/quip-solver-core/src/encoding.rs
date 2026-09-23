@@ -11,11 +11,17 @@ pub(crate) struct Decoded<C> {
     pub(crate) exact_milli: Option<MilliPair>,
 }
 
+/// Convert milli-valued fields and couplings to the chosen coefficient type.
+///
+/// Returns converted fields, converted couplings, and the original milli vectors
+/// when conversion loses precision. Conversion uses [`Coefficient::from_milli`],
+/// including its rounding and saturation behavior.
+#[must_use]
 #[expect(
     clippy::float_cmp,
     reason = "exactness requires equality, not a tolerance"
 )]
-pub(crate) fn convert_milli<C: Coefficient>(
+pub fn convert_milli<C: Coefficient>(
     h: Vec<i32>,
     j: Vec<i32>,
 ) -> (Vec<C>, Vec<C>, Option<MilliPair>) {

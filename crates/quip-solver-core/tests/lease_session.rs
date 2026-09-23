@@ -22,6 +22,45 @@ type Link = (
     Streaming<wire::MinerMsg>,
     mpsc::Sender<Result<wire::CoordMsg, Status>>,
 );
+
+#[test]
+#[ignore = "manual release-mode timing check on an Advantage2-sized synthetic topology"]
+#[expect(clippy::print_stdout, reason = "manual timing result for --nocapture")]
+fn lease_draw_advantage2_timing() -> Result<(), Box<dyn std::error::Error>> {
+    use quip_solver_core::{coefficient::Fixed, convert_milli};
+    use std::hint::black_box;
+
+    const NODES: usize = 4577;
+    const EDGES: usize = 41_515;
+    const ITERATIONS: u32 = 200;
+    let topology = TopologyView {
+        num_nodes: NODES,
+        edges: (1..NODES)
+            .flat_map(|offset| (0..NODES).map(move |u| (u, (u + offset) % NODES)))
+            .take(EDGES)
+            .collect(),
+        allowed_h_milli: vec![-1000, 0, 1000],
+        allowed_j_milli: vec![-1000, 1000],
+    };
+
+    let start = Instant::now();
+    for salt in 0..ITERATIONS {
+        let mut nonce = [0; 32];
+        for (byte, value) in nonce.iter_mut().zip(salt.to_le_bytes()) {
+            *byte = value;
+        }
+        let (h, j) = topology.draw(black_box(nonce))?;
+        let (h, j, exact_milli) = black_box(convert_milli::<Fixed<i8, 1>>(h, j));
+        if exact_milli.is_some() {
+            return Err("draw did not convert exactly to Fixed<i8, 1>".into());
+        }
+        drop(black_box((h, j)));
+    }
+    let mean = start.elapsed().as_secs_f64() / f64::from(ITERATIONS);
+    println!("lease_draw_advantage2_timing: {ITERATIONS} salts, mean {mean:.9} s per salt");
+    Ok(())
+}
+
 struct Coordinator(Mutex<Option<tokio::sync::oneshot::Sender<Link>>>);
 #[tonic::async_trait]
 #[expect(

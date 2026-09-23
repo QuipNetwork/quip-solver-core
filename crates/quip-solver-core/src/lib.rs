@@ -24,6 +24,7 @@ mod session;
 
 pub use cli::CommonArgs;
 pub use csr::CsrGraph;
+pub use encoding::convert_milli;
 pub use error::SampleError;
 pub use ising::{Algorithm, IsingGraph, SampleParams, SamplerResult, WarmStart};
 pub use lease::{Lease, LeaseSink, LeaseStopped};
