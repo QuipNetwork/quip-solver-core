@@ -616,7 +616,7 @@ fn rescore_result(sr: &mut StreamResult, entry: Option<&PendingJob>, required: b
     clippy::too_many_lines,
     reason = "keep cancellation, scoring, logging, and reply ordering in one writer loop"
 )]
-async fn outbound_writer(
+async fn outbound_writer<C: Coefficient>(
     tx: mpsc::Sender<MinerMsg>,
     mut res_rx: mpsc::Receiver<StreamResult>,
     mut ctrl_rx: mpsc::Receiver<MinerMsg>,
@@ -708,7 +708,7 @@ async fn outbound_writer(
                     }
                     _ => sr,
                 };
-                rescore_result(&mut sr, entry.as_ref(), entry.as_ref().is_some_and(|job| job.exact_energy.is_some()));
+                rescore_result(&mut sr, entry.as_ref(), entry.as_ref().map_or(!C::EXACT, |job| job.exact_energy.is_some()));
                 if let Some(link) = entry.as_ref().and_then(|e| e.lease.as_ref()) {
                     if let StreamOutcome::Completed(Err(error)) = &sr.outcome {
                         if error.is_fatal() {
@@ -943,7 +943,7 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
 
     let (ctrl_tx, ctrl_rx) = mpsc::channel::<MinerMsg>(CTRL_CHANNEL_DEPTH);
     let device_faulted = Arc::new(AtomicBool::new(false));
-    let mut writer = tokio::spawn(outbound_writer(
+    let mut writer = tokio::spawn(outbound_writer::<C>(
         tx.clone(),
         res_rx,
         ctrl_rx,
@@ -1651,12 +1651,16 @@ mod tests {
     }
 
     fn spawn_writer(depth: usize) -> WriterHarness {
+        spawn_writer_for::<crate::coefficient::Milli>(depth)
+    }
+
+    fn spawn_writer_for<C: Coefficient>(depth: usize) -> WriterHarness {
         let (tx, out_rx) = mpsc::channel::<MinerMsg>(depth);
         let (res_tx, res_rx) = mpsc::channel::<StreamResult>(depth);
         let (ctrl_tx, ctrl_rx) = mpsc::channel::<MinerMsg>(depth);
         let pending: PendingParams = Arc::new(StdMutex::new(HashMap::new()));
         let cancel = CancelToken::default();
-        let writer = tokio::spawn(outbound_writer(
+        let writer = tokio::spawn(outbound_writer::<C>(
             tx,
             res_rx,
             ctrl_rx,
@@ -2434,6 +2438,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn lossy_writer_missing_pending_job_is_a_device_fault() {
+        let WriterHarness {
+            res_tx,
+            ctrl_tx,
+            mut out_rx,
+            pending,
+            writer,
+            ..
+        } = spawn_writer_for::<crate::coefficient::Fixed<i8, 1>>(16);
+        assert!(pending.lock().unwrap().is_empty());
+        res_tx.send(completed_result(1)).await.unwrap();
+        drop(res_tx);
+        drop(ctrl_tx);
+
+        let mut results = 0;
+        let mut credits = 0;
+        let mut fatals = Vec::new();
+        let mut rejects = Vec::new();
+        while let Some(msg) = out_rx.recv().await {
+            match msg.msg {
+                Some(miner_msg::Msg::Result(_)) => results += 1,
+                Some(miner_msg::Msg::JobRequest(request)) => credits += request.credits,
+                Some(miner_msg::Msg::Fatal(fatal)) => fatals.push(fatal),
+                Some(miner_msg::Msg::Reject(reject)) => rejects.push(reject),
+                _ => {}
+            }
+        }
+        writer.await.unwrap();
+        assert_eq!(
+            (results, credits, fatals.len(), rejects.len()),
+            (0, 0, 1, 1)
+        );
+        let fatal = fatals.first().unwrap();
+        assert_eq!(fatal.exit_code, ExitCode::InternalFatal as u32);
+        assert!(fatal.restart_required);
+        let reject = rejects.first().unwrap();
+        assert_eq!(reject.job_id, vec![1]);
+        assert_eq!(
+            reject.reason,
+            quip_proto::v1::RejectReason::Overloaded as i32
+        );
+    }
+
+    #[tokio::test]
     async fn lossy_cancellation_and_device_fault_release_pending_state() {
         use crate::job::ExactEnergy;
         let WriterHarness {
@@ -2501,12 +2549,6 @@ mod tests {
             };
             assert_eq!(reads.first().map(|read| read.energy_milli), Some(expected));
         }
-        let mut result = completed_result(1);
-        rescore_result(&mut result, None, true);
-        assert!(matches!(
-            result.outcome,
-            StreamOutcome::Completed(Err(crate::SampleError::DeviceFault(_)))
-        ));
         let mut exact = completed_result(1);
         rescore_result(&mut exact, None, false);
         assert!(matches!(exact.outcome, StreamOutcome::Completed(Ok(_))));
