@@ -5,6 +5,33 @@ This file documents changes to the Quip solver contract.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.1.0-rc1
+
+`IsingGraph` carries the wire's integer milli coefficients. A Rust solver
+reads and scores them with no float conversion. The C binary interface,
+the `--solve` JSON schema, the wire, and the Python and npm packages do
+not change.
+
+### Added
+
+- `quip_protocol::scoring::energy_from_milli`, the integer form of
+  `energy_milli`. It takes `i32` milli coefficients and returns the value
+  `energy_milli` returns on the `v / 1000.0` floats.
+- `IsingGraph::h_f64` and `IsingGraph::j_f64` build the unit-float form for a
+  surface that carries floats, such as the C binary interface or `--solve`
+  JSON.
+
+### Changed
+
+- `IsingGraph::h` and `IsingGraph::j`, both `Vec<f64>`, become `h_milli` and
+  `j_milli`, both `Vec<i32>`. `CsrGraph` makes the same change. The
+  inverse-temperature ladder, `CsrGraph::j_csr`, and `CsrGraph::h_f32` stay
+  bit-identical.
+  `MIGRATING.md` lists the steps.
+- `--solve` rounds each `h` and `j` value to the nearest milli. It rejects a
+  value whose milli form is outside the `i32` range as malformed input, with
+  the `CONFIG_INVALID` exit code.
+
 ## 0.0.2-rc1
 
 Optional warm-start states on `IsingProblem`, for quantum processing unit (QPU) reverse anneal and

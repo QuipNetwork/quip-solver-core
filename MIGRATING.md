@@ -1,3 +1,32 @@
+# Migrating to quip-solver-core 0.1.0-rc1
+
+A Rust solver written for 0.0.2-rc1 does not compile with this release.
+`IsingGraph` holds the wire's integer milli coefficients, where 1000 is 1.0.
+C, C++, Python, and TypeScript solvers do not change.
+
+- `IsingGraph::h` and `IsingGraph::j` become `h_milli` and `j_milli`, each a
+  `Vec<i32>`. `IsingGraph::new` takes the two milli vectors.
+- Score a read with `quip_protocol::scoring::energy_from_milli`. It returns
+  the value `energy_milli` returns on the float form.
+- `CsrGraph::h` and `CsrGraph::j` become `h_milli` and `j_milli`. `j_csr` and
+  `h_f32` do not change.
+- A test or example that built a graph from float literals writes milli
+  integers: `1.0` becomes `1000`, and `-0.5` becomes `-500`.
+- A solver that sends the model to another process calls `graph.h_f64()` and
+  `graph.j_f64()`. Do not call them on the job path.
+
+Before:
+
+```rust
+let energy = energy_milli(&spins, &graph.h, &graph.j, &graph.edges);
+```
+
+After:
+
+```rust
+let energy = energy_from_milli(&spins, &graph.h_milli, &graph.j_milli, &graph.edges);
+```
+
 # Migrating to quip-solver-core 0.0.2-rc1
 
 A solver built against 0.0.1 compiles and runs unchanged. The new `Sampler`

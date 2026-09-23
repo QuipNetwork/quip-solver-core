@@ -167,6 +167,10 @@ A Rust solver supplies a `Sampler` and calls `run`.
 `SampleParams`. It returns `Result<Vec<SamplerResult>, SampleError>`.
 `sample` must not panic.
 
+`IsingGraph` carries the wire's coefficients as `i32` milli values in
+`h_milli` and `j_milli`, where 1000 is 1.0. Score a read with
+`quip_protocol::scoring::energy_from_milli`.
+
 The ten defaulted methods are:
 
 | Method | Default |
