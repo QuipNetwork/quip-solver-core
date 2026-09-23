@@ -2,7 +2,7 @@
 use quip_solver_core::coefficient::{Fixed, Milli};
 use quip_solver_core::{
     run, run_code, BackendIdentity, CancelToken, CommonArgs, IsingGraph, OpenError, SampleError,
-    SampleParams, Sampler, SamplerResult, StreamJob, StreamResult, WarmStreamJob,
+    SampleParams, Sampler, SamplerResult, StreamJob, StreamOutcome, StreamResult,
 };
 
 struct DefaultSampler;
@@ -28,10 +28,13 @@ struct NarrowSampler;
 impl Sampler<Fixed<i8, 1>> for NarrowSampler {
     fn sample(
         &self,
-        _: &IsingGraph<Fixed<i8, 1>>,
+        graph: &IsingGraph<Fixed<i8, 1>>,
         _: &SampleParams,
     ) -> Result<Vec<SamplerResult>, SampleError> {
-        Ok(Vec::new())
+        Ok(vec![SamplerResult {
+            spins: vec![1; graph.num_nodes()],
+            energy_milli: 7,
+        }])
     }
     fn accepts_warm_start() -> bool {
         true
@@ -99,11 +102,42 @@ fn main_constructor_still_infers_f64() {
 
 #[test]
 fn narrow_stream_signatures_are_callable() {
-    let (plain_tx, plain_rx) = tokio::sync::mpsc::channel::<StreamJob<Fixed<i8, 1>>>(1);
-    let (warm_tx, warm_rx) = tokio::sync::mpsc::channel::<WarmStreamJob<Fixed<i8, 1>>>(1);
-    let (out, _received) = tokio::sync::mpsc::channel::<StreamResult>(1);
-    drop(plain_tx);
-    drop(warm_tx);
-    NarrowSampler.sample_stream(plain_rx, out.clone(), CancelToken::default());
-    NarrowSampler.sample_stream_warm(warm_rx, out, CancelToken::default());
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("rt");
+    let (job_tx, job_rx) = tokio::sync::mpsc::channel::<StreamJob<Fixed<i8, 1>>>(8);
+    let (res_tx, mut res_rx) = tokio::sync::mpsc::channel::<StreamResult>(8);
+
+    let worker = std::thread::spawn(move || {
+        NarrowSampler.sample_stream(job_rx, res_tx, CancelToken::default());
+    });
+
+    rt.block_on(async {
+        job_tx
+            .send(StreamJob {
+                job_id: b"n1".to_vec(),
+                graph: IsingGraph::<Fixed<i8, 1>> {
+                    h: vec![Fixed(1), Fixed(-1)],
+                    j: vec![Fixed(1)],
+                    edges: vec![(0, 1)],
+                },
+                params: SampleParams::default(),
+                watermark: None,
+            })
+            .await
+            .expect("send job");
+        drop(job_tx);
+
+        let result = res_rx.recv().await.expect("one result");
+        assert!(res_rx.recv().await.is_none(), "exactly one result");
+        assert_eq!(result.job_id, b"n1");
+        let StreamOutcome::Completed(Ok(reads)) = result.outcome else {
+            panic!("expected Completed(Ok)");
+        };
+        assert_eq!(reads.len(), 1);
+        let read = reads.first().expect("one read");
+        assert_eq!(read.spins.len(), 2);
+        assert_eq!(read.energy_milli, 7);
+    });
+    worker.join().expect("worker join");
 }

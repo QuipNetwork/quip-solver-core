@@ -705,4 +705,64 @@ mod stream_tests {
             Ok(OneResultSampler.stream_width())
         );
     }
+
+    struct NarrowFixedSampler;
+    impl Sampler<coefficient::Fixed<i8, 1>> for NarrowFixedSampler {
+        fn sample(
+            &self,
+            graph: &IsingGraph<coefficient::Fixed<i8, 1>>,
+            _params: &SampleParams,
+        ) -> Result<Vec<SamplerResult>, SampleError> {
+            Ok(vec![SamplerResult {
+                spins: vec![1; graph.num_nodes()],
+                energy_milli: 7,
+            }])
+        }
+    }
+
+    /// The default warm stream forwards one cold narrow job through `sample`.
+    #[test]
+    fn default_sample_stream_warm_runs_a_narrow_job() {
+        use coefficient::Fixed;
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("rt");
+        let (job_tx, job_rx) = tokio::sync::mpsc::channel::<WarmStreamJob<Fixed<i8, 1>>>(8);
+        let (res_tx, mut res_rx) = tokio::sync::mpsc::channel::<StreamResult>(8);
+        let worker = std::thread::spawn(move || {
+            NarrowFixedSampler.sample_stream_warm(job_rx, res_tx, CancelToken::default());
+        });
+
+        rt.block_on(async {
+            job_tx
+                .send(WarmStreamJob {
+                    job: StreamJob {
+                        job_id: b"n1".to_vec(),
+                        graph: IsingGraph::<Fixed<i8, 1>> {
+                            h: vec![Fixed(1), Fixed(-1)],
+                            j: vec![Fixed(1)],
+                            edges: vec![(0, 1)],
+                        },
+                        params: SampleParams::default(),
+                        watermark: None,
+                    },
+                    warm_start: None,
+                })
+                .await
+                .expect("send job");
+            drop(job_tx);
+
+            let result = res_rx.recv().await.expect("one result");
+            assert!(res_rx.recv().await.is_none(), "exactly one result");
+            assert_eq!(result.job_id, b"n1");
+            let StreamOutcome::Completed(Ok(reads)) = result.outcome else {
+                panic!("expected Completed(Ok)");
+            };
+            assert_eq!(reads.len(), 1);
+            let read = reads.first().expect("one read");
+            assert_eq!(read.spins.len(), 2);
+        });
+        worker.join().expect("worker join");
+    }
 }
