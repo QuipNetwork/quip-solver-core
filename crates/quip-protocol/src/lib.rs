@@ -8,6 +8,7 @@
 pub mod chacha8;
 pub mod derive;
 pub mod diversity;
+pub mod lease;
 pub mod scoring;
 pub mod target;
 pub mod wire;
