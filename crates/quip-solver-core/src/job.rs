@@ -285,7 +285,7 @@ fn parse_ising<C: Coefficient>(
     max_nodes: u32,
     max_edges: u32,
     cache: Option<&TopologyCache>,
-) -> Result<IsingGraph<C>, RejectReason> {
+) -> Result<ParsedIsing<C>, RejectReason> {
     let h_milli = decode_i32_le(&ising.h_milli_le32).map_err(|_| RejectReason::Malformed)?;
     let j_milli = decode_i32_le(&ising.j_milli_le32).map_err(|_| RejectReason::Malformed)?;
     let edges = resolve_edges(ising, cache)?;
@@ -317,10 +317,19 @@ fn parse_ising<C: Coefficient>(
         return Err(RejectReason::TooLarge);
     }
 
-    Ok(IsingGraph {
-        h: h_milli.into_iter().map(C::from_milli).collect(),
-        j: j_milli.into_iter().map(C::from_milli).collect(),
+    let graph = IsingGraph {
+        h: h_milli.iter().copied().map(C::from_milli).collect(),
+        j: j_milli.iter().copied().map(C::from_milli).collect(),
         edges,
+    };
+    let exact_energy = if C::EXACT {
+        None
+    } else {
+        Some(ExactEnergy::new(h_milli, j_milli, graph.edges.clone()))
+    };
+    Ok(ParsedIsing {
+        graph,
+        exact_energy,
     })
 }
 
@@ -408,6 +417,37 @@ pub(crate) fn num_sweeps_from_toml(backend_toml: &str) -> usize {
     }
 }
 
+/// Original wire coefficients retained only for lossy samplers.
+#[derive(Debug)]
+pub(crate) struct ExactEnergy {
+    h: Vec<i32>,
+    j: Vec<i32>,
+    edges: Vec<(usize, usize)>,
+}
+
+impl ExactEnergy {
+    pub(crate) fn new(h: Vec<i32>, j: Vec<i32>, edges: Vec<(usize, usize)>) -> Self {
+        Self { h, j, edges }
+    }
+
+    pub(crate) fn rescore(&self, reads: &mut [crate::SamplerResult]) {
+        for read in reads {
+            read.energy_milli = quip_protocol::scoring::energy_from_milli(
+                &read.spins,
+                &self.h,
+                &self.j,
+                &self.edges,
+            );
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ParsedIsing<C: Coefficient> {
+    graph: IsingGraph<C>,
+    exact_energy: Option<ExactEnergy>,
+}
+
 /// A validated job ready to sample, or an immediate reject reply.
 pub(crate) enum Prepared<C: Coefficient> {
     /// Reject reply to send now (no sampling).
@@ -419,6 +459,8 @@ pub(crate) enum Prepared<C: Coefficient> {
         /// Decoded start states, `Some` only for a seeded job sent to a
         /// sampler whose `accepts_warm_start` is true.
         warm_start: Option<WarmStart>,
+        /// Original coefficients when sampler conversion loses information.
+        exact_energy: Option<ExactEnergy>,
         num_reads: u32,
         num_sweeps: u32,
     },
@@ -463,8 +505,11 @@ pub(crate) fn prepare_job<S: Sampler<C>, C: Coefficient>(
         return Prepared::Reject(reject(job_id, RejectReason::Malformed));
     };
 
-    let graph = match parse_ising::<C>(&ising, id.max_nodes, id.max_edges, cache) {
-        Ok(g) => g,
+    let ParsedIsing {
+        graph,
+        exact_energy,
+    } = match parse_ising::<C>(&ising, id.max_nodes, id.max_edges, cache) {
+        Ok(parsed) => parsed,
         Err(reason) => return Prepared::Reject(reject(job_id, reason)),
     };
 
@@ -540,6 +585,7 @@ pub(crate) fn prepare_job<S: Sampler<C>, C: Coefficient>(
             watermark: (job.generation != 0).then_some(job.generation),
         },
         warm_start,
+        exact_energy,
         num_reads,
         num_sweeps,
     }
@@ -735,7 +781,9 @@ mod tests {
         };
         let cache = TopologyCache::from_proto(&topo);
         let ising = hash_job(vec![7; 32], &[1000, -1000, 1000], &[1000, -1000]);
-        let g = parse_ising::<f64>(&ising, 100_000, 1_000_000, Some(&cache)).unwrap();
+        let g = parse_ising::<f64>(&ising, 100_000, 1_000_000, Some(&cache))
+            .unwrap()
+            .graph;
         assert_eq!(g.edges, vec![(0, 1), (1, 2)]);
         assert_eq!(g.h, vec![1.0, -1.0, 1.0]);
         assert_eq!(g.j, vec![1.0, -1.0]);
@@ -862,7 +910,8 @@ mod tests {
             ..Default::default()
         };
         let g = parse_ising::<f64>(&ising, 100_000, 1_000_000, None)
-            .expect("an edgeless problem is fine");
+            .expect("an edgeless problem is fine")
+            .graph;
         assert_eq!(g.num_nodes(), 2);
         assert!(g.edges.is_empty());
         assert!(g.j.is_empty());
@@ -974,7 +1023,9 @@ mod tests {
         }
         // The matching length still works.
         let ising = hash_job(vec![7; 32], &[1000, 1000, 1000], &[1000, 1000]);
-        let g = parse_ising::<f64>(&ising, 100_000, 1_000_000, Some(&cache)).expect("matching h");
+        let g = parse_ising::<f64>(&ising, 100_000, 1_000_000, Some(&cache))
+            .expect("matching h")
+            .graph;
         assert_eq!(g.num_nodes(), 3);
     }
 
@@ -1389,5 +1440,35 @@ mod tests {
             prepared_warm_start(job, &WarmSampler),
             Err(RejectReason::Malformed as i32)
         );
+    }
+
+    #[test]
+    fn lossy_decode_keeps_originals_but_exact_types_do_not() {
+        use crate::coefficient::{Fixed, Milli};
+        let problem = hash_job(vec![], &[499, -501], &[1501]);
+        let problem = IsingProblem {
+            graph: Some(Graph::Edges(EdgeList {
+                u: vec![0],
+                v: vec![1],
+            })),
+            ..problem
+        };
+        let parsed = parse_ising::<Fixed<i8, 1>>(&problem, 0, 0, None).expect("valid");
+        assert_eq!(parsed.graph.h, vec![Fixed(0), Fixed(-1)]);
+        assert_eq!(parsed.graph.j, vec![Fixed(2)]);
+        let mut reads = vec![SamplerResult {
+            spins: vec![1, -1],
+            energy_milli: 123,
+        }];
+        parsed
+            .exact_energy
+            .expect("lossy input retained")
+            .rescore(&mut reads);
+        assert_eq!(reads.first().map(|r| r.energy_milli), Some(-501));
+        let float = parse_ising::<f64>(&problem, 0, 0, None).expect("valid");
+        let milli = parse_ising::<Milli>(&problem, 0, 0, None).expect("valid");
+        assert!(float.exact_energy.is_none());
+        assert!(milli.exact_energy.is_none());
+        assert_eq!(milli.graph.h, vec![Fixed(499), Fixed(-501)]);
     }
 }

@@ -7,6 +7,7 @@
 use crate::cli::CommonArgs;
 use crate::coefficient::Coefficient;
 use crate::display::{energy_units, format_duration_ms};
+use crate::job::ExactEnergy;
 use crate::job::{
     finalize_result, miner, num_sweeps_from_toml, prepare_job, status_msg, Prepared, SessionTarget,
     TopologyCache, DEFAULT_NUM_SWEEPS,
@@ -344,6 +345,8 @@ const SAMPLER_JOIN_POLL: Duration = Duration::from_millis(20);
 /// Only the read loop sees the session `SetTarget`, so it records the
 /// thresholds here rather than sharing the target with the writer.
 struct PendingJob {
+    /// Original wire graph, present only for lossy coefficient types.
+    exact_energy: Option<ExactEnergy>,
     num_reads: u32,
     num_sweeps: u32,
     started: std::time::Instant,
@@ -473,6 +476,8 @@ fn log_attempt(backend: &str, sr: &StreamResult, pending: Option<&PendingJob>) {
 /// What the outbound writer shares with the read loop, gathered so the writer
 /// takes a handful of arguments instead of a list nobody can read.
 struct WriterContext {
+    /// Whether a successful result requires retained exact coefficients.
+    require_exact_score: bool,
     /// Prepare-time parameters per job, removed as each one finalizes.
     pending: PendingParams,
     /// Completed-job counter the read loop publishes in `Status`.
@@ -510,6 +515,21 @@ async fn drain_queued_ctrl(
     true
 }
 
+fn rescore_result(sr: &mut StreamResult, entry: Option<&PendingJob>, required: bool) {
+    if !required {
+        return;
+    }
+    if let StreamOutcome::Completed(Ok(reads)) = &mut sr.outcome {
+        if let Some(original) = entry.and_then(|job| job.exact_energy.as_ref()) {
+            original.rescore(reads);
+        } else {
+            sr.outcome = StreamOutcome::Completed(Err(crate::SampleError::DeviceFault(
+                "completed lossy job has no original coefficients".into(),
+            )));
+        }
+    }
+}
+
 /// Outbound half of a session.
 ///
 /// Reading the inbound stream and writing to the outbound one must not live in
@@ -532,6 +552,10 @@ async fn drain_queued_ctrl(
 ///
 /// Returns once both inputs are finished, after sending `Fatal` for a device
 /// fault, or as soon as the outbound channel closes.
+#[expect(
+    clippy::too_many_lines,
+    reason = "keep cancellation, scoring, logging, and reply ordering in one writer loop"
+)]
 async fn outbound_writer(
     tx: mpsc::Sender<MinerMsg>,
     mut res_rx: mpsc::Receiver<StreamResult>,
@@ -544,6 +568,7 @@ async fn outbound_writer(
         device_faulted,
         cancel,
         backend,
+        require_exact_score,
     } = ctx;
     // Progress logging (mirrors v0.2 mine_work_item's every-N-attempts line).
     let session_start = std::time::Instant::now();
@@ -604,7 +629,7 @@ async fn outbound_writer(
                 // only check at dequeue, and a Result for an abandoned
                 // generation must not reach the wire. Errors are left alone: a
                 // device fault is about the device, not the job.
-                let sr = match sr.outcome {
+                let mut sr = match sr.outcome {
                     StreamOutcome::Completed(Ok(_))
                         if entry.as_ref().is_some_and(|e| cancel.is_cancelled(e.watermark)) =>
                     {
@@ -616,6 +641,7 @@ async fn outbound_writer(
                     }
                     _ => sr,
                 };
+                rescore_result(&mut sr, entry.as_ref(), require_exact_score);
                 // A Cancelled job neither advances progress nor updates
                 // best energy; finalize_result just refunds its credit.
                 let completed = matches!(sr.outcome, StreamOutcome::Completed(_));
@@ -803,6 +829,7 @@ async fn run_session<S: Sampler<C>, C: Coefficient>(
             device_faulted: Arc::clone(&device_faulted),
             cancel: cancel.clone(),
             backend: id.backend,
+            require_exact_score: !C::EXACT,
         },
     ));
     // Set when the `select!` below polls `writer` to completion. A
@@ -1010,6 +1037,7 @@ async fn run_session<S: Sampler<C>, C: Coefficient>(
                             warm_start,
                             num_reads,
                             num_sweeps: ns,
+                            exact_energy,
                         } => {
                             tracing::debug!(
                                 "{} received job {}: {} nodes, {} edges | reads={num_reads} sweeps={ns}",
@@ -1038,6 +1066,7 @@ async fn run_session<S: Sampler<C>, C: Coefficient>(
                                     PendingJob {
                                         num_reads,
                                         num_sweeps: ns,
+                                        exact_energy,
                                         started: std::time::Instant::now(),
                                         watermark: job.watermark,
                                         // `drive` mode sets no real threshold
@@ -1432,6 +1461,10 @@ mod tests {
     }
 
     fn spawn_writer(depth: usize) -> WriterHarness {
+        spawn_writer_with_scoring(depth, false)
+    }
+
+    fn spawn_writer_with_scoring(depth: usize, require_exact_score: bool) -> WriterHarness {
         let (tx, out_rx) = mpsc::channel::<MinerMsg>(depth);
         let (res_tx, res_rx) = mpsc::channel::<StreamResult>(depth);
         let (ctrl_tx, ctrl_rx) = mpsc::channel::<MinerMsg>(depth);
@@ -1447,6 +1480,7 @@ mod tests {
                 device_faulted: Arc::new(AtomicBool::new(false)),
                 cancel: cancel.clone(),
                 backend: "test",
+                require_exact_score,
             },
         ));
         WriterHarness {
@@ -1472,6 +1506,7 @@ mod tests {
 
     fn pending_job(watermark: Option<u64>) -> PendingJob {
         PendingJob {
+            exact_energy: None,
             num_reads: 1,
             num_sweeps: 1,
             started: std::time::Instant::now(),
@@ -1945,5 +1980,197 @@ mod tests {
             write_and_map(&mut FailWrite(std::io::ErrorKind::Other), b"x"),
             ExitCode::InternalFatal
         );
+    }
+
+    struct WrongNarrow;
+    impl Sampler<crate::coefficient::Fixed<i8, 1>> for WrongNarrow {
+        fn sample(
+            &self,
+            graph: &crate::IsingGraph<crate::coefficient::Fixed<i8, 1>>,
+            _: &crate::SampleParams,
+        ) -> Result<Vec<crate::SamplerResult>, crate::SampleError> {
+            Ok(vec![crate::SamplerResult {
+                spins: vec![1; graph.num_nodes()],
+                energy_milli: 777,
+            }])
+        }
+        fn accepts_warm_start() -> bool {
+            true
+        }
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        clippy::panic_in_result_fn,
+        reason = "one end-to-end test asserts both stream paths and returns fixture errors"
+    )]
+    async fn lossy_plain_and_warm_results_are_rescored_out_of_order(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use crate::coefficient::Fixed;
+        let WriterHarness {
+            res_tx,
+            ctrl_tx,
+            mut out_rx,
+            pending,
+            writer,
+            ..
+        } = spawn_writer_with_scoring(16, true);
+        let id = BackendIdentity {
+            backend: "narrow",
+            algorithm: "sa",
+            max_nodes: 0,
+            max_edges: 0,
+            features: &[],
+            adapt: crate::adapt::AdaptBounds {
+                min_sweeps: 1,
+                max_sweeps: 1,
+                min_reads: 1,
+                max_reads: 1,
+                reads_solution_min_factor: 1,
+                reads_solution_max_factor: 1,
+                reads_solution_floor_factor: 0,
+            },
+        };
+        assert!(
+            advertised_features::<WrongNarrow, Fixed<i8, 1>>(&id).contains(&INITIAL_SPINS_FEATURE)
+        );
+        let mut jobs = Vec::new();
+        for (key, coefficient) in [(1_u8, 499), (2, -501)] {
+            let incoming = quip_proto::v1::Job {
+                job_id: vec![key],
+                kind: JobKind::IsingSample as i32,
+                ising: Some(quip_proto::v1::IsingProblem {
+                    h_milli_le32: quip_protocol::wire::encode_i32_le(&[coefficient]),
+                    num_reads: 1,
+                    initial_spins: if key == 2 { vec![vec![1]] } else { vec![] },
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            let Prepared::Sample {
+                job,
+                warm_start,
+                exact_energy,
+                ..
+            } = prepare_job(incoming, &WrongNarrow, &id, 1, None, None, None)
+            else {
+                return Err("valid fixture must prepare".into());
+            };
+            assert!(exact_energy.is_some());
+            let mut entry = pending_job(None);
+            entry.exact_energy = exact_energy;
+            let _ = pending.lock().expect("mutex").insert(vec![key], entry);
+            jobs.push((job, warm_start));
+        }
+        // Reverse completion order and use a different stream method for each job.
+        for (job, warm_start) in jobs.into_iter().rev() {
+            let warm = warm_start.is_some();
+            let out = res_tx.clone();
+            if warm {
+                let (tx, rx) = mpsc::channel(1);
+                tx.send(WarmStreamJob { job, warm_start })
+                    .await
+                    .expect("warm job");
+                drop(tx);
+                tokio::task::spawn_blocking(move || {
+                    WrongNarrow.sample_stream_warm(rx, out, CancelToken::default());
+                })
+                .await
+                .expect("warm worker");
+            } else {
+                let (tx, rx) = mpsc::channel(1);
+                tx.send(job).await.expect("plain job");
+                drop(tx);
+                tokio::task::spawn_blocking(move || {
+                    WrongNarrow.sample_stream(rx, out, CancelToken::default());
+                })
+                .await
+                .expect("plain worker");
+            }
+        }
+        drop(res_tx);
+        drop(ctrl_tx);
+        let mut energies = Vec::new();
+        let mut credits = 0;
+        while let Some(msg) = out_rx.recv().await {
+            match msg.msg {
+                Some(miner_msg::Msg::Result(result)) => {
+                    energies.push((
+                        result.job_id,
+                        result.solutions.first().map(|r| r.energy_milli),
+                    ));
+                }
+                Some(miner_msg::Msg::JobRequest(request)) => credits += request.credits,
+                _ => {}
+            }
+        }
+        writer.await.expect("writer");
+        assert_eq!(energies, vec![(vec![2], Some(-501)), (vec![1], Some(499))]);
+        assert_eq!(credits, 2);
+        assert!(pending.lock().expect("mutex").is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn lossy_cancellation_and_device_fault_release_pending_state() {
+        use crate::job::ExactEnergy;
+        let WriterHarness {
+            res_tx,
+            ctrl_tx,
+            mut out_rx,
+            pending,
+            cancel,
+            writer,
+        } = spawn_writer_with_scoring(16, true);
+        for key in [1_u8, 2] {
+            let mut entry = pending_job(Some(1));
+            entry.exact_energy = Some(ExactEnergy::new(vec![499], vec![], vec![]));
+            let _ = pending.lock().expect("mutex").insert(vec![key], entry);
+        }
+        cancel.cancel_through(1);
+        res_tx
+            .send(completed_result(1))
+            .await
+            .expect("late completion");
+        res_tx
+            .send(StreamResult {
+                job_id: vec![2],
+                device_access_time_us: 0,
+                outcome: StreamOutcome::Completed(Err(crate::SampleError::DeviceFault(
+                    "device".into(),
+                ))),
+            })
+            .await
+            .expect("fault");
+        drop(res_tx);
+        drop(ctrl_tx);
+        let mut results = 0;
+        let mut credits = 0;
+        let mut fatals = 0;
+        while let Some(msg) = out_rx.recv().await {
+            match msg.msg {
+                Some(miner_msg::Msg::Result(_)) => results += 1,
+                Some(miner_msg::Msg::JobRequest(request)) => credits += request.credits,
+                Some(miner_msg::Msg::Fatal(_)) => fatals += 1,
+                _ => {}
+            }
+        }
+        writer.await.expect("writer");
+        assert_eq!((results, credits, fatals), (0, 1, 1));
+        assert!(pending.lock().expect("mutex").is_empty());
+    }
+
+    #[test]
+    fn missing_lossy_metadata_cannot_send_an_unverified_score() {
+        let mut result = completed_result(1);
+        rescore_result(&mut result, None, true);
+        assert!(matches!(
+            result.outcome,
+            StreamOutcome::Completed(Err(crate::SampleError::DeviceFault(_)))
+        ));
+        let mut exact = completed_result(1);
+        rescore_result(&mut exact, None, false);
+        assert!(matches!(exact.outcome, StreamOutcome::Completed(Ok(_))));
     }
 }
