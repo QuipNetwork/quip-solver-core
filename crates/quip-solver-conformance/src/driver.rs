@@ -11,12 +11,14 @@
 use quip_proto::v1::miner_service_server::{MinerService, MinerServiceServer};
 use quip_proto::v1::{
     coord_msg, ising_problem, miner_msg, Cancel, Capabilities, Configure, CoordMsg, EdgeList,
-    GetCapabilities, Hello, IsingProblem, Job, JobKind, MinerMsg, Ping, RejectReason, Shutdown,
-    Status as MinerStatus, Topology, Welcome,
+    GetCapabilities, Hello, IsingProblem, IsingProblemGenerator, Job, JobKind, MinerMsg, Ping,
+    RejectReason, SetTarget, Shutdown, Status as MinerStatus, Topology, Welcome,
 };
+use quip_protocol::lease::{verify_lease_result, TopologyView};
 use quip_protocol::scoring::energy_milli;
+use quip_protocol::target::Target;
 use quip_protocol::wire::{decode_spins_packed, encode_i32_le, encode_spins_packed};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::net::UnixListener;
@@ -38,7 +40,7 @@ const PHASE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Expressed in phase budgets rather than as a flat number: a walk in which
 /// every phase times out must still run to completion, so the report names all
 /// the phases that failed instead of reporting a single kill.
-const CHILD_TIMEOUT: Duration = Duration::from_secs(PHASE_TIMEOUT.as_secs() * 12);
+const CHILD_TIMEOUT: Duration = Duration::from_secs(PHASE_TIMEOUT.as_secs() * 13);
 
 /// How long the harness waits for the session handler to hand back its outcome
 /// once the child has exited.
@@ -68,6 +70,22 @@ const LIVE_GENERATION: u64 = 2;
 /// [`LIVE_GENERATION`], so cancelling it cannot retroactively abandon the
 /// ordinary jobs — every one of those is already settled behind a barrier.
 const CANCEL_GENERATION: u64 = 3;
+
+const LEASE_JOB_ID: &[u8] = b"job-lease";
+const LEASE_SALTS: u32 = 4;
+
+/// Observations from the four-salt generation scenario.
+#[derive(Debug, Clone, Default)]
+pub struct LeaseOutcome {
+    /// Number of lease results received.
+    pub results: u32,
+    /// Number of distinct salts verified before completion.
+    pub results_verified: u32,
+    /// `(salts_done, best_energy_milli)` from `LeaseDone`.
+    pub lease_done: Option<(u64, i64)>,
+    /// Whether one credit arrived after `LeaseDone`.
+    pub credit_refunded: bool,
+}
 
 /// A reject observed during the scripted session, bound to its `job_id`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,6 +145,8 @@ pub enum Terminal {
     reason = "an observation record, not a state machine: each flag is an independent axis the walk grades, and collapsing them into enums would hide which one failed"
 )]
 pub struct DriverReport {
+    /// Lease observations, populated only when generation is advertised.
+    pub lease: Option<LeaseOutcome>,
     /// True when the first inbound message was a valid `Hello`.
     pub handshake_ok: bool,
     /// The `Hello` the miner opened with, when it sent one.
@@ -230,6 +250,7 @@ impl DriverReport {
             && self.has_reject(b"job-gate", RejectReason::UnsupportedKind)
             && self.has_reject(b"job-old", RejectReason::Expired)
             && self.warm_start_conformant()
+            && self.lease_conformant()
             && self.cancel_acked
             && self.ping_acked
             && self.capabilities_conformant()
@@ -238,6 +259,20 @@ impl DriverReport {
             && self.terminal == Terminal::Closed
             && self.timed_out_phases.is_empty()
             && self.exit_code == 0
+    }
+
+    /// Grade salt leases only when the miner advertises `ISING_GENERATE`.
+    #[must_use]
+    pub fn lease_conformant(&self) -> bool {
+        !advertises_lease(self.hello.as_ref())
+            || self.lease.as_ref().is_some_and(|lease| {
+                lease.results == LEASE_SALTS
+                    && lease.results_verified == LEASE_SALTS
+                    && lease
+                        .lease_done
+                        .is_some_and(|(salts, _)| salts == u64::from(LEASE_SALTS))
+                    && lease.credit_refunded
+            })
     }
 
     /// Every required `Result` present, no unexpected one, and each carrying
@@ -437,6 +472,14 @@ impl DriverReport {
             ("cancel ack", self.cancel_acked),
             ("cancellation honoured", self.live_cancel_conformant()),
             ("credit ledger", self.credit_ledger_balanced()),
+            (
+                if advertises_lease(self.hello.as_ref()) {
+                    "salt lease"
+                } else {
+                    "salt lease (not advertised, skipped)"
+                },
+                self.lease_conformant(),
+            ),
             ("clean stream end", self.terminal == Terminal::Closed),
             ("no phase timed out", self.timed_out_phases.is_empty()),
             ("exit code 0", self.exit_code == 0),
@@ -444,6 +487,9 @@ impl DriverReport {
             let _ = writeln!(out, "  [{}] {axis}", mark(ok));
         }
         let _ = writeln!(out, "  stream ended: {:?}", self.terminal);
+        if let Some(lease) = &self.lease {
+            let _ = writeln!(out, "  lease: {lease:?}");
+        }
         if !self.timed_out_phases.is_empty() {
             let _ = writeln!(
                 out,
@@ -486,6 +532,9 @@ struct ScoreSpec {
     reason = "mirrors DriverReport's independent observation axes"
 )]
 struct SessionOutcome {
+    lease: Option<LeaseOutcome>,
+    lease_salts: HashSet<Vec<u8>>,
+    lease_refund_messages: u32,
     handshake_ok: bool,
     hello: Option<Hello>,
     ready_received: bool,
@@ -884,7 +933,33 @@ async fn read_hello(inbound: &mut Streaming<MinerMsg>, outcome: &mut SessionOutc
 fn fold(outcome: &mut SessionOutcome, m: miner_msg::Msg) {
     match m {
         miner_msg::Msg::Ready(_) => outcome.ready_received = true,
-        miner_msg::Msg::JobRequest(jr) => outcome.job_request_credits.push(jr.credits),
+        miner_msg::Msg::JobRequest(jr) => {
+            outcome.job_request_credits.push(jr.credits);
+            if let Some(lease) = &mut outcome.lease {
+                if lease.lease_done.is_some() {
+                    outcome.lease_refund_messages += 1;
+                    lease.credit_refunded = jr.credits == 1 && outcome.lease_refund_messages == 1;
+                }
+            }
+        }
+        miner_msg::Msg::Result(r) if r.job_id == LEASE_JOB_ID && outcome.lease.is_some() => {
+            if let Some(lease) = &mut outcome.lease {
+                lease.results += 1;
+                if let Ok(topology) = TopologyView::from_proto(&lease_topology()) {
+                    let verified = verify_lease_result(
+                        &lease_generator(),
+                        &topology,
+                        &Target::from_proto(&lease_target()),
+                        &r,
+                    )
+                    .is_ok();
+                    if verified && lease.lease_done.is_none() && outcome.lease_salts.insert(r.salt)
+                    {
+                        lease.results_verified += 1;
+                    }
+                }
+            }
+        }
         miner_msg::Msg::Result(r) => {
             let spec = outcome.expected.get(&r.job_id);
             let rescored = spec.map(|s| {
@@ -921,7 +996,102 @@ fn fold(outcome: &mut SessionOutcome, m: miner_msg::Msg) {
         miner_msg::Msg::Fatal(f) => {
             outcome.fatal = Some((f.exit_code.cast_signed(), f.reason));
         }
-        miner_msg::Msg::Hello(_) | miner_msg::Msg::LeaseDone(_) => {}
+        miner_msg::Msg::LeaseDone(done) => {
+            if done.job_id == LEASE_JOB_ID {
+                if let Some(lease) = &mut outcome.lease {
+                    // A second completion cannot replace a malformed first one.
+                    lease.lease_done = Some(if lease.lease_done.is_some() {
+                        (0, done.best_energy_milli)
+                    } else {
+                        (done.salts_done, done.best_energy_milli)
+                    });
+                }
+            }
+        }
+        miner_msg::Msg::Hello(_) => {}
+    }
+}
+
+fn advertises_lease(hello: Option<&Hello>) -> bool {
+    hello
+        .and_then(|h| h.capabilities.as_ref())
+        .is_some_and(|c| c.supported_kinds.contains(&(JobKind::IsingGenerate as i32)))
+}
+
+fn lease_topology() -> Topology {
+    // An eight-node ring with four opposite-node chords: connected, degree three.
+    Topology {
+        hash: vec![0x33; 32],
+        nodes: (0..8).collect(),
+        edges: Some(EdgeList {
+            u: vec![0, 1, 2, 3, 4, 5, 6, 0, 0, 1, 2, 3],
+            v: vec![1, 2, 3, 4, 5, 6, 7, 7, 4, 5, 6, 7],
+        }),
+        allowed_h_milli: vec![-1000, 0, 1000],
+        allowed_j_milli: vec![-1000, 1000],
+    }
+}
+
+fn lease_generator() -> IsingProblemGenerator {
+    IsingProblemGenerator {
+        algorithm: quip_proto::v1::GeneratorAlgorithm::Blake3Chacha8V1 as i32,
+        topology_hash: lease_topology().hash,
+        last_proof_block_hash: vec![0x11; 32],
+        miner_account: vec![0x22; 32],
+        base_salt: vec![0x44; 32],
+        salt_start: 10,
+        salt_count: u64::from(LEASE_SALTS),
+    }
+}
+
+fn lease_target() -> SetTarget {
+    SetTarget {
+        max_energy_milli: i64::MAX,
+        min_solutions: 1,
+        min_diversity_milli: 0,
+        max_proof_solutions: 32,
+        num_reads: 1,
+        num_sweeps: CONFIGURED_SWEEPS,
+        ..Default::default()
+    }
+}
+
+async fn run_lease(
+    tx: &mpsc::Sender<Result<CoordMsg, Status>>,
+    inbound: &mut Streaming<MinerMsg>,
+    outcome: &mut SessionOutcome,
+) {
+    outcome.lease = Some(LeaseOutcome::default());
+    let _ = send(tx, coord_msg::Msg::Topology(lease_topology())).await;
+    let _ = send(tx, coord_msg::Msg::SetTarget(lease_target())).await;
+    let _ = dispatch(
+        tx,
+        outcome,
+        Job {
+            job_id: LEASE_JOB_ID.to_vec(),
+            kind: JobKind::IsingGenerate as i32,
+            generation: CANCEL_GENERATION + 1,
+            generator: Some(lease_generator()),
+            // Zero means no deadline. The driver's timeout bounds this scenario.
+            deadline_ms: 0,
+            ..Default::default()
+        },
+        None,
+    )
+    .await;
+    // Bound the whole scenario, including its refund, even if messages keep arriving.
+    if tokio::time::timeout(
+        PHASE_TIMEOUT,
+        read_until(inbound, outcome, "salt-lease", |o| {
+            o.lease
+                .as_ref()
+                .is_some_and(|l| l.lease_done.is_some() && l.credit_refunded)
+        }),
+    )
+    .await
+    .is_err()
+    {
+        outcome.timed_out_phases.push("salt-lease".to_owned());
     }
 }
 
@@ -1224,7 +1394,12 @@ async fn run_script(
     })
     .await;
 
-    // 11. Shutdown -> miner flushes and exits 0, closing its send stream.
+    // 11. Generation runs above the cancellation watermark from the plain jobs.
+    if advertises_lease(outcome.hello.as_ref()) {
+        run_lease(tx, inbound, &mut outcome).await;
+    }
+
+    // 12. Shutdown -> miner flushes and exits 0, closing its send stream.
     let _ = send(tx, coord_msg::Msg::Shutdown(Shutdown { grace_ms: 1000 })).await;
     drain_to_end(inbound, &mut outcome).await;
 
@@ -1413,6 +1588,7 @@ async fn drive_miner_with_script(bin_path: &str, socket: &str, script: ScriptKin
     let _ = std::fs::remove_file(&path);
 
     DriverReport {
+        lease: outcome.lease,
         handshake_ok: outcome.handshake_ok,
         hello: outcome.hello,
         ready_received: outcome.ready_received,
@@ -1524,6 +1700,7 @@ mod tests {
 
     fn bare_report() -> DriverReport {
         DriverReport {
+            lease: None,
             handshake_ok: true,
             hello: None,
             ready_received: false,
@@ -1636,6 +1813,178 @@ mod tests {
         // field, so this must pass or they prove nothing.
         let r = conformant_report();
         assert!(r.is_conformant(), "{r:?}");
+    }
+
+    fn lease_report() -> DriverReport {
+        let mut r = conformant_report();
+        let caps = r.hello.as_mut().unwrap().capabilities.as_mut().unwrap();
+        caps.supported_kinds.push(JobKind::IsingGenerate as i32);
+        r.capabilities_received = Some(caps.clone());
+        r
+    }
+
+    #[test]
+    fn advertised_lease_requires_an_outcome() {
+        let r = lease_report();
+        assert!(!r.is_conformant());
+    }
+
+    #[test]
+    fn lease_requires_four_verified_results_done_and_refund() {
+        let mut r = lease_report();
+        r.lease = Some(LeaseOutcome {
+            results: 4,
+            results_verified: 4,
+            lease_done: Some((4, -1000)),
+            credit_refunded: true,
+        });
+        assert!(r.is_conformant());
+        for bad in [
+            LeaseOutcome {
+                lease_done: Some((3, -1000)),
+                ..r.lease.clone().unwrap()
+            },
+            LeaseOutcome {
+                results: 3,
+                ..r.lease.clone().unwrap()
+            },
+            LeaseOutcome {
+                results_verified: 3,
+                ..r.lease.clone().unwrap()
+            },
+            LeaseOutcome {
+                lease_done: None,
+                ..r.lease.clone().unwrap()
+            },
+            LeaseOutcome {
+                credit_refunded: false,
+                ..r.lease.clone().unwrap()
+            },
+        ] {
+            let mut failed = r.clone();
+            failed.lease = Some(bad);
+            assert!(!failed.is_conformant());
+        }
+    }
+
+    #[test]
+    fn unadvertised_lease_is_not_graded() {
+        let mut r = conformant_report();
+        assert!(r.is_conformant());
+        r.lease = Some(LeaseOutcome {
+            results: 0,
+            results_verified: 0,
+            lease_done: None,
+            credit_refunded: false,
+        });
+        assert!(r.is_conformant());
+    }
+
+    fn lease_result(index: u64) -> quip_proto::v1::Result {
+        let generator = lease_generator();
+        let spec = quip_protocol::lease::LeaseSpec::from_proto(&generator).unwrap();
+        let topology = TopologyView::from_proto(&lease_topology()).unwrap();
+        let nonce = spec.nonce(index).unwrap();
+        let (h, j) = topology.draw(nonce).unwrap();
+        let spins = vec![1; topology.num_nodes];
+        quip_proto::v1::Result {
+            job_id: LEASE_JOB_ID.to_vec(),
+            salt: spec.salt(index).unwrap().to_vec(),
+            nonce: nonce.to_vec(),
+            solutions: vec![quip_proto::v1::Solution {
+                spins: encode_spins_packed(&spins),
+                energy_milli: quip_protocol::scoring::energy_from_milli(
+                    &spins,
+                    &h,
+                    &j,
+                    &topology.edges,
+                ),
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn lease_fold_verifies_distinct_salts_and_refund_order() {
+        let mut o = SessionOutcome {
+            lease: Some(LeaseOutcome::default()),
+            ..Default::default()
+        };
+        // These credits belong to the earlier plain jobs, not the lease completion.
+        fold(
+            &mut o,
+            miner_msg::Msg::JobRequest(quip_proto::v1::JobRequest { credits: 1 }),
+        );
+        assert!(!o.lease.as_ref().unwrap().credit_refunded);
+        for index in 0..4 {
+            fold(&mut o, miner_msg::Msg::Result(lease_result(index)));
+        }
+        assert!(o.results.is_empty());
+        assert_eq!(o.lease.as_ref().unwrap().results_verified, 4);
+        fold(
+            &mut o,
+            miner_msg::Msg::LeaseDone(quip_proto::v1::LeaseDone {
+                job_id: LEASE_JOB_ID.to_vec(),
+                salts_done: 4,
+                best_energy_milli: -1000,
+            }),
+        );
+        assert!(!o.lease.as_ref().unwrap().credit_refunded);
+        fold(
+            &mut o,
+            miner_msg::Msg::JobRequest(quip_proto::v1::JobRequest { credits: 1 }),
+        );
+        assert!(o.lease.as_ref().unwrap().credit_refunded);
+        let mut r = lease_report();
+        r.lease = o.lease;
+        assert!(r.is_conformant());
+    }
+
+    #[test]
+    fn lease_fold_rejects_duplicate_salts_and_bad_proofs() {
+        let mut o = SessionOutcome {
+            lease: Some(LeaseOutcome::default()),
+            ..Default::default()
+        };
+        fold(&mut o, miner_msg::Msg::Result(lease_result(0)));
+        fold(&mut o, miner_msg::Msg::Result(lease_result(0)));
+        let mut bad_nonce = lease_result(1);
+        bad_nonce.nonce = vec![0; 32];
+        fold(&mut o, miner_msg::Msg::Result(bad_nonce));
+        let mut bad_energy = lease_result(2);
+        bad_energy.solutions.first_mut().unwrap().energy_milli += 1;
+        fold(&mut o, miner_msg::Msg::Result(bad_energy));
+        let lease = o.lease.unwrap();
+        assert_eq!(lease.results, 4);
+        assert_eq!(lease.results_verified, 1);
+    }
+
+    #[test]
+    fn unsolicited_lease_results_remain_unexpected_plain_results() {
+        let mut o = SessionOutcome::default();
+        fold(&mut o, miner_msg::Msg::Result(lease_result(0)));
+        assert_eq!(o.results.len(), 1);
+        let mut r = conformant_report();
+        r.results.extend(o.results);
+        assert!(!r.is_conformant());
+    }
+
+    #[test]
+    fn extra_lease_refunds_stay_invalid() {
+        let mut o = SessionOutcome {
+            lease: Some(LeaseOutcome {
+                lease_done: Some((4, -1000)),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        for count in 1..=3 {
+            fold(
+                &mut o,
+                miner_msg::Msg::JobRequest(quip_proto::v1::JobRequest { credits: 1 }),
+            );
+            assert_eq!(o.lease.as_ref().unwrap().credit_refunded, count == 1);
+        }
     }
 
     #[test]
