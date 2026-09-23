@@ -73,6 +73,10 @@ impl Coefficient for half::f16 {
 /// ```compile_fail
 /// use quip_solver_core::coefficient::{Coefficient, Fixed};
 /// const INVALID_SCALE: bool = Fixed::<i8, 0>::EXACT;
+/// ```
+///
+/// ```compile_fail
+/// use quip_solver_core::coefficient::{Coefficient, Fixed};
 /// let value = Fixed::<i8, 0>::from_milli(1);
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

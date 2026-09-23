@@ -91,6 +91,22 @@ fn default_graph_and_json_keep_sub_milli_values() -> Result<(), Box<dyn std::err
 }
 
 #[test]
+#[expect(
+    clippy::panic_in_result_fn,
+    reason = "test assertions check behavior while Result propagates unexpected errors"
+)]
+fn explicit_sampler_turbofish_compiles_with_inferred_coefficient(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let bytes = br#"{"h":[0.0004],"j":[],"edges":[],"num_reads":1,
+        "num_sweeps":1,"sweeps_per_beta":1,"beta_range":null,"seed":0}"#;
+    assert_eq!(
+        quip_solver_core::driver::solve::<DefaultSampler, _>(&DefaultSampler, bytes)?,
+        b"[]"
+    );
+    Ok(())
+}
+
+#[test]
 fn main_constructor_still_infers_f64() {
     // Written exactly as main writes it: no annotation, empty vectors.
     let empty = IsingGraph::new(vec![], vec![], vec![]);

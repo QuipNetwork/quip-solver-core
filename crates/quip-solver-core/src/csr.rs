@@ -11,9 +11,11 @@ use crate::ising::IsingGraph;
 /// Ising problem with CSR adjacency plus f32 upload buffers.
 #[derive(Clone, Debug)]
 pub struct CsrGraph {
-    /// Linear biases (f64, for consensus scoring).
+    /// Linear biases. Holds the graph's coefficients in units as `f64`.
+    /// Exact scoring for a lossy type uses the original coefficients, which the harness re-scores from.
     pub h: Vec<f64>,
-    /// Couplings aligned with `edges` (f64, for consensus scoring).
+    /// Couplings aligned with `edges`. Holds the graph's coefficients in units as `f64`.
+    /// Exact scoring for a lossy type uses the original coefficients, which the harness re-scores from.
     pub j: Vec<f64>,
     /// Undirected edge list `(u, v)` in received order.
     pub edges: Vec<(usize, usize)>,

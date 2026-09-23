@@ -23,6 +23,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 The default coefficient type is `f64`. C, Python, WebAssembly, JSON, and
 wire interfaces keep their existing forms.
 
+### Changed
+
+- `run`, `run_code`, and `driver::solve` take a second type parameter for
+  the coefficient type. A call that names the sampler type explicitly, such
+  as `solve::<S>(...)`, now writes `solve::<S, _>(...)` or lets the compiler
+  infer both. Calls that infer the sampler type compile unchanged.
+- A struct literal `IsingGraph { h: vec![], j: vec![], edges: vec![] }` whose
+  type nothing else fixes no longer infers `f64`. Write
+  `IsingGraph::<f64> { .. }`, give the binding the type `IsingGraph`, or call
+  `IsingGraph::new`.
+
 ## 0.0.2-rc1
 
 Optional warm-start states on `IsingProblem`, for quantum processing unit (QPU) reverse anneal and
