@@ -26,7 +26,8 @@ pub use cli::CommonArgs;
 pub use csr::CsrGraph;
 pub use error::SampleError;
 pub use ising::{Algorithm, IsingGraph, SampleParams, SamplerResult, WarmStart};
-pub use lease::Lease;
+pub use lease::{Lease, LeaseSink, LeaseStopped};
+pub use quip_protocol::lease::TopologyView;
 pub use session::{capabilities, run, run_code, BackendIdentity, OpenError, INITIAL_SPINS_FEATURE};
 
 /// The generated protobuf and tonic stubs for the wire contract.
@@ -173,6 +174,31 @@ pub enum StreamOutcome {
 /// is required; the other methods default to a no-governor, uncapped backend
 /// (the CPU miner's shape).
 pub trait Sampler<C: Coefficient = f64>: Send + Sync + 'static {
+    /// Whether the backend draws lease problems itself, without opening a device.
+    #[must_use]
+    fn generates_locally() -> bool
+    where
+        Self: Sized,
+    {
+        false
+    }
+
+    /// Work a lease on a dedicated thread. Poll the sink to observe stops.
+    ///
+    /// # Errors
+    /// Returns a device condition, or a device fault if local generation is unsupported.
+    fn sample_lease(
+        &self,
+        _lease: &Lease,
+        _topology: &TopologyView,
+        _params: &SampleParams,
+        _out: &LeaseSink,
+    ) -> Result<(), SampleError> {
+        Err(SampleError::DeviceFault(
+            "sample_lease called on a sampler that does not generate locally".into(),
+        ))
+    }
+
     /// Sample one job.
     ///
     /// Each reported energy must be the exact energy of the model received by

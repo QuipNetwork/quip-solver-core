@@ -2,7 +2,10 @@
 use crate::coefficient::Coefficient;
 use crate::job::{miner, now_unix_ms, os_seed, pick_param, ExactEnergy, SessionTarget};
 use crate::session::{BackendIdentity, JobSender, PendingJob, PendingParams};
-use crate::{CancelToken, IsingGraph, SampleParams, StreamJob, StreamOutcome, StreamResult};
+use crate::{
+    CancelToken, IsingGraph, SampleError, SampleParams, Sampler, SamplerResult, StreamJob,
+    StreamOutcome, StreamResult,
+};
 use quip_proto::v1::{
     miner_msg, Job, JobRequest, LeaseDone, MinerMsg, RejectReason, SamplerMeta, Solution,
 };
@@ -74,7 +77,9 @@ impl LeaseState {
             || self.expired()
     }
     fn try_finish(&self) -> Option<MinerMsg> {
-        let mut p = self.progress();
+        self.finish_locked(&mut self.progress())
+    }
+    fn finish_locked(&self, p: &mut Progress) -> Option<MinerMsg> {
         if self.aborted.load(Ordering::Relaxed)
             || !p.closed
             || p.finished != p.dispatched
@@ -316,12 +321,34 @@ pub(crate) fn handle_result(
     let StreamOutcome::Completed(Ok(samples)) = result.outcome else {
         return None;
     };
-    let mut progress = link.state.progress();
+    record_samples(&link.state, &samples);
+    winner(
+        &link.state,
+        link.index,
+        &samples,
+        target,
+        SamplerMeta {
+            reads,
+            sweeps,
+            device_access_time_us: result.device_access_time_us,
+            ..Default::default()
+        },
+    )
+}
+fn record_samples(state: &LeaseState, samples: &[SamplerResult]) {
+    let mut progress = state.progress();
     progress.salts_done += 1;
     if let Some(best) = samples.iter().map(|s| s.energy_milli).min() {
         progress.best_energy_milli = progress.best_energy_milli.min(best);
     }
-    drop(progress);
+}
+fn winner(
+    state: &LeaseState,
+    index: u64,
+    samples: &[SamplerResult],
+    target: Option<&SessionTarget>,
+    meta: SamplerMeta,
+) -> Option<MinerMsg> {
     let target = target?.to_target();
     let pairs = samples
         .iter()
@@ -338,21 +365,198 @@ pub(crate) fn handle_result(
         })
         .collect();
     Some(miner(miner_msg::Msg::Result(quip_proto::v1::Result {
-        job_id: link.state.job_id.clone(),
-        salt: link.state.lease.salt(link.index).to_vec(),
-        nonce: link.state.lease.nonce(link.index).to_vec(),
+        job_id: state.job_id.clone(),
+        salt: state.lease.salt(index).to_vec(),
+        nonce: state.lease.nonce(index).to_vec(),
         solutions,
-        meta: Some(SamplerMeta {
-            reads,
-            sweeps,
-            device_access_time_us: result.device_access_time_us,
-            ..Default::default()
-        }),
+        meta: Some(meta),
     })))
 }
 pub(crate) async fn finish_result(link: &LeaseLink, tx: &mpsc::Sender<MinerMsg>) -> Result<(), ()> {
     link.state.progress().finished += 1;
     link.state.send_done(tx).await
+}
+
+/// A lease no longer accepts reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LeaseStopped;
+impl std::fmt::Display for LeaseStopped {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("lease stopped")
+    }
+}
+impl std::error::Error for LeaseStopped {}
+
+/// Receives locally generated salts and verifies winning reads on the host.
+pub struct LeaseSink {
+    pub(crate) state: Arc<LeaseState>,
+    pub(crate) cancel: CancelToken,
+    pub(crate) shutdown: watch::Receiver<bool>,
+    pub(crate) target: watch::Receiver<Option<SessionTarget>>,
+    // An uncooperative worker must not keep the control queue open after cancellation.
+    pub(crate) ctrl: mpsc::WeakSender<MinerMsg>,
+    pub(crate) device_faulted: Arc<AtomicBool>,
+    pub(crate) params: SampleParams,
+}
+impl LeaseSink {
+    /// Whether cancellation, shutdown, completion, or the deadline stopped this lease.
+    #[must_use]
+    pub fn is_stopped(&self) -> bool {
+        self.state.stopped(&self.cancel)
+            || *self.shutdown.borrow()
+            || self.ctrl.upgrade().is_none_or(|tx| tx.is_closed())
+            || self.state.progress().closed
+    }
+
+    /// Submit all reads for a finished salt from a blocking sampler thread.
+    ///
+    /// # Errors
+    /// Returns a stop if the lease has ended, the index is outside its range,
+    /// the writer has gone, or host verification detects a device fault.
+    pub fn push(&self, salt_index: u64, reads: Vec<SamplerResult>) -> Result<(), LeaseStopped> {
+        if self.is_stopped() || salt_index >= self.state.lease.salt_count() {
+            return Err(LeaseStopped);
+        }
+        {
+            let mut progress = self.state.progress();
+            if progress.closed {
+                return Err(LeaseStopped);
+            }
+            progress.dispatched += 1;
+        }
+        record_samples(&self.state, &reads);
+        let result = self.push_winner(salt_index, reads);
+        self.state.progress().finished += 1;
+        result
+    }
+
+    fn push_winner(&self, index: u64, reads: Vec<SamplerResult>) -> Result<(), LeaseStopped> {
+        let target = self.target.borrow().clone();
+        let meta = SamplerMeta {
+            reads: u32::try_from(self.params.num_reads).unwrap_or(u32::MAX),
+            sweeps: u32::try_from(self.params.num_sweeps).unwrap_or(u32::MAX),
+            ..Default::default()
+        };
+        let Some(target) = target else {
+            return Ok(());
+        };
+        let pairs = reads
+            .iter()
+            .map(|read| (read.spins.as_slice(), read.energy_milli))
+            .collect::<Vec<_>>();
+        if meets_target(&pairs, &target.to_target()).is_err() {
+            return Ok(());
+        }
+        let (h, j) = self
+            .state
+            .topology
+            .draw(self.state.lease.nonce(index))
+            .map_err(|error| {
+                self.fault(&SampleError::DeviceFault(error.to_string()));
+                LeaseStopped
+            })?;
+        let mut rescored = Vec::with_capacity(reads.len());
+        for read in reads {
+            let energy = quip_protocol::scoring::energy_from_milli(
+                &read.spins,
+                &h,
+                &j,
+                &self.state.topology.edges,
+            );
+            if read.spins.len() != self.state.topology.num_nodes
+                || read.spins.iter().any(|spin| !matches!(spin, -1 | 1))
+                || energy != read.energy_milli
+            {
+                self.fault(&SampleError::DeviceFault(
+                    "local lease draw disagrees with host energy".into(),
+                ));
+                return Err(LeaseStopped);
+            }
+            rescored.push(SamplerResult {
+                spins: read.spins,
+                energy_milli: energy,
+            });
+        }
+        if self.is_stopped() {
+            return Err(LeaseStopped);
+        }
+        let target = self.target.borrow().clone();
+        if let Some(reply) = winner(&self.state, index, &rescored, target.as_ref(), meta) {
+            self.send(reply)?;
+        }
+        Ok(())
+    }
+
+    fn send(&self, msg: MinerMsg) -> Result<(), LeaseStopped> {
+        self.ctrl
+            .upgrade()
+            .ok_or(LeaseStopped)?
+            .blocking_send(msg)
+            .map_err(|_| LeaseStopped)
+    }
+
+    fn fault(&self, error: &SampleError) {
+        self.state.progress().closed = true;
+        if !self.device_faulted.swap(true, Ordering::Relaxed) {
+            self.state.aborted.store(true, Ordering::Relaxed);
+            let _ = self.send(miner(miner_msg::Msg::Fatal(quip_proto::v1::Fatal {
+                exit_code: quip_protocol::session::ExitCode::InternalFatal as u32,
+                reason: error.to_string(),
+                restart_required: true,
+            })));
+        }
+    }
+
+    pub(crate) fn run<S: Sampler<C>, C: Coefficient>(&self, sampler: &S) {
+        let result =
+            sampler.sample_lease(&self.state.lease, &self.state.topology, &self.params, self);
+        let Some(ctrl) = self.ctrl.upgrade() else {
+            return;
+        };
+        let done = {
+            let mut progress = self.state.progress();
+            progress.closed = true;
+            self.state.finish_locked(&mut progress)
+        };
+        if let Some(done) = done {
+            let _ = ctrl.blocking_send(done);
+            match result {
+                Err(error) if error.is_fatal() => self.fault(&error),
+                _ => {
+                    let _ = ctrl.blocking_send(miner(miner_msg::Msg::JobRequest(JobRequest {
+                        credits: 1,
+                    })));
+                }
+            }
+        } else if let Err(error) = result {
+            if error.is_fatal() {
+                self.fault(&error);
+            }
+        }
+    }
+}
+
+/// Close cancelled local leases even when the backend never returns.
+pub(crate) async fn monitor_local(
+    state: Arc<LeaseState>,
+    cancel: CancelToken,
+    mut shutdown: watch::Receiver<bool>,
+    ctrl: mpsc::Sender<MinerMsg>,
+) {
+    let mut tick = tokio::time::interval(std::time::Duration::from_millis(5));
+    loop {
+        if state.stopped(&cancel) || *shutdown.borrow() {
+            state.progress().closed = true;
+        }
+        let _ = state.send_done(&ctrl).await;
+        if state.progress().done_sent || state.aborted.load(Ordering::Relaxed) {
+            break;
+        }
+        tokio::select! {
+            _ = tick.tick() => {},
+            _ = shutdown.changed() => {},
+        }
+    }
 }
 
 #[cfg(test)]

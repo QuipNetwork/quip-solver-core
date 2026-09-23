@@ -69,25 +69,11 @@ impl Session {
         Self::start_with_gate(zero, false).await
     }
     async fn start_with_gate(zero: bool, gated: bool) -> Self {
+        Self::start_mode(zero, gated, None).await
+    }
+    async fn start_mode(zero: bool, gated: bool, mode: Option<&str>) -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        static BIN: OnceLock<std::path::PathBuf> = OnceLock::new();
-        let bin = BIN.get_or_init(|| {
-            assert!(std::process::Command::new(env!("CARGO"))
-                .args([
-                    "build",
-                    "-p",
-                    "quip-solver-core",
-                    "--example",
-                    "mock_sampler_lease"
-                ])
-                .status()
-                .unwrap()
-                .success());
-            let mut path = std::env::current_exe().unwrap();
-            let _ = path.pop();
-            let _ = path.pop();
-            path.join("examples/mock_sampler_lease")
-        });
+        let bin = default_binary();
         let dir = std::path::PathBuf::from(format!(
             "target/t7-tmp/{}-{}",
             std::process::id(),
@@ -106,7 +92,13 @@ impl Session {
                 )))))
                 .serve_with_incoming(UnixListenerStream::new(listener)),
         );
-        let mut command = tokio::process::Command::new(bin);
+        let local = mode.map(|_| local_binary());
+        let mut command = tokio::process::Command::new(local.as_ref().unwrap_or(&bin));
+        if let Some(mode) = mode {
+            let _ = command
+                .args(["--mode", mode])
+                .stderr(std::process::Stdio::piped());
+        }
         let _ = command
             .args([
                 "--quip-coordinator",
@@ -675,4 +667,119 @@ async fn plain_id_equal_to_an_old_salt_id_keeps_its_metadata_and_credit() {
     assert_eq!((plain, winners, done, refunds), (1, 2, 1, 2));
     s.finish().await;
     releases.abort();
+}
+
+fn local_binary() -> std::path::PathBuf {
+    static BIN: OnceLock<std::path::PathBuf> = OnceLock::new();
+    BIN.get_or_init(|| build_example("mock_sampler_lease_local"))
+        .clone()
+}
+fn default_binary() -> std::path::PathBuf {
+    static BIN: OnceLock<std::path::PathBuf> = OnceLock::new();
+    BIN.get_or_init(|| build_example("mock_sampler_lease"))
+        .clone()
+}
+#[expect(clippy::unwrap_used, reason = "test fixture builds must succeed")]
+fn build_example(name: &str) -> std::path::PathBuf {
+    assert!(std::process::Command::new(env!("CARGO"))
+        .args(["build", "-p", "quip-solver-core", "--example", name])
+        .status()
+        .unwrap()
+        .success());
+    let mut path = std::env::current_exe().unwrap();
+    let _ = path.pop();
+    let _ = path.pop();
+    path.join("examples").join(name)
+}
+
+#[tokio::test]
+async fn a_local_generator_with_a_correct_draw_wins() {
+    let mut s = Session::start_mode(false, false, Some("honest")).await;
+    s.setup(i64::MAX).await;
+    s.send(coord_msg::Msg::Job(job(5))).await;
+    let mut salts = std::collections::HashSet::new();
+    for _ in 0..5 {
+        let miner_msg::Msg::Result(r) = s.recv().await else {
+            panic!("expected winner")
+        };
+        verify(&r);
+        assert!(salts.insert(r.salt));
+    }
+    assert!(matches!(s.recv().await, miner_msg::Msg::LeaseDone(d) if d.salts_done == 5));
+    s.refund().await;
+    s.finish().await;
+}
+
+#[tokio::test]
+async fn a_wrong_device_draw_is_a_device_fault() {
+    let mut s = Session::start_mode(false, false, Some("wrong-draw")).await;
+    s.setup(i64::MAX).await;
+    s.send(coord_msg::Msg::Job(job(5))).await;
+    assert!(matches!(s.recv().await, miner_msg::Msg::Fatal(f)
+        if f.restart_required && f.exit_code == 70));
+    s.tx = mpsc::channel(1).0;
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(10), s.child.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .code(),
+        Some(70)
+    );
+}
+
+#[tokio::test]
+async fn a_sampler_that_ignores_stop_sends_nothing_after_cancel() {
+    use tokio::io::AsyncBufReadExt as _;
+    let mut s = Session::start_mode(false, false, Some("ignore-stop")).await;
+    let mut logs = tokio::io::BufReader::new(s.child.stderr.take().unwrap()).lines();
+    s.setup(i64::MAX).await;
+    s.send(coord_msg::Msg::Job(job(u64::MAX - 10))).await;
+    first(&mut s).await;
+    s.send(coord_msg::Msg::Cancel(wire::Cancel { max_generation: 1 }))
+        .await;
+    loop {
+        match s.recv().await {
+            miner_msg::Msg::Result(r) => verify(&r),
+            miner_msg::Msg::Status(_) => {}
+            miner_msg::Msg::LeaseDone(d) => {
+                assert!(d.salts_done >= 1);
+                break;
+            }
+            other => panic!("unexpected message: {other:?}"),
+        }
+    }
+    s.refund().await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(line) = logs.next_line().await.unwrap() {
+            if line.contains("push returned LeaseStopped") {
+                return;
+            }
+        }
+        panic!("missing stop acknowledgement");
+    })
+    .await
+    .unwrap();
+    s.ack().await;
+    s.finish().await;
+}
+
+#[tokio::test]
+async fn capabilities_are_the_same_for_both_paths() {
+    let s = Session::start(false).await;
+    let default = local_binary().with_file_name("mock_sampler_lease");
+    let caps = |bin: &std::path::Path| {
+        let output = std::process::Command::new(bin)
+            .arg("--capabilities")
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let mut value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let object = value.as_object_mut().unwrap();
+        let _ = object.remove("backend");
+        let _ = object.remove("algorithm");
+        value
+    };
+    assert_eq!(caps(&local_binary()), caps(&default));
+    s.finish().await;
 }

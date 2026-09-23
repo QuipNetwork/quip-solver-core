@@ -564,7 +564,8 @@ async fn drain_queued_ctrl(
     while *ctrl_open {
         match ctrl_rx.try_recv() {
             Ok(msg) => {
-                if tx.send(msg).await.is_err() {
+                let fatal = matches!(msg.msg, Some(miner_msg::Msg::Fatal(_)));
+                if tx.send(msg).await.is_err() || fatal {
                     return false;
                 }
             }
@@ -770,7 +771,8 @@ async fn outbound_writer<C: Coefficient>(
             ctrl = ctrl_rx.recv(), if ctrl_open => {
                 result_streak = 0;
                 if let Some(msg) = ctrl {
-                    if tx.send(msg).await.is_err() {
+                    let fatal = matches!(msg.msg, Some(miner_msg::Msg::Fatal(_)));
+                    if tx.send(msg).await.is_err() || fatal {
                         return;
                     }
                 } else {
@@ -933,6 +935,7 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let aborted = Arc::new(AtomicBool::new(false));
     let mut expanders = tokio::task::JoinSet::new();
+    let mut lease_threads = Vec::new();
     let mut shutdown_requested = false;
     // job_id → (num_reads, num_sweeps) resolved at prepare, for the result meta.
     // Shared: the read loop inserts at prepare, the writer task removes at
@@ -948,7 +951,7 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
         res_rx,
         ctrl_rx,
         WriterContext {
-            target: target_rx,
+            target: target_rx.clone(),
             aborted: Arc::clone(&aborted),
             pending: Arc::clone(&pending),
             jobs_done: Arc::clone(&jobs_done),
@@ -1158,15 +1161,45 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
                             Arc::clone(&aborted),
                         ) {
                             Ok((state, params)) => {
-                                let expander = Expander {
-                                    jobs: job_tx.clone(),
-                                    pending: Arc::clone(&pending),
-                                    slots: Arc::clone(&slots),
-                                    cancel: cancel.clone(),
-                                    shutdown: shutdown_rx.clone(),
-                                    ctrl: ctrl_tx.clone(),
-                                };
-                                let _ = expanders.spawn(expander.run(state, params));
+                                if S::generates_locally() {
+                                    let sink = crate::LeaseSink {
+                                        state: Arc::clone(&state),
+                                        cancel: cancel.clone(),
+                                        shutdown: shutdown_rx.clone(),
+                                        target: target_rx.clone(),
+                                        ctrl: ctrl_tx.downgrade(),
+                                        device_faulted: Arc::clone(&device_faulted),
+                                        params,
+                                    };
+                                    let sampler = Arc::clone(&sampler);
+                                    match std::thread::Builder::new()
+                                        .name("quip-lease".into())
+                                        .spawn(move || sink.run(&*sampler))
+                                    {
+                                        Ok(thread) => lease_threads.push(thread),
+                                        Err(error) => {
+                                            writer_failure =
+                                                Some(format!("lease thread failed: {error}"));
+                                            break;
+                                        }
+                                    }
+                                    let _ = expanders.spawn(lease::monitor_local(
+                                        state,
+                                        cancel.clone(),
+                                        shutdown_rx.clone(),
+                                        ctrl_tx.clone(),
+                                    ));
+                                } else {
+                                    let expander = Expander {
+                                        jobs: job_tx.clone(),
+                                        pending: Arc::clone(&pending),
+                                        slots: Arc::clone(&slots),
+                                        cancel: cancel.clone(),
+                                        shutdown: shutdown_rx.clone(),
+                                        ctrl: ctrl_tx.clone(),
+                                    };
+                                    let _ = expanders.spawn(expander.run(state, params));
+                                }
                             }
                             Err(reason) => {
                                 if ctrl_tx
@@ -1359,6 +1392,25 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
     }
     drop(job_tx);
     drop(ctrl_tx);
+    drop(tx);
+    let mut lease_join_tick = tokio::time::interval(SAMPLER_JOIN_POLL);
+    while lease_threads.iter().any(|thread| !thread.is_finished())
+        && tokio::time::Instant::now() < deadline
+    {
+        let _ = tokio::time::timeout_at(deadline, lease_join_tick.tick()).await;
+    }
+    for thread in lease_threads {
+        if thread.is_finished() {
+            if let Err(panic) = thread.join() {
+                writer_failure = Some(format!(
+                    "lease thread panicked: {}",
+                    panic_payload_message(&*panic)
+                ));
+            }
+        } else {
+            tracing::warn!("lease thread exceeded the shutdown grace window; detaching it");
+        }
+    }
     if !writer_joined {
         match tokio::time::timeout_at(deadline, &mut writer).await {
             Ok(Ok(())) => {}
@@ -1418,7 +1470,6 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
         .into());
     }
 
-    drop(tx);
     let drain = async {
         while inbound.next().await.transpose()?.is_some() {}
         Ok::<(), tonic::Status>(())
