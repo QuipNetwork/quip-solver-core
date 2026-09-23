@@ -150,3 +150,55 @@ fn finite_saturation_nonfinite_and_exactness() {
         (-0.501_f64).to_bits()
     );
 }
+
+#[test]
+fn wire_forms_and_direct_values() {
+    use quip_proto::v1::CoefficientEncoding::{F16, F32, F64, I16, I32, I8};
+    use quip_solver_core::coefficient::WireForm;
+    assert_eq!(
+        Milli::WIRE_FORM,
+        WireForm::Int {
+            encoding: I32,
+            scale: 1000
+        }
+    );
+    assert_eq!(
+        Fixed::<i16, 7>::WIRE_FORM,
+        WireForm::Int {
+            encoding: I16,
+            scale: 7
+        }
+    );
+    assert_eq!(
+        Fixed::<i8, 1>::WIRE_FORM,
+        WireForm::Int {
+            encoding: I8,
+            scale: 1
+        }
+    );
+    assert_eq!(Fixed::<I4, 1>::WIRE_FORM, WireForm::None);
+    assert_eq!(f64::WIRE_FORM, WireForm::Float(F64));
+    assert_eq!(f32::WIRE_FORM, WireForm::Float(F32));
+    assert_eq!(half::f16::WIRE_FORM, WireForm::Float(F16));
+    assert_eq!(
+        Milli::from_wire_le(&i32::MIN.to_le_bytes()),
+        Fixed(i32::MIN)
+    );
+    assert_eq!(
+        Fixed::<i16, 7>::from_wire_le(&(-17_i16).to_le_bytes()),
+        Fixed(-17)
+    );
+    assert_eq!(Fixed::<i8, 1>::from_wire_le(&[0xFF]), Fixed(-1));
+    assert_eq!(
+        f64::from_wire_le(&(-0.0_f64).to_le_bytes()).to_bits(),
+        (-0.0_f64).to_bits()
+    );
+    assert_eq!(
+        f32::from_wire_le(&1_f32.to_le_bytes()).to_bits(),
+        1_f32.to_bits()
+    );
+    assert_eq!(
+        half::f16::from_wire_le(&half::f16::ONE.to_le_bytes()),
+        half::f16::ONE
+    );
+}

@@ -206,18 +206,19 @@ pub(crate) fn prepare(
     ))
 }
 
-/// Single conversion boundary for the encoding work that follows lease support.
+/// Convert each draw and retain milli coefficients only when conversion loses precision.
 fn draw_graph<C: Coefficient>(
     state: &LeaseState,
     index: u64,
 ) -> Result<(IsingGraph<C>, Option<ExactEnergy>), quip_protocol::chacha8::DrawError> {
     let (h, j) = state.topology.draw(state.lease.nonce(index))?;
+    let (h, j, exact_milli) = crate::encoding::convert_milli::<C>(h, j);
     let graph = IsingGraph {
-        h: h.iter().copied().map(C::from_milli).collect(),
-        j: j.iter().copied().map(C::from_milli).collect(),
+        h,
+        j,
         edges: state.topology.edges.clone(),
     };
-    let exact = (!C::EXACT).then(|| ExactEnergy::new(h, j, graph.edges.clone()));
+    let exact = exact_milli.map(|(h, j)| ExactEnergy::new(h, j, graph.edges.clone()));
     Ok((graph, exact))
 }
 

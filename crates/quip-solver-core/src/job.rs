@@ -12,7 +12,7 @@ use quip_proto::v1::{
     RejectReason, Result as JobResult, SamplerMeta, Solution, Status, Topology,
 };
 use quip_protocol::session::ExitCode;
-use quip_protocol::wire::{decode_i32_le, decode_spins_packed, encode_spins_packed};
+use quip_protocol::wire::{decode_spins_packed, encode_spins_packed};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -300,13 +300,9 @@ fn parse_ising<C: Coefficient>(
     max_edges: u32,
     cache: Option<&TopologyCache>,
 ) -> Result<ParsedIsing<C>, RejectReason> {
-    if ising.encoding != quip_proto::v1::CoefficientEncoding::I32 as i32 || ising.scale != 1000 {
-        return Err(RejectReason::Malformed);
-    }
-    let h_milli = decode_i32_le(&ising.h).map_err(|_| RejectReason::Malformed)?;
-    let j_milli = decode_i32_le(&ising.j).map_err(|_| RejectReason::Malformed)?;
+    let decoded = crate::encoding::decode_problem::<C>(ising)?;
     let edges = resolve_edges(ising, cache)?;
-    let n = h_milli.len();
+    let n = decoded.h.len();
 
     // A topology-hash job names the cached graph, so its biases must cover
     // exactly that graph's nodes. The endpoint bounds in `validate_shape` only
@@ -322,7 +318,7 @@ fn parse_ising<C: Coefficient>(
     // Shape before size: a malformed problem is malformed at any size, and
     // answering TooLarge would invite the coordinator to retry it on a bigger
     // miner, where it fails exactly the same way.
-    validate_shape(n, j_milli.len(), &edges).map_err(|_| RejectReason::Malformed)?;
+    validate_shape(n, decoded.j.len(), &edges).map_err(|_| RejectReason::Malformed)?;
 
     // `0` means "no limit" in the advertised caps (see Capabilities in
     // quip_protocol::session; the coordinator's router reads it the same way).
@@ -335,15 +331,13 @@ fn parse_ising<C: Coefficient>(
     }
 
     let graph = IsingGraph {
-        h: h_milli.iter().copied().map(C::from_milli).collect(),
-        j: j_milli.iter().copied().map(C::from_milli).collect(),
+        h: decoded.h,
+        j: decoded.j,
         edges,
     };
-    let exact_energy = if C::EXACT {
-        None
-    } else {
-        Some(ExactEnergy::new(h_milli, j_milli, graph.edges.clone()))
-    };
+    let exact_energy = decoded
+        .exact_milli
+        .map(|(h, j)| ExactEnergy::new(h, j, graph.edges.clone()));
     Ok(ParsedIsing {
         graph,
         exact_energy,
@@ -773,19 +767,9 @@ mod tests {
     }
 
     #[test]
-    fn wire_v2_accepts_only_i32_at_scale_1000() {
+    fn wire_v2_rejects_invalid_encoding_and_scale() {
         let mut ising = edges_job(1).ising.unwrap();
-        for (encoding, scale) in [
-            (0, 1000),
-            (2, 1000),
-            (3, 1000),
-            (4, 0),
-            (5, 0),
-            (6, 0),
-            (99, 1000),
-            (1, 0),
-            (1, 1),
-        ] {
+        for (encoding, scale) in [(0, 1000), (99, 1000), (1, 0), (4, 5), (5, 5), (6, 5)] {
             ising.encoding = encoding;
             ising.scale = scale;
             assert_eq!(

@@ -177,6 +177,16 @@ struct CapabilitiesJson<'a> {
 /// two different numbers for one message.
 fn advertised_capabilities<S: Sampler<C>, C: Coefficient>(id: &BackendIdentity) -> Capabilities {
     let mut caps = capabilities(id, S::declared_stream_width());
+    let own_encoding = match C::WIRE_FORM {
+        crate::coefficient::WireForm::Int { encoding, .. }
+        | crate::coefficient::WireForm::Float(encoding) => Some(encoding as i32),
+        crate::coefficient::WireForm::None => None,
+    };
+    if let Some(encoding) = own_encoding {
+        if !caps.encodings.contains(&encoding) {
+            caps.encodings.push(encoding);
+        }
+    }
     caps.features = advertised_features::<S, C>(id)
         .into_iter()
         .map(str::to_owned)
@@ -528,8 +538,6 @@ fn log_attempt(backend: &str, sr: &StreamResult, pending: Option<&PendingJob>) {
 struct WriterContext {
     target: watch::Receiver<Option<SessionTarget>>,
     aborted: Arc<AtomicBool>,
-    /// Whether a successful result requires retained exact coefficients.
-    require_exact_score: bool,
     /// Prepare-time parameters per job, removed as each one finalizes.
     pending: PendingParams,
     /// Completed-job counter the read loop publishes in `Status`.
@@ -620,7 +628,6 @@ async fn outbound_writer(
         device_faulted,
         cancel,
         backend,
-        require_exact_score,
         target,
         aborted,
     } = ctx;
@@ -701,7 +708,7 @@ async fn outbound_writer(
                     }
                     _ => sr,
                 };
-                rescore_result(&mut sr, entry.as_ref(), require_exact_score);
+                rescore_result(&mut sr, entry.as_ref(), entry.as_ref().is_some_and(|job| job.exact_energy.is_some()));
                 if let Some(link) = entry.as_ref().and_then(|e| e.lease.as_ref()) {
                     if let StreamOutcome::Completed(Err(error)) = &sr.outcome {
                         if error.is_fatal() {
@@ -948,7 +955,6 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
             device_faulted: Arc::clone(&device_faulted),
             cancel: cancel.clone(),
             backend: backend_name(id.backend),
-            require_exact_score: !C::EXACT,
         },
     ));
     // Set when the `select!` below polls `writer` to completion. A
@@ -1645,10 +1651,6 @@ mod tests {
     }
 
     fn spawn_writer(depth: usize) -> WriterHarness {
-        spawn_writer_with_scoring(depth, false)
-    }
-
-    fn spawn_writer_with_scoring(depth: usize, require_exact_score: bool) -> WriterHarness {
         let (tx, out_rx) = mpsc::channel::<MinerMsg>(depth);
         let (res_tx, res_rx) = mpsc::channel::<StreamResult>(depth);
         let (ctrl_tx, ctrl_rx) = mpsc::channel::<MinerMsg>(depth);
@@ -1666,7 +1668,6 @@ mod tests {
                 device_faulted: Arc::new(AtomicBool::new(false)),
                 cancel: cancel.clone(),
                 backend: "test",
-                require_exact_score,
             },
         ));
         WriterHarness {
@@ -2322,7 +2323,7 @@ mod tests {
             pending,
             writer,
             ..
-        } = spawn_writer_with_scoring(16, true);
+        } = spawn_writer(16);
         let id = BackendIdentity {
             backend: Backend::Mock,
             algorithm: Algorithm::Sa,
@@ -2343,7 +2344,7 @@ mod tests {
             advertised_features::<WrongNarrow, Fixed<i8, 1>>(&id).contains(&INITIAL_SPINS_FEATURE)
         );
         let mut jobs = Vec::new();
-        for (key, coefficient) in [(1_u8, 499), (2, -501)] {
+        for (key, coefficient) in [(1_u8, 499), (2, -501), (3, 1000)] {
             let incoming = quip_proto::v1::Job {
                 job_id: vec![key],
                 kind: JobKind::IsingSample as i32,
@@ -2366,7 +2367,7 @@ mod tests {
             else {
                 return Err("valid fixture must prepare".into());
             };
-            assert!(exact_energy.is_some());
+            assert_eq!(exact_energy.is_some(), key != 3);
             let mut entry = pending_job(None);
             entry.exact_energy = exact_energy;
             let _ = pending
@@ -2419,8 +2420,15 @@ mod tests {
             }
         }
         writer.await.expect("writer");
-        assert_eq!(energies, vec![(vec![2], Some(-501)), (vec![1], Some(499))]);
-        assert_eq!(credits, 2);
+        assert_eq!(
+            energies,
+            vec![
+                (vec![3], Some(777)),
+                (vec![2], Some(-501)),
+                (vec![1], Some(499))
+            ]
+        );
+        assert_eq!(credits, 3);
         assert!(pending.lock().expect("mutex").is_empty());
         Ok(())
     }
@@ -2435,7 +2443,7 @@ mod tests {
             pending,
             cancel,
             writer,
-        } = spawn_writer_with_scoring(16, true);
+        } = spawn_writer(16);
         for key in [1_u8, 2] {
             let mut entry = pending_job(Some(1));
             entry.exact_energy = Some(ExactEnergy::new(vec![499], vec![], vec![]));
@@ -2478,7 +2486,21 @@ mod tests {
     }
 
     #[test]
-    fn missing_lossy_metadata_cannot_send_an_unverified_score() {
+    fn per_job_scoring_requires_metadata_only_for_lossy_problems() {
+        let mut entry = pending_job(None);
+        for (original, expected) in [(Some(499), 499), (None, 777)] {
+            entry.exact_energy = original.map(|m| ExactEnergy::new(vec![m], vec![], vec![]));
+            let mut result = completed_result(1);
+            result.outcome = StreamOutcome::Completed(Ok(vec![crate::SamplerResult {
+                spins: vec![1],
+                energy_milli: 777,
+            }]));
+            rescore_result(&mut result, Some(&entry), entry.exact_energy.is_some());
+            let StreamOutcome::Completed(Ok(reads)) = result.outcome else {
+                panic!("valid result must remain successful");
+            };
+            assert_eq!(reads.first().map(|read| read.energy_milli), Some(expected));
+        }
         let mut result = completed_result(1);
         rescore_result(&mut result, None, true);
         assert!(matches!(

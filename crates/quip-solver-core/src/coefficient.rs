@@ -1,11 +1,29 @@
 //! Coefficient representations and conversions from wire milli values.
 
+use quip_proto::v1::CoefficientEncoding;
+
+/// Internal wire representation of a coefficient type.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WireForm {
+    Int {
+        encoding: CoefficientEncoding,
+        scale: u32,
+    },
+    Float(CoefficientEncoding),
+    None,
+}
+
 mod sealed {
     pub trait Sealed {}
 }
 
 /// A supported coefficient representation, sealed to this crate.
 pub trait Coefficient: sealed::Sealed + Copy + Send + Sync + 'static {
+    #[doc(hidden)]
+    const WIRE_FORM: WireForm;
+    #[doc(hidden)]
+    fn from_wire_le(bytes: &[u8]) -> Self;
     /// Whether every wire coefficient survives conversion without loss.
     const EXACT: bool;
     /// Convert wire milli, rounding halfway values away from zero and saturating integers.
@@ -18,6 +36,12 @@ pub trait Coefficient: sealed::Sealed + Copy + Send + Sync + 'static {
 
 impl sealed::Sealed for f64 {}
 impl Coefficient for f64 {
+    const WIRE_FORM: WireForm = WireForm::Float(CoefficientEncoding::F64);
+    fn from_wire_le(bytes: &[u8]) -> Self {
+        let mut value = [0; size_of::<Self>()];
+        value.copy_from_slice(bytes);
+        Self::from_le_bytes(value)
+    }
     const EXACT: bool = true;
     fn from_milli(milli: i32) -> Self {
         Self::from(milli) / 1000.0
@@ -32,6 +56,12 @@ impl Coefficient for f64 {
 
 impl sealed::Sealed for f32 {}
 impl Coefficient for f32 {
+    const WIRE_FORM: WireForm = WireForm::Float(CoefficientEncoding::F32);
+    fn from_wire_le(bytes: &[u8]) -> Self {
+        let mut value = [0; size_of::<Self>()];
+        value.copy_from_slice(bytes);
+        Self::from_le_bytes(value)
+    }
     const EXACT: bool = false;
     #[expect(
         clippy::cast_possible_truncation,
@@ -54,6 +84,12 @@ impl Coefficient for f32 {
 
 impl sealed::Sealed for half::f16 {}
 impl Coefficient for half::f16 {
+    const WIRE_FORM: WireForm = WireForm::Float(CoefficientEncoding::F16);
+    fn from_wire_le(bytes: &[u8]) -> Self {
+        let mut value = [0; size_of::<Self>()];
+        value.copy_from_slice(bytes);
+        Self::from_le_bytes(value)
+    }
     const EXACT: bool = false;
     fn from_milli(milli: i32) -> Self {
         Self::from_f64(f64::from(milli) / 1000.0)
@@ -129,9 +165,18 @@ fn rounded_milli<const SCALE: u32>(milli: i32) -> i128 {
 }
 
 macro_rules! fixed_integer {
-    ($ty:ty, $wire:expr) => {
+    ($ty:ty, $wire:expr, $encoding:ident) => {
         impl<const SCALE: u32> sealed::Sealed for Fixed<$ty, SCALE> {}
         impl<const SCALE: u32> Coefficient for Fixed<$ty, SCALE> {
+            const WIRE_FORM: WireForm = WireForm::Int {
+                encoding: CoefficientEncoding::$encoding,
+                scale: SCALE,
+            };
+            fn from_wire_le(bytes: &[u8]) -> Self {
+                let mut value = [0; size_of::<$ty>()];
+                value.copy_from_slice(bytes);
+                Self(<$ty>::from_le_bytes(value))
+            }
             const EXACT: bool = {
                 assert!(SCALE > 0, "SCALE must be positive");
                 $wire && SCALE == 1000
@@ -168,12 +213,16 @@ macro_rules! fixed_integer {
         }
     };
 }
-fixed_integer!(i32, true);
-fixed_integer!(i16, false);
-fixed_integer!(i8, false);
+fixed_integer!(i32, true, I32);
+fixed_integer!(i16, false, I16);
+fixed_integer!(i8, false, I8);
 
 impl<const SCALE: u32> sealed::Sealed for Fixed<I4, SCALE> {}
 impl<const SCALE: u32> Coefficient for Fixed<I4, SCALE> {
+    const WIRE_FORM: WireForm = WireForm::None;
+    fn from_wire_le(_: &[u8]) -> Self {
+        unreachable!("I4 has no wire encoding")
+    }
     const EXACT: bool = {
         assert!(SCALE > 0, "SCALE must be positive");
         false

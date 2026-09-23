@@ -51,7 +51,10 @@ fn capabilities_flag_emits_the_typed_message() {
     assert_eq!(v.get("protocolVersion"), Some(&serde_json::json!(2)));
     assert_eq!(
         v.get("encodings"),
-        Some(&serde_json::json!(["COEFFICIENT_ENCODING_I32"]))
+        Some(&serde_json::json!([
+            "COEFFICIENT_ENCODING_I32",
+            "COEFFICIENT_ENCODING_F64"
+        ]))
     );
     assert_eq!(
         v.get("generators"),

@@ -14,6 +14,7 @@ pub mod config;
 pub mod csr;
 mod display;
 pub mod driver;
+mod encoding;
 pub mod error;
 pub mod ising;
 mod job;
@@ -173,6 +174,11 @@ pub enum StreamOutcome {
 /// (the CPU miner's shape).
 pub trait Sampler<C: Coefficient = f64>: Send + Sync + 'static {
     /// Sample one job.
+    ///
+    /// Each reported energy must be the exact energy of the model received by
+    /// the solver, as required for an `f64` solver. The session skips rescoring
+    /// when coefficient conversion preserves the exact problem. Otherwise it
+    /// scores the returned spins against the original milli coefficients.
     ///
     /// # Errors
     ///

@@ -139,9 +139,33 @@ pub fn solve<S: Sampler<C>, C: Coefficient>(
         ));
     }
 
+    // JSON also accepts sub-milli values and values outside the wire range.
+    // Preserve those inputs, while wire-representable models share the session
+    // conversion and exactness check.
+    let milli = |values: &[f64]| {
+        values
+            .iter()
+            .copied()
+            .map(crate::encoding::float_milli)
+            .collect::<Result<Vec<_>, _>>()
+    };
+    let (h, j, exact_energy, rescore_units) = match (milli(&p.h), milli(&p.j)) {
+        (Ok(h), Ok(j)) => {
+            let (h, j, original) = crate::encoding::convert_milli::<C>(h, j);
+            let exact_energy =
+                original.map(|(h, j)| crate::job::ExactEnergy::new(h, j, p.edges.clone()));
+            (h, j, exact_energy, false)
+        }
+        _ => (
+            convert_units::<C>("h", &p.h)?,
+            convert_units::<C>("j", &p.j)?,
+            None,
+            !C::EXACT,
+        ),
+    };
     let graph = IsingGraph::<C> {
-        h: convert_units::<C>("h", &p.h)?,
-        j: convert_units::<C>("j", &p.j)?,
+        h,
+        j,
         edges: p.edges,
     };
     let params = SampleParams {
@@ -152,7 +176,10 @@ pub fn solve<S: Sampler<C>, C: Coefficient>(
         seed: p.seed,
     };
     let mut reads = sampler.sample(&graph, &params)?;
-    if !C::EXACT {
+    if let Some(original) = exact_energy {
+        original.rescore(&mut reads);
+    }
+    if rescore_units {
         for read in &mut reads {
             read.energy_milli =
                 quip_protocol::scoring::energy_milli(&read.spins, &p.h, &p.j, &graph.edges);
@@ -307,6 +334,18 @@ mod tests {
             Some(777)
         );
         Ok(())
+    }
+
+    #[test]
+    fn exact_fixed_problem_preserves_sampler_energy() {
+        let output = solve(&WrongLossy, &input_with_biases("[-1,0,1]")).unwrap();
+        let results: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(
+            results
+                .pointer("/0/energy_milli")
+                .and_then(serde_json::Value::as_i64),
+            Some(777)
+        );
     }
 
     #[test]
