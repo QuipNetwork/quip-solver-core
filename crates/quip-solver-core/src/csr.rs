@@ -5,6 +5,7 @@
 //! O(degree). Value dtype is f32 for kernel dynamics; f64 copies of `h`/`j` are
 //! kept for consensus scoring.
 
+use crate::coefficient::Coefficient;
 use crate::ising::IsingGraph;
 
 /// Ising problem with CSR adjacency plus f32 upload buffers.
@@ -37,7 +38,7 @@ impl CsrGraph {
     /// `SbGraph::from_base` in quip-miner-cpu. Couplings shorter than edges
     /// are treated as 0 for the missing entries.
     #[must_use]
-    pub fn from_base(g: &IsingGraph) -> Self {
+    pub fn from_base<C: Coefficient>(g: &IsingGraph<C>) -> Self {
         let n = g.h.len();
         let mut adj: Vec<Vec<(usize, f32)>> = vec![Vec::new(); n];
         for (k, &(u, v)) in g.edges.iter().enumerate() {
@@ -48,7 +49,7 @@ impl CsrGraph {
                 clippy::cast_possible_truncation,
                 reason = "kernel upload path intentionally narrows coupling f64 to f32"
             )]
-            let coup = g.j.get(k).copied().unwrap_or(0.0) as f32;
+            let coup = g.j.get(k).map_or(0.0, |value| value.to_unit()) as f32;
             #[expect(
                 clippy::indexing_slicing,
                 reason = "u and v checked against n; adj length is n"
@@ -87,10 +88,10 @@ impl CsrGraph {
             clippy::cast_possible_truncation,
             reason = "kernel upload path intentionally narrows bias f64 to f32"
         )]
-        let h_f32: Vec<f32> = g.h.iter().map(|&v| v as f32).collect();
+        let h_f32: Vec<f32> = g.h.iter().map(|&v| v.to_unit() as f32).collect();
         Self {
-            h: g.h.clone(),
-            j: g.j.clone(),
+            h: g.h.iter().map(|&v| v.to_unit()).collect(),
+            j: g.j.iter().map(|&v| v.to_unit()).collect(),
             edges: g.edges.clone(),
             row_ptr,
             col_ind,
@@ -193,10 +194,31 @@ mod tests {
 
     #[test]
     fn upload_buffers_are_bit_identical_to_the_f64_graph() {
-        for ((section, index), want) in crate::ising::GOLDEN_GRAPHS.into_iter().zip(PINNED_UPLOADS)
+        for ((section, index), expected) in
+            crate::ising::GOLDEN_GRAPHS.into_iter().zip(PINNED_UPLOADS)
         {
-            let g = CsrGraph::from_base(&crate::ising::golden_graph::<f64>(section, index));
-            assert_eq!(upload_digest(&g), want, "{section}[{index}]");
+            let float = crate::ising::golden_graph::<f64>(section, index);
+            let milli = crate::ising::golden_graph::<crate::coefficient::Milli>(section, index);
+            for graph in [CsrGraph::from_base(&float), CsrGraph::from_base(&milli)] {
+                assert_eq!(upload_digest(&graph), expected, "{section}[{index}]");
+                assert_eq!(graph.h, float.h);
+                assert_eq!(graph.j, float.j);
+            }
         }
+    }
+
+    #[test]
+    fn narrow_csr_retains_defensive_edges_and_uses_units() {
+        use crate::coefficient::Fixed;
+        let base = IsingGraph {
+            h: vec![Fixed::<i8, 2>(1), Fixed::<i8, 2>(-1)],
+            j: vec![Fixed::<i8, 2>(4), Fixed::<i8, 2>(3)],
+            edges: vec![(0, 0), (0, 1), (1, 0), (1, 9)],
+        };
+        let csr = CsrGraph::from_base(&base);
+        assert_eq!(csr.row_ptr, vec![0, 2, 4]);
+        assert_eq!(csr.col_ind, vec![1, 1, 0, 0]);
+        assert_eq!(csr.j_csr, vec![1.5, 0.0, 1.5, 0.0]);
+        assert_eq!(csr.h_f32, vec![0.5, -0.5]);
     }
 }

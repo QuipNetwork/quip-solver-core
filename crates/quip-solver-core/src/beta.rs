@@ -8,13 +8,14 @@
 //! already computed the schedule in f64 and cast per element, so the shared
 //! f64 math with a per-element cast is bit-identical to the prior behavior.
 
+use crate::coefficient::Coefficient;
 use crate::ising::IsingGraph;
 
 /// Default hot/cold beta from per-variable effective-field magnitudes.
 ///
 /// - hot: `ln(2) / (2 * max_abs_field)` so worst-case flip ≈ 50%
 /// - cold: low single-qubit excitation rate on the smallest non-zero gap
-pub fn default_ising_beta_range(graph: &IsingGraph) -> (f64, f64) {
+pub fn default_ising_beta_range<C: Coefficient>(graph: &IsingGraph<C>) -> (f64, f64) {
     let n = graph.num_nodes();
     if n == 0 {
         return (0.1, 1.0);
@@ -24,7 +25,7 @@ pub fn default_ising_beta_range(graph: &IsingGraph) -> (f64, f64) {
     let mut min_abs: Vec<Option<f64>> = vec![None; n];
 
     for (i, &hi) in graph.h.iter().enumerate() {
-        let a = hi.abs();
+        let a = hi.to_unit().abs();
         #[expect(
             clippy::indexing_slicing,
             reason = "i comes from enumerate over h, which has length n == sum_abs/min_abs len"
@@ -40,7 +41,7 @@ pub fn default_ising_beta_range(graph: &IsingGraph) -> (f64, f64) {
         if u >= n || v >= n {
             continue;
         }
-        let a = graph.j.get(k).copied().unwrap_or(0.0).abs();
+        let a = graph.j.get(k).map_or(0.0, |value| value.to_unit()).abs();
         #[expect(
             clippy::indexing_slicing,
             reason = "u and v checked against n; sum_abs/min_abs length is n"
@@ -211,16 +212,21 @@ mod tests {
 
     #[test]
     fn ladder_is_bit_identical_to_the_f64_graph() {
-        for ((section, index), (hot_bits, cold_bits)) in
+        for ((section, index), expected) in
             crate::ising::GOLDEN_GRAPHS.into_iter().zip(PINNED_LADDERS)
         {
-            let (hot, cold) =
-                default_ising_beta_range(&crate::ising::golden_graph::<f64>(section, index));
-            assert_eq!(
-                (hot.to_bits(), cold.to_bits()),
-                (hot_bits, cold_bits),
-                "{section}[{index}]: hot={hot} cold={cold}"
-            );
+            let float = crate::ising::golden_graph::<f64>(section, index);
+            let milli = crate::ising::golden_graph::<crate::coefficient::Milli>(section, index);
+            for (hot, cold) in [
+                default_ising_beta_range(&float),
+                default_ising_beta_range(&milli),
+            ] {
+                assert_eq!(
+                    (hot.to_bits(), cold.to_bits()),
+                    expected,
+                    "{section}[{index}]"
+                );
+            }
         }
     }
 }
