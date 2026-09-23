@@ -11,6 +11,7 @@ use std::process::ExitCode;
 
 struct MockSampler {
     zero: bool,
+    gate: Option<std::path::PathBuf>,
 }
 
 impl Sampler<quip_solver_core::coefficient::Milli> for MockSampler {
@@ -19,6 +20,14 @@ impl Sampler<quip_solver_core::coefficient::Milli> for MockSampler {
         graph: &IsingGraph<quip_solver_core::coefficient::Milli>,
         params: &SampleParams,
     ) -> Result<Vec<SamplerResult>, SampleError> {
+        if let Some(path) = &self.gate {
+            use std::io::Read as _;
+            let mut stream = std::os::unix::net::UnixStream::connect(path)
+                .map_err(|e| SampleError::DeviceFault(e.to_string()))?;
+            stream
+                .read_exact(&mut [0])
+                .map_err(|e| SampleError::DeviceFault(e.to_string()))?;
+        }
         std::thread::sleep(std::time::Duration::from_millis(5));
         if self.zero {
             return Ok(vec![]);
@@ -43,6 +52,8 @@ struct Cli {
     common: CommonArgs,
     #[arg(long)]
     zero: bool,
+    #[arg(long)]
+    gate: Option<std::path::PathBuf>,
 }
 
 fn main() -> ExitCode {
@@ -65,6 +76,11 @@ fn main() -> ExitCode {
             },
         },
         &cli.common,
-        || Ok(MockSampler { zero: cli.zero }),
+        || {
+            Ok(MockSampler {
+                zero: cli.zero,
+                gate: cli.gate,
+            })
+        },
     )
 }

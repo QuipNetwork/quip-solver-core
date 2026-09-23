@@ -51,6 +51,7 @@ struct Session {
     child: tokio::process::Child,
     server: tokio::task::JoinHandle<Result<(), tonic::transport::Error>>,
     dir: std::path::PathBuf,
+    gate: std::sync::Arc<tokio::net::UnixListener>,
 }
 impl Drop for Session {
     fn drop(&mut self) {
@@ -65,6 +66,9 @@ impl Drop for Session {
 )]
 impl Session {
     async fn start(zero: bool) -> Self {
+        Self::start_with_gate(zero, false).await
+    }
+    async fn start_with_gate(zero: bool, gated: bool) -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         static BIN: OnceLock<std::path::PathBuf> = OnceLock::new();
         let bin = BIN.get_or_init(|| {
@@ -90,6 +94,8 @@ impl Session {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::create_dir_all(&dir).unwrap();
+        let gate_path = dir.join("g");
+        let gate = std::sync::Arc::new(tokio::net::UnixListener::bind(&gate_path).unwrap());
         let socket = dir.join("s");
         let listener = tokio::net::UnixListener::bind(&socket).unwrap();
         let (link_tx, link_rx) = tokio::sync::oneshot::channel();
@@ -113,6 +119,9 @@ impl Session {
         if zero {
             let _ = command.arg("--zero");
         }
+        if gated {
+            let _ = command.arg("--gate").arg(gate_path);
+        }
         let child = command.spawn().unwrap();
         let (inbound, tx) = tokio::time::timeout(Duration::from_secs(30), link_rx)
             .await
@@ -124,6 +133,7 @@ impl Session {
             child,
             server,
             dir,
+            gate,
         };
         let miner_msg::Msg::Hello(hello) = s.recv().await else {
             panic!("expected Hello")
@@ -133,6 +143,9 @@ impl Session {
         assert!(caps
             .supported_kinds
             .contains(&(wire::JobKind::IsingGenerate as i32)));
+        if gated {
+            assert_eq!(caps.stream_width, 1);
+        }
         assert_eq!(
             caps.generators,
             vec![wire::GeneratorAlgorithm::Blake3Chacha8V1 as i32]
@@ -149,6 +162,26 @@ impl Session {
         assert!(matches!(s.recv().await, miner_msg::Msg::Ready(_)));
         assert!(matches!(s.recv().await, miner_msg::Msg::JobRequest(_)));
         s
+    }
+    async fn blocked_sample(&self) -> tokio::net::UnixStream {
+        tokio::time::timeout(Duration::from_secs(10), self.gate.accept())
+            .await
+            .unwrap()
+            .unwrap()
+            .0
+    }
+    async fn ack(&mut self) {
+        self.send(coord_msg::Msg::Ping(wire::Ping {})).await;
+        assert!(matches!(self.recv().await, miner_msg::Msg::Status(_)));
+    }
+    fn release_remaining(&self) -> tokio::task::JoinHandle<()> {
+        let gate = std::sync::Arc::clone(&self.gate);
+        tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = gate.accept().await.unwrap();
+                release(&mut stream).await;
+            }
+        })
     }
     async fn send(&self, msg: coord_msg::Msg) {
         self.tx
@@ -191,6 +224,11 @@ impl Session {
                 .success()
         );
     }
+}
+#[expect(clippy::unwrap_used, reason = "test barrier must release the sampler")]
+async fn release(stream: &mut tokio::net::UnixStream) {
+    use tokio::io::AsyncWriteExt as _;
+    stream.write_all(&[1]).await.unwrap();
 }
 fn topology() -> wire::Topology {
     wire::Topology {
@@ -447,36 +485,42 @@ async fn plain_jobs_interleave_with_a_lease() {
 }
 #[tokio::test]
 async fn a_new_target_applies_to_later_salts_and_the_topology_is_a_snapshot() {
-    let mut s = Session::start(false).await;
+    let mut s = Session::start_with_gate(false, true).await;
     s.setup(i64::MAX).await;
     s.send(coord_msg::Msg::Job(job(40))).await;
+    release(&mut s.blocked_sample().await).await;
     first(&mut s).await;
+    let mut before_update = s.blocked_sample().await;
     let mut top = topology();
     top.hash = vec![8; 32];
     top.allowed_h_milli = vec![9000];
     s.send(coord_msg::Msg::Topology(top)).await;
-    // Keep the target permissive until a later winner proves snapshot use.
+    s.ack().await;
+    release(&mut before_update).await;
+    // This salt was drawn before the update.
     first(&mut s).await;
+    // Width one keeps the next draw behind the blocked salt's completion.
+    release(&mut s.blocked_sample().await).await;
+    let miner_msg::Msg::Result(confirming) = s.recv().await else {
+        panic!("expected confirming winner")
+    };
+    verify(&confirming);
+    let spec = LeaseSpec::from_proto(job(40).generator.as_ref().unwrap()).unwrap();
+    assert_eq!(
+        confirming.salt,
+        spec.salt(2).unwrap(),
+        "confirmation must be drawn after the acknowledged update"
+    );
+    let mut after_confirmation = s.blocked_sample().await;
     s.send(coord_msg::Msg::SetTarget(target(i64::MIN))).await;
-    s.send(coord_msg::Msg::Ping(wire::Ping {})).await;
-    let mut ack = false;
-    loop {
-        match s.recv().await {
-            miner_msg::Msg::Result(r) => {
-                assert!(!ack);
-                verify(&r);
-            }
-            miner_msg::Msg::Status(_) => ack = true,
-            miner_msg::Msg::LeaseDone(d) => {
-                assert_eq!(d.salts_done, 40);
-                break;
-            }
-            other => panic!("unexpected {other:?}"),
-        }
-    }
-    assert!(ack);
+    s.ack().await;
+    release(&mut after_confirmation).await;
+    let releases = s.release_remaining();
+    // No winner can pass the acknowledged target, including the blocked salt.
+    assert!(matches!(s.recv().await, miner_msg::Msg::LeaseDone(d) if d.salts_done == 40));
     s.refund().await;
     s.finish().await;
+    releases.abort();
 }
 #[tokio::test]
 async fn zero_read_salts_count_but_never_win() {
@@ -544,14 +588,25 @@ async fn an_expired_lease_is_rejected_and_a_deadline_mid_lease_stops_it() {
             .as_millis(),
     )
     .unwrap()
-        + 200;
+        + 5000;
+    // Model a coordinator task descheduled between constructing and sending a job.
+    let _ = tokio::time::timeout(Duration::from_millis(300), std::future::pending::<()>()).await;
+    let deadline_ms = j.deadline_ms;
     s.send(coord_msg::Msg::Job(j)).await;
+    first(&mut s).await;
     loop {
         match s.recv().await {
             miner_msg::Msg::Result(r) => verify(&r),
             miner_msg::Msg::LeaseDone(d) => {
                 assert!(d.salts_done < 10_000);
-                assert!(start.elapsed() < Duration::from_secs(2));
+                assert!(start.elapsed() < Duration::from_secs(7));
+                assert!(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis()
+                        >= u128::from(deadline_ms)
+                );
                 break;
             }
             other => panic!("unexpected {other:?}"),
@@ -559,4 +614,65 @@ async fn an_expired_lease_is_rejected_and_a_deadline_mid_lease_stops_it() {
     }
     s.refund().await;
     s.finish().await;
+}
+
+#[tokio::test]
+async fn plain_id_equal_to_an_old_salt_id_keeps_its_metadata_and_credit() {
+    let mut s = Session::start_with_gate(false, true).await;
+    s.setup(i64::MAX).await;
+    s.send(coord_msg::Msg::Job(job(2))).await;
+    let mut salt = s.blocked_sample().await;
+    let mut plain_id = b"lease".to_vec();
+    plain_id.extend_from_slice(&0u64.to_le_bytes());
+    s.send(coord_msg::Msg::Job(wire::Job {
+        job_id: plain_id.clone(),
+        kind: wire::JobKind::IsingSample as i32,
+        ising: Some(wire::IsingProblem {
+            encoding: wire::CoefficientEncoding::I32 as i32,
+            scale: 1000,
+            h: quip_protocol::wire::encode_i32_le(&[1000]),
+            num_reads: 3,
+            num_sweeps: 7,
+            ..Default::default()
+        }),
+        ..Default::default()
+    }))
+    .await;
+    s.ack().await;
+    release(&mut salt).await;
+    let releases = s.release_remaining();
+    let mut plain = 0;
+    let mut winners = 0;
+    let mut done = 0;
+    let mut refunds = 0;
+    while refunds < 2 {
+        match s.recv().await {
+            miner_msg::Msg::Result(r) if r.job_id == plain_id => {
+                plain += 1;
+                assert!(r.salt.is_empty());
+                assert!(r.nonce.is_empty());
+                let meta = r.meta.unwrap();
+                assert_eq!((meta.reads, meta.sweeps), (3, 7));
+                assert_eq!(r.solutions.len(), 3);
+                assert!(r.solutions.iter().all(|v| v.energy_milli == 1000));
+                s.refund().await;
+                refunds += 1;
+            }
+            miner_msg::Msg::Result(r) => {
+                verify(&r);
+                winners += 1;
+            }
+            miner_msg::Msg::LeaseDone(d) => {
+                assert_eq!(d.job_id, b"lease");
+                assert_eq!(d.salts_done, 2);
+                done += 1;
+                s.refund().await;
+                refunds += 1;
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    assert_eq!((plain, winners, done, refunds), (1, 2, 1, 2));
+    s.finish().await;
+    releases.abort();
 }

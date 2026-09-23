@@ -387,6 +387,32 @@ pub(crate) struct PendingJob {
 /// inserts) and its outbound writer (which removes).
 pub(crate) type PendingParams = Arc<StdMutex<HashMap<Vec<u8>, PendingJob>>>;
 
+pub(crate) fn pending_id(wire_id: &[u8], salt_index: Option<u64>) -> Vec<u8> {
+    // Internal IDs are 0 || plain wire ID or 1 || lease wire ID || index LE64.
+    // Distinct tags make the namespaces disjoint for arbitrary coordinator IDs.
+    // Stream jobs, completions, and the pending map use them internally. The writer
+    // removes the tag and salt suffix after lookup, before cancellation, rescoring,
+    // logging, and wire replies.
+    let mut id = Vec::with_capacity(1 + wire_id.len() + salt_index.map_or(0, |_| 8));
+    id.push(u8::from(salt_index.is_some()));
+    id.extend_from_slice(wire_id);
+    if let Some(index) = salt_index {
+        id.extend_from_slice(&index.to_le_bytes());
+    }
+    id
+}
+
+fn wire_job_id(id: &[u8]) -> Vec<u8> {
+    match id.split_first() {
+        Some((0, wire)) => wire.to_vec(),
+        Some((1, wire)) => wire
+            .get(..wire.len().saturating_sub(8))
+            .unwrap_or_default()
+            .to_vec(),
+        _ => Vec::new(),
+    }
+}
+
 /// Render the leading bytes of a job id for logs.
 ///
 /// Job ids are opaque and long. Eight bytes is enough to correlate a completion
@@ -632,7 +658,7 @@ async fn outbound_writer(
         tokio::select! {
             biased;
             // Drain completed results first so a busy sampler never backs up.
-            Some(sr) = res_rx.recv() => {
+            Some(mut sr) = res_rx.recv() => {
                 result_streak = result_streak.saturating_add(1);
                 let entry = {
                     let mut p = match pending.lock() {
@@ -649,6 +675,7 @@ async fn outbound_writer(
                     };
                     p.remove(&sr.job_id)
                 };
+                sr.job_id = wire_job_id(&sr.job_id);
                 let (reads, sweeps) = entry
                     .as_ref()
                     .map_or((0, 0), |e| (e.num_reads, e.num_sweeps));
@@ -754,10 +781,27 @@ async fn outbound_writer(
     }
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "single bidi session select-loop; splitting would obscure the control flow"
-)]
+// Shared shutdown stage, also exercised with saturated channels in tests.
+pub(crate) async fn join_expanders(
+    expanders: &mut tokio::task::JoinSet<()>,
+    deadline: tokio::time::Instant,
+) -> Option<String> {
+    let mut failure = None;
+    loop {
+        match tokio::time::timeout_at(deadline, expanders.join_next()).await {
+            Ok(Some(Err(error))) => failure = Some(format!("lease expander failed: {error}")),
+            Ok(Some(Ok(()))) => {}
+            Ok(None) => break,
+            Err(_) => {
+                tracing::warn!("lease expanders exceeded the shutdown grace window; aborting them");
+                expanders.shutdown().await;
+                break;
+            }
+        }
+    }
+    failure
+}
+
 async fn run_session<S: Sampler<C>, C: Coefficient>(
     uri: &str,
     miner_id: &str,
@@ -798,7 +842,23 @@ async fn run_session<S: Sampler<C>, C: Coefficient>(
     let (tx, rx) = mpsc::channel::<MinerMsg>(16);
     tx.send(miner(miner_msg::Msg::Hello(hello))).await?;
 
-    let mut inbound = client.session(ReceiverStream::new(rx)).await?.into_inner();
+    let inbound = client.session(ReceiverStream::new(rx)).await?.into_inner();
+    run_connected_session(inbound, tx, miner_id, id, sampler, sweeps_per_beta).await
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "single bidi session select-loop; splitting would obscure the control flow"
+)]
+async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
+    mut inbound: impl tokio_stream::Stream<Item = Result<CoordMsg, tonic::Status>> + Unpin,
+    tx: mpsc::Sender<MinerMsg>,
+    miner_id: &str,
+    id: &BackendIdentity,
+    sampler: Arc<S>,
+    sweeps_per_beta: Option<usize>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use tokio_stream::StreamExt as _;
 
     // Streaming sampler on a blocking thread: it pulls StreamJobs and emits
     // StreamResults in completion order, keeping `stream_width` models in flight.
@@ -943,7 +1003,7 @@ async fn run_session<S: Sampler<C>, C: Coefficient>(
                 }
                 continue;
             }
-            msg = inbound.message() => msg,
+            msg = inbound.next() => msg.transpose(),
         };
         {
             let cm: CoordMsg = match msg {
@@ -1149,7 +1209,7 @@ async fn run_session<S: Sampler<C>, C: Coefficient>(
                             }
                         }
                         Prepared::Sample {
-                            job,
+                            mut job,
                             warm_start,
                             num_reads,
                             num_sweeps: ns,
@@ -1162,6 +1222,7 @@ async fn run_session<S: Sampler<C>, C: Coefficient>(
                                 job.graph.num_nodes(),
                                 job.graph.edges.len(),
                             );
+                            job.job_id = pending_id(&job.job_id, None);
                             {
                                 let mut p = match pending.lock() {
                                     Ok(p) => p,
@@ -1284,18 +1345,16 @@ async fn run_session<S: Sampler<C>, C: Coefficient>(
     if !shutdown_requested {
         aborted.store(true, Ordering::Relaxed);
     }
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(grace_ms);
     let _ = shutdown_tx.send_replace(true);
-    while let Some(result) = expanders.join_next().await {
-        if let Err(error) = result {
-            aborted.store(true, Ordering::Relaxed);
-            writer_failure = Some(format!("lease expander failed: {error}"));
-        }
+    if let Some(error) = join_expanders(&mut expanders, deadline).await {
+        aborted.store(true, Ordering::Relaxed);
+        writer_failure = Some(error);
     }
     drop(job_tx);
     drop(ctrl_tx);
-    let grace = Duration::from_millis(grace_ms);
     if !writer_joined {
-        match tokio::time::timeout(grace, &mut writer).await {
+        match tokio::time::timeout_at(deadline, &mut writer).await {
             Ok(Ok(())) => {}
             // A panic here is not a clean drain: results the coordinator was
             // waiting for never went out. Surfaced so the process exits 70.
@@ -1330,8 +1389,7 @@ async fn run_session<S: Sampler<C>, C: Coefficient>(
     // is a backend wedged inside `sample`, and the escalation below is the only
     // lever this layer has over it. If that backend ignores the token too, the
     // process parks here with the error below in the log, waiting for SIGKILL.
-    let sampler_deadline = tokio::time::Instant::now() + grace;
-    while !sampler_thread.is_finished() && tokio::time::Instant::now() < sampler_deadline {
+    while !sampler_thread.is_finished() && tokio::time::Instant::now() < deadline {
         tokio::time::sleep(SAMPLER_JOIN_POLL).await;
     }
     if !sampler_thread.is_finished() {
@@ -1356,13 +1414,13 @@ async fn run_session<S: Sampler<C>, C: Coefficient>(
 
     drop(tx);
     let drain = async {
-        while inbound.message().await?.is_some() {}
+        while inbound.next().await.transpose()?.is_some() {}
         Ok::<(), tonic::Status>(())
     };
     // Best-effort: the session is over either way, and a peer that errors or
     // stalls while we drain changes nothing. Logged rather than dropped so a
     // coordinator that consistently fails here is visible at all.
-    match tokio::time::timeout(grace, drain).await {
+    match tokio::time::timeout_at(deadline, drain).await {
         Ok(Ok(())) => {}
         Ok(Err(status)) => tracing::debug!(%status, "final inbound drain ended with an error"),
         Err(_) => tracing::debug!("final inbound drain did not finish within the grace window"),
@@ -1621,9 +1679,120 @@ mod tests {
         }
     }
 
+    struct Sampled(StdMutex<Option<tokio::sync::oneshot::Sender<()>>>);
+    impl Sampler<crate::coefficient::Milli> for Sampled {
+        fn sample(
+            &self,
+            _: &crate::IsingGraph<crate::coefficient::Milli>,
+            _: &crate::SampleParams,
+        ) -> Result<Vec<crate::SamplerResult>, crate::SampleError> {
+            if let Some(tx) = self.0.lock().unwrap().take() {
+                let _ = tx.send(());
+            }
+            Ok(Vec::new())
+        }
+    }
+
+    #[tokio::test]
+    async fn stalled_outbound_session_ends_within_shutdown_grace() {
+        let (input, incoming) = mpsc::channel(1);
+        let (out, _stalled_receiver) = mpsc::channel(1);
+        out.send(miner(miner_msg::Msg::Ready(Ready {})))
+            .await
+            .unwrap();
+        let (sampled_tx, sampled_rx) = tokio::sync::oneshot::channel();
+        let sampler = Arc::new(Sampled(StdMutex::new(Some(sampled_tx))));
+        let identity = test_identity();
+        let session = run_connected_session(
+            ReceiverStream::new(incoming),
+            out,
+            "test",
+            &identity,
+            sampler,
+            None,
+        );
+        let coordinator = async move {
+            let send = |msg| input.send(Ok(CoordMsg { msg: Some(msg) }));
+            send(coord_msg::Msg::Welcome(quip_proto::v1::Welcome {
+                protocol_version: 2,
+            }))
+            .await
+            .unwrap();
+            send(coord_msg::Msg::Configure(
+                quip_proto::v1::Configure::default(),
+            ))
+            .await
+            .unwrap();
+            // Configure produces two replies. The blocked writer holds one and
+            // these pings fill every remaining control slot before lease admission.
+            for _ in 0..CTRL_CHANNEL_DEPTH - 1 {
+                send(coord_msg::Msg::Ping(quip_proto::v1::Ping {}))
+                    .await
+                    .unwrap();
+            }
+            send(coord_msg::Msg::Topology(quip_proto::v1::Topology {
+                hash: vec![7; 32],
+                nodes: vec![1],
+                allowed_h_milli: vec![1000],
+                ..Default::default()
+            }))
+            .await
+            .unwrap();
+            send(coord_msg::Msg::SetTarget(quip_proto::v1::SetTarget {
+                max_energy_milli: i64::MAX,
+                min_solutions: 1,
+                max_proof_solutions: 1,
+                num_reads: 1,
+                num_sweeps: 1,
+                ..Default::default()
+            }))
+            .await
+            .unwrap();
+            let lease = |id| {
+                coord_msg::Msg::Job(quip_proto::v1::Job {
+                    job_id: vec![id],
+                    kind: JobKind::IsingGenerate as i32,
+                    generator: Some(quip_proto::v1::IsingProblemGenerator {
+                        algorithm: GeneratorAlgorithm::Blake3Chacha8V1 as i32,
+                        topology_hash: vec![7; 32],
+                        last_proof_block_hash: vec![1; 32],
+                        miner_account: vec![2; 32],
+                        base_salt: vec![0; 32],
+                        salt_count: 10,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                })
+            };
+            send(lease(1)).await.unwrap();
+            sampled_rx.await.unwrap();
+            // The first lease owns the sole permit until its result is written.
+            // The second expander closes without dispatching and blocks in send_done.
+            send(lease(2)).await.unwrap();
+            let start = tokio::time::Instant::now();
+            send(coord_msg::Msg::Shutdown(quip_proto::v1::Shutdown {
+                grace_ms: 200,
+            }))
+            .await
+            .unwrap();
+            start
+        };
+        let run = async {
+            let (result, start) = tokio::join!(session, coordinator);
+            assert!(result.is_ok(), "{result:?}");
+            assert!(start.elapsed() < Duration::from_millis(1200));
+        };
+        assert!(
+            tokio::time::timeout(Duration::from_secs(10), run)
+                .await
+                .is_ok(),
+            "session never completed shutdown with saturated control and outbound queues"
+        );
+    }
+
     fn completed_result(job_id: u8) -> StreamResult {
         StreamResult {
-            job_id: vec![job_id],
+            job_id: pending_id(&[job_id], None),
             outcome: StreamOutcome::Completed(Ok(vec![crate::SamplerResult {
                 spins: vec![1i8, -1],
                 energy_milli: -1000,
@@ -1679,7 +1848,7 @@ mod tests {
         // And it is still serving the result side while the control side is shut.
         res_tx
             .send(StreamResult {
-                job_id: vec![1, 2, 3],
+                job_id: pending_id(&[1, 2, 3], None),
                 outcome: StreamOutcome::Cancelled,
                 device_access_time_us: 0,
             })
@@ -1876,7 +2045,7 @@ mod tests {
 
         {
             let mut p = pending.lock().expect("fresh mutex");
-            let _ = p.insert(vec![7], pending_job(Some(4)));
+            let _ = p.insert(pending_id(&[7], None), pending_job(Some(4)));
         }
         cancel.cancel_through(4);
         res_tx.send(completed_result(7)).await.expect("send result");
@@ -1912,7 +2081,7 @@ mod tests {
 
         {
             let mut p = pending.lock().expect("fresh mutex");
-            let _ = p.insert(vec![7], pending_job(Some(4)));
+            let _ = p.insert(pending_id(&[7], None), pending_job(Some(4)));
         }
         res_tx.send(completed_result(7)).await.expect("send result");
 
@@ -2189,7 +2358,7 @@ mod tests {
                 ..Default::default()
             };
             let Prepared::Sample {
-                job,
+                mut job,
                 warm_start,
                 exact_energy,
                 ..
@@ -2200,7 +2369,11 @@ mod tests {
             assert!(exact_energy.is_some());
             let mut entry = pending_job(None);
             entry.exact_energy = exact_energy;
-            let _ = pending.lock().expect("mutex").insert(vec![key], entry);
+            let _ = pending
+                .lock()
+                .expect("mutex")
+                .insert(pending_id(&[key], None), entry);
+            job.job_id = pending_id(&job.job_id, None);
             jobs.push((job, warm_start));
         }
         // Reverse completion order and use a different stream method for each job.
@@ -2266,7 +2439,10 @@ mod tests {
         for key in [1_u8, 2] {
             let mut entry = pending_job(Some(1));
             entry.exact_energy = Some(ExactEnergy::new(vec![499], vec![], vec![]));
-            let _ = pending.lock().expect("mutex").insert(vec![key], entry);
+            let _ = pending
+                .lock()
+                .expect("mutex")
+                .insert(pending_id(&[key], None), entry);
         }
         cancel.cancel_through(1);
         res_tx
@@ -2275,7 +2451,7 @@ mod tests {
             .expect("late completion");
         res_tx
             .send(StreamResult {
-                job_id: vec![2],
+                job_id: pending_id(&[2], None),
                 device_access_time_us: 0,
                 outcome: StreamOutcome::Completed(Err(crate::SampleError::DeviceFault(
                     "device".into(),

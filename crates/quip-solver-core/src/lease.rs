@@ -253,8 +253,7 @@ impl<C: Coefficient> Expander<C> {
                 break;
             };
             params.seed = seed;
-            let mut job_id = state.job_id.clone();
-            job_id.extend_from_slice(&index.to_le_bytes());
+            let job_id = crate::session::pending_id(&state.job_id, Some(index));
             let entry = PendingJob {
                 exact_energy,
                 num_reads: u32::try_from(params.num_reads).unwrap_or(u32::MAX),
@@ -358,6 +357,72 @@ pub(crate) async fn finish_result(link: &LeaseLink, tx: &mpsc::Sender<MinerMsg>)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_bounds_an_expander_on_a_full_control_queue() {
+        use crate::coefficient::Milli;
+        let (ctrl, _stalled_outbound) = mpsc::channel(1);
+        ctrl.send(miner(miner_msg::Msg::JobRequest(JobRequest { credits: 1 })))
+            .await
+            .unwrap();
+        assert_eq!(ctrl.capacity(), 0);
+        let spec =
+            LeaseSpec::new(Generator::Blake3Chacha8V1, [1; 32], [2; 32], [3; 32], 0, 1).unwrap();
+        let topology = TopologyView::from_proto(&quip_proto::v1::Topology {
+            nodes: vec![1],
+            allowed_h_milli: vec![1000],
+            ..Default::default()
+        })
+        .unwrap();
+        let state = Arc::new(LeaseState {
+            job_id: b"lease".to_vec(),
+            lease: Lease(spec),
+            topology: Arc::new(topology),
+            watermark: None,
+            deadline_ms: 0,
+            aborted: Arc::new(AtomicBool::new(false)),
+            progress: Mutex::new(Progress {
+                dispatched: 0,
+                finished: 0,
+                salts_done: 0,
+                best_energy_milli: i64::MAX,
+                closed: false,
+                done_sent: false,
+            }),
+        });
+        let (jobs, _jobs_rx) = mpsc::channel::<StreamJob<Milli>>(1);
+        let expander = Expander {
+            jobs: JobSender::Plain(jobs),
+            pending: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            slots: Arc::new(Semaphore::new(1)),
+            cancel: CancelToken::default(),
+            shutdown: watch::channel(true).1,
+            ctrl: ctrl.clone(),
+        };
+        let mut expanders = tokio::task::JoinSet::new();
+        let _ = expanders.spawn(expander.run(Arc::clone(&state), SampleParams::default()));
+        tokio::task::yield_now().await;
+        assert!(state.progress().done_sent);
+        assert_eq!(ctrl.capacity(), 0);
+        let grace = std::time::Duration::from_millis(200);
+        let start = tokio::time::Instant::now();
+        let ended = tokio::time::timeout(
+            grace + std::time::Duration::from_millis(50),
+            crate::session::join_expanders(&mut expanders, start + grace),
+        )
+        .await;
+        assert!(
+            ended.is_ok(),
+            "session shutdown blocked before the grace timeout"
+        );
+        assert!(start.elapsed() <= grace);
+        assert!(expanders.is_empty());
+        assert_eq!(
+            ctrl.strong_count(),
+            1,
+            "aborted expander must release its sender"
+        );
+    }
 
     #[test]
     fn lease_wrapper_maps_out_of_range_indices_to_zero() {
