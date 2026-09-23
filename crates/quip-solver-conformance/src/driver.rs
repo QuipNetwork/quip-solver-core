@@ -15,7 +15,7 @@ use quip_proto::v1::{
     Status as MinerStatus, Topology, Welcome,
 };
 use quip_protocol::scoring::energy_milli;
-use quip_protocol::wire::{decode_spins, encode_i32_le};
+use quip_protocol::wire::{decode_spins, encode_i32_le, encode_spins_packed};
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -165,20 +165,49 @@ pub struct DriverReport {
 }
 
 /// Job ids the full walk requires a `Result` for.
-const REQUIRED_RESULTS: [&[u8]; 4] = [b"job-1", b"job-2", b"job-hash", b"job-sparse"];
+const REQUIRED_RESULTS: [&[u8]; 5] = [
+    b"job-1",
+    b"job-2",
+    b"job-hash",
+    b"job-sparse",
+    b"job-seeded",
+];
 
 /// Job ids the full walk permits a `Result` for. `job-cancel` is cancelled
 /// while live, which is a race the driver cannot win from outside the miner:
 /// a fast sampler legitimately finishes before the `Cancel` lands. Its
 /// *forbidden* outcomes are graded instead (see
 /// [`live_cancel_conformant`](DriverReport::live_cancel_conformant)).
-const PERMITTED_RESULTS: [&[u8]; 5] = [
+const PERMITTED_RESULTS: [&[u8]; 7] = [
     b"job-1",
     b"job-2",
     b"job-hash",
     b"job-sparse",
+    b"job-seeded",
+    b"job-warm-proof",
     b"job-cancel",
 ];
+
+/// The feature string a solver lists in `Hello.features` when it uses
+/// `IsingProblem.initial_spins`. Mirrors `quip_solver_core::INITIAL_SPINS_FEATURE`,
+/// which this crate cannot depend on (see [`GIBBS_SWEEP_MULTIPLIER`]).
+pub const INITIAL_SPINS_FEATURE: &str = "initial-spins";
+
+/// Spins in the warm-start proof ring. A cold anneal leaves domain walls behind,
+/// because 1-D coarsening grows domains only as the square root of the sweep
+/// count, and the wall count grows with the ring. At 4096 spins a simulated
+/// cold Metropolis anneal kept a median of 21 walls even at 4096 sweeps, and
+/// never reached the ground state in 40 trials; at 1024 spins it did in 4 of
+/// 40. A solver that advertises `initial-spins` must accept a job this size.
+const WARM_PROOF_NODES: usize = 4096;
+
+/// Start beta sent with the proof seed, milli-units. Cold enough that a seeded
+/// anneal keeps the planted ground state.
+const WARM_PROOF_START_BETA_MILLI: u32 = 10_000;
+
+/// Reversal point sent with the proof seed, milli-units, for a reverse-anneal
+/// backend. Shallow, so the anneal stays near the seed.
+const WARM_PROOF_REVERSAL_S_MILLI: u32 = 900;
 
 impl DriverReport {
     /// Job ids of the observed results, in arrival order. Convenience over
@@ -200,6 +229,7 @@ impl DriverReport {
             && self.has_reject(b"job-bad-j", RejectReason::Malformed)
             && self.has_reject(b"job-gate", RejectReason::UnsupportedKind)
             && self.has_reject(b"job-old", RejectReason::Expired)
+            && self.warm_start_conformant()
             && self.cancel_acked
             && self.ping_acked
             && self.capabilities_conformant()
@@ -304,6 +334,36 @@ impl DriverReport {
             && self.abandoned_watermark() >= self.cancelled_watermark
     }
 
+    /// True when the `Hello` advertised [`INITIAL_SPINS_FEATURE`]. Only then
+    /// is [`warm_start_conformant`](Self::warm_start_conformant) graded.
+    #[must_use]
+    pub fn advertises_initial_spins(&self) -> bool {
+        self.hello
+            .as_ref()
+            .is_some_and(|h| h.features.iter().any(|f| f == INITIAL_SPINS_FEATURE))
+    }
+
+    /// A solver that advertises [`INITIAL_SPINS_FEATURE`] rejects a malformed
+    /// state as `Malformed`, and uses the states it is sent: seeded with the
+    /// planted ground state of the proof ring, it returns that ground energy,
+    /// which a cold anneal of the same budget does not reach.
+    ///
+    /// A solver that does not advertise the feature passes: it may ignore the
+    /// field. The seeded `job-seeded`, which every solver must answer, already
+    /// proves it still answers a seeded job.
+    #[must_use]
+    pub fn warm_start_conformant(&self) -> bool {
+        if !self.advertises_initial_spins() {
+            return true;
+        }
+        let ground = warm_proof_ground_milli();
+        self.has_reject(b"job-bad-seed", RejectReason::Malformed)
+            && self.results.iter().any(|r| {
+                r.job_id == b"job-warm-proof"
+                    && r.solution_energies_milli.iter().min() == Some(&ground)
+            })
+    }
+
     /// Highest `abandoned_generation` any `Status` reported.
     #[must_use]
     pub fn abandoned_watermark(&self) -> u64 {
@@ -355,6 +415,14 @@ impl DriverReport {
             ("energies re-score", self.energies_rescore_clean()),
             ("configured sweeps", self.sweeps_honoured()),
             ("capabilities", self.capabilities_conformant()),
+            (
+                if self.advertises_initial_spins() {
+                    "warm start used"
+                } else {
+                    "warm start (not advertised, not graded)"
+                },
+                self.warm_start_conformant(),
+            ),
             ("ping ack", self.ping_acked),
             ("cancel ack", self.cancel_acked),
             ("cancellation honoured", self.live_cancel_conformant()),
@@ -555,6 +623,7 @@ fn valid_ising() -> IsingProblem {
         num_reads: 1,
         num_sweeps: 0,
         anneal_time_us: 0,
+        ..Default::default()
     }
 }
 
@@ -577,6 +646,7 @@ fn hash_ising() -> IsingProblem {
         num_reads: 1,
         num_sweeps: 0,
         anneal_time_us: 0,
+        ..Default::default()
     }
 }
 
@@ -593,6 +663,7 @@ fn sparse_ising() -> IsingProblem {
         num_reads: 1,
         num_sweeps: 0,
         anneal_time_us: 0,
+        ..Default::default()
     }
 }
 
@@ -604,6 +675,88 @@ fn sparse_spec() -> ScoreSpec {
         j: vec![0.5, -0.75],
         edges: vec![(0, 1), (1, 2)],
     }
+}
+
+/// `valid_ising` seeded with its ground state `[-1, +1]`. Every solver must
+/// answer it: one that ignores the seed returns a cold result, which is valid.
+fn seeded_ising() -> IsingProblem {
+    IsingProblem {
+        initial_spins: vec![encode_spins_packed(&[-1, 1])],
+        ..valid_ising()
+    }
+}
+
+/// The planted spin of node `i` in the proof ring. Deterministic and
+/// irregular, so no simple cold start (all `+1`, alternating) matches it.
+fn warm_proof_spin(i: usize) -> i8 {
+    if (i.wrapping_mul(2_654_435_761) >> 7) & 1 == 1 {
+        1
+    } else {
+        -1
+    }
+}
+
+/// Coupling of ring edge `(i, i + 1)`: `-s_i * s_(i+1)` in milli-units, so the
+/// planted state satisfies every edge. With `h = 0` that state and its flip are
+/// the only ground states, at energy `-WARM_PROOF_NODES` units.
+fn warm_proof_j_milli() -> Vec<i32> {
+    (0..WARM_PROOF_NODES)
+        .map(|i| {
+            let (a, b) = (
+                warm_proof_spin(i),
+                warm_proof_spin((i + 1) % WARM_PROOF_NODES),
+            );
+            -1000 * i32::from(a) * i32::from(b)
+        })
+        .collect()
+}
+
+fn warm_proof_edges() -> Vec<(usize, usize)> {
+    (0..WARM_PROOF_NODES)
+        .map(|i| (i, (i + 1) % WARM_PROOF_NODES))
+        .collect()
+}
+
+/// The proof ring, seeded with its planted ground state at a cold start.
+fn warm_proof_ising() -> IsingProblem {
+    let edges = warm_proof_edges();
+    let planted: Vec<i8> = (0..WARM_PROOF_NODES).map(warm_proof_spin).collect();
+    IsingProblem {
+        graph: Some(ising_problem::Graph::Edges(EdgeList {
+            u: edges.iter().map(|&(u, _)| as_node_id(u)).collect(),
+            v: edges.iter().map(|&(_, v)| as_node_id(v)).collect(),
+        })),
+        h_milli_le32: encode_i32_le(&vec![0; WARM_PROOF_NODES]),
+        j_milli_le32: encode_i32_le(&warm_proof_j_milli()),
+        num_reads: 1,
+        initial_spins: vec![encode_spins_packed(&planted)],
+        start_beta_milli: WARM_PROOF_START_BETA_MILLI,
+        reversal_s_milli: WARM_PROOF_REVERSAL_S_MILLI,
+        ..Default::default()
+    }
+}
+
+fn warm_proof_spec() -> ScoreSpec {
+    ScoreSpec {
+        h: vec![0.0; WARM_PROOF_NODES],
+        j: warm_proof_j_milli()
+            .into_iter()
+            .map(|m| f64::from(m) / 1000.0)
+            .collect(),
+        edges: warm_proof_edges(),
+    }
+}
+
+/// Energy of the proof ring's planted state, scored the consensus way.
+fn warm_proof_ground_milli() -> i64 {
+    let spec = warm_proof_spec();
+    let planted: Vec<i8> = (0..WARM_PROOF_NODES).map(warm_proof_spin).collect();
+    energy_milli(&planted, &spec.h, &spec.j, &spec.edges)
+}
+
+/// A dense index as a wire node id. The proof ring is far below `u32::MAX`.
+fn as_node_id(i: usize) -> u32 {
+    u32::try_from(i).unwrap_or(u32::MAX)
 }
 
 /// The dense topology `job-hash` resolves against.
@@ -908,6 +1061,38 @@ async fn run_script(
         Some(valid_spec()),
     )
     .await;
+    // A seeded job goes to every solver. One built before `initial_spins`
+    // existed skips the unknown field and answers it cold.
+    let _ = dispatch(
+        tx,
+        &mut outcome,
+        job(b"job-seeded", future, seeded_ising()),
+        Some(valid_spec()),
+    )
+    .await;
+    // Only a solver that says it uses the states is held to using them.
+    let advertises_initial_spins = outcome
+        .hello
+        .as_ref()
+        .is_some_and(|h| h.features.iter().any(|f| f == INITIAL_SPINS_FEATURE));
+    if advertises_initial_spins {
+        let _ = dispatch(
+            tx,
+            &mut outcome,
+            job(b"job-warm-proof", future, warm_proof_ising()),
+            Some(warm_proof_spec()),
+        )
+        .await;
+        let mut bad_seed = valid_ising();
+        bad_seed.initial_spins = vec![vec![0x00, 0x00]]; // 2 bytes for 2 spins
+        let _ = dispatch(
+            tx,
+            &mut outcome,
+            job(b"job-bad-seed", future, bad_seed),
+            None,
+        )
+        .await;
+    }
     let expect_credits = outcome.jobs_dispatched as u64;
     let _ = read_until(inbound, &mut outcome, "valid-jobs", |o| {
         o.credits_refunded() >= expect_credits

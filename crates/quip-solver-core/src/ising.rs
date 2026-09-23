@@ -40,6 +40,34 @@ impl Default for SampleParams {
     }
 }
 
+/// Warm-start states and anneal start point for one seeded job, decoded from
+/// `IsingProblem` fields 9 to 12.
+///
+/// The session builds one only for a job that carries at least one state, and
+/// hands it only to a [`Sampler`](crate::Sampler) whose
+/// [`accepts_warm_start`](crate::Sampler::accepts_warm_start) is true. Every
+/// state has already been checked to cover the job's nodes, and the list is
+/// already cut to `num_reads`.
+///
+/// Seed one read per state and start the remaining reads cold. A backend that
+/// takes one state per job, as the QPU does, uses the first state.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct WarmStart {
+    /// Start states, best first, each with one `{-1,+1}` entry per variable.
+    /// Never empty.
+    pub spins: Vec<Vec<i8>>,
+    /// Seeded SA: the inverse temperature the anneal starts from. `None` = the
+    /// backend picks.
+    pub start_beta: Option<f64>,
+    /// Seeded QPU: the anneal fraction `s` in `(0, 1)` that the reverse anneal
+    /// backs off to. `None` = the backend picks.
+    pub reversal_s: Option<f64>,
+    /// Seeded QPU: the pause at the reversal point, in microseconds. `None` =
+    /// the backend picks.
+    pub reversal_pause_us: Option<u32>,
+}
+
 /// One completed read: spins in {-1,+1} and consensus milli-energy.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SamplerResult {

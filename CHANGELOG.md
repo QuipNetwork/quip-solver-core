@@ -5,6 +5,35 @@ This file documents changes to the Quip solver contract.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.0.2-rc1
+
+Optional warm-start states on `IsingProblem`, for quantum processing unit (QPU) reverse anneal and
+seeded SA.
+
+### Added
+
+- `IsingProblem` field 9, `initial_spins`, carries bit-packed start states.
+  Fields 10 to 12 (`start_beta_milli`, `reversal_s_milli`,
+  `reversal_pause_us`) set where a seeded anneal starts. A solver that uses
+  them advertises the `initial-spins` feature. `SPEC.md` section 3 describes the
+  encoding and the solver behavior.
+- `Sampler::accepts_warm_start`, `Sampler::sample_warm`, and
+  `Sampler::sample_stream_warm`, all defaulted, plus the `WarmStart` and
+  `WarmStreamJob` types and the `INITIAL_SPINS_FEATURE` constant.
+- `quip_protocol::wire::encode_spins_packed` and `decode_spins_packed`, with
+  the `WireError::BadPackedLength` and `WireError::NonZeroPadding` variants.
+- The conformance driver sends a seeded job to every solver. It grades a
+  solver that advertises `initial-spins` on a malformed state and on a
+  seeded 4096-spin ring. `DriverReport::advertises_initial_spins()` and
+  `DriverReport::warm_start_conformant()` are public.
+
+### Changed
+
+- The session rejects a job with `MALFORMED` when a start state has the
+  wrong length or a padding bit set, or when `reversal_s_milli` is 1000 or
+  more. This applies to every solver, including one that does not use the
+  states.
+
 ## 0.0.1
 
 Packaging, conformance, and release-pipeline fixes. This section consolidates

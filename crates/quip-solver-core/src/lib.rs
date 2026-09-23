@@ -22,8 +22,8 @@ mod session;
 pub use cli::CommonArgs;
 pub use csr::CsrGraph;
 pub use error::SampleError;
-pub use ising::{Algorithm, IsingGraph, SampleParams, SamplerResult};
-pub use session::{capabilities, run, run_code, BackendIdentity, OpenError};
+pub use ising::{Algorithm, IsingGraph, SampleParams, SamplerResult, WarmStart};
+pub use session::{capabilities, run, run_code, BackendIdentity, OpenError, INITIAL_SPINS_FEATURE};
 
 /// The generated protobuf and tonic stubs for the wire contract.
 ///
@@ -131,6 +131,16 @@ pub struct StreamJob {
     pub watermark: Option<u64>,
 }
 
+/// One job entering [`Sampler::sample_stream_warm`]: the plain job, plus its
+/// warm start when the coordinator sent one.
+#[non_exhaustive]
+pub struct WarmStreamJob {
+    /// The job, exactly as [`Sampler::sample_stream`] would receive it.
+    pub job: StreamJob,
+    /// Start states and anneal start point, or `None` for a cold job.
+    pub warm_start: Option<WarmStart>,
+}
+
 /// One job leaving the streaming sampler, in completion order.
 pub struct StreamResult {
     /// Opaque job id, matching the inbound [`StreamJob`].
@@ -179,66 +189,61 @@ pub trait Sampler: Send + Sync + 'static {
     /// [`stream_width`]: Sampler::stream_width
     fn sample_stream(
         &self,
-        mut jobs: tokio::sync::mpsc::Receiver<StreamJob>,
+        jobs: tokio::sync::mpsc::Receiver<StreamJob>,
         out: tokio::sync::mpsc::Sender<StreamResult>,
         cancel: CancelToken,
     ) {
-        while let Some(j) = jobs.blocking_recv() {
-            // Skip a job the coordinator abandoned on reseed; refund the credit
-            // (via the session's Cancelled handling) so the pipeline keeps depth.
-            // The serial default can only check at dequeue; backends that own a
-            // sweep/read loop poll `cancel` at their finer checkpoints.
-            if cancel.is_cancelled(j.watermark) {
-                if out
-                    .blocking_send(StreamResult {
-                        job_id: j.job_id,
-                        outcome: StreamOutcome::Cancelled,
-                        device_access_time_us: 0,
-                    })
-                    .is_err()
-                {
-                    break;
-                }
-                continue;
-            }
-            if self.should_throttle() {
-                std::thread::sleep(std::time::Duration::from_millis(50));
-            }
-            let t0 = std::time::Instant::now();
-            let result = self.sample(&j.graph, &j.params);
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "per-job sample duration in micros fits u64 for any realistic device runtime"
-            )]
-            let device_access_time_us = t0.elapsed().as_micros() as u64;
-            // A `Cancel` that lands while `sample` runs abandons this job too.
-            // Checking only at dequeue lets the finished samples out as a
-            // `Result` for a generation the coordinator has already moved past,
-            // which SPEC section 5 forbids: an abandoned generation gets no
-            // `Result` at all. The credit is still refunded, by the same
-            // `Cancelled` path the dequeue check uses.
-            //
-            // A device fault is the exception. It describes the device, not the
-            // job, and the session ends on it, so swallowing it here would hide
-            // a wedged device behind an ordinary cancellation.
-            let cancelled =
-                cancel.is_cancelled(j.watermark) && !matches!(&result, Err(e) if e.is_fatal());
-            let outcome = if cancelled {
-                StreamOutcome::Cancelled
-            } else {
-                StreamOutcome::Completed(result)
-            };
-            if out
-                .blocking_send(StreamResult {
-                    job_id: j.job_id,
-                    outcome,
-                    device_access_time_us,
-                })
-                .is_err()
-            {
-                break;
-            }
-        }
+        serial_stream(self, jobs, &out, &cancel, |j| (j, None));
+    }
+
+    /// Whether this backend uses warm-start states (`IsingProblem` fields 9 to
+    /// 12). Answered without a device, like
+    /// [`declared_stream_width`](Sampler::declared_stream_width), because
+    /// `--capabilities` reads it too.
+    ///
+    /// Default `false`: the session feeds [`sample_stream`](Sampler::sample_stream)
+    /// and the states never reach the backend. When `true`, the session
+    /// advertises the `initial-spins` feature and feeds
+    /// [`sample_stream_warm`](Sampler::sample_stream_warm) instead. Override it
+    /// together with [`sample_warm`](Sampler::sample_warm), or with
+    /// `sample_stream_warm` for a backend that keeps several models in flight.
+    #[must_use]
+    fn accepts_warm_start() -> bool
+    where
+        Self: Sized,
+    {
+        false
+    }
+
+    /// Sample one seeded job. Called only when
+    /// [`accepts_warm_start`](Sampler::accepts_warm_start) is `true`.
+    /// Default: ignore `warm` and call [`sample`](Sampler::sample).
+    ///
+    /// # Errors
+    ///
+    /// Same as [`sample`](Sampler::sample).
+    fn sample_warm(
+        &self,
+        graph: &IsingGraph,
+        params: &SampleParams,
+        warm: &WarmStart,
+    ) -> Result<Vec<SamplerResult>, SampleError> {
+        let _ = warm;
+        self.sample(graph, params)
+    }
+
+    /// The warm-start form of [`sample_stream`](Sampler::sample_stream), with
+    /// the same contract. Called instead of `sample_stream` only when
+    /// [`accepts_warm_start`](Sampler::accepts_warm_start) is `true`.
+    /// Default: serial loop over [`sample_warm`](Sampler::sample_warm) for a
+    /// seeded job and [`sample`](Sampler::sample) for a cold one.
+    fn sample_stream_warm(
+        &self,
+        jobs: tokio::sync::mpsc::Receiver<WarmStreamJob>,
+        out: tokio::sync::mpsc::Sender<StreamResult>,
+        cancel: CancelToken,
+    ) {
+        serial_stream(self, jobs, &out, &cancel, |w| (w.job, w.warm_start));
     }
 
     /// Number of models the backend keeps in flight. Default 1 (serial).
@@ -297,6 +302,80 @@ pub trait Sampler: Send + Sync + 'static {
     /// ([`config::warn_unknown_fields`]). Default: no configurable settings (the
     /// CPU miner's shape).
     fn apply_config(&self, _backend_toml: &str) {}
+}
+
+/// The serial loop behind the default [`Sampler::sample_stream`] and
+/// [`Sampler::sample_stream_warm`]. `split` pulls the plain job and its
+/// optional warm start out of the channel item.
+fn serial_stream<S, J>(
+    sampler: &S,
+    mut jobs: tokio::sync::mpsc::Receiver<J>,
+    out: &tokio::sync::mpsc::Sender<StreamResult>,
+    cancel: &CancelToken,
+    split: impl Fn(J) -> (StreamJob, Option<WarmStart>),
+) where
+    S: Sampler + ?Sized,
+{
+    while let Some(item) = jobs.blocking_recv() {
+        let (j, warm) = split(item);
+        // Skip a job the coordinator abandoned on reseed; refund the credit
+        // (via the session's Cancelled handling) so the pipeline keeps depth.
+        // The serial default can only check at dequeue; backends that own a
+        // sweep/read loop poll `cancel` at their finer checkpoints.
+        if cancel.is_cancelled(j.watermark) {
+            if out
+                .blocking_send(StreamResult {
+                    job_id: j.job_id,
+                    outcome: StreamOutcome::Cancelled,
+                    device_access_time_us: 0,
+                })
+                .is_err()
+            {
+                break;
+            }
+            continue;
+        }
+        if sampler.should_throttle() {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let t0 = std::time::Instant::now();
+        let result = match &warm {
+            Some(w) => sampler.sample_warm(&j.graph, &j.params, w),
+            None => sampler.sample(&j.graph, &j.params),
+        };
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "per-job sample duration in micros fits u64 for any realistic device runtime"
+        )]
+        let device_access_time_us = t0.elapsed().as_micros() as u64;
+        // A `Cancel` that lands while `sample` runs abandons this job too.
+        // Checking only at dequeue lets the finished samples out as a
+        // `Result` for a generation the coordinator has already moved past,
+        // which SPEC section 5 forbids: an abandoned generation gets no
+        // `Result` at all. The credit is still refunded, by the same
+        // `Cancelled` path the dequeue check uses.
+        //
+        // A device fault is the exception. It describes the device, not the
+        // job, and the session ends on it, so swallowing it here would hide
+        // a wedged device behind an ordinary cancellation.
+        let cancelled =
+            cancel.is_cancelled(j.watermark) && !matches!(&result, Err(e) if e.is_fatal());
+        let outcome = if cancelled {
+            StreamOutcome::Cancelled
+        } else {
+            StreamOutcome::Completed(result)
+        };
+        if out
+            .blocking_send(StreamResult {
+                job_id: j.job_id,
+                outcome,
+                device_access_time_us,
+            })
+            .is_err()
+        {
+            break;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -523,6 +602,93 @@ mod stream_tests {
     fn a_cancel_during_sample_suppresses_a_non_fatal_error() {
         let outcome = outcome_after_cancel_during_sample(Err(SampleError::DeviceBusy));
         assert!(matches!(outcome, StreamOutcome::Cancelled));
+    }
+
+    /// Reports which entry point handled each job through the read's energy:
+    /// `sample_warm` returns the first seed's first spin, `sample` returns 0.
+    struct WarmEcho;
+    impl Sampler for WarmEcho {
+        fn sample(
+            &self,
+            graph: &IsingGraph,
+            _params: &SampleParams,
+        ) -> Result<Vec<SamplerResult>, SampleError> {
+            Ok(vec![SamplerResult {
+                spins: vec![1i8; graph.h.len()],
+                energy_milli: 0,
+            }])
+        }
+
+        fn accepts_warm_start() -> bool {
+            true
+        }
+
+        fn sample_warm(
+            &self,
+            _graph: &IsingGraph,
+            _params: &SampleParams,
+            warm: &WarmStart,
+        ) -> Result<Vec<SamplerResult>, SampleError> {
+            let first = warm.spins.first().cloned().unwrap_or_default();
+            Ok(vec![SamplerResult {
+                energy_milli: first.first().copied().map_or(0, i64::from),
+                spins: first,
+            }])
+        }
+    }
+
+    /// The default warm stream sends a seeded job to `sample_warm` and a cold
+    /// one to `sample`.
+    #[test]
+    fn default_sample_stream_warm_routes_by_warm_start() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("rt");
+        let (job_tx, job_rx) = tokio::sync::mpsc::channel::<WarmStreamJob>(4);
+        let (res_tx, mut res_rx) = tokio::sync::mpsc::channel::<StreamResult>(4);
+        let worker = std::thread::spawn(move || {
+            WarmEcho.sample_stream_warm(job_rx, res_tx, CancelToken::default());
+        });
+
+        let energies = rt.block_on(async {
+            for (id, warm_start) in [
+                (
+                    1u8,
+                    Some(WarmStart {
+                        spins: vec![vec![-1, 1]],
+                        start_beta: None,
+                        reversal_s: None,
+                        reversal_pause_us: None,
+                    }),
+                ),
+                (2u8, None),
+            ] {
+                job_tx
+                    .send(WarmStreamJob {
+                        job: StreamJob {
+                            job_id: vec![id],
+                            graph: tiny_graph(),
+                            params: SampleParams::default(),
+                            watermark: None,
+                        },
+                        warm_start,
+                    })
+                    .await
+                    .expect("send");
+            }
+            drop(job_tx);
+            let mut energies = std::collections::HashMap::new();
+            while let Some(r) = res_rx.recv().await {
+                let StreamOutcome::Completed(Ok(reads)) = r.outcome else {
+                    panic!("both jobs complete");
+                };
+                let _ = energies.insert(r.job_id, reads.first().map(|x| x.energy_milli));
+            }
+            energies
+        });
+        worker.join().expect("worker join");
+        assert_eq!(energies.get(&vec![1u8]), Some(&Some(-1))); // sample_warm
+        assert_eq!(energies.get(&vec![2u8]), Some(&Some(0))); // sample
     }
 
     /// The advertised width defaults to the live width, so a backend that

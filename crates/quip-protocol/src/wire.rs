@@ -7,6 +7,15 @@ pub enum WireError {
     BadLength,
     /// Spin byte was neither `0x01` (+1) nor `0xFF` (−1).
     BadSpinByte(u8),
+    /// Bit-packed spins were not `ceil(num_spins / 8)` bytes long.
+    BadPackedLength {
+        /// Bytes the spin count requires.
+        expected: usize,
+        /// Bytes received.
+        got: usize,
+    },
+    /// A padding bit past the last spin of a bit-packed state was set.
+    NonZeroPadding,
 }
 
 impl std::fmt::Display for WireError {
@@ -14,6 +23,10 @@ impl std::fmt::Display for WireError {
         match self {
             Self::BadLength => write!(f, "byte length is not a multiple of 4"),
             Self::BadSpinByte(b) => write!(f, "invalid spin byte: 0x{b:02X}"),
+            Self::BadPackedLength { expected, got } => {
+                write!(f, "packed spins are {got} bytes, expected {expected}")
+            }
+            Self::NonZeroPadding => write!(f, "packed spins have a padding bit set"),
         }
     }
 }
@@ -82,6 +95,56 @@ pub fn decode_spins(bytes: &[u8]) -> Result<Vec<i8>, WireError> {
         .collect()
 }
 
+/// Encode `{-1,+1}` spins to the bit-packed form `IsingProblem.initial_spins`
+/// carries: spin `i` is bit `i % 8` of byte `i / 8`, LSB first, `1` = +1 and
+/// `0` = −1. Padding bits in the last byte are `0`.
+///
+/// The `s > 0` boundary matches [`encode_spins`], so a stray `0` maps to −1 in
+/// both forms.
+#[must_use]
+pub fn encode_spins_packed(spins: &[i8]) -> Vec<u8> {
+    let mut out = vec![0u8; spins.len().div_ceil(8)];
+    for (byte, chunk) in out.iter_mut().zip(spins.chunks(8)) {
+        for (bit, &s) in chunk.iter().enumerate() {
+            if s > 0 {
+                *byte |= 1 << bit;
+            }
+        }
+    }
+    out
+}
+
+/// Decode `num_spins` bit-packed spins (see [`encode_spins_packed`]) to
+/// `{-1,+1}` `i8` values.
+///
+/// # Errors
+/// Returns [`WireError::BadPackedLength`] unless `bytes` is exactly
+/// `ceil(num_spins / 8)` long, and [`WireError::NonZeroPadding`] when a bit past
+/// the last spin is set. Both are strict so that one state has one encoding.
+pub fn decode_spins_packed(bytes: &[u8], num_spins: usize) -> Result<Vec<i8>, WireError> {
+    let expected = num_spins.div_ceil(8);
+    if bytes.len() != expected {
+        return Err(WireError::BadPackedLength {
+            expected,
+            got: bytes.len(),
+        });
+    }
+    let tail_bits = num_spins % 8;
+    if tail_bits != 0 && bytes.last().is_some_and(|&b| b >> tail_bits != 0) {
+        return Err(WireError::NonZeroPadding);
+    }
+    Ok((0..num_spins)
+        .map(|i| {
+            let set = bytes.get(i / 8).is_some_and(|&b| b >> (i % 8) & 1 == 1);
+            if set {
+                1i8
+            } else {
+                -1i8
+            }
+        })
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -139,5 +202,52 @@ mod tests {
         assert_eq!(decode_i32_le(&[]).unwrap(), Vec::<i32>::new());
         assert_eq!(encode_spins(&[]), Vec::<u8>::new());
         assert_eq!(decode_spins(&[]).unwrap(), Vec::<i8>::new());
+        assert_eq!(encode_spins_packed(&[]), Vec::<u8>::new());
+        assert_eq!(decode_spins_packed(&[], 0).unwrap(), Vec::<i8>::new());
+    }
+
+    #[test]
+    fn packed_spins_are_lsb_first_with_zero_padding() {
+        // Spin 0 is bit 0; spins 8 and 9 land in the second byte.
+        let spins = [1, -1, -1, -1, -1, -1, -1, 1, -1, 1];
+        assert_eq!(encode_spins_packed(&spins), vec![0b1000_0001, 0b0000_0010]);
+        assert_eq!(
+            decode_spins_packed(&[0b1000_0001, 0b10], 10).unwrap(),
+            spins
+        );
+    }
+
+    #[test]
+    fn packed_spins_roundtrip_every_tail_width() {
+        for n in 0..=17usize {
+            let spins: Vec<i8> = (0..n).map(|i| if i % 3 == 0 { 1 } else { -1 }).collect();
+            assert_eq!(
+                decode_spins_packed(&encode_spins_packed(&spins), n).unwrap(),
+                spins
+            );
+        }
+    }
+
+    #[test]
+    fn packed_spins_reject_a_wrong_length_or_set_padding() {
+        assert_eq!(
+            decode_spins_packed(&[0, 0], 8),
+            Err(WireError::BadPackedLength {
+                expected: 1,
+                got: 2
+            })
+        );
+        assert_eq!(
+            decode_spins_packed(&[], 1),
+            Err(WireError::BadPackedLength {
+                expected: 1,
+                got: 0
+            })
+        );
+        // 3 spins use bits 0..=2; bit 3 is padding.
+        assert_eq!(
+            decode_spins_packed(&[0b1000], 3),
+            Err(WireError::NonZeroPadding)
+        );
     }
 }

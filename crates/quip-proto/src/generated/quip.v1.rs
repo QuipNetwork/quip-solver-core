@@ -163,6 +163,27 @@ pub struct IsingProblem {
     /// per-job override; 0 = unset
     #[prost(uint32, tag = "8")]
     pub anneal_time_us: u32,
+    /// Optional warm-start states, one entry per seeded read, best state first.
+    /// Each entry is bit-packed in topology node order: node i is bit (i % 8) of
+    /// byte (i / 8), LSB first; bit 1 = spin +1, bit 0 = spin -1. An entry is
+    /// exactly ceil(num_nodes / 8) bytes and its padding bits are 0. Empty =
+    /// unset: the solver picks its own start. A solver that does not advertise
+    /// the `initial-spins` feature ignores this field and fields 10 to 12.
+    #[prost(bytes = "vec", repeated, tag = "9")]
+    pub initial_spins: ::prost::alloc::vec::Vec<::prost::alloc::vec::Vec<u8>>,
+    /// Seeded SA: inverse temperature the anneal starts from, milli-units.
+    /// 0 = the solver picks. Ignored when initial_spins is empty.
+    #[prost(uint32, tag = "10")]
+    pub start_beta_milli: u32,
+    /// Seeded QPU: anneal fraction s the reverse anneal backs off to, in
+    /// milli-units (1..999). 0 = the solver picks. Ignored when initial_spins is
+    /// empty.
+    #[prost(uint32, tag = "11")]
+    pub reversal_s_milli: u32,
+    /// Seeded QPU: pause at the reversal point, microseconds. 0 = the solver
+    /// picks. Ignored when initial_spins is empty.
+    #[prost(uint32, tag = "12")]
+    pub reversal_pause_us: u32,
     #[prost(oneof = "ising_problem::Graph", tags = "1, 2")]
     pub graph: ::core::option::Option<ising_problem::Graph>,
 }

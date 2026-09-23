@@ -116,6 +116,42 @@ M is the solver. C is the coordinator.
 | `GetCapabilities` | C→M | Ask for the `Capabilities` message. |
 | `Capabilities` | M→C | Reply with what this solver supports. |
 
+### Warm starts
+
+An `IsingProblem` may carry start states in `initial_spins` (field 9). A
+solver that uses them lists the feature string `initial-spins` in
+`Hello.features` and `Capabilities.features`. A solver that does not list
+the feature ignores fields 9 to 12 and runs a cold start.
+
+Each `initial_spins` entry is one state, bit-packed in topology node order.
+Node `i` is bit `i % 8` of byte `i / 8`, least significant bit first. Bit
+`1` is spin +1 and bit `0` is spin –1. An entry is exactly
+`ceil(num_nodes / 8)` bytes, and its padding bits are `0`. The entries come in
+order of energy, lowest first.
+
+Three fields set where a seeded anneal starts. The value `0` in any of
+them means the solver picks.
+
+| Field | Used by | Meaning |
+|---|---|---|
+| `start_beta_milli` (10) | Seeded SA | Inverse temperature the anneal starts from, in milli-units. |
+| `reversal_s_milli` (11) | Seeded QPU (quantum processing unit) | Anneal fraction `s` that the reverse anneal backs off to, in milli-units, from 1 to 999. |
+| `reversal_pause_us` (12) | Seeded QPU | Pause at the reversal point, in microseconds. |
+
+The solver applies these rules:
+
+| Condition | Solver behavior |
+|---|---|
+| `initial_spins` is empty. | Run a cold start and ignore fields 10 to 12. |
+| The job has fewer states than `num_reads`. | Seed one read per state. Start the remaining reads cold. |
+| The job has more states than `num_reads`. | Use the first `num_reads` states. |
+| The solver takes one state per job, as the QPU does. | Use the first state. |
+| A state has the wrong length or a padding bit set. | Send `Reject` with `MALFORMED`. |
+| `reversal_s_milli` is 1000 or more. | Send `Reject` with `MALFORMED`. |
+
+The Rust session applies the two `MALFORMED` rules to every job, whether or
+not the solver lists the feature.
+
 ## 4. The Rust contract
 
 This section is the Rust binding of the language-neutral contract. This
@@ -131,11 +167,14 @@ A Rust solver supplies a `Sampler` and calls `run`.
 `SampleParams`. It returns `Result<Vec<SamplerResult>, SampleError>`.
 `sample` must not panic.
 
-The seven defaulted methods are:
+The ten defaulted methods are:
 
 | Method | Default |
 |---|---|
 | `sample_stream` | Serial loop over `sample`. Polls the cancel token at dequeue. |
+| `accepts_warm_start` | `false`. `true` adds `initial-spins` to the advertised features. |
+| `sample_warm` | Ignores the `WarmStart` and calls `sample`. |
+| `sample_stream_warm` | Serial loop over `sample_warm` for a seeded job and `sample` for a cold one. |
 | `stream_width` | `1` |
 | `declared_stream_width` | `1`. `0` declares a device-dependent width, resolved when the device opens. |
 | `utilization` | `0.0` |
@@ -153,6 +192,13 @@ The seven defaulted methods are:
 
 On `DeviceFault`, the session rejects the job, sends `Fatal` with
 `exit_code = 70`, and ends.
+
+The session calls `sample_stream_warm` instead of `sample_stream` only when
+`accepts_warm_start` returns `true`. The session then passes each job as a
+`WarmStreamJob`. Its `warm_start` holds the decoded states, cut to
+`num_reads`, and the start point. A solver that uses warm starts overrides
+`accepts_warm_start` and `sample_warm`. A solver that keeps more than one
+model in flight overrides `sample_stream_warm` instead of `sample_warm`.
 
 ## 5. Cancellation
 
@@ -191,6 +237,13 @@ A solver is conformant when both of these hold:
 
 The driver spawns any executable. The driver speaks the proto over the
 socket. This definition holds for a solver written in any language.
+
+Every session sends one job that carries `initial_spins`, and every solver
+must return a `Result` for it. A solver that lists `initial-spins` gets two
+more jobs. It must reject a state of the wrong length with `MALFORMED`. It
+must also return the planted ground-state energy of a 4096-spin ring when
+that ground state is its seed. A cold anneal of the same sweep budget leaves
+domain walls in the ring and does not reach that energy.
 
 A Rust solver repository may use this convenience form:
 

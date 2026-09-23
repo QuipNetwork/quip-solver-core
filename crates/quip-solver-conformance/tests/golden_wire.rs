@@ -104,6 +104,7 @@ fn job() -> Job {
             num_reads: 128,
             num_sweeps: 512,
             anneal_time_us: 20,
+            ..Default::default()
         }),
         provenance: Some(Provenance {
             is_pow: true,

@@ -114,6 +114,24 @@ message IsingProblem {
   uint32 num_sweeps     = 7; // per-job override; 0 = unset
   uint32 anneal_time_us = 8; // per-job override; 0 = unset
   reserved 6; // was `gates`; difficulty gates moved to SetTarget
+
+  // Optional warm-start states, one entry per seeded read, best state first.
+  // Each entry is bit-packed in topology node order: node i is bit (i % 8) of
+  // byte (i / 8), LSB first; bit 1 = spin +1, bit 0 = spin -1. An entry is
+  // exactly ceil(num_nodes / 8) bytes and its padding bits are 0. Empty =
+  // unset: the solver picks its own start. A solver that does not advertise
+  // the `initial-spins` feature ignores this field and fields 10 to 12.
+  repeated bytes initial_spins = 9;
+  // Seeded SA: inverse temperature the anneal starts from, milli-units.
+  // 0 = the solver picks. Ignored when initial_spins is empty.
+  uint32 start_beta_milli = 10;
+  // Seeded QPU: anneal fraction s the reverse anneal backs off to, in
+  // milli-units (1..999). 0 = the solver picks. Ignored when initial_spins is
+  // empty.
+  uint32 reversal_s_milli = 11;
+  // Seeded QPU: pause at the reversal point, microseconds. 0 = the solver
+  // picks. Ignored when initial_spins is empty.
+  uint32 reversal_pause_us = 12;
 }
 
 message Provenance {
