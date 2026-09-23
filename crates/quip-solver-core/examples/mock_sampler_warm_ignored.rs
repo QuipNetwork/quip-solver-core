@@ -4,7 +4,7 @@
 //! a solver that does not use the states it claims to use.
 
 use clap::Parser;
-use quip_protocol::scoring::energy_from_milli;
+use quip_protocol::scoring::energy_milli;
 use quip_solver_core::{
     run, BackendIdentity, CommonArgs, IsingGraph, SampleError, SampleParams, Sampler, SamplerResult,
 };
@@ -19,7 +19,7 @@ impl Sampler for IgnoringSampler {
         params: &SampleParams,
     ) -> Result<Vec<SamplerResult>, SampleError> {
         let spins = vec![1i8; graph.num_nodes()];
-        let energy = energy_from_milli(&spins, &graph.h_milli, &graph.j_milli, &graph.edges);
+        let energy = energy_milli(&spins, &graph.h, &graph.j, &graph.edges);
         Ok((0..params.num_reads)
             .map(|_| SamplerResult {
                 spins: spins.clone(),

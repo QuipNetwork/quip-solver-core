@@ -5,6 +5,7 @@
 //! Shutdown / idle timeout. Backends supply only a [`Sampler`].
 
 use crate::cli::CommonArgs;
+use crate::coefficient::Coefficient;
 use crate::display::{energy_units, format_duration_ms};
 use crate::job::{
     finalize_result, miner, num_sweeps_from_toml, prepare_job, status_msg, Prepared, SessionTarget,
@@ -167,9 +168,9 @@ struct CapabilitiesJson<'a> {
 /// answer available without an instance. `--capabilities` used to hardcode `1`
 /// here while the session reported the live width, so a multi-lane backend gave
 /// two different numbers for one message.
-fn advertised_capabilities<S: Sampler>(id: &BackendIdentity) -> Capabilities {
+fn advertised_capabilities<S: Sampler<C>, C: Coefficient>(id: &BackendIdentity) -> Capabilities {
     let mut caps = capabilities(id, S::declared_stream_width());
-    caps.features = advertised_features::<S>(id)
+    caps.features = advertised_features::<S, C>(id)
         .into_iter()
         .map(str::to_owned)
         .collect();
@@ -183,7 +184,7 @@ pub const INITIAL_SPINS_FEATURE: &str = "initial-spins";
 /// [`INITIAL_SPINS_FEATURE`] when [`Sampler::accepts_warm_start`] is true.
 /// Deriving it from the trait keeps the advertisement and the behaviour from
 /// drifting apart.
-fn advertised_features<S: Sampler>(id: &BackendIdentity) -> Vec<&'static str> {
+fn advertised_features<S: Sampler<C>, C: Coefficient>(id: &BackendIdentity) -> Vec<&'static str> {
     let mut features = id.features.to_vec();
     if S::accepts_warm_start() && !features.contains(&INITIAL_SPINS_FEATURE) {
         features.push(INITIAL_SPINS_FEATURE);
@@ -192,23 +193,23 @@ fn advertised_features<S: Sampler>(id: &BackendIdentity) -> Vec<&'static str> {
 }
 
 /// The receiving half matching [`JobSender`], moved into the sampler thread.
-enum JobReceiver {
-    Plain(mpsc::Receiver<StreamJob>),
-    Warm(mpsc::Receiver<WarmStreamJob>),
+enum JobReceiver<C: Coefficient> {
+    Plain(mpsc::Receiver<StreamJob<C>>),
+    Warm(mpsc::Receiver<WarmStreamJob<C>>),
 }
 
 /// The sending half of the channel into the sampler thread. Which one depends
 /// on [`Sampler::accepts_warm_start`], fixed for the session.
-enum JobSender {
+enum JobSender<C: Coefficient> {
     /// Feeds [`Sampler::sample_stream`]; warm starts are dropped.
-    Plain(mpsc::Sender<StreamJob>),
+    Plain(mpsc::Sender<StreamJob<C>>),
     /// Feeds [`Sampler::sample_stream_warm`].
-    Warm(mpsc::Sender<WarmStreamJob>),
+    Warm(mpsc::Sender<WarmStreamJob<C>>),
 }
 
-impl JobSender {
+impl<C: Coefficient> JobSender<C> {
     /// Send one job. `Err` means the sampler thread is gone.
-    async fn send(&self, job: StreamJob, warm_start: Option<WarmStart>) -> Result<(), ()> {
+    async fn send(&self, job: StreamJob<C>, warm_start: Option<WarmStart>) -> Result<(), ()> {
         match self {
             Self::Plain(tx) => tx.send(job).await.map_err(|_| ()),
             Self::Warm(tx) => tx
@@ -225,8 +226,11 @@ impl JobSender {
 /// declaration: a backend that declares `0` (width unknown until the device
 /// opens) gets the live width filled in, because the session holds the device
 /// open. The static `--capabilities` answer keeps the `0`.
-fn session_capabilities<S: Sampler>(id: &BackendIdentity, live_width: usize) -> Capabilities {
-    let mut caps = advertised_capabilities::<S>(id);
+fn session_capabilities<S: Sampler<C>, C: Coefficient>(
+    id: &BackendIdentity,
+    live_width: usize,
+) -> Capabilities {
+    let mut caps = advertised_capabilities::<S, C>(id);
     if caps.stream_width == 0 {
         caps.stream_width = u32::try_from(live_width).unwrap_or(u32::MAX);
     }
@@ -265,7 +269,7 @@ fn capabilities_json_from(c: &Capabilities) -> String {
     serde_json::to_string(&view).expect("serialize capabilities")
 }
 
-fn print_capabilities<S: Sampler>(id: &BackendIdentity) -> ExitCode {
+fn print_capabilities<S: Sampler<C>, C: Coefficient>(id: &BackendIdentity) -> ExitCode {
     // The protobuf JSON mapping, so the flag and the session reply agree on
     // field names and on every value. Both answers are built by
     // [`advertised_capabilities`].
@@ -274,7 +278,7 @@ fn print_capabilities<S: Sampler>(id: &BackendIdentity) -> ExitCode {
     // `println!` panics on a closed pipe. Reachability does not depend on the
     // output being large enough to fill the pipe buffer — `--capabilities |
     // false` closes the reader before the write happens, and that panics too.
-    let mut line = capabilities_json_from(&advertised_capabilities::<S>(id)).into_bytes();
+    let mut line = capabilities_json_from(&advertised_capabilities::<S, C>(id)).into_bytes();
     line.push(b'\n');
     write_and_map(&mut std::io::stdout(), &line)
 }
@@ -669,7 +673,7 @@ async fn outbound_writer(
     clippy::too_many_lines,
     reason = "single bidi session select-loop; splitting would obscure the control flow"
 )]
-async fn run_session<S: Sampler>(
+async fn run_session<S: Sampler<C>, C: Coefficient>(
     uri: &str,
     miner_id: &str,
     id: &BackendIdentity,
@@ -683,7 +687,7 @@ async fn run_session<S: Sampler>(
         id.backend,
         id.algorithm,
         &[JobKind::IsingSample],
-        &advertised_features::<S>(id),
+        &advertised_features::<S, C>(id),
         BackendCaps {
             max_nodes: id.max_nodes,
             max_edges: id.max_edges,
@@ -749,10 +753,10 @@ async fn run_session<S: Sampler>(
     let prefetch = width.saturating_mul(2);
     let cap = prefetch.max(8);
     let (job_tx, job_rx) = if S::accepts_warm_start() {
-        let (tx, rx) = mpsc::channel::<WarmStreamJob>(cap);
+        let (tx, rx) = mpsc::channel::<WarmStreamJob<C>>(cap);
         (JobSender::Warm(tx), JobReceiver::Warm(rx))
     } else {
-        let (tx, rx) = mpsc::channel::<StreamJob>(cap);
+        let (tx, rx) = mpsc::channel::<StreamJob<C>>(cap);
         (JobSender::Plain(tx), JobReceiver::Plain(rx))
     };
     let (res_tx, res_rx) = mpsc::channel::<StreamResult>(cap);
@@ -1093,9 +1097,12 @@ async fn run_session<S: Sampler>(
                     // except a device-dependent width declaration (0), which
                     // the open device resolves.
                     if ctrl_tx
-                        .send(miner(miner_msg::Msg::Capabilities(
-                            session_capabilities::<S>(id, width),
-                        )))
+                        .send(miner(miner_msg::Msg::Capabilities(session_capabilities::<
+                            S,
+                            C,
+                        >(
+                            id, width
+                        ))))
                         .await
                         .is_err()
                     {
@@ -1287,7 +1294,7 @@ fn map_err_to_exit(err: Box<dyn std::error::Error>, backend: &str) -> ExitCode {
 /// Prefer [`run`] from a Rust `main`. This variant exists because
 /// `std::process::ExitCode` cannot be read back into a number, which a foreign
 /// function interface has to do to return the code to its own caller.
-pub fn run_code<S: Sampler>(
+pub fn run_code<S: Sampler<C>, C: Coefficient>(
     id: BackendIdentity,
     common: &CommonArgs,
     open: impl FnOnce() -> Result<S, OpenError>,
@@ -1307,7 +1314,7 @@ pub fn run_code<S: Sampler>(
     }
 
     if common.capabilities {
-        return print_capabilities::<S>(&id);
+        return print_capabilities::<S, C>(&id);
     }
     if common.solve {
         let sampler = match open() {
@@ -1402,7 +1409,7 @@ pub fn run_code<S: Sampler>(
 /// Miner entry point. Dispatches `--capabilities`/`--solve`/`--check`/session mode.
 ///
 /// Thin wrapper over [`run_code`] for use as a Rust `main` return value.
-pub fn run<S: Sampler>(
+pub fn run<S: Sampler<C>, C: Coefficient>(
     id: BackendIdentity,
     common: &CommonArgs,
     open: impl FnOnce() -> Result<S, OpenError>,
@@ -1839,7 +1846,7 @@ mod tests {
 
         let id = test_identity();
         // What GetCapabilities replies with.
-        let reply = advertised_capabilities::<WideSampler>(&id);
+        let reply = advertised_capabilities::<WideSampler, f64>(&id);
         assert_eq!(reply.stream_width, 8);
         // What `--capabilities` prints, from the same function.
         let v: serde_json::Value =
@@ -1879,11 +1886,11 @@ mod tests {
 
         let id = test_identity();
         assert_eq!(
-            advertised_capabilities::<Warm>(&id).features,
+            advertised_capabilities::<Warm, f64>(&id).features,
             vec!["streaming", INITIAL_SPINS_FEATURE]
         );
         assert_eq!(
-            advertised_capabilities::<Cold>(&id).features,
+            advertised_capabilities::<Cold, f64>(&id).features,
             vec!["streaming"]
         );
         // An identity that already lists the feature does not get it twice.
@@ -1892,7 +1899,7 @@ mod tests {
             ..test_identity()
         };
         assert_eq!(
-            advertised_features::<Warm>(&listed),
+            advertised_features::<Warm, f64>(&listed),
             vec![INITIAL_SPINS_FEATURE]
         );
     }
@@ -1920,9 +1927,9 @@ mod tests {
         }
 
         let id = test_identity();
-        let flag = advertised_capabilities::<DeviceWidthSampler>(&id);
+        let flag = advertised_capabilities::<DeviceWidthSampler, f64>(&id);
         assert_eq!(flag.stream_width, 0);
-        let reply = session_capabilities::<DeviceWidthSampler>(&id, 6);
+        let reply = session_capabilities::<DeviceWidthSampler, f64>(&id, 6);
         assert_eq!(reply.stream_width, 6);
     }
 

@@ -23,13 +23,11 @@ pub fn default_ising_beta_range(graph: &IsingGraph) -> (f64, f64) {
     let mut sum_abs = vec![0.0f64; n];
     let mut min_abs: Vec<Option<f64>> = vec![None; n];
 
-    for (i, &milli) in graph.h_milli.iter().enumerate() {
-        // Same quotient `IsingGraph` stored before it held milli integers, so
-        // the ladder stays bit-identical.
-        let a = (f64::from(milli) / 1000.0).abs();
+    for (i, &hi) in graph.h.iter().enumerate() {
+        let a = hi.abs();
         #[expect(
             clippy::indexing_slicing,
-            reason = "i comes from enumerate over h_milli, which has length n == sum_abs/min_abs len"
+            reason = "i comes from enumerate over h, which has length n == sum_abs/min_abs len"
         )]
         {
             sum_abs[i] += a;
@@ -42,11 +40,7 @@ pub fn default_ising_beta_range(graph: &IsingGraph) -> (f64, f64) {
         if u >= n || v >= n {
             continue;
         }
-        let a = graph
-            .j_milli
-            .get(k)
-            .map_or(0.0, |&v| f64::from(v) / 1000.0)
-            .abs();
+        let a = graph.j.get(k).copied().unwrap_or(0.0).abs();
         #[expect(
             clippy::indexing_slicing,
             reason = "u and v checked against n; sum_abs/min_abs length is n"
@@ -135,7 +129,7 @@ mod tests {
     #[test]
     fn all_zero_biases_return_fallback_beta_range() {
         // n > 0 but every |h| and |J| is 0, so min_gaps is empty.
-        let g = IsingGraph::new(vec![0, 0], vec![0], vec![(0, 1)]);
+        let g = IsingGraph::new(vec![0.0, 0.0], vec![0.0], vec![(0, 1)]);
         assert_eq!(default_ising_beta_range(&g), (0.1, 1.0));
     }
 
@@ -146,7 +140,7 @@ mod tests {
         // isolated zero-bias node has max_eff == 0.0 and empty min_gaps, so
         // the empty-min_gaps return fires first. There is no IsingGraph that
         // reaches hot_beta = 1.0 from that arm.
-        let g = IsingGraph::new(vec![0], vec![], vec![]);
+        let g = IsingGraph::new(vec![0.0], vec![], vec![]);
         assert_eq!(default_ising_beta_range(&g), (0.1, 1.0));
     }
 
@@ -155,7 +149,7 @@ mod tests {
         // Two nodes, one coupling. Unclamped cold is ln(200)/(2J) and hot is
         // ln(2)/(2J); cold is already larger. The return still has to satisfy
         // cold >= hot, which is the post-condition of cold_beta.max(hot_beta).
-        let g = IsingGraph::new(vec![0, 0], vec![1000], vec![(0, 1)]);
+        let g = IsingGraph::new(vec![0.0, 0.0], vec![1.0], vec![(0, 1)]);
         let (hot, cold) = default_ising_beta_range(&g);
         assert_ne!(
             (hot, cold),
@@ -201,7 +195,6 @@ mod tests {
             assert!((f64::from(f32s[0]) - 0.1).abs() < 1e-5);
         }
     }
-
     /// `(hot, cold)` as `f64` bits for each entry of `GOLDEN_GRAPHS`, captured
     /// from 0.0.2-rc1, where `IsingGraph` stored `v / 1000.0` floats.
     const PINNED_LADDERS: [(u64, u64); 9] = [
@@ -221,7 +214,8 @@ mod tests {
         for ((section, index), (hot_bits, cold_bits)) in
             crate::ising::GOLDEN_GRAPHS.into_iter().zip(PINNED_LADDERS)
         {
-            let (hot, cold) = default_ising_beta_range(&crate::ising::golden_graph(section, index));
+            let (hot, cold) =
+                default_ising_beta_range(&crate::ising::golden_graph::<f64>(section, index));
             assert_eq!(
                 (hot.to_bits(), cold.to_bits()),
                 (hot_bits, cold_bits),

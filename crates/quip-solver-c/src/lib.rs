@@ -309,11 +309,11 @@ impl CSampler {
     /// and is the difference between a rejected job and a C solver reading past
     /// the end of an array it was told the length of.
     fn flatten_edges(graph: &IsingGraph) -> Result<Vec<u32>, String> {
-        if graph.j_milli.len() != graph.edges.len() {
+        if graph.j.len() != graph.edges.len() {
             return Err(format!(
                 "graph carries {} couplings for {} edges; the C ABI describes both with one \
                  num_edges",
-                graph.j_milli.len(),
+                graph.j.len(),
                 graph.edges.len()
             ));
         }
@@ -324,7 +324,7 @@ impl CSampler {
             ));
         };
 
-        let num_nodes = graph.num_nodes();
+        let num_nodes = graph.h.len();
         let mut flat = Vec::with_capacity(flat_len);
         for &(u, v) in &graph.edges {
             for endpoint in [u, v] {
@@ -364,17 +364,13 @@ impl Sampler for CSampler {
             }
         };
 
-        // The C ABI carries unit floats. Build them once per job. They, and
-        // `edges`, live until the callback returns.
-        let h = graph.h_f64();
-        let j = graph.j_f64();
         // Every length below comes from an array that is actually passed, so
         // the `2 * num_edges` and `num_edges` reads the header promises the C
         // callback are both in bounds.
         let c_graph = QuipIsingGraph {
-            h: h.as_ptr(),
-            num_nodes: h.len(),
-            j: j.as_ptr(),
+            h: graph.h.as_ptr(),
+            num_nodes: graph.h.len(),
+            j: graph.j.as_ptr(),
             num_edges: graph.edges.len(),
             edges: edges.as_ptr(),
         };
@@ -395,7 +391,7 @@ impl Sampler for CSampler {
             results: Vec::with_capacity(params.num_reads),
         };
 
-        // SAFETY: both structs and the `h`, `j`, and `edges` buffers they point into live
+        // SAFETY: both structs and the `edges` buffer they point into live
         // until this call returns, `emit_solution` matches QuipEmitFn, and
         // `sink` outlives the callback.
         let code = unsafe {
@@ -605,7 +601,6 @@ mod tests {
     use super::*;
     use std::ptr;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::sync::Mutex;
 
     /// A value no scorer produces, so a guard that returns without writing is
     /// distinguishable from one that wrote a real zero.
@@ -841,7 +836,7 @@ mod tests {
         // Two couplings, one edge: the old code advertised num_edges = 2 while
         // the flat array held 2 entries, so a callback reading 2 * num_edges
         // ran four entries off the end.
-        let graph = IsingGraph::new(vec![0, 0], vec![500, 250], vec![(0, 1)]);
+        let graph = IsingGraph::new(vec![0.0, 0.0], vec![0.5, 0.25], vec![(0, 1)]);
         let err = sampler
             .sample(&graph, &SampleParams::default())
             .expect_err("a mismatched graph must be rejected");
@@ -854,7 +849,7 @@ mod tests {
 
     #[test]
     fn an_out_of_range_endpoint_is_rejected() {
-        let graph = IsingGraph::new(vec![0, 0], vec![500], vec![(0, 7)]);
+        let graph = IsingGraph::new(vec![0.0, 0.0], vec![0.5], vec![(0, 7)]);
         let why = CSampler::flatten_edges(&graph).expect_err("endpoint 7 has no node");
         assert!(why.contains("out of range"), "{why}");
     }
@@ -894,7 +889,7 @@ mod tests {
             sample: inspecting_sampler,
             user_data: ptr::null_mut(),
         };
-        let graph = IsingGraph::new(vec![0, 0, 0], vec![500, 250], vec![(0, 1), (1, 2)]);
+        let graph = IsingGraph::new(vec![0.0, 0.0, 0.0], vec![0.5, 0.25], vec![(0, 1), (1, 2)]);
         let results = sampler
             .sample(&graph, &SampleParams::default())
             .expect("a well-formed graph is accepted");
@@ -909,7 +904,7 @@ mod tests {
 
     #[test]
     fn an_edgeless_graph_crosses_the_boundary_as_zero_edges() {
-        let graph = IsingGraph::new(vec![1000, -1000], Vec::new(), Vec::new());
+        let graph = IsingGraph::new(vec![1.0, -1.0], Vec::new(), Vec::new());
         let flat = CSampler::flatten_edges(&graph).expect("no edges is well formed");
         assert!(flat.is_empty());
     }
@@ -982,54 +977,5 @@ mod tests {
             reads_solution_max_factor: 0,
             reads_solution_floor_factor: 0,
         }
-    }
-
-    /// Every `h` then `j` value [`coefficient_sampler`] read.
-    static SEEN_COEFFICIENTS: Mutex<Vec<f64>> = Mutex::new(Vec::new());
-
-    /// Reads the `h` and `j` arrays the header promises.
-    ///
-    /// # Safety
-    ///
-    /// Matches [`QuipSampleFn`]: `graph` points at a live [`QuipIsingGraph`]
-    /// whose `h` holds `num_nodes` entries and `j` holds `num_edges`.
-    unsafe extern "C" fn coefficient_sampler(
-        _user_data: *mut core::ffi::c_void,
-        graph: *const QuipIsingGraph,
-        _params: *const QuipSampleParams,
-        _emit: QuipEmitFn,
-        _sink: *mut core::ffi::c_void,
-    ) -> i32 {
-        // SAFETY: the caller passes a live struct for the duration of the call.
-        let graph = unsafe { &*graph };
-        // SAFETY: the header promises `num_nodes` and `num_edges` readable
-        // entries, which is the claim this test checks.
-        let h = unsafe { borrow_or_empty(graph.h, graph.num_nodes) };
-        // SAFETY: as above.
-        let j = unsafe { borrow_or_empty(graph.j, graph.num_edges) };
-        if let Ok(mut seen) = SEEN_COEFFICIENTS.lock() {
-            *seen = h.iter().chain(j).copied().collect();
-        }
-        QUIP_SAMPLE_OK
-    }
-
-    #[test]
-    fn the_callback_reads_unit_float_coefficients() {
-        let sampler = CSampler {
-            sample: coefficient_sampler,
-            user_data: ptr::null_mut(),
-        };
-        let graph = IsingGraph::new(
-            vec![1, -1000, i32::MAX],
-            vec![500, -1],
-            vec![(0, 1), (1, 2)],
-        );
-        let _ = sampler
-            .sample(&graph, &SampleParams::default())
-            .expect("a well-formed graph is accepted");
-        assert_eq!(
-            *SEEN_COEFFICIENTS.lock().unwrap(),
-            vec![0.001, -1.0, 2_147_483.647, 0.5, -0.001]
-        );
     }
 }

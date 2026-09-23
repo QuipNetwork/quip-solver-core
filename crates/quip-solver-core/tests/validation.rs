@@ -52,7 +52,7 @@ impl Sampler for RecordingSampler {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(params.clone());
         Ok(vec![
             SamplerResult {
-                spins: vec![1i8; graph.num_nodes()],
+                spins: vec![1i8; graph.h.len()],
                 energy_milli: 0,
             };
             params.num_reads

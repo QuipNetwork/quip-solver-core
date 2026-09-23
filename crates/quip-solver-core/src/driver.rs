@@ -5,6 +5,7 @@
 //! `quip-miner-exec` already sends to an external solver, so the two are duals
 //! and the schema stays single.
 
+use crate::coefficient::Coefficient;
 use crate::error::SampleError;
 use crate::ising::{IsingGraph, SampleParams, SamplerResult};
 use crate::Sampler;
@@ -75,29 +76,16 @@ impl From<SampleError> for SolveError {
     }
 }
 
-/// Convert `--solve` coefficients to the milli integers `IsingGraph` holds.
-///
-/// Rounds to the nearest milli, ties away from zero, which is the rule
-/// `quip_protocol::scoring::energy_milli` applies to every coefficient it
-/// reads. `name` labels the field in the error.
-fn to_milli(name: &str, values: &[f64]) -> Result<Vec<i32>, SolveError> {
+fn convert_units<C: Coefficient>(name: &str, values: &[f64]) -> Result<Vec<C>, SolveError> {
     values
         .iter()
         .enumerate()
-        .map(|(i, &v)| {
-            let milli = (v * 1000.0).round();
-            // A NaN fails both comparisons, and an infinity fails one.
-            if milli >= f64::from(i32::MIN) && milli <= f64::from(i32::MAX) {
-                #[expect(
-                    clippy::cast_possible_truncation,
-                    reason = "range-checked against i32 above, and round() left no fraction"
-                )]
-                Ok(milli as i32)
-            } else {
-                Err(SolveError::Malformed(format!(
-                    "{name}[{i}] = {v} is outside the i32 milli range"
-                )))
-            }
+        .map(|(index, &unit)| {
+            C::from_unit(unit).ok_or_else(|| {
+                SolveError::Malformed(format!(
+                    "{name}[{index}] cannot be represented by this coefficient type"
+                ))
+            })
         })
         .collect()
 }
@@ -106,16 +94,18 @@ fn to_milli(name: &str, values: &[f64]) -> Result<Vec<i32>, SolveError> {
 ///
 /// # Errors
 ///
-/// Returns [`SolveError::Malformed`] when `input` is not valid problem JSON,
-/// does not describe a coherent problem, or holds a coefficient outside the
-/// `i32` milli range, and [`SolveError::Sample`] when the sampler cannot
-/// complete the job. A caller maps each to its own exit code;
+/// Returns [`SolveError::Malformed`] when `input` is not valid problem JSON or
+/// does not describe a coherent problem, and [`SolveError::Sample`] when the
+/// sampler cannot complete the job. A caller maps each to its own exit code;
 /// only the latter is a device condition.
 ///
 /// # Panics
 ///
 /// Never. Serializing `Vec<SolutionJson>` cannot fail.
-pub fn solve<S: Sampler>(sampler: &S, input: &[u8]) -> Result<Vec<u8>, SolveError> {
+pub fn solve<S: Sampler<C>, C: Coefficient>(
+    sampler: &S,
+    input: &[u8],
+) -> Result<Vec<u8>, SolveError> {
     let p: ProblemJson =
         serde_json::from_slice(input).map_err(|e| SolveError::Malformed(e.to_string()))?;
 
@@ -126,11 +116,6 @@ pub fn solve<S: Sampler>(sampler: &S, input: &[u8]) -> Result<Vec<u8>, SolveErro
     // node, and a sampler behind the C ABI reads out of bounds when they do not
     // (see `job::validate_shape`).
     crate::job::validate_shape(p.h.len(), p.j.len(), &p.edges).map_err(SolveError::Malformed)?;
-
-    // The schema carries unit floats for every language. The graph holds the
-    // wire's milli integers.
-    let h_milli = to_milli("h", &p.h)?;
-    let j_milli = to_milli("j", &p.j)?;
 
     // A read count of zero asks for no solutions and gets an empty array back,
     // which is indistinguishable from a sampler that failed to find any.
@@ -154,7 +139,11 @@ pub fn solve<S: Sampler>(sampler: &S, input: &[u8]) -> Result<Vec<u8>, SolveErro
         ));
     }
 
-    let graph = IsingGraph::new(h_milli, j_milli, p.edges);
+    let graph = IsingGraph::<C> {
+        h: convert_units::<C>("h", &p.h)?,
+        j: convert_units::<C>("j", &p.j)?,
+        edges: p.edges,
+    };
     let params = SampleParams {
         num_reads: p.num_reads,
         num_sweeps: p.num_sweeps,
@@ -179,7 +168,7 @@ pub fn solve<S: Sampler>(sampler: &S, input: &[u8]) -> Result<Vec<u8>, SolveErro
 
 #[cfg(test)]
 mod tests {
-    use super::{solve, to_milli, SolveError};
+    use super::{solve, SolveError};
     use crate::error::SampleError;
     use crate::ising::{IsingGraph, SampleParams, SamplerResult};
     use crate::Sampler;
@@ -203,78 +192,5 @@ mod tests {
             matches!(err, SolveError::Malformed(_)),
             "a malformed problem document is a caller error, not {err:?}"
         );
-    }
-
-    /// Records the milli coefficients it was handed, and returns no reads.
-    #[derive(Default)]
-    struct RecordingSampler(std::sync::Mutex<Option<(Vec<i32>, Vec<i32>)>>);
-
-    impl Sampler for RecordingSampler {
-        fn sample(
-            &self,
-            graph: &IsingGraph,
-            _params: &SampleParams,
-        ) -> Result<Vec<SamplerResult>, SampleError> {
-            *self.0.lock().unwrap() = Some((graph.h_milli.clone(), graph.j_milli.clone()));
-            Ok(vec![])
-        }
-    }
-
-    fn problem(h: &str, j: &str, edges: &str) -> Vec<u8> {
-        format!(
-            r#"{{"h":{h},"j":{j},"edges":{edges},"num_reads":1,"num_sweeps":1,
-                "sweeps_per_beta":1,"beta_range":null,"seed":0}}"#
-        )
-        .into_bytes()
-    }
-
-    #[test]
-    fn coefficients_round_to_the_nearest_milli() {
-        let sampler = RecordingSampler::default();
-        let _ = solve(
-            &sampler,
-            &problem(
-                "[0.0004, 0.0005, -0.0005, 0.0015, 1.0, -2147483.648]",
-                "[2147483.647]",
-                "[[0, 1]]",
-            ),
-        )
-        .expect("every value is inside the i32 milli range");
-        assert_eq!(
-            sampler.0.lock().unwrap().take(),
-            Some((vec![0, 1, -1, 2, 1000, i32::MIN], vec![i32::MAX]))
-        );
-    }
-
-    #[test]
-    fn a_coefficient_outside_the_i32_milli_range_is_malformed() {
-        for (h, j) in [
-            ("[2147483.648, 0]", "[0]"),
-            ("[0, 0]", "[-2147483.649]"),
-            ("[1e300, 0]", "[0]"),
-        ] {
-            let sampler = RecordingSampler::default();
-            let err = solve(&sampler, &problem(h, j, "[[0, 1]]"))
-                .expect_err("out-of-range coefficient must fail");
-            assert!(
-                matches!(&err, SolveError::Malformed(why) if why.contains("i32 milli range")),
-                "h={h} j={j}: {err:?}"
-            );
-            assert!(
-                sampler.0.lock().unwrap().is_none(),
-                "h={h} j={j} reached the sampler"
-            );
-        }
-    }
-
-    #[test]
-    fn a_non_finite_coefficient_is_malformed() {
-        // JSON cannot spell these, so call the conversion directly.
-        for v in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-            assert!(
-                matches!(to_milli("h", &[v]), Err(SolveError::Malformed(_))),
-                "{v}"
-            );
-        }
     }
 }

@@ -2,7 +2,7 @@
 //!
 //! Built from the base [`crate::ising::IsingGraph`] by the GPU backends.
 //! Couplings are stored once per directed half-edge so local-field walks are
-//! O(degree). Value dtype is f32 for kernel dynamics. Milli copies of h/j are
+//! O(degree). Value dtype is f32 for kernel dynamics; f64 copies of `h`/`j` are
 //! kept for consensus scoring.
 
 use crate::ising::IsingGraph;
@@ -10,10 +10,10 @@ use crate::ising::IsingGraph;
 /// Ising problem with CSR adjacency plus f32 upload buffers.
 #[derive(Clone, Debug)]
 pub struct CsrGraph {
-    /// Linear biases in milli units, for consensus scoring.
-    pub h_milli: Vec<i32>,
-    /// Couplings in milli units aligned with `edges`, for consensus scoring.
-    pub j_milli: Vec<i32>,
+    /// Linear biases (f64, for consensus scoring).
+    pub h: Vec<f64>,
+    /// Couplings aligned with `edges` (f64, for consensus scoring).
+    pub j: Vec<f64>,
     /// Undirected edge list `(u, v)` in received order.
     pub edges: Vec<(usize, usize)>,
     /// CSR row pointers, length `N + 1`.
@@ -29,7 +29,7 @@ pub struct CsrGraph {
 impl CsrGraph {
     /// Build CSR adjacency from the base problem.
     ///
-    /// Edges whose endpoints are out of range for `h_milli.len()` are skipped (same
+    /// Edges whose endpoints are out of range for `h.len()` are skipped (same
     /// defensive posture as `energy_milli`). Self-loops `(u, u)` are skipped:
     /// a self-loop in a neighbor row would inject a spurious self-force into
     /// that node's local field, while `energy_milli` scores the loop as an
@@ -38,13 +38,17 @@ impl CsrGraph {
     /// are treated as 0 for the missing entries.
     #[must_use]
     pub fn from_base(g: &IsingGraph) -> Self {
-        let n = g.num_nodes();
+        let n = g.h.len();
         let mut adj: Vec<Vec<(usize, f32)>> = vec![Vec::new(); n];
         for (k, &(u, v)) in g.edges.iter().enumerate() {
             if u >= n || v >= n || u == v {
                 continue;
             }
-            let coup = milli_to_f32(g.j_milli.get(k).copied().unwrap_or(0));
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "kernel upload path intentionally narrows coupling f64 to f32"
+            )]
+            let coup = g.j.get(k).copied().unwrap_or(0.0) as f32;
             #[expect(
                 clippy::indexing_slicing,
                 reason = "u and v checked against n; adj length is n"
@@ -79,10 +83,14 @@ impl CsrGraph {
             }
         }
 
-        let h_f32: Vec<f32> = g.h_milli.iter().map(|&v| milli_to_f32(v)).collect();
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "kernel upload path intentionally narrows bias f64 to f32"
+        )]
+        let h_f32: Vec<f32> = g.h.iter().map(|&v| v as f32).collect();
         Self {
-            h_milli: g.h_milli.clone(),
-            j_milli: g.j_milli.clone(),
+            h: g.h.clone(),
+            j: g.j.clone(),
             edges: g.edges.clone(),
             row_ptr,
             col_ind,
@@ -91,10 +99,10 @@ impl CsrGraph {
         }
     }
 
-    /// Number of variables (length of `h_milli`).
+    /// Number of variables (length of `h`).
     #[must_use]
     pub fn num_nodes(&self) -> usize {
-        self.h_milli.len()
+        self.h.len()
     }
 
     /// Number of directed half-edges in the CSR (`col_ind` length).
@@ -104,24 +112,13 @@ impl CsrGraph {
     }
 }
 
-/// Kernel upload value of one milli coefficient: `v / 1000` rounded to `f64`,
-/// then to `f32`. The two roundings match the pre-milli `IsingGraph`, which
-/// stored the `f64` quotient that this module narrowed.
-#[expect(
-    clippy::cast_possible_truncation,
-    reason = "kernel upload path intentionally narrows f64 to f32"
-)]
-fn milli_to_f32(v: i32) -> f32 {
-    (f64::from(v) / 1000.0) as f32
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn csr_symmetric_two_node() {
-        let g = CsrGraph::from_base(&IsingGraph::new(vec![1000, -1000], vec![500], vec![(0, 1)]));
+        let g = CsrGraph::from_base(&IsingGraph::new(vec![1.0, -1.0], vec![0.5], vec![(0, 1)]));
         assert_eq!(g.row_ptr, vec![0, 1, 2]);
         assert_eq!(g.col_ind, vec![1, 0]);
         assert_eq!(g.j_csr, vec![0.5, 0.5]);
@@ -142,8 +139,8 @@ mod tests {
     #[test]
     fn csr_drops_self_loops() {
         let g = CsrGraph::from_base(&IsingGraph::new(
-            vec![500, -250, 0],
-            vec![2000, -1000, 750],
+            vec![0.5, -0.25, 0.0],
+            vec![2.0, -1.0, 0.75],
             vec![(0, 0), (0, 1), (1, 2)],
         ));
         assert_eq!(g.row_ptr, vec![0, 1, 3, 4]);
@@ -156,13 +153,12 @@ mod tests {
     /// a row containing the node itself.
     #[test]
     fn csr_pure_self_loop_yields_empty_row() {
-        let g = CsrGraph::from_base(&IsingGraph::new(vec![0], vec![3000], vec![(0, 0)]));
+        let g = CsrGraph::from_base(&IsingGraph::new(vec![0.0], vec![3.0], vec![(0, 0)]));
         assert_eq!(g.row_ptr, vec![0, 0]);
         assert!(g.col_ind.is_empty());
         assert!(g.j_csr.is_empty());
         assert_eq!(g.nnz(), 0);
     }
-
     /// FNV-1a over `j_csr` then `h_f32`, each `f32` widened to a `u64` of
     /// its bits and hashed little-endian.
     fn upload_digest(g: &CsrGraph) -> u64 {
@@ -199,7 +195,7 @@ mod tests {
     fn upload_buffers_are_bit_identical_to_the_f64_graph() {
         for ((section, index), want) in crate::ising::GOLDEN_GRAPHS.into_iter().zip(PINNED_UPLOADS)
         {
-            let g = CsrGraph::from_base(&crate::ising::golden_graph(section, index));
+            let g = CsrGraph::from_base(&crate::ising::golden_graph::<f64>(section, index));
             assert_eq!(upload_digest(&g), want, "{section}[{index}]");
         }
     }

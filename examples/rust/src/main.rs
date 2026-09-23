@@ -11,7 +11,7 @@
 use clap::Parser;
 use quip_solver_core::adapt::AdaptBounds;
 // Reached through quip-solver-core rather than a second dependency.
-use quip_solver_core::quip_protocol::scoring::energy_from_milli;
+use quip_solver_core::quip_protocol::scoring::energy_milli;
 use quip_solver_core::{
     run, BackendIdentity, CommonArgs, IsingGraph, SampleError, SampleParams, Sampler, SamplerResult,
 };
@@ -41,7 +41,7 @@ impl Sampler for MockSampler {
         let spins = vec![1i8; graph.num_nodes()];
         // Score with the shipped scorer, never a local reimplementation: the
         // network recomputes this and rejects a solution that disagrees.
-        let energy = energy_from_milli(&spins, &graph.h_milli, &graph.j_milli, &graph.edges);
+        let energy = energy_milli(&spins, &graph.h, &graph.j, &graph.edges);
         Ok((0..params.num_reads)
             .map(|_| SamplerResult {
                 spins: spins.clone(),

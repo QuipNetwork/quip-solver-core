@@ -4,7 +4,7 @@
 //! grade.
 
 use clap::Parser;
-use quip_protocol::scoring::energy_from_milli;
+use quip_protocol::scoring::energy_milli;
 use quip_solver_core::{
     run, BackendIdentity, CommonArgs, IsingGraph, SampleError, SampleParams, Sampler,
     SamplerResult, WarmStart,
@@ -20,7 +20,7 @@ impl Sampler for WarmSampler {
         params: &SampleParams,
     ) -> Result<Vec<SamplerResult>, SampleError> {
         let spins = vec![1i8; graph.num_nodes()];
-        let energy = energy_from_milli(&spins, &graph.h_milli, &graph.j_milli, &graph.edges);
+        let energy = energy_milli(&spins, &graph.h, &graph.j, &graph.edges);
         Ok((0..params.num_reads)
             .map(|_| SamplerResult {
                 spins: spins.clone(),
@@ -41,8 +41,7 @@ impl Sampler for WarmSampler {
     ) -> Result<Vec<SamplerResult>, SampleError> {
         let mut reads = self.sample(graph, params)?;
         for (read, seed) in reads.iter_mut().zip(&warm.spins) {
-            read.energy_milli =
-                energy_from_milli(seed, &graph.h_milli, &graph.j_milli, &graph.edges);
+            read.energy_milli = energy_milli(seed, &graph.h, &graph.j, &graph.edges);
             read.spins.clone_from(seed);
         }
         Ok(reads)

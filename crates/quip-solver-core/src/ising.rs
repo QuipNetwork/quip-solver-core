@@ -1,8 +1,10 @@
 //! Base Ising problem type and per-job sampling knobs, shared by all backends.
 //!
-//! The base [`IsingGraph`] holds the wire's `(h, j, edges)` in integer milli
-//! units. Backends derive their own representation from it: the CPU miner
-//! builds an adjacency list, the GPU miners build [`crate::csr::CsrGraph`].
+//! The base [`IsingGraph`] holds the wire-parsed `(h, j, edges)`. Backends
+//! derive their own representation from it: the CPU miner builds an adjacency
+//! list, the GPU miners build [`crate::csr::CsrGraph`].
+
+use crate::coefficient::Coefficient;
 
 /// Sampling algorithm selected by the binary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -77,75 +79,47 @@ pub struct SamplerResult {
     pub energy_milli: i64,
 }
 
-/// Wire-parsed Ising problem: dense biases, flat couplings, and edge list.
-///
-/// Coefficients stay in the wire's integer milli units, where 1000 is 1.0.
-/// Score a read with `quip_protocol::scoring::energy_from_milli`.
+/// Wire-parsed Ising problem in the sampler's coefficient representation.
 #[derive(Clone, Debug)]
-pub struct IsingGraph {
-    /// Linear biases in milli units, one per variable.
-    pub h_milli: Vec<i32>,
-    /// Couplings in milli units, aligned with `edges`.
-    pub j_milli: Vec<i32>,
+pub struct IsingGraph<C: Coefficient = f64> {
+    /// Linear biases, one per variable, in the sampler's coefficient type.
+    pub h: Vec<C>,
+    /// Couplings aligned with `edges`, in the sampler's coefficient type.
+    pub j: Vec<C>,
     /// Undirected edge list `(u, v)` in received order.
     pub edges: Vec<(usize, usize)>,
 }
 
 impl IsingGraph {
-    /// Store flat milli `h` / `j` and the edge list as the base problem.
+    /// Store flat `h` / `j` / edge lists as the base problem.
     #[must_use]
-    pub fn new(h_milli: Vec<i32>, j_milli: Vec<i32>, edges: Vec<(usize, usize)>) -> Self {
-        Self {
-            h_milli,
-            j_milli,
-            edges,
-        }
+    pub fn new(h: Vec<f64>, j: Vec<f64>, edges: Vec<(usize, usize)>) -> Self {
+        Self { h, j, edges }
     }
+}
 
-    /// Number of variables (length of `h_milli`).
+impl<C: Coefficient> IsingGraph<C> {
+    /// Number of variables, equal to the bias count.
     #[must_use]
     pub fn num_nodes(&self) -> usize {
-        self.h_milli.len()
-    }
-
-    /// Biases as unit floats, `v / 1000.0` per entry. Allocates.
-    ///
-    /// For a surface that carries floats to another language, such as the C
-    /// ABI or `--solve` JSON. Do not call it on the job path.
-    #[must_use]
-    pub fn h_f64(&self) -> Vec<f64> {
-        milli_to_f64(&self.h_milli)
-    }
-
-    /// Couplings as unit floats, `v / 1000.0` per entry. Allocates.
-    ///
-    /// For a surface that carries floats to another language, such as the C
-    /// ABI or `--solve` JSON. Do not call it on the job path.
-    #[must_use]
-    pub fn j_f64(&self) -> Vec<f64> {
-        milli_to_f64(&self.j_milli)
+        self.h.len()
     }
 }
 
-fn milli_to_f64(milli: &[i32]) -> Vec<f64> {
-    milli.iter().map(|&v| f64::from(v) / 1000.0).collect()
-}
-
-/// One graph from the `energy` or `ising` section of `golden_vectors.json`,
-/// built the way `parse_ising` builds a job's graph.
+/// Read one pinned graph from the shared conformance fixtures.
 #[cfg(test)]
-pub(crate) fn golden_graph(section: &str, index: usize) -> IsingGraph {
+pub(crate) fn golden_graph<C: Coefficient>(section: &str, index: usize) -> IsingGraph<C> {
     let golden: serde_json::Value =
         serde_json::from_str(quip_solver_conformance::GOLDEN_VECTORS).expect("golden JSON");
     let case = golden
         .pointer(&format!("/{section}/{index}"))
-        .expect("golden case exists");
-    let milli = |key: &str| -> Vec<i32> {
+        .expect("golden case");
+    let coefficients = |key: &str| {
         case.get(key)
             .and_then(serde_json::Value::as_array)
             .expect("milli array")
             .iter()
-            .map(|v| i32::try_from(v.as_i64().expect("integer")).expect("i32 milli"))
+            .map(|v| C::from_milli(i32::try_from(v.as_i64().expect("integer")).expect("i32 milli")))
             .collect()
     };
     let edges = case
@@ -153,10 +127,10 @@ pub(crate) fn golden_graph(section: &str, index: usize) -> IsingGraph {
         .and_then(serde_json::Value::as_array)
         .expect("edges array")
         .iter()
-        .map(|e| {
-            let end = |i: usize| {
+        .map(|edge| {
+            let end = |i| {
                 usize::try_from(
-                    e.get(i)
+                    edge.get(i)
                         .and_then(serde_json::Value::as_u64)
                         .expect("endpoint"),
                 )
@@ -165,7 +139,11 @@ pub(crate) fn golden_graph(section: &str, index: usize) -> IsingGraph {
             (end(0), end(1))
         })
         .collect();
-    IsingGraph::new(milli("h_milli"), milli("j_milli"), edges)
+    IsingGraph {
+        h: coefficients("h_milli"),
+        j: coefficients("j_milli"),
+        edges,
+    }
 }
 
 /// Every golden graph the pinned beta and CSR tests cover, as
@@ -185,27 +163,15 @@ pub(crate) const GOLDEN_GRAPHS: [(&str, usize); 9] = [
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
+    use super::IsingGraph;
     #[test]
     fn num_nodes_counts_biases() {
-        let g = IsingGraph::new(
-            vec![1000, -500, 0, 250],
-            vec![1000, -1000, -1000, 1000],
+        let graph = IsingGraph::new(
+            vec![1.0, -0.5, 0.0, 0.25],
+            vec![1.0, -1.0, -1.0, 1.0],
             vec![(0, 1), (1, 2), (2, 3), (0, 3)],
         );
-        assert_eq!(g.num_nodes(), 4);
-        assert_eq!(g.edges.len(), 4);
-    }
-
-    #[test]
-    fn float_accessors_divide_each_entry_by_1000() {
-        let g = IsingGraph::new(
-            vec![1, -1000, i32::MAX],
-            vec![500, i32::MIN],
-            vec![(0, 1), (1, 2)],
-        );
-        assert_eq!(g.h_f64(), vec![0.001, -1.0, 2_147_483.647]);
-        assert_eq!(g.j_f64(), vec![0.5, -2_147_483.648]);
+        assert_eq!(graph.num_nodes(), 4);
+        assert_eq!(graph.edges.len(), 4);
     }
 }

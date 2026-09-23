@@ -2,6 +2,7 @@
 //! `Result`/`Reject`.
 
 use crate::adapt::adapt_params;
+use crate::coefficient::Coefficient;
 use crate::ising::{IsingGraph, SampleParams, WarmStart};
 use crate::session::BackendIdentity;
 use crate::Sampler;
@@ -279,12 +280,12 @@ pub(crate) fn validate_shape(
 }
 
 /// Validate wire fields and build the base Ising graph, or a reject reason.
-fn parse_ising(
+fn parse_ising<C: Coefficient>(
     ising: &IsingProblem,
     max_nodes: u32,
     max_edges: u32,
     cache: Option<&TopologyCache>,
-) -> Result<IsingGraph, RejectReason> {
+) -> Result<IsingGraph<C>, RejectReason> {
     let h_milli = decode_i32_le(&ising.h_milli_le32).map_err(|_| RejectReason::Malformed)?;
     let j_milli = decode_i32_le(&ising.j_milli_le32).map_err(|_| RejectReason::Malformed)?;
     let edges = resolve_edges(ising, cache)?;
@@ -316,7 +317,11 @@ fn parse_ising(
         return Err(RejectReason::TooLarge);
     }
 
-    Ok(IsingGraph::new(h_milli, j_milli, edges))
+    Ok(IsingGraph {
+        h: h_milli.into_iter().map(C::from_milli).collect(),
+        j: j_milli.into_iter().map(C::from_milli).collect(),
+        edges,
+    })
 }
 
 /// Validate the warm-start fields (`IsingProblem` 9 to 12) against a job of
@@ -404,13 +409,13 @@ pub(crate) fn num_sweeps_from_toml(backend_toml: &str) -> usize {
 }
 
 /// A validated job ready to sample, or an immediate reject reply.
-pub(crate) enum Prepared {
+pub(crate) enum Prepared<C: Coefficient> {
     /// Reject reply to send now (no sampling).
     Reject(MinerMsg),
     /// Hand to the streaming sampler; `num_reads`/`num_sweeps` are the resolved
     /// values, carried so [`finalize_result`] can build `SamplerMeta`.
     Sample {
-        job: StreamJob,
+        job: StreamJob<C>,
         /// Decoded start states, `Some` only for a seeded job sent to a
         /// sampler whose `accepts_warm_start` is true.
         warm_start: Option<WarmStart>,
@@ -422,7 +427,7 @@ pub(crate) enum Prepared {
 /// Validate + resolve one job: reject reasons short-circuit; otherwise resolve
 /// the sampling budget (per-job override > `SetTarget` override > adapt > default)
 /// and return a [`StreamJob`] for the streaming sampler.
-pub(crate) fn prepare_job<S: Sampler>(
+pub(crate) fn prepare_job<S: Sampler<C>, C: Coefficient>(
     job: Job,
     sampler: &S,
     id: &BackendIdentity,
@@ -430,7 +435,7 @@ pub(crate) fn prepare_job<S: Sampler>(
     sweeps_per_beta: Option<usize>,
     cache: Option<&TopologyCache>,
     target: Option<&SessionTarget>,
-) -> Prepared {
+) -> Prepared<C> {
     let job_id = job.job_id.clone();
 
     if job.kind != JobKind::IsingSample as i32 {
@@ -458,7 +463,7 @@ pub(crate) fn prepare_job<S: Sampler>(
         return Prepared::Reject(reject(job_id, RejectReason::Malformed));
     };
 
-    let graph = match parse_ising(&ising, id.max_nodes, id.max_edges, cache) {
+    let graph = match parse_ising::<C>(&ising, id.max_nodes, id.max_edges, cache) {
         Ok(g) => g,
         Err(reason) => return Prepared::Reject(reject(job_id, reason)),
     };
@@ -730,16 +735,16 @@ mod tests {
         };
         let cache = TopologyCache::from_proto(&topo);
         let ising = hash_job(vec![7; 32], &[1000, -1000, 1000], &[1000, -1000]);
-        let g = parse_ising(&ising, 100_000, 1_000_000, Some(&cache)).unwrap();
+        let g = parse_ising::<f64>(&ising, 100_000, 1_000_000, Some(&cache)).unwrap();
         assert_eq!(g.edges, vec![(0, 1), (1, 2)]);
-        assert_eq!(g.h_milli, vec![1000, -1000, 1000]);
-        assert_eq!(g.j_milli, vec![1000, -1000]);
+        assert_eq!(g.h, vec![1.0, -1.0, 1.0]);
+        assert_eq!(g.j, vec![1.0, -1.0]);
     }
 
     #[test]
     fn hash_job_without_cache_rejects_missing() {
         let ising = hash_job(vec![7; 32], &[1000], &[]);
-        let err = parse_ising(&ising, 100_000, 1_000_000, None).unwrap_err();
+        let err = parse_ising::<f64>(&ising, 100_000, 1_000_000, None).unwrap_err();
         assert_eq!(err, RejectReason::TopologyMissing);
     }
 
@@ -753,7 +758,7 @@ mod tests {
         };
         let cache = TopologyCache::from_proto(&topo);
         let ising = hash_job(vec![2; 32], &[1000], &[]);
-        let err = parse_ising(&ising, 100_000, 1_000_000, Some(&cache)).unwrap_err();
+        let err = parse_ising::<f64>(&ising, 100_000, 1_000_000, Some(&cache)).unwrap_err();
         assert_eq!(err, RejectReason::TopologyMismatch);
     }
 
@@ -800,7 +805,7 @@ mod tests {
         };
         let cache = TopologyCache::from_proto(&topo);
         let ising = hash_job(vec![7; 32], &[1000, 1000], &[1000]);
-        let err = parse_ising(&ising, 100_000, 1_000_000, Some(&cache)).unwrap_err();
+        let err = parse_ising::<f64>(&ising, 100_000, 1_000_000, Some(&cache)).unwrap_err();
         assert_eq!(err, RejectReason::Malformed);
     }
 
@@ -837,7 +842,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            parse_ising(&ising, 100_000, 1_000_000, None).unwrap_err(),
+            parse_ising::<f64>(&ising, 100_000, 1_000_000, None).unwrap_err(),
             RejectReason::Malformed,
             "3 couplings against 0 edges must never reach a sampler"
         );
@@ -856,10 +861,11 @@ mod tests {
             anneal_time_us: 0,
             ..Default::default()
         };
-        let g = parse_ising(&ising, 100_000, 1_000_000, None).expect("an edgeless problem is fine");
+        let g = parse_ising::<f64>(&ising, 100_000, 1_000_000, None)
+            .expect("an edgeless problem is fine");
         assert_eq!(g.num_nodes(), 2);
         assert!(g.edges.is_empty());
-        assert!(g.j_milli.is_empty());
+        assert!(g.j.is_empty());
     }
 
     #[test]
@@ -867,7 +873,7 @@ mod tests {
         // resolve_edges rejects the pair before it can zip-truncate.
         let ising = inline_job(&[1000, 1000, 1000], &[1000, 1000], vec![0, 1], vec![1]);
         assert_eq!(
-            parse_ising(&ising, 100_000, 1_000_000, None).unwrap_err(),
+            parse_ising::<f64>(&ising, 100_000, 1_000_000, None).unwrap_err(),
             RejectReason::Malformed
         );
     }
@@ -877,13 +883,13 @@ mod tests {
         // 2 edges, 1 coupling.
         let ising = inline_job(&[1000, 1000, 1000], &[1000], vec![0, 1], vec![1, 2]);
         assert_eq!(
-            parse_ising(&ising, 100_000, 1_000_000, None).unwrap_err(),
+            parse_ising::<f64>(&ising, 100_000, 1_000_000, None).unwrap_err(),
             RejectReason::Malformed
         );
         // 1 edge, 2 couplings — the direction that used to reach the C ABI.
         let ising = inline_job(&[1000, 1000], &[1000, 1000], vec![0], vec![1]);
         assert_eq!(
-            parse_ising(&ising, 100_000, 1_000_000, None).unwrap_err(),
+            parse_ising::<f64>(&ising, 100_000, 1_000_000, None).unwrap_err(),
             RejectReason::Malformed
         );
     }
@@ -892,7 +898,7 @@ mod tests {
     fn an_edge_endpoint_outside_h_is_malformed() {
         let ising = inline_job(&[1000, 1000], &[1000], vec![0], vec![7]);
         assert_eq!(
-            parse_ising(&ising, 100_000, 1_000_000, None).unwrap_err(),
+            parse_ising::<f64>(&ising, 100_000, 1_000_000, None).unwrap_err(),
             RejectReason::Malformed
         );
     }
@@ -916,7 +922,7 @@ mod tests {
         let cache = TopologyCache::from_proto(&topology(vec![0, 1, 2], vec![0, 1], vec![1]));
         let ising = hash_job(vec![7; 32], &[1000, 1000, 1000], &[1000]);
         assert_eq!(
-            parse_ising(&ising, 100_000, 1_000_000, Some(&cache)).unwrap_err(),
+            parse_ising::<f64>(&ising, 100_000, 1_000_000, Some(&cache)).unwrap_err(),
             RejectReason::Malformed
         );
     }
@@ -929,7 +935,7 @@ mod tests {
         let cache = TopologyCache::from_proto(&topology(vec![0, 1, 1], vec![0], vec![1]));
         let ising = hash_job(vec![7; 32], &[1000, 1000, 1000], &[1000]);
         assert_eq!(
-            parse_ising(&ising, 100_000, 1_000_000, Some(&cache)).unwrap_err(),
+            parse_ising::<f64>(&ising, 100_000, 1_000_000, Some(&cache)).unwrap_err(),
             RejectReason::Malformed
         );
     }
@@ -942,7 +948,7 @@ mod tests {
         let cache = TopologyCache::from_proto(&topology(vec![0, 1, 1], vec![0], vec![1]));
         let ising = hash_job(vec![9; 32], &[1000, 1000, 1000], &[1000]);
         assert_eq!(
-            parse_ising(&ising, 100_000, 1_000_000, Some(&cache)).unwrap_err(),
+            parse_ising::<f64>(&ising, 100_000, 1_000_000, Some(&cache)).unwrap_err(),
             RejectReason::TopologyMismatch
         );
     }
@@ -960,7 +966,7 @@ mod tests {
         ] {
             let ising = hash_job(vec![7; 32], &h, &[1000, 1000]);
             assert_eq!(
-                parse_ising(&ising, 100_000, 1_000_000, Some(&cache)).unwrap_err(),
+                parse_ising::<f64>(&ising, 100_000, 1_000_000, Some(&cache)).unwrap_err(),
                 RejectReason::Malformed,
                 "h of {} against a 3-node topology must not sample",
                 h.len()
@@ -968,7 +974,7 @@ mod tests {
         }
         // The matching length still works.
         let ising = hash_job(vec![7; 32], &[1000, 1000, 1000], &[1000, 1000]);
-        let g = parse_ising(&ising, 100_000, 1_000_000, Some(&cache)).expect("matching h");
+        let g = parse_ising::<f64>(&ising, 100_000, 1_000_000, Some(&cache)).expect("matching h");
         assert_eq!(g.num_nodes(), 3);
     }
 
@@ -978,14 +984,17 @@ mod tests {
     fn a_size_cap_admits_a_job_exactly_at_the_limit_and_rejects_one_past_it() {
         // 3 nodes, 2 edges.
         let ising = inline_job(&[1000, 1000, 1000], &[1000, 1000], vec![0, 1], vec![1, 2]);
-        assert!(parse_ising(&ising, 3, 2, None).is_ok(), "n == max_nodes");
+        assert!(
+            parse_ising::<f64>(&ising, 3, 2, None).is_ok(),
+            "n == max_nodes"
+        );
         assert_eq!(
-            parse_ising(&ising, 2, 2, None).unwrap_err(),
+            parse_ising::<f64>(&ising, 2, 2, None).unwrap_err(),
             RejectReason::TooLarge,
             "n == max_nodes + 1"
         );
         assert_eq!(
-            parse_ising(&ising, 3, 1, None).unwrap_err(),
+            parse_ising::<f64>(&ising, 3, 1, None).unwrap_err(),
             RejectReason::TooLarge,
             "edges == max_edges + 1"
         );
@@ -998,15 +1007,15 @@ mod tests {
     fn a_zero_size_cap_means_unlimited_not_a_zero_ceiling() {
         let ising = inline_job(&[1000, 1000, 1000], &[1000, 1000], vec![0, 1], vec![1, 2]);
         assert!(
-            parse_ising(&ising, 0, 0, None).is_ok(),
+            parse_ising::<f64>(&ising, 0, 0, None).is_ok(),
             "max_nodes/max_edges of 0 must accept a large problem, not reject every one"
         );
         // Each bound is independently unlimited.
-        assert!(parse_ising(&ising, 0, 2, None).is_ok());
-        assert!(parse_ising(&ising, 3, 0, None).is_ok());
+        assert!(parse_ising::<f64>(&ising, 0, 2, None).is_ok());
+        assert!(parse_ising::<f64>(&ising, 3, 0, None).is_ok());
         // A zero cap on one axis does not excuse a real cap on the other.
         assert_eq!(
-            parse_ising(&ising, 0, 1, None).unwrap_err(),
+            parse_ising::<f64>(&ising, 0, 1, None).unwrap_err(),
             RejectReason::TooLarge
         );
     }
@@ -1307,7 +1316,10 @@ mod tests {
         job
     }
 
-    fn prepared_warm_start<S: Sampler>(job: Job, sampler: &S) -> Result<Option<WarmStart>, i32> {
+    fn prepared_warm_start<S: Sampler<C>, C: Coefficient>(
+        job: Job,
+        sampler: &S,
+    ) -> Result<Option<WarmStart>, i32> {
         match prepare_job(job, sampler, &identity("sa"), 64, None, None, None) {
             Prepared::Sample { warm_start, .. } => Ok(warm_start),
             Prepared::Reject(MinerMsg {

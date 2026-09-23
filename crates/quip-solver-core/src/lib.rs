@@ -42,6 +42,8 @@ pub use quip_protocol;
 /// carries.
 pub use quip_protocol::session::ExitCode;
 
+use crate::coefficient::Coefficient;
+
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -120,11 +122,11 @@ mod cancel_tests {
 }
 
 /// One job entering the streaming sampler.
-pub struct StreamJob {
+pub struct StreamJob<C: Coefficient = f64> {
     /// Opaque job id from the coordinator (echoed on Result/Reject).
     pub job_id: Vec<u8>,
     /// Wire-parsed Ising problem for this job.
-    pub graph: IsingGraph,
+    pub graph: IsingGraph<C>,
     /// Resolved sampling knobs for this job.
     pub params: SampleParams,
     /// Cancellation watermark for this job, or `None` when the job cannot be
@@ -135,9 +137,9 @@ pub struct StreamJob {
 /// One job entering [`Sampler::sample_stream_warm`]: the plain job, plus its
 /// warm start when the coordinator sent one.
 #[non_exhaustive]
-pub struct WarmStreamJob {
+pub struct WarmStreamJob<C: Coefficient = f64> {
     /// The job, exactly as [`Sampler::sample_stream`] would receive it.
-    pub job: StreamJob,
+    pub job: StreamJob<C>,
     /// Start states and anneal start point, or `None` for a cold job.
     pub warm_start: Option<WarmStart>,
 }
@@ -167,7 +169,7 @@ pub enum StreamOutcome {
 /// Implementations own their device and algorithm. Only [`sample`](Sampler::sample)
 /// is required; the other methods default to a no-governor, uncapped backend
 /// (the CPU miner's shape).
-pub trait Sampler: Send + Sync + 'static {
+pub trait Sampler<C: Coefficient = f64>: Send + Sync + 'static {
     /// Sample one job.
     ///
     /// # Errors
@@ -177,7 +179,7 @@ pub trait Sampler: Send + Sync + 'static {
     /// `DeviceFault` for a state that needs a restart.
     fn sample(
         &self,
-        graph: &IsingGraph,
+        graph: &IsingGraph<C>,
         params: &SampleParams,
     ) -> Result<Vec<SamplerResult>, SampleError>;
 
@@ -190,7 +192,7 @@ pub trait Sampler: Send + Sync + 'static {
     /// [`stream_width`]: Sampler::stream_width
     fn sample_stream(
         &self,
-        jobs: tokio::sync::mpsc::Receiver<StreamJob>,
+        jobs: tokio::sync::mpsc::Receiver<StreamJob<C>>,
         out: tokio::sync::mpsc::Sender<StreamResult>,
         cancel: CancelToken,
     ) {
@@ -225,7 +227,7 @@ pub trait Sampler: Send + Sync + 'static {
     /// Same as [`sample`](Sampler::sample).
     fn sample_warm(
         &self,
-        graph: &IsingGraph,
+        graph: &IsingGraph<C>,
         params: &SampleParams,
         warm: &WarmStart,
     ) -> Result<Vec<SamplerResult>, SampleError> {
@@ -240,7 +242,7 @@ pub trait Sampler: Send + Sync + 'static {
     /// seeded job and [`sample`](Sampler::sample) for a cold one.
     fn sample_stream_warm(
         &self,
-        jobs: tokio::sync::mpsc::Receiver<WarmStreamJob>,
+        jobs: tokio::sync::mpsc::Receiver<WarmStreamJob<C>>,
         out: tokio::sync::mpsc::Sender<StreamResult>,
         cancel: CancelToken,
     ) {
@@ -308,14 +310,15 @@ pub trait Sampler: Send + Sync + 'static {
 /// The serial loop behind the default [`Sampler::sample_stream`] and
 /// [`Sampler::sample_stream_warm`]. `split` pulls the plain job and its
 /// optional warm start out of the channel item.
-fn serial_stream<S, J>(
+fn serial_stream<S, J, C>(
     sampler: &S,
     mut jobs: tokio::sync::mpsc::Receiver<J>,
     out: &tokio::sync::mpsc::Sender<StreamResult>,
     cancel: &CancelToken,
-    split: impl Fn(J) -> (StreamJob, Option<WarmStart>),
+    split: impl Fn(J) -> (StreamJob<C>, Option<WarmStart>),
 ) where
-    S: Sampler + ?Sized,
+    S: Sampler<C> + ?Sized,
+    C: Coefficient,
 {
     while let Some(item) = jobs.blocking_recv() {
         let (j, warm) = split(item);
@@ -398,7 +401,7 @@ mod stream_tests {
     }
 
     fn tiny_graph() -> IsingGraph {
-        IsingGraph::new(vec![1000, -1000], vec![1000], vec![(0, 1)])
+        IsingGraph::new(vec![1.0, -1.0], vec![1.0], vec![(0, 1)])
     }
 
     #[test]
