@@ -45,7 +45,8 @@ fn selection_matches_chain() {
     let cases = fixture["select_diverse"].as_array().unwrap();
     assert!(!cases.is_empty());
     for (index, case) in cases.iter().enumerate() {
-        let solutions: Vec<_> = case["solutions"]
+        let diversity_case = usize::try_from(case["diversity_case"].as_u64().unwrap()).unwrap();
+        let solutions: Vec<_> = fixture["diversity"][diversity_case]["solutions"]
             .as_array()
             .unwrap()
             .iter()
@@ -97,6 +98,7 @@ fn proof_checks_match_chain() {
                 valid_solution_count: u32::try_from(case["valid_solution_count"].as_u64().unwrap())
                     .unwrap(),
             }),
+            "MalformedSolutions" => Err(TargetMiss::MalformedSolutions),
             "InsufficientEnergy" => Err(TargetMiss::InsufficientEnergy),
             "InsufficientSolutions" => Err(TargetMiss::InsufficientSolutions),
             "InsufficientDiversity" => Err(TargetMiss::InsufficientDiversity),

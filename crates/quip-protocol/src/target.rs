@@ -30,6 +30,8 @@ pub enum TargetMiss {
     InsufficientDiversity,
     /// More solutions than one proof may carry.
     TooManySolutions,
+    /// A solution is empty, has a different width from the first, or holds a spin other than +1 or -1.
+    MalformedSolutions,
 }
 
 /// What the chain computes for a proof set that passes.
@@ -55,11 +57,19 @@ pub struct ProofSet {
 /// Run the chain's proof checks on `set`, in the order given.
 ///
 /// # Errors
-/// The first failed check, in the pallet's order: size, energy, count, diversity.
+/// The first failed check, in the pallet's order: size, solution shape and spins, energy, count, diversity.
 pub fn validate_proof_set(set: &[(&[i8], i64)], target: &Target) -> Result<ProofStats, TargetMiss> {
     let max_proof_solutions = usize::try_from(target.max_proof_solutions).unwrap_or(usize::MAX);
     if set.len() > max_proof_solutions {
         return Err(TargetMiss::TooManySolutions);
+    }
+    let width = set.first().map_or(0, |&(spins, _)| spins.len());
+    if set.iter().any(|&(spins, _)| {
+        spins.is_empty()
+            || spins.len() != width
+            || spins.iter().any(|&spin| spin != 1 && spin != -1)
+    }) {
+        return Err(TargetMiss::MalformedSolutions);
     }
     let valid: Vec<(&[i8], i64)> = set
         .iter()
@@ -127,6 +137,42 @@ mod tests {
         min_diversity_milli: 200,
         max_proof_solutions: 3,
     };
+
+    #[test]
+    fn malformed_solutions_are_rejected_before_energy_filtering() {
+        let target = Target {
+            max_energy_milli: -100,
+            min_solutions: 2,
+            min_diversity_milli: 0,
+            max_proof_solutions: 32,
+        };
+        let cases: [&[(&[i8], i64)]; 4] = [
+            &[(&[1, -1], -200), (&[1], -200)],
+            &[(&[], -200), (&[], -200)],
+            &[(&[1, -1], -200), (&[1, 0], -200)],
+            &[(&[1, -1], -200), (&[1, 2], -200)],
+        ];
+        for set in cases {
+            assert_eq!(
+                validate_proof_set(set, &target),
+                Err(TargetMiss::MalformedSolutions),
+                "set {set:?}"
+            );
+            let above_ceiling: Vec<_> = set.iter().map(|&(spins, _)| (spins, 0)).collect();
+            assert_eq!(
+                validate_proof_set(&above_ceiling, &target),
+                Err(TargetMiss::MalformedSolutions)
+            );
+            let size_limit = Target {
+                max_proof_solutions: 1,
+                ..target
+            };
+            assert_eq!(
+                validate_proof_set(set, &size_limit),
+                Err(TargetMiss::TooManySolutions)
+            );
+        }
+    }
 
     #[test]
     fn energy_equal_to_the_ceiling_does_not_count() {
