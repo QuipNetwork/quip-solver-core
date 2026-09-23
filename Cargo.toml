@@ -13,7 +13,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.1.0-rc1"
+version = "0.0.2-rc2"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://gitlab.com/quip.network/quip-solver-core"
@@ -71,9 +71,9 @@ all = "warn"
 # what lets crates.io resolve them. quip-solver-conformance is deliberately
 # absent: it is only ever a dev-dependency, and versioning it would create a
 # publish cycle with quip-protocol. See the note in crates/quip-protocol.
-quip-proto = { path = "crates/quip-proto", version = "0.1.0-rc1" }
-quip-protocol = { path = "crates/quip-protocol", version = "0.1.0-rc1" }
-quip-solver-core = { path = "crates/quip-solver-core", version = "0.1.0-rc1" }
+quip-proto = { path = "crates/quip-proto", version = "0.0.2-rc2" }
+quip-protocol = { path = "crates/quip-protocol", version = "0.0.2-rc2" }
+quip-solver-core = { path = "crates/quip-solver-core", version = "0.0.2-rc2" }
 
 tonic = "0.12"
 prost = "0.13"

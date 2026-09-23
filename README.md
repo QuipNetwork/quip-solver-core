@@ -10,7 +10,7 @@ written today writes its own state machine. A Rust solver conforms today by
 supplying a `Sampler` and calling `run`.
 
 The full contract is in [SPEC.md](SPEC.md).
-[CHANGELOG.md](CHANGELOG.md) lists the 0.1.0-rc1 changes.
+[CHANGELOG.md](CHANGELOG.md) lists the 0.0.2-rc2 changes.
 [MIGRATING.md](MIGRATING.md) covers the move from `quip-miner-core`.
 
 ## Crates
@@ -34,15 +34,21 @@ artifact, because a C consumer wants the compiled object and the header.
 
 ```toml
 [dependencies]
-quip-solver-core = "0.1.0-rc1"
+quip-solver-core = "0.0.2-rc2"
 
 [dev-dependencies]
-quip-solver-conformance = "0.1.0-rc1"
+quip-solver-conformance = "0.0.2-rc2"
 ```
 
 One dependency is enough. `quip-solver-core` re-exports `quip_proto` and
-`quip_protocol`, so the consensus scorer is at
+`quip_protocol`. Default `Sampler` implementations use `IsingGraph<f64>`
+and `quip_solver_core::quip_protocol::scoring::energy_milli`.
+
+A solver can select `Sampler<Milli>` to receive exact wire coefficients.
+Import `Milli` from `quip_solver_core::coefficient`. Its stored integer is
+available through `.0`. Score those integers with
 `quip_solver_core::quip_protocol::scoring::energy_from_milli`.
+The Rust example shows this choice.
 
 ### Python
 

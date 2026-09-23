@@ -167,9 +167,22 @@ A Rust solver supplies a `Sampler` and calls `run`.
 `SampleParams`. It returns `Result<Vec<SamplerResult>, SampleError>`.
 `sample` must not panic.
 
-`IsingGraph` carries the wire's coefficients as `i32` milli values in
-`h_milli` and `j_milli`, where 1000 is 1.0. Score a read with
-`quip_protocol::scoring::energy_from_milli`.
+`IsingGraph<C = f64>` stores coefficients in `h` and `j`.
+`Sampler<C = f64>`, `StreamJob<C = f64>`, and `WarmStreamJob<C = f64>`
+carry the same coefficient type. The default is `f64`.
+The session converts each wire coefficient once when it decodes a job.
+
+The sealed `Coefficient` trait supports `f64`, `f32`, `half::f16`, and
+`Fixed<T, SCALE>` for `i32`, `i16`, `i8`, and `I4` storage.
+`SCALE` is positive. Fixed-point conversion rounds halfway values away
+from zero and saturates. `I4` stores values from –8 through 7 in one byte.
+`Milli` is `Fixed<i32, 1000>` and preserves each wire coefficient.
+
+A lossy sampler receives converted coefficients, but the session replaces
+the reported energies with scores from the original problem before transmission.
+The JSON driver applies the same rule to the original JSON coefficients.
+`f64` and `Milli` keep the sampler's reported energy.
+Use `quip_protocol::scoring::energy_from_milli` to score stored milli integers.
 
 The ten defaulted methods are:
 
@@ -288,10 +301,8 @@ tag and never moves it keeps working.
 The `--capabilities` output is the protobuf JSON mapping of the
 `Capabilities` message. Field names are lowerCamelCase:
 
-<!-- vale Microsoft.Avoid = NO -->
 - `backend`
 - `algorithm`
-<!-- vale Microsoft.Avoid = YES -->
 - `supportedKinds`
 - `maxNodes`
 - `maxEdges`
@@ -303,9 +314,7 @@ The `--capabilities` output is the protobuf JSON mapping of the
 
 This changed in 0.0.0-rc1. The previous hand-written output used
 `supported_kinds`, `max_nodes`, and `max_edges`.
-<!-- vale Microsoft.Avoid = NO -->
 `backend` and `algorithm` keep the same spelling.
-<!-- vale Microsoft.Avoid = YES -->
 
 `--capabilities` and the `Capabilities` message on the session stream are
 the same message. One message must not have two spellings.
