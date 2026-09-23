@@ -7,6 +7,20 @@
 use serde::Deserialize;
 use std::collections::BTreeMap;
 
+/// Target and diversity vectors generated from the validator's
+/// `quantum-validation` crate.
+pub const GOLDEN_TARGET: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/vectors/golden_target.json"
+));
+
+/// Lease salt, nonce, and draw vectors generated from the validator's
+/// `quantum-validation` crate.
+pub const GOLDEN_LEASE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/vectors/golden_lease.json"
+));
+
 /// Raw `golden_adapt.json`: adaptive-parameter parity with the Python source.
 pub const GOLDEN_ADAPT: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
