@@ -540,7 +540,7 @@ struct WriterContext {
     aborted: Arc<AtomicBool>,
     /// Prepare-time parameters per job, removed as each one finalizes.
     pending: PendingParams,
-    /// Completed-job counter the read loop publishes in `Status`.
+    /// Completed plain jobs plus sampled lease salts, published in `Status`.
     jobs_done: Arc<AtomicU64>,
     /// Set when the writer sends `Fatal` for an unrecoverable device.
     device_faulted: Arc<AtomicBool>,
@@ -827,6 +827,7 @@ async fn outbound_writer<C: Coefficient>(
                     }
                 }
                 log_attempt(backend, &sr, entry.as_ref());
+                let before = done;
                 for reply in finalize_result(sr, reads, sweeps, &mut done) {
                     let fatal = matches!(reply.msg, Some(miner_msg::Msg::Fatal(_)));
                     if tx.send(reply).await.is_err() {
@@ -840,7 +841,8 @@ async fn outbound_writer<C: Coefficient>(
                         return;
                     }
                 }
-                jobs_done.store(done, Ordering::Relaxed);
+                // Lease salts add to the same counter, so add rather than overwrite.
+                let _ = jobs_done.fetch_add(done - before, Ordering::Relaxed);
                 if completed && done > 0 && done.is_multiple_of(PROGRESS_LOG_INTERVAL) {
                     log_progress(
                         backend,
@@ -1249,6 +1251,7 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
                             num_sweeps,
                             sweeps_per_beta,
                             Arc::clone(&aborted),
+                            Arc::clone(&jobs_done),
                         ) {
                             Ok((state, params)) => {
                                 if S::generates_locally() {

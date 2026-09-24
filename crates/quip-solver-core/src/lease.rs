@@ -12,7 +12,7 @@ use quip_proto::v1::{
 use quip_protocol::lease::{Generator, LeaseSpec, TopologyView};
 use quip_protocol::target::meets_target;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc, Mutex, MutexGuard,
 };
 use tokio::sync::{mpsc, watch, OwnedSemaphorePermit, Semaphore};
@@ -91,6 +91,7 @@ pub(crate) struct LeaseState {
     watermark: Option<u64>,
     deadline_ms: u64,
     aborted: Arc<AtomicBool>,
+    jobs_done: Arc<AtomicU64>,
     progress: Mutex<Progress>,
 }
 impl LeaseState {
@@ -214,6 +215,7 @@ pub(crate) fn prepare(
     default_sweeps: usize,
     sweeps_per_beta: Option<usize>,
     aborted: Arc<AtomicBool>,
+    jobs_done: Arc<AtomicU64>,
 ) -> Result<(Arc<LeaseState>, SampleParams), RejectReason> {
     if expired(job.deadline_ms) {
         return Err(RejectReason::Expired);
@@ -266,6 +268,7 @@ pub(crate) fn prepare(
         watermark: (job.generation != 0).then_some(job.generation),
         deadline_ms: job.deadline_ms,
         aborted,
+        jobs_done,
         progress: Mutex::new(Progress {
             dispatched: 0,
             finished: 0,
@@ -435,6 +438,7 @@ fn record_samples(state: &LeaseState, samples: &[SamplerResult]) -> bool {
         return false;
     }
     progress.salts_done += 1;
+    let _ = state.jobs_done.fetch_add(1, Ordering::Relaxed);
     if let Some(best) = samples.iter().map(|s| s.energy_milli).min() {
         progress.best_energy_milli = progress.best_energy_milli.min(best);
     }
@@ -758,6 +762,7 @@ mod tests {
             watermark,
             deadline_ms: 0,
             aborted: Arc::new(AtomicBool::new(false)),
+            jobs_done: Arc::new(AtomicU64::new(0)),
             progress: Mutex::new(Progress {
                 dispatched: 0,
                 finished: 0,
@@ -943,6 +948,7 @@ mod tests {
             watermark: None,
             deadline_ms: 0,
             aborted: Arc::new(AtomicBool::new(false)),
+            jobs_done: Arc::new(AtomicU64::new(0)),
             progress: Mutex::new(Progress {
                 dispatched: 0,
                 finished: 0,

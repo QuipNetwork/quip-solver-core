@@ -305,6 +305,33 @@ async fn first(s: &mut Session) {
 }
 
 #[tokio::test]
+async fn status_counts_default_lease_salts_as_jobs_done() {
+    let mut s = Session::start(true).await;
+    s.setup(i64::MAX).await;
+    s.send(coord_msg::Msg::Job(job(5))).await;
+    assert!(matches!(s.recv().await, miner_msg::Msg::LeaseDone(d) if d.salts_done == 5));
+    s.refund().await;
+    s.send(coord_msg::Msg::Ping(wire::Ping {})).await;
+    assert!(matches!(s.recv().await, miner_msg::Msg::Status(v) if v.jobs_done == 5));
+    s.finish().await;
+}
+
+#[tokio::test]
+async fn status_counts_local_lease_salts_as_jobs_done() {
+    let mut s = Session::start_mode(false, false, Some("honest")).await;
+    s.setup(i64::MAX).await;
+    s.send(coord_msg::Msg::Job(job(5))).await;
+    for _ in 0..5 {
+        first(&mut s).await;
+    }
+    assert!(matches!(s.recv().await, miner_msg::Msg::LeaseDone(d) if d.salts_done == 5));
+    s.refund().await;
+    s.send(coord_msg::Msg::Ping(wire::Ping {})).await;
+    assert!(matches!(s.recv().await, miner_msg::Msg::Status(v) if v.jobs_done == 5));
+    s.finish().await;
+}
+
+#[tokio::test]
 async fn a_lease_reports_winners_then_one_lease_done() {
     let mut s = Session::start(false).await;
     s.setup(i64::MAX).await;
