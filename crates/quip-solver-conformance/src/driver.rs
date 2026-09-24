@@ -1530,6 +1530,39 @@ async fn run_script_close(
 ///
 /// `socket` is a `unix://<path>` URI; the same value is passed to the miner via
 /// `--quip-coordinator`.
+async fn finish_stderr_capture(
+    mut reader: Option<tokio::task::JoinHandle<std::io::Result<()>>>,
+    captured: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+) -> String {
+    let incomplete_reason = match reader.as_mut() {
+        Some(reader) => match tokio::time::timeout(Duration::from_secs(5), &mut *reader).await {
+            Ok(Ok(Ok(()))) => None,
+            Ok(Ok(Err(error))) => Some(format!("read error: {error}")),
+            Ok(Err(error)) => Some(format!("reader task failed: {error}")),
+            Err(_) => {
+                reader.abort();
+                Some("the pipe stayed open after the miner exited".to_owned())
+            }
+        },
+        None => None,
+    };
+    let bytes = {
+        let mut bytes = match captured.lock() {
+            Ok(bytes) => bytes,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        std::mem::take(&mut *bytes)
+    };
+    let mut stderr = String::from_utf8_lossy(&bytes).into_owned();
+    if let Some(reason) = incomplete_reason {
+        if !stderr.is_empty() && !stderr.ends_with('\n') {
+            stderr.push('\n');
+        }
+        let _ = writeln!(stderr, "[stderr capture incomplete: {reason}]");
+    }
+    stderr
+}
+
 async fn drive_miner_with_script(bin_path: &str, socket: &str, script: ScriptKind) -> DriverReport {
     let path = socket.strip_prefix("unix://").unwrap_or(socket).to_string();
     let _ = std::fs::remove_file(&path);
@@ -1565,12 +1598,23 @@ async fn drive_miner_with_script(bin_path: &str, socket: &str, script: ScriptKin
         .stderr(std::process::Stdio::piped())
         .spawn()
         .expect("spawn miner");
+    let captured_stderr = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let stderr_reader = child.stderr.take().map(|mut pipe| {
+        let captured_stderr = std::sync::Arc::clone(&captured_stderr);
         tokio::spawn(async move {
             use tokio::io::AsyncReadExt as _;
-            let mut bytes = Vec::new();
-            let _ = pipe.read_to_end(&mut bytes).await;
-            String::from_utf8_lossy(&bytes).into_owned()
+            let mut chunk = [0_u8; 8192];
+            loop {
+                let count = pipe.read(&mut chunk).await?;
+                if count == 0 {
+                    return Ok::<(), std::io::Error>(());
+                }
+                let mut bytes = match captured_stderr.lock() {
+                    Ok(bytes) => bytes,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                bytes.extend(chunk.iter().take(count).copied());
+            }
         })
     });
 
@@ -1588,14 +1632,7 @@ async fn drive_miner_with_script(bin_path: &str, socket: &str, script: ScriptKin
         let _ = child.kill().await;
         -1
     };
-    let stderr = match stderr_reader {
-        Some(reader) => tokio::time::timeout(Duration::from_secs(5), reader)
-            .await
-            .ok()
-            .and_then(Result::ok)
-            .unwrap_or_default(),
-        None => String::new(),
-    };
+    let stderr = finish_stderr_capture(stderr_reader, captured_stderr).await;
     // The session handler sends the outcome as the miner closes its stream on
     // exit; the timeout guards a miner that dies before ever connecting.
     let outcome = tokio::time::timeout(OUTCOME_TIMEOUT, orx)

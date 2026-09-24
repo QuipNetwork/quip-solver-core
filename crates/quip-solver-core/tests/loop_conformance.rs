@@ -262,3 +262,42 @@ async fn a_device_fault_ends_the_session_instead_of_requesting_more_work() {
     );
     assert!(report.stderr.contains("test: wedged"), "{}", report.stderr);
 }
+
+#[tokio::test]
+async fn stderr_capture_preserves_partial_output_when_a_descendant_holds_the_pipe_open() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let miner = std::fs::canonicalize(example_bin("mock_sampler_miner"))
+        .expect("canonicalize miner binary");
+    let dir = std::path::PathBuf::from(format!("{}-wrapper", unique_socket("stderr-capture")));
+    std::fs::create_dir_all(&dir).expect("create wrapper directory");
+    let wrapper = dir.join("miner-wrapper");
+    let script = format!(
+        "#!/bin/sh\nsleep 30 &\nprintf '%s\\n' 'known wrapper diagnostic' >&2\nexec '{}' \"$@\"\n",
+        miner.display()
+    );
+    std::fs::write(&wrapper, script).expect("write miner wrapper");
+    let mut permissions = std::fs::metadata(&wrapper)
+        .expect("read wrapper metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&wrapper, permissions).expect("make wrapper executable");
+
+    let wrapper = wrapper.to_string_lossy().into_owned();
+    let socket = unique_socket("stderr-capture-session");
+    let report = drive_miner(&wrapper, &format!("unix://{socket}")).await;
+
+    assert!(
+        report.stderr.contains("known wrapper diagnostic"),
+        "{}",
+        report.stderr
+    );
+    assert!(
+        report
+            .stderr
+            .contains("[stderr capture incomplete: the pipe stayed open after the miner exited]"),
+        "{}",
+        report.stderr
+    );
+    std::fs::remove_dir_all(dir).expect("remove wrapper directory");
+}

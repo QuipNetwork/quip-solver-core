@@ -53,7 +53,7 @@ async fn main() -> ExitCode {
             reason = "CLI failure summary is intentionally written to stderr"
         )]
         {
-            eprintln!("conformance failed: {report:?}");
+            eprintln!("conformance failed for {bin_path}");
         }
         ExitCode::from(1)
     }
