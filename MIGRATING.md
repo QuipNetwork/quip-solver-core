@@ -88,14 +88,14 @@ If stopped workers still fill that window, the session ends with a device fault.
 `LeaseSink::push` returns `Ok(())` for a repeated salt index.
 It sends no result and does not update counts.
 
+Report the exact energy of the model your sampler receives.
+The session now checks coefficient conversion per problem and skips rescoring when that conversion is exact.
+A narrow coefficient type no longer implies that the session always replaces your energies.
+
 ## Conformance driver
 
 `DriverReport.stderr` contains the miner process standard error.
 `quip-solver-drive` prints it after the report summary.
-
-Report the exact energy of the model your sampler receives.
-The session now checks coefficient conversion per problem and skips rescoring when that conversion is exact.
-A narrow coefficient type no longer implies that the session always replaces your energies.
 
 ## Wire and binding changes
 
