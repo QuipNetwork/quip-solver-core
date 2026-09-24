@@ -558,13 +558,15 @@ async fn plain_jobs_interleave_with_a_lease() {
         .await;
     let mut ack = false;
     let mut done = false;
+    let mut salts_done = 0;
     let mut refunded = false;
     while !(ack && done && refunded) {
         match s.recv().await {
             miner_msg::Msg::Status(_) => ack = true,
-            miner_msg::Msg::LeaseDone(_) => {
+            miner_msg::Msg::LeaseDone(d) => {
                 assert!(!done);
                 done = true;
+                salts_done = d.salts_done;
             }
             miner_msg::Msg::JobRequest(r) => {
                 assert!(done);
@@ -578,6 +580,9 @@ async fn plain_jobs_interleave_with_a_lease() {
             other => panic!("unexpected {other:?}"),
         }
     }
+    // Three plain jobs plus every sampled lease salt share one counter.
+    s.send(coord_msg::Msg::Ping(wire::Ping {})).await;
+    assert!(matches!(s.recv().await, miner_msg::Msg::Status(v) if v.jobs_done == 3 + salts_done));
     s.finish().await;
 }
 #[tokio::test]
