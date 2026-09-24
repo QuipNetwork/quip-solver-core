@@ -434,6 +434,64 @@ async fn cancel_stops_a_lease_and_reports_what_finished() {
     }
     s.finish().await;
 }
+
+#[tokio::test]
+async fn cancel_reports_a_lease_while_its_salt_is_still_running() {
+    let mut s = Session::start_with_gate(false, true).await;
+    s.setup(i64::MAX).await;
+    s.send(coord_msg::Msg::Job(job(40))).await;
+    let mut held = s.blocked_sample().await;
+    s.send(coord_msg::Msg::Cancel(wire::Cancel { max_generation: 1 }))
+        .await;
+    let (mut ack, mut done, mut refund) = (false, false, false);
+    while !(ack && done && refund) {
+        match s.recv().await {
+            miner_msg::Msg::Status(v) => {
+                assert!(!ack);
+                assert_eq!(v.abandoned_generation, 1);
+                ack = true;
+            }
+            miner_msg::Msg::LeaseDone(d) => {
+                assert!(!done);
+                assert_eq!(d.salts_done, 0);
+                done = true;
+            }
+            miner_msg::Msg::JobRequest(r) => {
+                assert!(done && !refund);
+                assert_eq!(r.credits, 1);
+                refund = true;
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    release(&mut held).await;
+    // The late salt must not add a Result, a summary, or a refund.
+    s.ack().await;
+    s.finish().await;
+}
+
+#[tokio::test]
+async fn a_deadline_reports_a_lease_while_its_salt_is_still_running() {
+    let mut s = Session::start_with_gate(false, true).await;
+    s.setup(i64::MAX).await;
+    let mut lease = job(40);
+    lease.deadline_ms = u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap()
+        + 500;
+    s.send(coord_msg::Msg::Job(lease)).await;
+    let mut held = s.blocked_sample().await;
+    assert!(matches!(s.recv().await, miner_msg::Msg::LeaseDone(d) if d.salts_done == 0));
+    s.refund().await;
+    release(&mut held).await;
+    s.ack().await;
+    s.finish().await;
+}
+
 #[tokio::test]
 async fn plain_jobs_interleave_with_a_lease() {
     let mut s = Session::start(false).await;

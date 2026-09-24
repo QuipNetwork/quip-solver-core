@@ -813,7 +813,7 @@ async fn outbound_writer<C: Coefficient>(
                             return;
                         }
                     }
-                    if lease::finish_result(link, &tx).await.is_err() {
+                    if lease::finish_result(link, &tx, &cancel).await.is_err() {
                         return;
                     }
                     continue;

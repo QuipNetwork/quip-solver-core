@@ -97,13 +97,13 @@ impl LeaseState {
             permit.send(msg);
         }
     }
-    fn try_finish(&self) -> Option<MinerMsg> {
-        self.finish_locked(&mut self.progress(), false)
+    fn try_finish(&self, force: bool) -> Option<MinerMsg> {
+        self.finish_locked(&mut self.progress(), force)
     }
-    fn finish_locked(&self, p: &mut Progress, grace_expired: bool) -> Option<MinerMsg> {
+    fn finish_locked(&self, p: &mut Progress, force: bool) -> Option<MinerMsg> {
         if self.aborted.load(Ordering::Relaxed)
             || !p.closed
-            || (!grace_expired && p.finished != p.dispatched)
+            || (!force && p.finished != p.dispatched)
             || p.done_sent
         {
             return None;
@@ -115,8 +115,12 @@ impl LeaseState {
             best_energy_milli: p.best_energy_milli,
         })))
     }
-    pub(crate) async fn send_done(&self, ctrl: &mpsc::Sender<Control>) -> Result<(), ()> {
-        if let Some(done) = self.try_finish() {
+    pub(crate) async fn send_done(
+        &self,
+        ctrl: &mpsc::Sender<Control>,
+        force: bool,
+    ) -> Result<(), ()> {
+        if let Some(done) = self.try_finish(force) {
             ctrl.send(Control::summary(done, None))
                 .await
                 .map_err(|_| ())?;
@@ -125,8 +129,12 @@ impl LeaseState {
     }
 
     /// Write a finished lease's summary and refund from inside the writer.
-    pub(crate) async fn send_done_direct(&self, tx: &mpsc::Sender<MinerMsg>) -> Result<(), ()> {
-        if let Some(done) = self.try_finish() {
+    pub(crate) async fn send_done_direct(
+        &self,
+        tx: &mpsc::Sender<MinerMsg>,
+        force: bool,
+    ) -> Result<(), ()> {
+        if let Some(done) = self.try_finish(force) {
             let permits = tx.reserve_many(2).await.map_err(|_| ())?;
             for (permit, msg) in permits.zip([done, refund()]) {
                 permit.send(msg);
@@ -341,7 +349,18 @@ impl<C: Coefficient> Expander<C> {
             }
         }
         state.progress().closed = true;
-        let _ = state.send_done(&self.ctrl).await;
+        // A stopped lease reports what finished without waiting for running salts.
+        // The writer reports a lease that ends normally, so this loop exits on done_sent.
+        loop {
+            let force = state.stopped(&self.cancel);
+            if state.send_done(&self.ctrl, force).await.is_err() {
+                break;
+            }
+            if state.progress().done_sent || state.aborted.load(Ordering::Relaxed) {
+                break;
+            }
+            let _ = tick.tick().await;
+        }
     }
 }
 
@@ -356,7 +375,9 @@ pub(crate) fn handle_result(
     let StreamOutcome::Completed(Ok(samples)) = result.outcome else {
         return None;
     };
-    record_samples(&link.state, &samples);
+    if !record_samples(&link.state, &samples) {
+        return None;
+    }
     winner(
         &link.state,
         link.index,
@@ -370,12 +391,16 @@ pub(crate) fn handle_result(
         },
     )
 }
-fn record_samples(state: &LeaseState, samples: &[SamplerResult]) {
+fn record_samples(state: &LeaseState, samples: &[SamplerResult]) -> bool {
     let mut progress = state.progress();
+    if progress.done_sent {
+        return false;
+    }
     progress.salts_done += 1;
     if let Some(best) = samples.iter().map(|s| s.energy_milli).min() {
         progress.best_energy_milli = progress.best_energy_milli.min(best);
     }
+    true
 }
 fn winner(
     state: &LeaseState,
@@ -407,9 +432,15 @@ fn winner(
         meta: Some(meta),
     })))
 }
-pub(crate) async fn finish_result(link: &LeaseLink, tx: &mpsc::Sender<MinerMsg>) -> Result<(), ()> {
+pub(crate) async fn finish_result(
+    link: &LeaseLink,
+    tx: &mpsc::Sender<MinerMsg>,
+    cancel: &CancelToken,
+) -> Result<(), ()> {
     link.state.progress().finished += 1;
-    link.state.send_done_direct(tx).await
+    link.state
+        .send_done_direct(tx, link.state.stopped(cancel))
+        .await
 }
 
 /// A lease no longer accepts reads.
@@ -472,7 +503,10 @@ impl LeaseSink {
             }
             progress.dispatched += 1;
         }
-        record_samples(&self.state, &reads);
+        if !record_samples(&self.state, &reads) {
+            self.state.progress().finished += 1;
+            return Err(LeaseStopped);
+        }
         let result = self.push_winner(salt_index, reads);
         self.state.progress().finished += 1;
         result
