@@ -1525,11 +1525,9 @@ async fn run_script_close(
     outcome
 }
 
-/// Bind a UDS mock coordinator, spawn `bin_path` as a miner client against it,
-/// run the given scripted session, and report what was observed.
-///
-/// `socket` is a `unix://<path>` URI; the same value is passed to the miner via
-/// `--quip-coordinator`.
+/// Wait up to five seconds for the stderr reader, then return what it captured.
+/// A read error, a failed reader task, or a timeout appends an
+/// incomplete-capture marker line. On timeout the reader task is aborted.
 async fn finish_stderr_capture(
     mut reader: Option<tokio::task::JoinHandle<std::io::Result<()>>>,
     captured: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
@@ -1563,6 +1561,11 @@ async fn finish_stderr_capture(
     stderr
 }
 
+/// Bind a UDS mock coordinator, spawn `bin_path` as a miner client against it,
+/// run the given scripted session, and report what was observed.
+///
+/// `socket` is a `unix://<path>` URI; the same value is passed to the miner via
+/// `--quip-coordinator`.
 async fn drive_miner_with_script(bin_path: &str, socket: &str, script: ScriptKind) -> DriverReport {
     let path = socket.strip_prefix("unix://").unwrap_or(socket).to_string();
     let _ = std::fs::remove_file(&path);
