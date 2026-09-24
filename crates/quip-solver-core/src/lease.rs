@@ -352,14 +352,19 @@ impl<C: Coefficient> Expander<C> {
         // A stopped lease reports what finished without waiting for running salts.
         // The writer reports a lease that ends normally, so this loop exits on done_sent.
         loop {
-            let force = state.stopped(&self.cancel);
+            let close_at = *self.shutdown.borrow();
+            let past_close = close_at.is_some_and(|d| tokio::time::Instant::now() >= d);
+            let force = past_close || state.stopped(&self.cancel);
             if state.send_done(&self.ctrl, force).await.is_err() {
                 break;
             }
             if state.progress().done_sent || state.aborted.load(Ordering::Relaxed) {
                 break;
             }
-            let _ = tick.tick().await;
+            tokio::select! {
+                _ = tick.tick() => {},
+                () = wait_for_grace(close_at) => {},
+            }
         }
     }
 }

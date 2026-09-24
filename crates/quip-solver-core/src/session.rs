@@ -893,6 +893,12 @@ pub(crate) async fn join_expanders(
     failure
 }
 
+/// Leases close this long before the grace deadline, so their summaries reach
+/// the writer while it can still flush them.
+fn summary_margin(grace: Duration) -> Duration {
+    (grace / 4).min(Duration::from_millis(250))
+}
+
 async fn run_session<S: Sampler<C>, C: Coefficient>(
     uri: &str,
     miner_id: &str,
@@ -1516,8 +1522,11 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
     if !shutdown_requested {
         aborted.store(true, Ordering::Relaxed);
     }
-    let deadline = tokio::time::Instant::now() + Duration::from_millis(grace_ms);
-    let _ = shutdown_tx.send_replace(Some(deadline));
+    let grace = Duration::from_millis(grace_ms);
+    let deadline = tokio::time::Instant::now() + grace;
+    // Lease sinks, monitors, and expanders read this value as their close deadline.
+    // Teardown below keeps the full grace deadline.
+    let _ = shutdown_tx.send_replace(Some(deadline - summary_margin(grace)));
     if S::generates_locally() {
         // Local monitors enforce their own grace deadline, including blocked
         // sends. Let them send terminal summaries before ending the writer.
@@ -1831,6 +1840,26 @@ pub fn run<S: Sampler<C>, C: Coefficient>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[expect(
+        clippy::duration_suboptimal_units,
+        reason = "The test uses the specified grace value in milliseconds."
+    )]
+    fn leases_close_before_the_grace_deadline() {
+        assert_eq!(
+            summary_margin(Duration::from_millis(5000)),
+            Duration::from_millis(250)
+        );
+        assert_eq!(
+            summary_margin(Duration::from_millis(400)),
+            Duration::from_millis(100)
+        );
+        assert_eq!(
+            summary_margin(Duration::from_millis(1)),
+            Duration::from_micros(250)
+        );
+    }
 
     /// One outbound writer wired to fresh channels, for the writer tests.
     struct WriterHarness {

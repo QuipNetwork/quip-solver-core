@@ -1059,41 +1059,48 @@ async fn local_shutdown_closes_an_unreturned_worker_at_grace_deadline() {
     let _blocked = s.blocked_sample().await;
     s.send(coord_msg::Msg::Shutdown(wire::Shutdown { grace_ms: 100 }))
         .await;
-    // Stop rules permit grace expiry to end transport before a summary arrives.
-    // The monitor's exact summary/refund behavior is covered with paused time.
-    tokio::time::timeout(Duration::from_secs(10), async {
-        let mut done = false;
-        let mut refunded = false;
-        loop {
-            let message = match s.inbound.message().await {
-                Ok(Some(message)) => message,
-                Ok(None) => break,
-                Err(error) => {
-                    // At the hard deadline, process exit can interrupt HTTP/2
-                    // before END_STREAM. Still require a clean process exit below.
-                    assert_eq!(error.code(), tonic::Code::Unknown);
-                    assert!(std::error::Error::source(&error).is_some());
-                    break;
-                }
-            };
-            match message.msg.unwrap() {
-                miner_msg::Msg::LeaseDone(summary) => {
-                    assert!(!done, "duplicate lease completion");
-                    assert_eq!(summary.job_id, b"lease");
-                    assert_eq!(summary.salts_done, 0);
-                    done = true;
-                }
-                miner_msg::Msg::JobRequest(request) => {
-                    assert!(done && !refunded, "refund must follow one completion");
-                    assert_eq!(request.credits, 1);
-                    refunded = true;
-                }
-                other => panic!("unexpected message at grace expiry: {other:?}"),
-            }
-        }
-    })
-    .await
-    .unwrap();
+    assert!(matches!(
+        s.recv().await,
+        miner_msg::Msg::LeaseDone(d) if d.job_id == b"lease" && d.salts_done == 0
+    ));
+    s.refund().await;
+    assert!(
+        tokio::time::timeout(Duration::from_secs(10), s.inbound.message())
+            .await
+            .unwrap()
+            .unwrap()
+            .is_none()
+    );
+    s.tx = mpsc::channel(1).0;
+    assert!(
+        tokio::time::timeout(Duration::from_secs(10), s.child.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success()
+    );
+}
+
+#[tokio::test]
+async fn shutdown_reports_a_lease_whose_salt_never_returns() {
+    let mut s = Session::start_with_gate(false, true).await;
+    s.setup(i64::MAX).await;
+    s.send(coord_msg::Msg::Job(job(40))).await;
+    // Hold the salt through the whole grace window.
+    let held = s.blocked_sample().await;
+    s.send(coord_msg::Msg::Shutdown(wire::Shutdown { grace_ms: 400 }))
+        .await;
+    assert!(matches!(s.recv().await, miner_msg::Msg::LeaseDone(d) if d.salts_done == 0));
+    s.refund().await;
+    assert!(
+        tokio::time::timeout(Duration::from_secs(10), s.inbound.message())
+            .await
+            .unwrap()
+            .unwrap()
+            .is_none()
+    );
+    // The sampler thread blocks on the gate. Closing it lets the process exit.
+    drop(held);
     s.tx = mpsc::channel(1).0;
     assert!(
         tokio::time::timeout(Duration::from_secs(10), s.child.wait())
