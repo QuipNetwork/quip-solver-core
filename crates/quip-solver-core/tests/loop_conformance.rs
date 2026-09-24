@@ -203,6 +203,13 @@ async fn a_coordinator_lost_after_welcome_exits_internal_fatal() {
         report.exit_code, 70,
         "a coordinator lost after Welcome must exit InternalFatal, not report success: {report:?}"
     );
+    assert!(
+        report
+            .stderr
+            .contains("coordinator closed the session stream without Shutdown"),
+        "{}",
+        report.stderr
+    );
     assert!(report.close_after_welcome_conformant(), "{report:?}");
 }
 
@@ -222,6 +229,11 @@ async fn a_coordinator_lost_before_welcome_exits_token_rejected() {
     assert_eq!(
         report.exit_code, 77,
         "a coordinator lost before Welcome must exit TokenRejected: {report:?}"
+    );
+    assert!(
+        report.stderr.contains("the session token was rejected"),
+        "{}",
+        report.stderr
     );
     assert!(report.close_before_welcome_conformant(), "{report:?}");
 }
@@ -248,4 +260,5 @@ async fn a_device_fault_ends_the_session_instead_of_requesting_more_work() {
         report.exit_code, 70,
         "a wedged device must exit InternalFatal, not keep accepting jobs"
     );
+    assert!(report.stderr.contains("test: wedged"), "{}", report.stderr);
 }

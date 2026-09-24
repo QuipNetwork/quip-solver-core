@@ -53,9 +53,45 @@ struct Session {
     server: tokio::task::JoinHandle<Result<(), tonic::transport::Error>>,
     dir: std::path::PathBuf,
     gate: std::sync::Arc<tokio::net::UnixListener>,
+    logs: std::sync::Arc<(std::sync::Mutex<Vec<String>>, tokio::sync::Notify)>,
 }
+
+#[expect(
+    clippy::unwrap_used,
+    reason = "the stderr reader stops if the test log buffer is poisoned"
+)]
+fn capture_stderr(
+    child: &mut tokio::process::Child,
+) -> std::sync::Arc<(std::sync::Mutex<Vec<String>>, tokio::sync::Notify)> {
+    let logs = std::sync::Arc::new((
+        std::sync::Mutex::new(Vec::new()),
+        tokio::sync::Notify::new(),
+    ));
+    if let Some(pipe) = child.stderr.take() {
+        let logs = std::sync::Arc::clone(&logs);
+        drop(tokio::spawn(async move {
+            use tokio::io::AsyncBufReadExt as _;
+            let mut lines = tokio::io::BufReader::new(pipe).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                logs.0.lock().unwrap().push(line);
+                logs.1.notify_waiters();
+            }
+        }));
+    }
+    logs
+}
+
+#[expect(
+    clippy::print_stderr,
+    reason = "show captured child logs when a lease test fails"
+)]
 impl Drop for Session {
     fn drop(&mut self) {
+        if std::thread::panicking() {
+            if let Ok(lines) = self.logs.0.lock() {
+                eprintln!("miner stderr:\n{}", lines.join("\n"));
+            }
+        }
         self.server.abort();
         let _ = std::fs::remove_dir_all(&self.dir);
     }
@@ -101,10 +137,9 @@ impl Session {
             }
         });
         let mut command = tokio::process::Command::new(local.as_ref().unwrap_or(&bin));
+        let _ = command.stderr(std::process::Stdio::piped());
         if let Some(mode) = mode.filter(|m| *m != "wide") {
-            let _ = command
-                .args(["--mode", mode])
-                .stderr(std::process::Stdio::piped());
+            let _ = command.args(["--mode", mode]);
         }
         let _ = command
             .args([
@@ -121,7 +156,8 @@ impl Session {
         if gated {
             let _ = command.arg("--gate").arg(gate_path);
         }
-        let child = command.spawn().unwrap();
+        let mut child = command.spawn().unwrap();
+        let logs = capture_stderr(&mut child);
         let (inbound, tx) = tokio::time::timeout(Duration::from_secs(30), link_rx)
             .await
             .unwrap()
@@ -133,6 +169,7 @@ impl Session {
             server,
             dir,
             gate,
+            logs,
         };
         let miner_msg::Msg::Hello(hello) = s.recv().await else {
             panic!("expected Hello")
@@ -161,6 +198,26 @@ impl Session {
         assert!(matches!(s.recv().await, miner_msg::Msg::Ready(_)));
         assert!(matches!(s.recv().await, miner_msg::Msg::JobRequest(_)));
         s
+    }
+    async fn wait_for_log(&self, needle: &str) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let notified = self.logs.1.notified();
+                if self
+                    .logs
+                    .0
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|l| l.contains(needle))
+                {
+                    return;
+                }
+                notified.await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("miner never logged {needle:?}"));
     }
     async fn blocked_sample(&self) -> tokio::net::UnixStream {
         tokio::time::timeout(Duration::from_secs(10), self.gate.accept())
@@ -882,9 +939,7 @@ async fn a_wrong_device_draw_is_a_device_fault() {
 
 #[tokio::test]
 async fn a_sampler_that_ignores_stop_sends_nothing_after_cancel() {
-    use tokio::io::AsyncBufReadExt as _;
     let mut s = Session::start_mode(false, false, Some("ignore-stop")).await;
-    let mut logs = tokio::io::BufReader::new(s.child.stderr.take().unwrap()).lines();
     s.setup(i64::MAX).await;
     s.send(coord_msg::Msg::Job(job(u64::MAX - 10))).await;
     first(&mut s).await;
@@ -923,16 +978,7 @@ async fn a_sampler_that_ignores_stop_sends_nothing_after_cancel() {
             other => panic!("unexpected message: {other:?}"),
         }
     }
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while let Some(line) = logs.next_line().await.unwrap() {
-            if line.contains("push returned LeaseStopped") {
-                return;
-            }
-        }
-        panic!("missing stop acknowledgement");
-    })
-    .await
-    .unwrap();
+    s.wait_for_log("push returned LeaseStopped").await;
     s.ack().await;
     s.finish().await;
 }
@@ -1131,6 +1177,8 @@ async fn shutdown_reports_a_lease_whose_salt_never_returns() {
             .unwrap()
             .is_none()
     );
+    s.wait_for_log("sampler thread did not finish within the shutdown grace window")
+        .await;
     // The sampler thread blocks on the gate. Closing it lets the process exit.
     drop(held);
     s.tx = mpsc::channel(1).0;

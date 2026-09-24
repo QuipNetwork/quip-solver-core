@@ -182,6 +182,8 @@ pub struct DriverReport {
     pub timed_out_phases: Vec<String>,
     /// Process exit code of the spawned miner binary.
     pub exit_code: i32,
+    /// Everything the miner wrote to standard error during the session.
+    pub stderr: String,
 }
 
 /// Job ids the full walk requires a `Result` for.
@@ -1560,8 +1562,17 @@ async fn drive_miner_with_script(bin_path: &str, socket: &str, script: ScriptKin
         .arg("--miner-id")
         .arg("mock-0")
         .env("QUIP_SESSION_TOKEN", "test-token")
+        .stderr(std::process::Stdio::piped())
         .spawn()
         .expect("spawn miner");
+    let stderr_reader = child.stderr.take().map(|mut pipe| {
+        tokio::spawn(async move {
+            use tokio::io::AsyncReadExt as _;
+            let mut bytes = Vec::new();
+            let _ = pipe.read_to_end(&mut bytes).await;
+            String::from_utf8_lossy(&bytes).into_owned()
+        })
+    });
 
     // Bound the wait so a hung miner can't hang the test suite; on timeout,
     // kill the child and report a sentinel exit code so callers fail loudly
@@ -1576,6 +1587,14 @@ async fn drive_miner_with_script(bin_path: &str, socket: &str, script: ScriptKin
     } else {
         let _ = child.kill().await;
         -1
+    };
+    let stderr = match stderr_reader {
+        Some(reader) => tokio::time::timeout(Duration::from_secs(5), reader)
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .unwrap_or_default(),
+        None => String::new(),
     };
     // The session handler sends the outcome as the miner closes its stream on
     // exit; the timeout guards a miner that dies before ever connecting.
@@ -1605,6 +1624,7 @@ async fn drive_miner_with_script(bin_path: &str, socket: &str, script: ScriptKin
         terminal: outcome.terminal,
         timed_out_phases: outcome.timed_out_phases,
         exit_code,
+        stderr,
     }
 }
 
@@ -1717,6 +1737,7 @@ mod tests {
             terminal: Terminal::Open,
             timed_out_phases: vec![],
             exit_code: 0,
+            stderr: String::new(),
         }
     }
 

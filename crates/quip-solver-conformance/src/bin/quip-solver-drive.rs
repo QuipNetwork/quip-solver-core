@@ -36,6 +36,15 @@ async fn main() -> ExitCode {
         println!("conformance report for {bin_path}:");
         print!("{}", report.summary());
     }
+    #[expect(
+        clippy::print_stderr,
+        reason = "the CLI shows the miner's own log after the report"
+    )]
+    {
+        if !report.stderr.is_empty() {
+            eprintln!("miner stderr:\n{}", report.stderr);
+        }
+    }
     if report.is_conformant() {
         ExitCode::SUCCESS
     } else {
