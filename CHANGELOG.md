@@ -28,7 +28,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Cancellation and lease deadlines send `LeaseDone` with the salts finished so far.
 - Shutdown closes leases at `grace_ms - min(grace_ms / 4, 250 ms)`.
-- `LeaseDone` and its credit refund use one outbound reservation and always arrive together.
+- `LeaseDone` and its credit refund use one outbound reservation. The miner commits both to the outbound queue without an intervening await, so the coordinator receives both unless the connection fails.
 - `LeaseSink::push` ignores a repeated salt index and returns `Ok(())`.
 - `Status.jobs_done` counts completed plain jobs and sampled lease salts.
 - The conformance driver captures miner stderr in `DriverReport.stderr` and prints it after the report summary.

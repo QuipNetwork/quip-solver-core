@@ -17,6 +17,12 @@ use std::sync::{
 };
 use tokio::sync::{mpsc, watch, OwnedSemaphorePermit, Semaphore};
 
+#[derive(Clone, Copy)]
+pub(crate) struct ShutdownDeadlines {
+    pub(crate) close: tokio::time::Instant,
+    pub(crate) teardown: tokio::time::Instant,
+}
+
 /// A decoded salt range and its deterministic generator.
 #[derive(Clone, Debug)]
 pub struct Lease(LeaseSpec);
@@ -190,12 +196,59 @@ pub(crate) struct LeaseLink {
     _permit: OwnedSemaphorePermit,
 }
 
+#[cfg(test)]
+pub(crate) fn test_state(watermark: Option<u64>) -> Arc<LeaseState> {
+    let spec = LeaseSpec::new(Generator::Blake3Chacha8V1, [1; 32], [2; 32], [3; 32], 0, 1).unwrap();
+    Arc::new(LeaseState {
+        job_id: b"lease".to_vec(),
+        lease: Lease(spec),
+        topology: Arc::new(TopologyView {
+            num_nodes: 1,
+            edges: vec![],
+            allowed_h_milli: vec![1000],
+            allowed_j_milli: vec![],
+        }),
+        watermark,
+        deadline_ms: 0,
+        aborted: Arc::new(AtomicBool::new(false)),
+        jobs_done: Arc::new(AtomicU64::new(0)),
+        progress: Mutex::new(Progress {
+            dispatched: 0,
+            finished: 0,
+            salts_done: 0,
+            best_energy_milli: i64::MAX,
+            closed: false,
+            done_sent: false,
+            pushed: PushedSalts::default(),
+        }),
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn test_link() -> (LeaseLink, Arc<LeaseState>) {
+    let state = test_state(None);
+    {
+        let mut progress = state.progress();
+        progress.dispatched = 1;
+        progress.closed = true;
+    }
+    let permit = Arc::new(Semaphore::new(1)).try_acquire_owned().unwrap();
+    (
+        LeaseLink {
+            state: Arc::clone(&state),
+            index: 0,
+            _permit: permit,
+        },
+        state,
+    )
+}
+
 pub(crate) struct Expander<C: Coefficient> {
     pub(crate) jobs: JobSender<C>,
     pub(crate) pending: PendingParams,
     pub(crate) slots: Arc<Semaphore>,
     pub(crate) cancel: CancelToken,
-    pub(crate) shutdown: watch::Receiver<Option<tokio::time::Instant>>,
+    pub(crate) shutdown: watch::Receiver<Option<ShutdownDeadlines>>,
     pub(crate) ctrl: mpsc::Sender<Control>,
 }
 
@@ -387,8 +440,10 @@ impl<C: Coefficient> Expander<C> {
         state.progress().closed = true;
         // A stopped lease reports what finished without waiting for running salts.
         // The writer reports a lease that ends normally, so this loop exits on done_sent.
+        let mut shutdown_open = true;
         loop {
-            let close_at = *self.shutdown.borrow();
+            let deadlines = *self.shutdown.borrow();
+            let close_at = deadlines.map(|d| d.close);
             let past_close = close_at.is_some_and(|d| tokio::time::Instant::now() >= d);
             let force = past_close || state.stopped(&self.cancel);
             if state.send_done(&self.ctrl, force).await.is_err() {
@@ -399,6 +454,7 @@ impl<C: Coefficient> Expander<C> {
             }
             tokio::select! {
                 _ = tick.tick() => {},
+                changed = self.shutdown.changed(), if shutdown_open => shutdown_open = changed.is_ok(),
                 () = wait_for_grace(close_at) => {},
             }
         }
@@ -501,7 +557,7 @@ pub struct LeaseSink {
     pub(crate) before_send: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
     pub(crate) state: Arc<LeaseState>,
     pub(crate) cancel: CancelToken,
-    pub(crate) shutdown: watch::Receiver<Option<tokio::time::Instant>>,
+    pub(crate) shutdown: watch::Receiver<Option<ShutdownDeadlines>>,
     pub(crate) target: watch::Receiver<Option<SessionTarget>>,
     // An uncooperative worker must not keep the control queue open after cancellation.
     pub(crate) ctrl: mpsc::WeakSender<Control>,
@@ -523,7 +579,7 @@ impl LeaseSink {
             || self
                 .shutdown
                 .borrow()
-                .is_some_and(|deadline| tokio::time::Instant::now() >= deadline)
+                .is_some_and(|deadlines| tokio::time::Instant::now() >= deadlines.close)
             || self.ctrl.upgrade().is_none_or(|tx| tx.is_closed())
             || self.state.progress().closed
     }
@@ -694,33 +750,33 @@ impl LeaseSink {
 pub(crate) async fn monitor_local(
     state: Arc<LeaseState>,
     cancel: CancelToken,
-    mut shutdown: watch::Receiver<Option<tokio::time::Instant>>,
+    mut shutdown: watch::Receiver<Option<ShutdownDeadlines>>,
     tx: mpsc::Sender<MinerMsg>,
 ) {
     let mut tick = tokio::time::interval(std::time::Duration::from_millis(5));
     loop {
-        let deadline = *shutdown.borrow();
-        let grace_expired = deadline.is_some_and(|d| tokio::time::Instant::now() >= d);
+        let deadlines = *shutdown.borrow();
+        let close_expired = deadlines.is_some_and(|d| tokio::time::Instant::now() >= d.close);
         let done = {
             let mut progress = state.progress();
-            if state.stopped(&cancel) || grace_expired {
+            if state.stopped(&cancel) || close_expired {
                 progress.closed = true;
             }
-            state.finish_locked(&mut progress, grace_expired)
+            state.finish_locked(&mut progress, close_expired)
         };
         if let Some(done) = done {
-            // Stop summaries bypass queued winners only after cancellation or
-            // grace expiry. The writer drops those winners using the same state.
+            // Stop summaries bypass queued winners after cancellation or the
+            // close deadline. The writer drops those winners using the same state.
             let control = Control::summary(done, Some((Arc::clone(&state), shutdown.clone())));
             let send = crate::session::send_control(&tx, control, &cancel);
             tokio::pin!(send);
             loop {
-                let deadline = *shutdown.borrow();
+                let teardown = shutdown.borrow().map(|d| d.teardown);
                 tokio::select! {
                     biased;
                     _ = &mut send => break,
                     _ = shutdown.changed() => {},
-                    () = wait_for_grace(deadline) => return,
+                    () = wait_for_grace(teardown) => return,
                 }
             }
         }
@@ -730,7 +786,7 @@ pub(crate) async fn monitor_local(
         tokio::select! {
             _ = tick.tick() => {},
             _ = shutdown.changed() => {},
-            () = wait_for_grace(deadline) => {},
+            () = wait_for_grace(deadlines.map(|d| d.close)) => {},
         }
     }
 }
@@ -746,34 +802,6 @@ async fn wait_for_grace(deadline: Option<tokio::time::Instant>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn test_state(watermark: Option<u64>) -> Arc<LeaseState> {
-        let spec =
-            LeaseSpec::new(Generator::Blake3Chacha8V1, [1; 32], [2; 32], [3; 32], 0, 1).unwrap();
-        Arc::new(LeaseState {
-            job_id: b"lease".to_vec(),
-            lease: Lease(spec),
-            topology: Arc::new(TopologyView {
-                num_nodes: 1,
-                edges: vec![],
-                allowed_h_milli: vec![1000],
-                allowed_j_milli: vec![],
-            }),
-            watermark,
-            deadline_ms: 0,
-            aborted: Arc::new(AtomicBool::new(false)),
-            jobs_done: Arc::new(AtomicU64::new(0)),
-            progress: Mutex::new(Progress {
-                dispatched: 0,
-                finished: 0,
-                salts_done: 0,
-                best_energy_milli: i64::MAX,
-                closed: false,
-                done_sent: false,
-                pushed: PushedSalts::default(),
-            }),
-        })
-    }
 
     #[test]
     fn pushed_salts_merge_ranges_and_reject_repeats() {
@@ -825,7 +853,10 @@ mod tests {
 
         let state = test_state(Some(1));
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(100);
-        let (_shutdown_tx, shutdown) = watch::channel(Some(deadline));
+        let (_shutdown_tx, shutdown) = watch::channel(Some(ShutdownDeadlines {
+            close: deadline,
+            teardown: deadline,
+        }));
         let (tx, mut rx) = mpsc::channel(2);
         let cancel = CancelToken::default();
         let monitor = monitor_local(
@@ -869,7 +900,10 @@ mod tests {
     async fn local_monitor_never_sends_a_summary_without_its_refund() {
         let state = test_state(Some(1));
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(100);
-        let (_shutdown_tx, shutdown) = watch::channel(Some(deadline));
+        let (_shutdown_tx, shutdown) = watch::channel(Some(ShutdownDeadlines {
+            close: deadline,
+            teardown: deadline,
+        }));
         // Two slots, one already taken: room for the summary but not its refund.
         let (tx, mut rx) = mpsc::channel(2);
         tx.send(miner(miner_msg::Msg::JobRequest(JobRequest { credits: 7 })))
@@ -885,6 +919,92 @@ mod tests {
             rx.try_recv().is_err(),
             "a summary reached the writer without its refund"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn local_monitor_retries_summary_until_teardown_deadline() {
+        let state = test_state(Some(1));
+        let close = tokio::time::Instant::now() + std::time::Duration::from_millis(20);
+        let teardown = close + std::time::Duration::from_millis(20);
+        let (_shutdown_tx, shutdown) = watch::channel(Some(ShutdownDeadlines { close, teardown }));
+        // One free slot remains, but a summary and refund need two slots.
+        let (tx, mut rx) = mpsc::channel(2);
+        tx.send(miner(miner_msg::Msg::JobRequest(JobRequest { credits: 7 })))
+            .await
+            .unwrap();
+        let monitor = tokio::spawn(monitor_local(
+            Arc::clone(&state),
+            CancelToken::default(),
+            shutdown,
+            tx,
+        ));
+
+        tokio::time::advance(std::time::Duration::from_millis(20)).await;
+        tokio::task::yield_now().await;
+        assert!(state.progress().closed);
+        assert_eq!(
+            rx.try_recv().unwrap().msg,
+            Some(miner_msg::Msg::JobRequest(JobRequest { credits: 7 }))
+        );
+        tokio::task::yield_now().await;
+        assert!(
+            matches!(
+                rx.try_recv().unwrap().msg,
+                Some(miner_msg::Msg::LeaseDone(_))
+            ),
+            "the summary must be sent after capacity returns during the flush margin"
+        );
+        assert_eq!(
+            rx.try_recv().unwrap().msg,
+            Some(miner_msg::Msg::JobRequest(JobRequest { credits: 1 }))
+        );
+        monitor.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn expander_reports_after_short_shutdown_changes_while_waiting_for_sampler() {
+        use crate::coefficient::Milli;
+
+        let state = test_state(None);
+        let (jobs, _jobs_rx) = mpsc::channel::<StreamJob<Milli>>(1);
+        let (ctrl, mut ctrl_rx) = mpsc::channel::<Control>(1);
+        let (shutdown_tx, shutdown) = watch::channel(None);
+        let expander = Expander {
+            jobs: JobSender::Plain(jobs),
+            pending: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            slots: Arc::new(Semaphore::new(1)),
+            cancel: CancelToken::default(),
+            shutdown,
+            ctrl,
+        };
+        let run = tokio::spawn(expander.run(Arc::clone(&state), SampleParams::default()));
+        tokio::task::yield_now().await;
+        assert_eq!(state.progress().dispatched, 1);
+        assert!(state.progress().closed);
+
+        // The first interval tick ran during dispatch. Publish Shutdown just after it.
+        tokio::time::advance(std::time::Duration::from_millis(1)).await;
+        let teardown = tokio::time::Instant::now() + std::time::Duration::from_millis(10);
+        let _ = shutdown_tx.send_replace(Some(ShutdownDeadlines {
+            close: teardown - std::time::Duration::from_micros(2500),
+            teardown,
+        }));
+        tokio::time::advance(std::time::Duration::from_millis(9)).await;
+
+        let control = ctrl_rx
+            .try_recv()
+            .expect("shutdown change must force a summary before teardown");
+        let (out, mut out_rx) = mpsc::channel(2);
+        assert!(crate::session::send_control(&out, control, &CancelToken::default()).await);
+        assert!(matches!(
+            out_rx.try_recv().unwrap().msg,
+            Some(miner_msg::Msg::LeaseDone(_))
+        ));
+        assert_eq!(
+            out_rx.try_recv().unwrap().msg,
+            Some(miner_msg::Msg::JobRequest(JobRequest { credits: 1 }))
+        );
+        run.await.unwrap();
     }
 
     #[test]
@@ -965,7 +1085,11 @@ mod tests {
             pending: Arc::new(Mutex::new(std::collections::HashMap::new())),
             slots: Arc::new(Semaphore::new(1)),
             cancel: CancelToken::default(),
-            shutdown: watch::channel(Some(tokio::time::Instant::now())).1,
+            shutdown: watch::channel(Some(ShutdownDeadlines {
+                close: tokio::time::Instant::now(),
+                teardown: tokio::time::Instant::now(),
+            }))
+            .1,
             ctrl: ctrl.clone(),
         };
         let mut expanders = tokio::task::JoinSet::new();

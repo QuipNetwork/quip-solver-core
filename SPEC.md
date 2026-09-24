@@ -384,7 +384,8 @@ optional. The `None` belongs to the job's watermark.
 | Stream closes or the session becomes fatal | Abandon leases without a guaranteed `LeaseDone`. |
 
 `Status.abandoned_generation` reports the cancellation watermark.
-`LeaseDone` and its credit refund always arrive together.
+The miner commits `LeaseDone` and its credit refund to the outbound queue without an intervening await.
+If the connection stays open, the coordinator receives both messages together.
 `Status.jobs_done` counts completed plain jobs plus sampled lease salts.
 
 For local generation, shutdown makes `LeaseSink::is_stopped()` true immediately, so the sampler starts no new salts.

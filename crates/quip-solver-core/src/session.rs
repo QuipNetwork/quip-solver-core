@@ -547,6 +547,8 @@ struct WriterContext {
     /// Cancellation watermark, re-checked here so no `Result` for an abandoned
     /// generation reaches the wire.
     cancel: CancelToken,
+    /// Lease close deadline, re-checked when each result reaches the writer.
+    shutdown: watch::Receiver<Option<lease::ShutdownDeadlines>>,
     /// Backend name for the log lines.
     backend: &'static str,
 }
@@ -558,7 +560,7 @@ pub(crate) struct Control {
     refund: bool,
     local: Option<(
         Arc<lease::LeaseState>,
-        watch::Receiver<Option<tokio::time::Instant>>,
+        watch::Receiver<Option<lease::ShutdownDeadlines>>,
     )>,
 }
 impl From<MinerMsg> for Control {
@@ -574,7 +576,7 @@ impl Control {
     pub(crate) fn local(
         msg: MinerMsg,
         state: Arc<lease::LeaseState>,
-        shutdown: watch::Receiver<Option<tokio::time::Instant>>,
+        shutdown: watch::Receiver<Option<lease::ShutdownDeadlines>>,
     ) -> Self {
         Self {
             msg,
@@ -587,7 +589,7 @@ impl Control {
         done: MinerMsg,
         local: Option<(
             Arc<lease::LeaseState>,
-            watch::Receiver<Option<tokio::time::Instant>>,
+            watch::Receiver<Option<lease::ShutdownDeadlines>>,
         )>,
     ) -> Self {
         Self {
@@ -622,10 +624,10 @@ pub(crate) async fn send_control(
         msgs.push(miner(miner_msg::Msg::JobRequest(JobRequest { credits: 1 })));
     }
     if let Some((state, shutdown)) = &control.local {
-        let grace_expired = shutdown
+        let close_expired = shutdown
             .borrow()
-            .is_some_and(|deadline| tokio::time::Instant::now() >= deadline);
-        state.send_local(msgs, permits, cancel, grace_expired);
+            .is_some_and(|deadlines| tokio::time::Instant::now() >= deadlines.close);
+        state.send_local(msgs, permits, cancel, close_expired);
         return true;
     }
     for (permit, msg) in permits.zip(msgs) {
@@ -711,6 +713,7 @@ async fn outbound_writer<C: Coefficient>(
         jobs_done,
         device_faulted,
         cancel,
+        shutdown,
         backend,
         target,
         aborted,
@@ -778,7 +781,11 @@ async fn outbound_writer<C: Coefficient>(
                 let stopped = entry.as_ref().is_some_and(|e| {
                     cancel.is_cancelled(e.watermark)
                         || e.lease.as_ref().is_some_and(|link| {
-                            link.state.expired() || aborted.load(Ordering::Relaxed)
+                            link.state.expired()
+                                || aborted.load(Ordering::Relaxed)
+                                || shutdown.borrow().is_some_and(|deadlines| {
+                                    tokio::time::Instant::now() >= deadlines.close
+                                })
                         })
                 });
                 let mut sr = match sr.outcome {
@@ -1048,6 +1055,7 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
             jobs_done: Arc::clone(&jobs_done),
             device_faulted: Arc::clone(&device_faulted),
             cancel: cancel.clone(),
+            shutdown: shutdown_rx.clone(),
             backend: backend_name(id.backend),
         },
     ));
@@ -1529,7 +1537,10 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
     let deadline = tokio::time::Instant::now() + grace;
     // Lease sinks, monitors, and expanders read this value as their close deadline.
     // Teardown below keeps the full grace deadline.
-    let _ = shutdown_tx.send_replace(Some(deadline - summary_margin(grace)));
+    let _ = shutdown_tx.send_replace(Some(lease::ShutdownDeadlines {
+        close: deadline - summary_margin(grace),
+        teardown: deadline,
+    }));
     if S::generates_locally() {
         // Local monitors enforce their own grace deadline, including blocked
         // sends. Let them send terminal summaries before ending the writer.
@@ -1870,6 +1881,8 @@ mod tests {
         ctrl_tx: mpsc::Sender<Control>,
         out_rx: mpsc::Receiver<MinerMsg>,
         pending: PendingParams,
+        jobs_done: Arc<AtomicU64>,
+        shutdown_tx: watch::Sender<Option<lease::ShutdownDeadlines>>,
         cancel: CancelToken,
         writer: tokio::task::JoinHandle<()>,
     }
@@ -1884,6 +1897,8 @@ mod tests {
         let (ctrl_tx, ctrl_rx) = mpsc::channel::<Control>(depth);
         let pending: PendingParams = Arc::new(StdMutex::new(HashMap::new()));
         let cancel = CancelToken::default();
+        let jobs_done = Arc::new(AtomicU64::new(0));
+        let (shutdown_tx, shutdown) = watch::channel(None);
         let writer = tokio::spawn(outbound_writer::<C>(
             tx,
             res_rx,
@@ -1892,9 +1907,10 @@ mod tests {
                 target: watch::channel(None).1,
                 aborted: Arc::new(AtomicBool::new(false)),
                 pending: Arc::clone(&pending),
-                jobs_done: Arc::new(AtomicU64::new(0)),
+                jobs_done: Arc::clone(&jobs_done),
                 device_faulted: Arc::new(AtomicBool::new(false)),
                 cancel: cancel.clone(),
+                shutdown,
                 backend: "test",
             },
         ));
@@ -1903,9 +1919,63 @@ mod tests {
             ctrl_tx,
             out_rx,
             pending,
+            jobs_done,
+            shutdown_tx,
             cancel,
             writer,
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn lease_result_reaching_writer_after_close_is_not_counted() {
+        let mut harness = spawn_writer(4);
+        let (link, _state) = lease::test_link();
+        let internal_id = pending_id(b"lease", Some(0));
+        let _ = harness.pending.lock().unwrap().insert(
+            internal_id.clone(),
+            PendingJob {
+                lease: Some(link),
+                exact_energy: None,
+                num_reads: 1,
+                num_sweeps: 1,
+                started: std::time::Instant::now(),
+                max_energy_milli: None,
+                min_solutions: 0,
+                watermark: None,
+            },
+        );
+        let now = tokio::time::Instant::now();
+        let _ = harness
+            .shutdown_tx
+            .send_replace(Some(lease::ShutdownDeadlines {
+                close: now,
+                teardown: now + Duration::from_millis(10),
+            }));
+        harness
+            .res_tx
+            .send(StreamResult {
+                job_id: internal_id,
+                outcome: StreamOutcome::Completed(Ok(vec![crate::SamplerResult {
+                    spins: vec![1],
+                    energy_milli: -1000,
+                }])),
+                device_access_time_us: 0,
+            })
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            harness.out_rx.recv().await.unwrap().msg,
+            Some(miner_msg::Msg::LeaseDone(done)) if done.salts_done == 0
+        ));
+        assert_eq!(harness.jobs_done.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            harness.out_rx.recv().await.unwrap().msg,
+            Some(miner_msg::Msg::JobRequest(JobRequest { credits: 1 }))
+        );
+        drop(harness.res_tx);
+        drop(harness.ctrl_tx);
+        harness.writer.await.unwrap();
     }
 
     #[tokio::test]
@@ -2470,6 +2540,7 @@ mod tests {
             pending,
             cancel,
             writer,
+            ..
         } = spawn_writer(16);
 
         {
@@ -2915,6 +2986,7 @@ mod tests {
             pending,
             cancel,
             writer,
+            ..
         } = spawn_writer(16);
         for key in [1_u8, 2] {
             let mut entry = pending_job(Some(1));

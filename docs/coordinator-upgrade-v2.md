@@ -266,7 +266,8 @@ Reordering equal-energy reads can change diversity selection ties.
 
 Generation zero has no cancellation watermark.
 Neither repeated nor out-of-order cancellation changes that rule.
-`LeaseDone` and its credit refund always arrive together.
+The miner commits `LeaseDone` and its credit refund to the outbound queue without an intervening await.
+If the connection stays open, the coordinator receives both messages together.
 A local sampler can push until the lease close deadline.
 A local sampler can push the same salt index twice, but the second push sends and counts nothing.
 
