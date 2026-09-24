@@ -54,7 +54,7 @@ An unknown non-NULL string ends the run with `ConfigInvalid`, exit code 64, and 
 Keep `sample` and the existing streaming methods for the default lease path.
 These methods need no changes.
 The session generates salt problems and sends them through the sampler stream.
-It sends one result per winning salt, one `LeaseDone` per completed lease, then one credit.
+It sends one result per winning salt, then one `LeaseDone` with a one-credit refund per completed lease.
 
 For device-side generation, return `true` from `generates_locally()` and override this method:
 
@@ -77,12 +77,21 @@ The method takes no `CancelToken` parameter.
 The host redraws and rescores candidate winners. A mismatch or panic ends the run as a device fault.
 A local fatal error sends no `LeaseDone` or credit refund for that lease.
 On shutdown, `out.is_stopped()` becomes true immediately, so start no new salts.
-The sink accepts verified winners from work already running until the grace deadline.
-The lease closes and sends `LeaseDone` when its worker returns or grace expires, whichever comes first.
-Cancellation and lease expiry reject later pushes and queued winners.
+The sink accepts verified winners from work already running until the lease close deadline.
+The close deadline is `grace_ms - min(grace_ms / 4, 250 ms)`.
+The session then sends `LeaseDone` and one credit refund together.
+Cancellation and lease expiry send the summary and refund with salts finished so far, then reject later pushes and queued winners.
 Live local workers cannot exceed the advertised credit window.
 The session removes finished workers before starting another worker.
 If stopped workers still fill that window, the session ends with a device fault.
+
+`LeaseSink::push` returns `Ok(())` for a repeated salt index.
+It sends no result and does not update counts.
+
+## Conformance driver
+
+`DriverReport.stderr` contains the miner process standard error.
+`quip-solver-drive` prints it after the report summary.
 
 Report the exact energy of the model your sampler receives.
 The session now checks coefficient conversion per problem and skips rescoring when that conversion is exact.

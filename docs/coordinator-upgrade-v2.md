@@ -143,7 +143,7 @@ Plain jobs can run while a lease is active and refund their own credits.
 The lease keeps its admission topology snapshot.
 Each completed salt uses the target current at scoring time.
 A winner produces one `Result` with that salt, nonce, and proof set.
-After the last result, the session sends one `LeaseDone`, then refunds one credit.
+After the last result, the session sends one `LeaseDone` with a one-credit refund.
 `salts_done` counts completed successful salt samples, including empty read sets.
 Empty reads produce no result and leave `best_energy_milli` unchanged.
 The lowest energy starts at `i64::MAX` and stays there if no reads finish.
@@ -259,21 +259,21 @@ Reordering equal-energy reads can change diversity selection ties.
 
 | Stop | Default lease behavior |
 | --- | --- |
-| `Cancel { max_generation }` covers a nonzero generation | Stop drawing before the next salt. Drop later reads. Send `LeaseDone` after outstanding salt outcomes drain. Report `Status.abandoned_generation`. |
-| `Shutdown { grace_ms }` | Stop drawing. Let outstanding reads finish within the grace window. Send winners and `LeaseDone` if the drain finishes in time. Exit. |
-| A nonzero deadline passes | Stop drawing and drop later reads, as for cancellation. Complete the summary after outstanding outcomes drain. |
+| `Cancel { max_generation }` covers a nonzero generation | Stop drawing. Send `LeaseDone` and one credit refund at once with the salts finished so far. Drop later outcomes. Report `Status.abandoned_generation`. |
+| `Shutdown { grace_ms }` | Stop drawing. Accept outcomes until the lease close deadline, `grace_ms - min(grace_ms / 4, 250 ms)`. Then send `LeaseDone` and one credit refund. Exit within `grace_ms`. |
+| A nonzero deadline passes | Stop drawing. Send `LeaseDone` and one credit refund at once with the salts finished so far. Drop later outcomes, as for cancellation. |
 | Stream closes or the session becomes fatal | Abandon the lease. Do not expect a completion summary. |
 
 Generation zero has no cancellation watermark.
 Neither repeated nor out-of-order cancellation changes that rule.
-A sampler must cooperate so that outstanding outcomes can drain.
-The shutdown grace limit can end the session before a summary reaches the coordinator.
+`LeaseDone` and its credit refund always arrive together.
+A local sampler can push until the lease close deadline.
+A local sampler can push the same salt index twice, but the second push sends and counts nothing.
 
 For local generation, `LeaseSink::is_stopped()` covers cancellation, deadlines, shutdown, completion, and a closed writer.
 On shutdown, stop starting salts immediately.
-The sink accepts verified winners from work already running until the grace deadline.
-The lease closes when its worker returns or grace expires, whichever comes first, and sends `LeaseDone`.
-Cancellation and lease expiry reject later pushes and queued winners.
+The sink accepts verified winners from work already running until the lease close deadline.
+Cancellation and lease expiry reject later pushes and queued winners after the summary.
 A session task closes cancelled local leases even if the sampler does not return.
 A local fatal error or panic sends `Fatal` without a completion summary or credit refund for that lease.
 

@@ -14,8 +14,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Optional Rust `generates_locally`, `sample_lease`, `Lease`, and `LeaseSink` APIs.
   The host verifies candidate winners from local generation.
   The writer checks local winners for cancellation and lease expiry before transmission.
-  Shutdown stops new salts but accepts verified winners from running work during grace.
-  The local lease closes when its worker returns or grace expires, whichever comes first.
+  Shutdown stops new salts but accepts verified winners from running work until the lease close deadline.
+  The local lease closes at the lease close deadline before grace expires.
   Local fatal errors send no lease summary or credit refund.
   The advertised credit window bounds live local workers.
   Stopped workers that prevent replacement work cause a device fault.
@@ -26,6 +26,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Cancellation and lease deadlines send `LeaseDone` with the salts finished so far.
+- Shutdown closes leases at `grace_ms - min(grace_ms / 4, 250 ms)`.
+- `LeaseDone` and its credit refund use one outbound reservation and always arrive together.
+- `LeaseSink::push` ignores a repeated salt index and returns `Ok(())`.
+- `Status.jobs_done` counts completed plain jobs and sampled lease salts.
+- The conformance driver captures miner stderr in `DriverReport.stderr` and prints it after the report summary.
 - Protocol version 2 requires a coordinated upgrade of solvers and coordinators.
   `Hello.capabilities` carries the capability message.
 - `Backend` and `Algorithm` identities use enums. Command-line identity names remain lowercase.

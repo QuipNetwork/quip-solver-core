@@ -112,7 +112,7 @@ M is the solver. C is the coordinator.
 | `Reject` | M→C | Decline a job, with a reason. |
 | `Cancel` | C→M | Abandon stale generations. |
 | `Ping` | C→M | Liveness probe. |
-| `Status` | M→C | Health, load, and liveness state. |
+| `Status` | M→C | Health, load, liveness state, and completed work count. |
 | `Shutdown` | C→M | End the session within a grace window. |
 | `Fatal` | M→C | Report a fatal reason before exit. |
 | `GetCapabilities` | C→M | Ask for the `Capabilities` message. |
@@ -178,7 +178,7 @@ The coordinator verifies and submits that set unchanged and in order.
 `quip_protocol::target::meets_target` selects the proof set.
 `quip_protocol::lease::verify_lease_result` verifies the complete wire result with a lease, topology, and target.
 
-After its last result, a completed lease sends one `LeaseDone`, then one credit.
+After its last result, a completed lease sends one `LeaseDone` with a one-credit refund.
 `salts_done` counts successfully completed salt samples, including empty read sets.
 Empty reads send no result and do not change the lowest energy.
 `best_energy_milli` is the lowest energy observed, or `i64::MAX` if no reads finish.
@@ -378,19 +378,19 @@ optional. The `None` belongs to the job's watermark.
 
 | Event | Default session behavior |
 | --- | --- |
-| `Cancel` covers a nonzero lease generation | Stop before the next salt. Drop later reads. Send `LeaseDone` after outstanding outcomes drain, then one credit. |
-| `Shutdown { grace_ms }` | Stop drawing. Drain outstanding reads and winners within the grace window. Send `LeaseDone` if the drain completes, then exit. |
-| A nonzero `deadline_ms` passes | Stop drawing and drop later reads, as for cancellation. |
+| `Cancel` covers a nonzero lease generation | Stop drawing. Send `LeaseDone` and one credit refund at once with the salts finished so far. Drop later outcomes. |
+| `Shutdown { grace_ms }` | Stop drawing. Accept outcomes until the lease close deadline, `grace_ms - min(grace_ms / 4, 250 ms)`. Then send `LeaseDone` and one credit refund. Exit within `grace_ms`. |
+| A nonzero `deadline_ms` passes | Stop drawing. Send `LeaseDone` and one credit refund at once with the salts finished so far. Drop later outcomes, as for cancellation. |
 | Stream closes or the session becomes fatal | Abandon leases without a guaranteed `LeaseDone`. |
 
 `Status.abandoned_generation` reports the cancellation watermark.
-A default sampler must return outstanding salt outcomes before its lease summary can complete.
-A shutdown timeout can prevent that summary from reaching the coordinator.
+`LeaseDone` and its credit refund always arrive together.
+`Status.jobs_done` counts completed plain jobs plus sampled lease salts.
 
 For local generation, shutdown makes `LeaseSink::is_stopped()` true immediately, so the sampler starts no new salts.
-The sink accepts verified winners from work already running until the grace deadline.
-The lease closes and sends `LeaseDone` when its worker returns or grace expires, whichever comes first.
-Cancellation and lease expiry reject later pushes and queued winners.
+The sink accepts verified winners from work already running until the lease close deadline.
+`LeaseSink::push` ignores a repeated salt index.
+Cancellation and lease expiry reject later pushes and queued winners after the summary.
 A session task closes cancelled local leases even when the sampler does not return.
 A local fatal error or panic sends `Fatal` without `LeaseDone` or a credit refund for that lease.
 
