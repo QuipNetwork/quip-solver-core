@@ -554,6 +554,8 @@ struct WriterContext {
 /// Local messages retain their stop state until the writer commits them.
 pub(crate) struct Control {
     msg: MinerMsg,
+    /// Send `JobRequest { credits: 1 }` right after `msg`, from the same reservation.
+    refund: bool,
     local: Option<(
         Arc<lease::LeaseState>,
         watch::Receiver<Option<tokio::time::Instant>>,
@@ -561,7 +563,11 @@ pub(crate) struct Control {
 }
 impl From<MinerMsg> for Control {
     fn from(msg: MinerMsg) -> Self {
-        Self { msg, local: None }
+        Self {
+            msg,
+            refund: false,
+            local: None,
+        }
     }
 }
 impl Control {
@@ -572,7 +578,22 @@ impl Control {
     ) -> Self {
         Self {
             msg,
+            refund: false,
             local: Some((state, shutdown)),
+        }
+    }
+    /// A lease summary and its credit refund. The writer commits both or neither.
+    pub(crate) fn summary(
+        done: MinerMsg,
+        local: Option<(
+            Arc<lease::LeaseState>,
+            watch::Receiver<Option<tokio::time::Instant>>,
+        )>,
+    ) -> Self {
+        Self {
+            msg: done,
+            refund: true,
+            local,
         }
     }
 }
@@ -582,27 +603,34 @@ pub(crate) async fn send_control(
     control: Control,
     cancel: &CancelToken,
 ) -> bool {
+    let count = if control.refund { 2 } else { 1 };
     // Ready terminal messages must not yield on a depleted task budget at
     // the grace boundary. Only wait when the channel is actually full.
-    let permit = match tx.try_reserve() {
-        Ok(permit) => permit,
+    let permits = match tx.try_reserve_many(count) {
+        Ok(permits) => permits,
         Err(mpsc::error::TrySendError::Closed(())) => return false,
         Err(mpsc::error::TrySendError::Full(())) => {
-            let Ok(permit) = tx.reserve().await else {
+            let Ok(permits) = tx.reserve_many(count).await else {
                 return false;
             };
-            permit
+            permits
         }
     };
+    let fatal = matches!(control.msg.msg, Some(miner_msg::Msg::Fatal(_)));
+    let mut msgs = vec![control.msg];
+    if control.refund {
+        msgs.push(miner(miner_msg::Msg::JobRequest(JobRequest { credits: 1 })));
+    }
     if let Some((state, shutdown)) = &control.local {
         let grace_expired = shutdown
             .borrow()
             .is_some_and(|deadline| tokio::time::Instant::now() >= deadline);
-        state.send_local(control.msg, permit, cancel, grace_expired);
+        state.send_local(msgs, permits, cancel, grace_expired);
         return true;
     }
-    let fatal = matches!(control.msg.msg, Some(miner_msg::Msg::Fatal(_)));
-    permit.send(control.msg);
+    for (permit, msg) in permits.zip(msgs) {
+        permit.send(msg);
+    }
     !fatal
 }
 
@@ -1867,6 +1895,39 @@ mod tests {
             "ready terminal send yielded past the grace deadline"
         );
         assert!(rx.try_recv().is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_summary_and_its_refund_are_committed_together() {
+        use std::future::Future as _;
+        let (tx, mut rx) = mpsc::channel(2);
+        let cancel = CancelToken::default();
+        tx.send(miner(miner_msg::Msg::JobRequest(JobRequest { credits: 7 })))
+            .await
+            .unwrap();
+        let done = miner(miner_msg::Msg::LeaseDone(quip_proto::v1::LeaseDone {
+            job_id: b"lease".to_vec(),
+            salts_done: 3,
+            best_energy_milli: -5,
+        }));
+        let send = send_control(&tx, Control::summary(done.clone(), None), &cancel);
+        tokio::pin!(send);
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(
+            send.as_mut().poll(&mut context).is_pending(),
+            "one free slot must not take half a summary"
+        );
+        assert_eq!(
+            rx.try_recv().unwrap().msg,
+            Some(miner_msg::Msg::JobRequest(JobRequest { credits: 7 }))
+        );
+        assert!(rx.try_recv().is_err());
+        assert!(send.as_mut().poll(&mut context).is_ready());
+        assert_eq!(rx.try_recv().unwrap(), done);
+        assert_eq!(
+            rx.try_recv().unwrap().msg,
+            Some(miner_msg::Msg::JobRequest(JobRequest { credits: 1 }))
+        );
     }
 
     struct PausingLocalSampler(Arc<dyn Fn() + Send + Sync>);

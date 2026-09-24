@@ -78,20 +78,24 @@ impl LeaseState {
     }
     pub(crate) fn send_local(
         &self,
-        msg: MinerMsg,
-        permit: mpsc::Permit<'_, MinerMsg>,
+        msgs: Vec<MinerMsg>,
+        permits: mpsc::PermitIterator<'_, MinerMsg>,
         cancel: &CancelToken,
         grace_expired: bool,
     ) {
         // Serialize the final send with fault(), which aborts under this lock.
         let _progress = self.progress();
-        if self.aborted.load(Ordering::Relaxed)
-            || (matches!(msg.msg, Some(miner_msg::Msg::Result(_)))
-                && (self.stopped(cancel) || grace_expired))
-        {
+        if self.aborted.load(Ordering::Relaxed) {
             return;
         }
-        permit.send(msg);
+        for (permit, msg) in permits.zip(msgs) {
+            if matches!(msg.msg, Some(miner_msg::Msg::Result(_)))
+                && (self.stopped(cancel) || grace_expired)
+            {
+                continue;
+            }
+            permit.send(msg);
+        }
     }
     fn try_finish(&self) -> Option<MinerMsg> {
         self.finish_locked(&mut self.progress(), false)
@@ -111,18 +115,29 @@ impl LeaseState {
             best_energy_milli: p.best_energy_milli,
         })))
     }
-    pub(crate) async fn send_done<T: From<MinerMsg>>(
-        &self,
-        tx: &mpsc::Sender<T>,
-    ) -> Result<(), ()> {
+    pub(crate) async fn send_done(&self, ctrl: &mpsc::Sender<Control>) -> Result<(), ()> {
         if let Some(done) = self.try_finish() {
-            tx.send(done.into()).await.map_err(|_| ())?;
-            tx.send(miner(miner_msg::Msg::JobRequest(JobRequest { credits: 1 })).into())
+            ctrl.send(Control::summary(done, None))
                 .await
                 .map_err(|_| ())?;
         }
         Ok(())
     }
+
+    /// Write a finished lease's summary and refund from inside the writer.
+    pub(crate) async fn send_done_direct(&self, tx: &mpsc::Sender<MinerMsg>) -> Result<(), ()> {
+        if let Some(done) = self.try_finish() {
+            let permits = tx.reserve_many(2).await.map_err(|_| ())?;
+            for (permit, msg) in permits.zip([done, refund()]) {
+                permit.send(msg);
+            }
+        }
+        Ok(())
+    }
+}
+
+fn refund() -> MinerMsg {
+    miner(miner_msg::Msg::JobRequest(JobRequest { credits: 1 }))
 }
 pub(crate) fn expired(deadline: u64) -> bool {
     deadline != 0 && now_unix_ms().is_none_or(|now| now > deadline)
@@ -394,7 +409,7 @@ fn winner(
 }
 pub(crate) async fn finish_result(link: &LeaseLink, tx: &mpsc::Sender<MinerMsg>) -> Result<(), ()> {
     link.state.progress().finished += 1;
-    link.state.send_done(tx).await
+    link.state.send_done_direct(tx).await
 }
 
 /// A lease no longer accepts reads.
@@ -580,8 +595,12 @@ impl LeaseSink {
             self.state.finish_locked(&mut progress, false)
         };
         if let Some(done) = done {
-            let _ = self.send(done);
-            let _ = self.send(miner(miner_msg::Msg::JobRequest(JobRequest { credits: 1 })));
+            if let Some(ctrl) = self.ctrl.upgrade() {
+                let _ = ctrl.blocking_send(Control::summary(
+                    done,
+                    Some((Arc::clone(&self.state), self.shutdown.clone())),
+                ));
+            }
         }
     }
 }
@@ -607,21 +626,16 @@ pub(crate) async fn monitor_local(
         if let Some(done) = done {
             // Stop summaries bypass queued winners only after cancellation or
             // grace expiry. The writer drops those winners using the same state.
-            for msg in [
-                done,
-                miner(miner_msg::Msg::JobRequest(JobRequest { credits: 1 })),
-            ] {
-                let control = Control::local(msg, Arc::clone(&state), shutdown.clone());
-                let send = crate::session::send_control(&tx, control, &cancel);
-                tokio::pin!(send);
-                loop {
-                    let deadline = *shutdown.borrow();
-                    tokio::select! {
-                        biased;
-                        _ = &mut send => break,
-                        _ = shutdown.changed() => {},
-                        () = wait_for_grace(deadline) => return,
-                    }
+            let control = Control::summary(done, Some((Arc::clone(&state), shutdown.clone())));
+            let send = crate::session::send_control(&tx, control, &cancel);
+            tokio::pin!(send);
+            loop {
+                let deadline = *shutdown.borrow();
+                tokio::select! {
+                    biased;
+                    _ = &mut send => break,
+                    _ = shutdown.changed() => {},
+                    () = wait_for_grace(deadline) => return,
                 }
             }
         }
@@ -648,13 +662,10 @@ async fn wait_for_grace(deadline: Option<tokio::time::Instant>) {
 mod tests {
     use super::*;
 
-    #[tokio::test(start_paused = true)]
-    async fn local_monitor_submits_one_summary_and_refund_at_grace_expiry() {
-        use std::future::Future as _;
-
+    fn test_state(watermark: Option<u64>) -> Arc<LeaseState> {
         let spec =
             LeaseSpec::new(Generator::Blake3Chacha8V1, [1; 32], [2; 32], [3; 32], 0, 1).unwrap();
-        let state = Arc::new(LeaseState {
+        Arc::new(LeaseState {
             job_id: b"lease".to_vec(),
             lease: Lease(spec),
             topology: Arc::new(TopologyView {
@@ -663,7 +674,7 @@ mod tests {
                 allowed_h_milli: vec![1000],
                 allowed_j_milli: vec![],
             }),
-            watermark: Some(1),
+            watermark,
             deadline_ms: 0,
             aborted: Arc::new(AtomicBool::new(false)),
             progress: Mutex::new(Progress {
@@ -674,7 +685,14 @@ mod tests {
                 closed: false,
                 done_sent: false,
             }),
-        });
+        })
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn local_monitor_submits_one_summary_and_refund_at_grace_expiry() {
+        use std::future::Future as _;
+
+        let state = test_state(Some(1));
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(100);
         let (_shutdown_tx, shutdown) = watch::channel(Some(deadline));
         let (tx, mut rx) = mpsc::channel(2);
@@ -714,6 +732,28 @@ mod tests {
         // A later observer must not submit a second completion or refund.
         monitor_local(state, cancel, shutdown, tx).await;
         assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn local_monitor_never_sends_a_summary_without_its_refund() {
+        let state = test_state(Some(1));
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(100);
+        let (_shutdown_tx, shutdown) = watch::channel(Some(deadline));
+        // Two slots, one already taken: room for the summary but not its refund.
+        let (tx, mut rx) = mpsc::channel(2);
+        tx.send(miner(miner_msg::Msg::JobRequest(JobRequest { credits: 7 })))
+            .await
+            .unwrap();
+        tokio::time::advance(std::time::Duration::from_millis(100)).await;
+        monitor_local(Arc::clone(&state), CancelToken::default(), shutdown, tx).await;
+        assert_eq!(
+            rx.try_recv().unwrap().msg,
+            Some(miner_msg::Msg::JobRequest(JobRequest { credits: 7 }))
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "a summary reached the writer without its refund"
+        );
     }
 
     #[test]
