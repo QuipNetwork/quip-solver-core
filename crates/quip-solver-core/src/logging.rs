@@ -79,12 +79,15 @@ pub fn init(level: &str) -> Result<(), String> {
     // into a log file, and escape sequences baked into that capture corrupt
     // every downstream grep.
     let ansi = std::io::stderr().is_terminal();
-    let _ = tracing_subscriber::fmt()
+    let builder = tracing_subscriber::fmt()
         .with_env_filter(filter)
-        .with_writer(std::io::stderr)
         .with_target(true)
-        .with_ansi(ansi)
-        .try_init();
+        .with_ansi(ansi);
+    // Unit tests route logs through libtest capture, so passing tests stay quiet.
+    #[cfg(test)]
+    let _ = builder.with_test_writer().try_init();
+    #[cfg(not(test))]
+    let _ = builder.with_writer(std::io::stderr).try_init();
     Ok(())
 }
 

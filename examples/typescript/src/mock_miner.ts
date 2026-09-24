@@ -24,6 +24,10 @@
 
 import { credentials, type ClientDuplexStream } from "@grpc/grpc-js";
 import {
+  Algorithm,
+  Backend,
+  Capabilities,
+  CoefficientEncoding,
   consensus,
   ExitCode,
   JobKind,
@@ -37,10 +41,43 @@ import {
 } from "@quip.network/quip-solver-core";
 
 const BACKEND = "mock-typescript";
-const ALGORITHM = "sa";
 const MAX_NODES = 100_000;
 const MAX_EDGES = 1_000_000;
-const PROTOCOL_VERSION = 1;
+const PROTOCOL_VERSION = 2;
+// Stable CLI identity names from quip_protocol::session.
+const BACKEND_NAMES = {
+  [Backend.BACKEND_UNSPECIFIED]: "unspecified",
+  [Backend.BACKEND_CPU]: "cpu",
+  [Backend.BACKEND_CUDA]: "cuda",
+  [Backend.BACKEND_METAL]: "metal",
+  [Backend.BACKEND_ANE]: "ane",
+  [Backend.BACKEND_DWAVE_QPU]: "dwave-qpu",
+  [Backend.BACKEND_EXEC]: "exec",
+  [Backend.BACKEND_MOCK]: "mock",
+  [Backend.UNRECOGNIZED]: "unspecified",
+};
+const ALGORITHM_NAMES = {
+  [Algorithm.ALGORITHM_UNSPECIFIED]: "unspecified",
+  [Algorithm.ALGORITHM_SA]: "sa",
+  [Algorithm.ALGORITHM_GIBBS]: "gibbs",
+  [Algorithm.ALGORITHM_QUANTUM_ANNEAL]: "quantum-anneal",
+  [Algorithm.ALGORITHM_FSA]: "fsa",
+  [Algorithm.ALGORITHM_MSA]: "msa",
+  [Algorithm.ALGORITHM_FLATIRON]: "flatiron",
+  [Algorithm.ALGORITHM_MPS]: "mps",
+  [Algorithm.ALGORITHM_MFA]: "mfa",
+  [Algorithm.ALGORITHM_SB]: "sb",
+  [Algorithm.ALGORITHM_BSB]: "bsb",
+  [Algorithm.ALGORITHM_GBSB]: "gbsb",
+  [Algorithm.ALGORITHM_GDSB]: "gdsb",
+  [Algorithm.ALGORITHM_GGDSB]: "ggdsb",
+  [Algorithm.ALGORITHM_HBSB]: "hbsb",
+  [Algorithm.ALGORITHM_HDSB]: "hdsb",
+  [Algorithm.ALGORITHM_SBQA]: "sbqa",
+  [Algorithm.ALGORITHM_TEDSB]: "tedsb",
+  [Algorithm.ALGORITHM_EXTERNAL]: "external",
+  [Algorithm.UNRECOGNIZED]: "unspecified",
+};
 // Mirrors the Rust session loop's DEFAULT_NUM_SWEEPS in quip-solver-core.
 const DEFAULT_NUM_SWEEPS = 64;
 
@@ -69,16 +106,19 @@ function numSweepsFromToml(backendToml: string): number {
 }
 
 /** What this solver supports. Must answer without touching the device. */
-function capabilities() {
+function capabilities(): Capabilities {
   return {
-    backend: BACKEND,
-    algorithm: ALGORITHM,
-    supportedKinds: ["ISING_SAMPLE"],
+    backend: Backend.BACKEND_MOCK,
+    algorithm: Algorithm.ALGORITHM_SA,
+    supportedKinds: [JobKind.ISING_SAMPLE],
     maxNodes: MAX_NODES,
     maxEdges: MAX_EDGES,
     features: [] as string[],
     protocolVersion: PROTOCOL_VERSION,
     streamWidth: 1,
+    nativeTopologyHash: undefined,
+    encodings: [CoefficientEncoding.COEFFICIENT_ENCODING_I32],
+    generators: [],
   };
 }
 
@@ -97,9 +137,17 @@ interface CachedTopology {
   pos: Map<number, number>;
 }
 
-/** Decodes little-endian int32 milli-units into floats via the WASM codec. */
-function decodeMilli(bytes: Uint8Array): number[] {
-  return Array.from(consensus.decodeI32Le(bytes), (v) => v / 1000);
+/** Decodes I32 coefficients through exact milli units via the WASM codec. */
+function decodeMilli(bytes: Uint8Array, scale: number): number[] {
+  return Array.from(consensus.decodeI32Le(bytes), (v) => {
+    // An I32 value times 1000 remains an exact JavaScript integer.
+    const product = v * 1000;
+    const milli = product / scale;
+    if (product % scale !== 0 || milli < -2147483648 || milli > 2147483647) {
+      throw new MalformedProblem("coefficient is not exact i32 milli");
+    }
+    return milli / 1000;
+  });
 }
 
 /**
@@ -110,20 +158,23 @@ function decodeMilli(bytes: Uint8Array): number[] {
  * Topology-hash jobs remap native node ids through `pos` onto dense 0..n-1
  * indices that line up with `h`.
  */
-function decodeProblem(
+export function decodeProblem(
   ising: IsingProblem | undefined,
   topologies: Map<string, CachedTopology>,
 ): { h: number[]; j: number[]; edges: number[] } {
   if (!ising) throw new MalformedProblem("job carries no ising problem");
-  if (ising.hMilliLe32.length % 4 !== 0) {
-    throw new MalformedProblem("h_milli_le32 length is not a multiple of 4");
+  if (ising.encoding !== CoefficientEncoding.COEFFICIENT_ENCODING_I32 || ising.scale === 0) {
+    throw new MalformedProblem("coefficients must be I32 with a positive scale");
   }
-  if (ising.jMilliLe32.length % 4 !== 0) {
-    throw new MalformedProblem("j_milli_le32 length is not a multiple of 4");
+  if (ising.h.length % 4 !== 0) {
+    throw new MalformedProblem("h length is not a multiple of 4");
+  }
+  if (ising.j.length % 4 !== 0) {
+    throw new MalformedProblem("j length is not a multiple of 4");
   }
 
-  const h = decodeMilli(ising.hMilliLe32);
-  const j = decodeMilli(ising.jMilliLe32);
+  const h = decodeMilli(ising.h, ising.scale);
+  const j = decodeMilli(ising.j, ising.scale);
 
   let u: number[];
   let v: number[];
@@ -254,13 +305,7 @@ class Session {
       hello: {
         minerId: this.minerId,
         sessionToken: token,
-        protocolVersion: PROTOCOL_VERSION,
-        backend: BACKEND,
-        algorithm: ALGORITHM,
-        supportedKinds: [JobKind.ISING_SAMPLE],
-        maxNodes: MAX_NODES,
-        maxEdges: MAX_EDGES,
-        features: [],
+        capabilities: capabilities(),
       },
     });
   }
@@ -329,8 +374,10 @@ class Session {
     await this.send({
       result: {
         jobId,
+        salt: new Uint8Array(),
+        nonce: new Uint8Array(),
         solutions: solutions.map((s) => ({
-          spinsBytes: consensus.encodeSpins(s.spins),
+          spins: consensus.encodeSpinsPacked(s.spins),
           energyMilli: s.energy,
         })),
         meta: {
@@ -419,16 +466,7 @@ class Session {
 
     if (msg.getCapabilities) {
       await this.send({
-        capabilities: {
-          backend: BACKEND,
-          algorithm: ALGORITHM,
-          supportedKinds: [JobKind.ISING_SAMPLE],
-          maxNodes: MAX_NODES,
-          maxEdges: MAX_EDGES,
-          features: [],
-          protocolVersion: PROTOCOL_VERSION,
-          streamWidth: 1,
-        },
+        capabilities: capabilities(),
       });
       return undefined;
     }
@@ -554,7 +592,12 @@ async function main(): Promise<number> {
   const argv = process.argv.slice(2);
 
   if (argv.includes("--capabilities")) {
-    process.stdout.write(`${JSON.stringify(capabilities())}\n`);
+    const message = capabilities();
+    process.stdout.write(`${JSON.stringify({
+      ...Capabilities.toJSON(message) as object,
+      backend: BACKEND_NAMES[message.backend],
+      algorithm: ALGORITHM_NAMES[message.algorithm],
+    })}\n`);
     return ExitCode.CLEAN;
   }
   if (argv.includes("--check")) {
@@ -584,11 +627,13 @@ async function main(): Promise<number> {
   return runSession(coordinator.value, miner.kind === "ok" ? miner.value : `${BACKEND}-0`);
 }
 
-main()
-  .then((code) => {
-    process.exitCode = code;
-  })
-  .catch((e: unknown) => {
-    process.stderr.write(`error: ${e instanceof Error ? e.message : e}\n`);
-    process.exitCode = ExitCode.INTERNAL_FATAL;
-  });
+if (require.main === module) {
+  main()
+    .then((code) => {
+      process.exitCode = code;
+    })
+    .catch((e: unknown) => {
+      process.stderr.write(`error: ${e instanceof Error ? e.message : e}\n`);
+      process.exitCode = ExitCode.INTERNAL_FATAL;
+    });
+}

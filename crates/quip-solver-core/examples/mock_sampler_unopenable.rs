@@ -21,8 +21,16 @@ impl Sampler for UnopenableSampler {
     }
 }
 
+static CLI_VERSION: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    format!(
+        "{} protocol {}",
+        env!("CARGO_PKG_VERSION"),
+        quip_protocol::session::PROTOCOL_VERSION
+    )
+});
+
 #[derive(Parser)]
-#[command(version = concat!(env!("CARGO_PKG_VERSION"), " protocol 1"))]
+#[command(version = CLI_VERSION.as_str())]
 struct Cli {
     #[command(flatten)]
     common: CommonArgs,
@@ -32,8 +40,8 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     run(
         BackendIdentity {
-            backend: "mock",
-            algorithm: "sa",
+            backend: quip_proto::v1::Backend::Mock,
+            algorithm: quip_proto::v1::Algorithm::Sa,
             max_nodes: 100_000,
             max_edges: 1_000_000,
             features: &[],

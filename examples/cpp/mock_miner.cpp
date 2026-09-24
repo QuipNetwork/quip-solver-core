@@ -96,7 +96,7 @@ int main(int argc, char** argv) {
 
     QuipBackendIdentity id;
     std::memset(&id, 0, sizeof(id));
-    id.backend = "mock-cpp";
+    id.backend = "mock";
     id.algorithm = "sa";
     id.max_nodes = 100000;
     id.max_edges = 1000000;

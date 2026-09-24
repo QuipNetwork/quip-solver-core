@@ -10,8 +10,10 @@
 
 use clap::Parser;
 use quip_solver_core::adapt::AdaptBounds;
+use quip_solver_core::quip_proto::v1::{Algorithm, Backend};
 // Reached through quip-solver-core rather than a second dependency.
-use quip_solver_core::quip_protocol::scoring::energy_milli;
+use quip_solver_core::coefficient::Milli;
+use quip_solver_core::quip_protocol::scoring::energy_from_milli;
 use quip_solver_core::{
     run, BackendIdentity, CommonArgs, IsingGraph, SampleError, SampleParams, Sampler, SamplerResult,
 };
@@ -20,28 +22,20 @@ use std::process::ExitCode;
 /// Stands in for a device handle. A real backend owns its hardware here.
 struct MockSampler;
 
-impl Sampler for MockSampler {
+impl Sampler<Milli> for MockSampler {
     fn sample(
         &self,
-        graph: &IsingGraph,
+        graph: &IsingGraph<Milli>,
         params: &SampleParams,
     ) -> Result<Vec<SamplerResult>, SampleError> {
-        // A real backend refuses a problem larger than its hardware.
-        //
-        // In session mode this branch never fires. The bound is the same
-        // `max_nodes` advertised below, and the session rejects an oversized
-        // job with `RejectReason::TooLarge` while parsing it, before the
-        // sampler is called. `--solve` reads its problem straight from JSON
-        // and applies no such bound, so that mode is what reaches this check.
-        // A backend whose real capacity is smaller than what it advertises
-        // would hit it from the session too.
         if graph.num_nodes() > 100_000 {
             return Err(SampleError::Capacity);
         }
-        let spins = vec![1i8; graph.num_nodes()];
-        // Score with the shipped scorer, never a local reimplementation: the
-        // network recomputes this and rejects a solution that disagrees.
-        let energy = energy_milli(&spins, &graph.h, &graph.j, &graph.edges);
+        let spins = vec![1_i8; graph.num_nodes()];
+        // Extract stored integers once per sample call, without float conversion.
+        let h: Vec<i32> = graph.h.iter().map(|value| value.0).collect();
+        let j: Vec<i32> = graph.j.iter().map(|value| value.0).collect();
+        let energy = energy_from_milli(&spins, &h, &j, &graph.edges);
         Ok((0..params.num_reads)
             .map(|_| SamplerResult {
                 spins: spins.clone(),
@@ -51,8 +45,16 @@ impl Sampler for MockSampler {
     }
 }
 
+static CLI_VERSION: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    format!(
+        "{} protocol {}",
+        env!("CARGO_PKG_VERSION"),
+        quip_solver_core::quip_protocol::session::PROTOCOL_VERSION
+    )
+});
+
 #[derive(Parser)]
-#[command(version = concat!(env!("CARGO_PKG_VERSION"), " protocol 1"))]
+#[command(version = CLI_VERSION.as_str())]
 struct Cli {
     #[command(flatten)]
     common: CommonArgs,
@@ -62,8 +64,8 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     run(
         BackendIdentity {
-            backend: "mock-rust",
-            algorithm: "sa",
+            backend: Backend::Mock,
+            algorithm: Algorithm::Sa,
             max_nodes: 100_000,
             max_edges: 1_000_000,
             features: &[],

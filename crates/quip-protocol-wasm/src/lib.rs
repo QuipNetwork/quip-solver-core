@@ -87,14 +87,14 @@ pub fn decode_i32_le(bytes: &[u8]) -> Result<Vec<i32>, JsError> {
     wire::decode_i32_le(bytes).map_err(|e| JsError::new(&e.to_string()))
 }
 
-/// Encode spins as packed bytes.
+/// Encode spins as one byte per spin.
 #[wasm_bindgen(js_name = encodeSpins)]
 #[must_use]
 pub fn encode_spins(spins: &[i8]) -> Vec<u8> {
     wire::encode_spins(spins)
 }
 
-/// Decode packed spin bytes.
+/// Decode one-byte spin values.
 ///
 /// # Errors
 ///
@@ -102,6 +102,23 @@ pub fn encode_spins(spins: &[i8]) -> Vec<u8> {
 #[wasm_bindgen(js_name = decodeSpins)]
 pub fn decode_spins(bytes: &[u8]) -> Result<Vec<i8>, JsError> {
     wire::decode_spins(bytes).map_err(|e| JsError::new(&e.to_string()))
+}
+
+/// Encode spins as LSB-first bits, with 1 for +1 and zero padding.
+#[wasm_bindgen(js_name = encodeSpinsPacked)]
+#[must_use]
+pub fn encode_spins_packed(spins: &[i8]) -> Vec<u8> {
+    wire::encode_spins_packed(spins)
+}
+
+/// Decode LSB-first packed spins.
+///
+/// # Errors
+///
+/// Returns an error when the byte length is wrong or padding bits are nonzero.
+#[wasm_bindgen(js_name = decodeSpinsPacked)]
+pub fn decode_spins_packed(bytes: &[u8], num_spins: usize) -> Result<Vec<i8>, JsError> {
+    wire::decode_spins_packed(bytes, num_spins).map_err(|e| JsError::new(&e.to_string()))
 }
 
 /// Process exit codes a solver reports back to the coordinator.

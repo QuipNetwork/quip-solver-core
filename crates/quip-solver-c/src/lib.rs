@@ -109,16 +109,18 @@ pub type QuipSampleFn = unsafe extern "C" fn(
 /// What the solver advertises in `--capabilities` and `Hello`.
 ///
 /// `backend` and `algorithm` are NUL-terminated strings, and may be NULL to
-/// take the default. `features` is an array of NUL-terminated strings with
+/// take the default. An unknown non-NULL identity string ends the run with
+/// `ConfigInvalid` (64), with a message that lists the accepted names.
+/// `features` is an array of NUL-terminated strings with
 /// `num_features` entries, and may be NULL only when `num_features` is 0. Bytes
 /// that are not UTF-8 end the run with the config-invalid exit code rather than
 /// falling back to a default. All strings are copied during [`quip_solver_run`],
 /// so the caller may free them once it returns.
 #[repr(C)]
 pub struct QuipBackendIdentity {
-    /// Backend name, for example `"cpu"`. NULL means `"c"`.
+    /// Backend name, for example `"cpu"`. NULL becomes `BACKEND_UNSPECIFIED`.
     pub backend: *const c_char,
-    /// Algorithm name, for example `"sa"`. NULL means `"custom"`.
+    /// Algorithm name, for example `"sa"`. NULL becomes `ALGORITHM_EXTERNAL`.
     pub algorithm: *const c_char,
     /// Largest node count this solver accepts.
     pub max_nodes: u32,
@@ -457,6 +459,54 @@ unsafe fn identity_str(
     }
 }
 
+/// Read a registered backend name. NULL selects the unspecified backend.
+///
+/// # Safety
+/// The pointer must be NULL or name a NUL-terminated string.
+unsafe fn identity_backend(
+    s: *const c_char,
+) -> Result<quip_solver_core::quip_proto::v1::Backend, ExitCode> {
+    use quip_solver_core::quip_proto::v1::Backend;
+    use quip_solver_core::quip_protocol::session::{backend_from_name, backend_name};
+    // SAFETY: forwarded from this function's contract.
+    let name = unsafe { identity_str(s, "backend", "unspecified") }?;
+    backend_from_name(name).ok_or_else(|| {
+        let accepted: Vec<_> = (0..=7)
+            .filter_map(|v| Backend::try_from(v).ok())
+            .map(backend_name)
+            .collect();
+        tracing::error!(
+            "unknown backend {name:?}; accepted names: {}",
+            accepted.join(", ")
+        );
+        ExitCode::ConfigInvalid
+    })
+}
+
+/// Read a registered algorithm name. NULL selects the external algorithm.
+///
+/// # Safety
+/// The pointer must be NULL or name a NUL-terminated string.
+unsafe fn identity_algorithm(
+    s: *const c_char,
+) -> Result<quip_solver_core::quip_proto::v1::Algorithm, ExitCode> {
+    use quip_solver_core::quip_proto::v1::Algorithm;
+    use quip_solver_core::quip_protocol::session::{algorithm_from_name, algorithm_name};
+    // SAFETY: forwarded from this function's contract.
+    let name = unsafe { identity_str(s, "algorithm", "external") }?;
+    algorithm_from_name(name).ok_or_else(|| {
+        let accepted: Vec<_> = (0..=18)
+            .filter_map(|v| Algorithm::try_from(v).ok())
+            .map(algorithm_name)
+            .collect();
+        tracing::error!(
+            "unknown algorithm {name:?}; accepted names: {}",
+            accepted.join(", ")
+        );
+        ExitCode::ConfigInvalid
+    })
+}
+
 /// Collects the advertised feature strings.
 ///
 /// # Safety
@@ -557,12 +607,12 @@ pub unsafe extern "C" fn quip_solver_run(
     let _ = quip_solver_core::logging::init(&cli.common.log_level);
 
     // SAFETY: the caller guarantees these are NUL-terminated or NULL.
-    let backend = match unsafe { identity_str(id.backend, "backend", "c") } {
+    let backend = match unsafe { identity_backend(id.backend) } {
         Ok(text) => text,
         Err(code) => return code as i32,
     };
     // SAFETY: as above.
-    let algorithm = match unsafe { identity_str(id.algorithm, "algorithm", "custom") } {
+    let algorithm = match unsafe { identity_algorithm(id.algorithm) } {
         Ok(text) => text,
         Err(code) => return code as i32,
     };
@@ -912,8 +962,20 @@ mod tests {
     #[test]
     fn a_null_identity_string_takes_the_default() {
         // SAFETY: a NULL pointer is the documented "take the default" case.
-        let backend = unsafe { identity_str(ptr::null(), "backend", "c") }.expect("NULL is legal");
-        assert_eq!(backend, "c");
+        let backend = unsafe { identity_backend(ptr::null()) }.expect("NULL is legal");
+        assert_eq!(
+            backend,
+            quip_solver_core::quip_proto::v1::Backend::Unspecified
+        );
+    }
+
+    #[test]
+    fn unknown_quantum_algorithm_is_rejected() {
+        // SAFETY: the literal is a NUL-terminated string.
+        assert_eq!(
+            unsafe { identity_algorithm(c"quantum".as_ptr()) },
+            Err(ExitCode::ConfigInvalid)
+        );
     }
 
     #[test]

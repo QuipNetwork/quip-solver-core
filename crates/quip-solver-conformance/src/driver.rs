@@ -11,12 +11,14 @@
 use quip_proto::v1::miner_service_server::{MinerService, MinerServiceServer};
 use quip_proto::v1::{
     coord_msg, ising_problem, miner_msg, Cancel, Capabilities, Configure, CoordMsg, EdgeList,
-    GetCapabilities, Hello, IsingProblem, Job, JobKind, MinerMsg, Ping, RejectReason, Shutdown,
-    Status as MinerStatus, Topology, Welcome,
+    GetCapabilities, Hello, IsingProblem, IsingProblemGenerator, Job, JobKind, MinerMsg, Ping,
+    RejectReason, SetTarget, Shutdown, Status as MinerStatus, Topology, Welcome,
 };
+use quip_protocol::lease::{verify_lease_result, TopologyView};
 use quip_protocol::scoring::energy_milli;
-use quip_protocol::wire::{decode_spins, encode_i32_le, encode_spins_packed};
-use std::collections::HashMap;
+use quip_protocol::target::Target;
+use quip_protocol::wire::{decode_spins_packed, encode_i32_le, encode_spins_packed};
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::net::UnixListener;
@@ -38,7 +40,7 @@ const PHASE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Expressed in phase budgets rather than as a flat number: a walk in which
 /// every phase times out must still run to completion, so the report names all
 /// the phases that failed instead of reporting a single kill.
-const CHILD_TIMEOUT: Duration = Duration::from_secs(PHASE_TIMEOUT.as_secs() * 12);
+const CHILD_TIMEOUT: Duration = Duration::from_secs(PHASE_TIMEOUT.as_secs() * 13);
 
 /// How long the harness waits for the session handler to hand back its outcome
 /// once the child has exited.
@@ -69,6 +71,22 @@ const LIVE_GENERATION: u64 = 2;
 /// ordinary jobs — every one of those is already settled behind a barrier.
 const CANCEL_GENERATION: u64 = 3;
 
+const LEASE_JOB_ID: &[u8] = b"job-lease";
+const LEASE_SALTS: u32 = 4;
+
+/// Observations from the four-salt generation scenario.
+#[derive(Debug, Clone, Default)]
+pub struct LeaseOutcome {
+    /// Number of lease results received.
+    pub results: u32,
+    /// Number of distinct salts verified before completion.
+    pub results_verified: u32,
+    /// `(salts_done, best_energy_milli)` from `LeaseDone`.
+    pub lease_done: Option<(u64, i64)>,
+    /// Whether one credit arrived after `LeaseDone`.
+    pub credit_refunded: bool,
+}
+
 /// A reject observed during the scripted session, bound to its `job_id`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObservedReject {
@@ -87,7 +105,7 @@ pub struct ObservedResult {
     pub job_id: Vec<u8>,
     /// `energy_milli` the miner reported for each solution, in arrival order.
     pub solution_energies_milli: Vec<i64>,
-    /// The driver's own score of the returned `spins_bytes` under the problem
+    /// The driver's own score of the returned `spins` under the problem
     /// it sent, in arrival order. `None` for the whole vector when the driver
     /// has no problem on file for this job id (so it cannot re-score);
     /// `None` for one entry when that solution's spins did not decode to the
@@ -127,6 +145,8 @@ pub enum Terminal {
     reason = "an observation record, not a state machine: each flag is an independent axis the walk grades, and collapsing them into enums would hide which one failed"
 )]
 pub struct DriverReport {
+    /// Lease observations, populated only when generation is advertised.
+    pub lease: Option<LeaseOutcome>,
     /// True when the first inbound message was a valid `Hello`.
     pub handshake_ok: bool,
     /// The `Hello` the miner opened with, when it sent one.
@@ -162,6 +182,8 @@ pub struct DriverReport {
     pub timed_out_phases: Vec<String>,
     /// Process exit code of the spawned miner binary.
     pub exit_code: i32,
+    /// Everything the miner wrote to standard error during the session.
+    pub stderr: String,
 }
 
 /// Job ids the full walk requires a `Result` for.
@@ -230,6 +252,7 @@ impl DriverReport {
             && self.has_reject(b"job-gate", RejectReason::UnsupportedKind)
             && self.has_reject(b"job-old", RejectReason::Expired)
             && self.warm_start_conformant()
+            && self.lease_conformant()
             && self.cancel_acked
             && self.ping_acked
             && self.capabilities_conformant()
@@ -238,6 +261,20 @@ impl DriverReport {
             && self.terminal == Terminal::Closed
             && self.timed_out_phases.is_empty()
             && self.exit_code == 0
+    }
+
+    /// Grade salt leases only when the miner advertises `ISING_GENERATE`.
+    #[must_use]
+    pub fn lease_conformant(&self) -> bool {
+        !advertises_lease(self.hello.as_ref())
+            || self.lease.as_ref().is_some_and(|lease| {
+                lease.results == LEASE_SALTS
+                    && lease.results_verified == LEASE_SALTS
+                    && lease
+                        .lease_done
+                        .is_some_and(|(salts, _)| salts == u64::from(LEASE_SALTS))
+                    && lease.credit_refunded
+            })
     }
 
     /// Every required `Result` present, no unexpected one, and each carrying
@@ -287,7 +324,11 @@ impl DriverReport {
     /// un-doubled budget is the right default.
     #[must_use]
     pub fn expected_meta_sweeps(&self) -> u32 {
-        if self.hello.as_ref().is_some_and(|h| h.algorithm == "gibbs") {
+        if self.hello.as_ref().is_some_and(|h| {
+            h.capabilities
+                .as_ref()
+                .is_some_and(|c| c.algorithm == quip_proto::v1::Algorithm::Gibbs as i32)
+        }) {
             CONFIGURED_SWEEPS * GIBBS_SWEEP_MULTIPLIER
         } else {
             CONFIGURED_SWEEPS
@@ -305,12 +346,13 @@ impl DriverReport {
     /// The returned `Capabilities` agrees with the identity the miner
     /// advertised in its own `Hello`.
     ///
-    /// Only the fields both messages carry are compared. `Hello.features` is
-    /// not: the handshake states what the session needs, while `Capabilities`
-    /// states what the host can do, and they are allowed to differ.
+    /// Every field except features and stream width must match the handshake.
     #[must_use]
     pub fn capabilities_conformant(&self) -> bool {
         let (Some(c), Some(h)) = (self.capabilities_received.as_ref(), self.hello.as_ref()) else {
+            return false;
+        };
+        let Some(h) = h.capabilities.as_ref() else {
             return false;
         };
         c.backend == h.backend
@@ -319,6 +361,9 @@ impl DriverReport {
             && c.max_nodes == h.max_nodes
             && c.max_edges == h.max_edges
             && c.supported_kinds == h.supported_kinds
+            && c.native_topology_hash == h.native_topology_hash
+            && c.encodings == h.encodings
+            && c.generators == h.generators
     }
 
     /// Cancellation is honoured: a job at or below the cancelled watermark
@@ -338,9 +383,11 @@ impl DriverReport {
     /// is [`warm_start_conformant`](Self::warm_start_conformant) graded.
     #[must_use]
     pub fn advertises_initial_spins(&self) -> bool {
-        self.hello
-            .as_ref()
-            .is_some_and(|h| h.features.iter().any(|f| f == INITIAL_SPINS_FEATURE))
+        self.hello.as_ref().is_some_and(|h| {
+            h.capabilities
+                .as_ref()
+                .is_some_and(|c| c.features.iter().any(|f| f == INITIAL_SPINS_FEATURE))
+        })
     }
 
     /// A solver that advertises [`INITIAL_SPINS_FEATURE`] rejects a malformed
@@ -427,6 +474,14 @@ impl DriverReport {
             ("cancel ack", self.cancel_acked),
             ("cancellation honoured", self.live_cancel_conformant()),
             ("credit ledger", self.credit_ledger_balanced()),
+            (
+                if advertises_lease(self.hello.as_ref()) {
+                    "salt lease"
+                } else {
+                    "salt lease (not advertised, skipped)"
+                },
+                self.lease_conformant(),
+            ),
             ("clean stream end", self.terminal == Terminal::Closed),
             ("no phase timed out", self.timed_out_phases.is_empty()),
             ("exit code 0", self.exit_code == 0),
@@ -434,6 +489,9 @@ impl DriverReport {
             let _ = writeln!(out, "  [{}] {axis}", mark(ok));
         }
         let _ = writeln!(out, "  stream ended: {:?}", self.terminal);
+        if let Some(lease) = &self.lease {
+            let _ = writeln!(out, "  lease: {lease:?}");
+        }
         if !self.timed_out_phases.is_empty() {
             let _ = writeln!(
                 out,
@@ -476,6 +534,9 @@ struct ScoreSpec {
     reason = "mirrors DriverReport's independent observation axes"
 )]
 struct SessionOutcome {
+    lease: Option<LeaseOutcome>,
+    lease_salts: HashSet<Vec<u8>>,
+    lease_refund_messages: u32,
     handshake_ok: bool,
     hello: Option<Hello>,
     ready_received: bool,
@@ -618,8 +679,10 @@ fn valid_ising() -> IsingProblem {
             u: vec![0],
             v: vec![1],
         })),
-        h_milli_le32: encode_i32_le(&[1000, -1000]),
-        j_milli_le32: encode_i32_le(&[500]),
+        encoding: quip_proto::v1::CoefficientEncoding::I32 as i32,
+        scale: 1000,
+        h: encode_i32_le(&[1000, -1000]),
+        j: encode_i32_le(&[500]),
         num_reads: 1,
         num_sweeps: 0,
         anneal_time_us: 0,
@@ -641,8 +704,10 @@ fn valid_spec() -> ScoreSpec {
 fn hash_ising() -> IsingProblem {
     IsingProblem {
         graph: Some(ising_problem::Graph::TopologyHash(TOPOLOGY_HASH.to_vec())),
-        h_milli_le32: encode_i32_le(&[1000, -1000]),
-        j_milli_le32: encode_i32_le(&[500]),
+        encoding: quip_proto::v1::CoefficientEncoding::I32 as i32,
+        scale: 1000,
+        h: encode_i32_le(&[1000, -1000]),
+        j: encode_i32_le(&[500]),
         num_reads: 1,
         num_sweeps: 0,
         anneal_time_us: 0,
@@ -658,8 +723,10 @@ fn sparse_ising() -> IsingProblem {
         graph: Some(ising_problem::Graph::TopologyHash(
             SPARSE_TOPOLOGY_HASH.to_vec(),
         )),
-        h_milli_le32: encode_i32_le(&[1000, -1000, 250]),
-        j_milli_le32: encode_i32_le(&[500, -750]),
+        encoding: quip_proto::v1::CoefficientEncoding::I32 as i32,
+        scale: 1000,
+        h: encode_i32_le(&[1000, -1000, 250]),
+        j: encode_i32_le(&[500, -750]),
         num_reads: 1,
         num_sweeps: 0,
         anneal_time_us: 0,
@@ -726,8 +793,10 @@ fn warm_proof_ising() -> IsingProblem {
             u: edges.iter().map(|&(u, _)| as_node_id(u)).collect(),
             v: edges.iter().map(|&(_, v)| as_node_id(v)).collect(),
         })),
-        h_milli_le32: encode_i32_le(&vec![0; WARM_PROOF_NODES]),
-        j_milli_le32: encode_i32_le(&warm_proof_j_milli()),
+        encoding: quip_proto::v1::CoefficientEncoding::I32 as i32,
+        scale: 1000,
+        h: encode_i32_le(&vec![0; WARM_PROOF_NODES]),
+        j: encode_i32_le(&warm_proof_j_milli()),
         num_reads: 1,
         initial_spins: vec![encode_spins_packed(&planted)],
         start_beta_milli: WARM_PROOF_START_BETA_MILLI,
@@ -762,6 +831,7 @@ fn as_node_id(i: usize) -> u32 {
 /// The dense topology `job-hash` resolves against.
 fn dense_topology() -> Topology {
     Topology {
+        allowed_j_milli: vec![],
         hash: TOPOLOGY_HASH.to_vec(),
         nodes: vec![0, 1],
         edges: Some(EdgeList {
@@ -775,6 +845,7 @@ fn dense_topology() -> Topology {
 /// The sparse topology `job-sparse` resolves against.
 fn sparse_topology() -> Topology {
     Topology {
+        allowed_j_milli: vec![],
         hash: SPARSE_TOPOLOGY_HASH.to_vec(),
         nodes: SPARSE_NODES.to_vec(),
         edges: Some(EdgeList {
@@ -799,6 +870,7 @@ fn configure() -> Configure {
 
 fn job_at(job_id: &[u8], deadline_ms: u64, generation: u64, ising: IsingProblem) -> Job {
     Job {
+        generator: None,
         job_id: job_id.to_vec(),
         kind: JobKind::IsingSample as i32,
         generation,
@@ -814,6 +886,7 @@ fn job(job_id: &[u8], deadline_ms: u64, ising: IsingProblem) -> Job {
 
 fn job_kind(job_id: &[u8], deadline_ms: u64, kind: JobKind, ising: IsingProblem) -> Job {
     Job {
+        generator: None,
         job_id: job_id.to_vec(),
         kind: kind as i32,
         generation: LIVE_GENERATION,
@@ -831,7 +904,10 @@ async fn read_hello(inbound: &mut Streaming<MinerMsg>, outcome: &mut SessionOutc
         Ok(Ok(Some(MinerMsg {
             msg: Some(miner_msg::Msg::Hello(h)),
         }))) => {
-            outcome.handshake_ok = h.session_token == "test-token" && h.protocol_version == 1;
+            outcome.handshake_ok = h.session_token == "test-token"
+                && h.capabilities
+                    .as_ref()
+                    .is_some_and(|c| c.protocol_version == 2);
             outcome.hello = Some(h);
             true
         }
@@ -859,7 +935,33 @@ async fn read_hello(inbound: &mut Streaming<MinerMsg>, outcome: &mut SessionOutc
 fn fold(outcome: &mut SessionOutcome, m: miner_msg::Msg) {
     match m {
         miner_msg::Msg::Ready(_) => outcome.ready_received = true,
-        miner_msg::Msg::JobRequest(jr) => outcome.job_request_credits.push(jr.credits),
+        miner_msg::Msg::JobRequest(jr) => {
+            outcome.job_request_credits.push(jr.credits);
+            if let Some(lease) = &mut outcome.lease {
+                if lease.lease_done.is_some() {
+                    outcome.lease_refund_messages += 1;
+                    lease.credit_refunded = jr.credits == 1 && outcome.lease_refund_messages == 1;
+                }
+            }
+        }
+        miner_msg::Msg::Result(r) if r.job_id == LEASE_JOB_ID && outcome.lease.is_some() => {
+            if let Some(lease) = &mut outcome.lease {
+                lease.results += 1;
+                if let Ok(topology) = TopologyView::from_proto(&lease_topology()) {
+                    let verified = verify_lease_result(
+                        &lease_generator(),
+                        &topology,
+                        &Target::from_proto(&lease_target()),
+                        &r,
+                    )
+                    .is_ok();
+                    if verified && lease.lease_done.is_none() && outcome.lease_salts.insert(r.salt)
+                    {
+                        lease.results_verified += 1;
+                    }
+                }
+            }
+        }
         miner_msg::Msg::Result(r) => {
             let spec = outcome.expected.get(&r.job_id);
             let rescored = spec.map(|s| {
@@ -870,7 +972,7 @@ fn fold(outcome: &mut SessionOutcome, m: miner_msg::Msg) {
                         // wrong width for the problem, cannot be re-scored.
                         // Recording `None` keeps it distinguishable from a
                         // genuine score of zero.
-                        decode_spins(&sol.spins_bytes)
+                        decode_spins_packed(&sol.spins, s.h.len())
                             .ok()
                             .filter(|v| v.len() == s.h.len())
                             .map(|v| energy_milli(&v, &s.h, &s.j, &s.edges))
@@ -896,7 +998,102 @@ fn fold(outcome: &mut SessionOutcome, m: miner_msg::Msg) {
         miner_msg::Msg::Fatal(f) => {
             outcome.fatal = Some((f.exit_code.cast_signed(), f.reason));
         }
+        miner_msg::Msg::LeaseDone(done) => {
+            if done.job_id == LEASE_JOB_ID {
+                if let Some(lease) = &mut outcome.lease {
+                    // A second completion cannot replace a malformed first one.
+                    lease.lease_done = Some(if lease.lease_done.is_some() {
+                        (0, done.best_energy_milli)
+                    } else {
+                        (done.salts_done, done.best_energy_milli)
+                    });
+                }
+            }
+        }
         miner_msg::Msg::Hello(_) => {}
+    }
+}
+
+fn advertises_lease(hello: Option<&Hello>) -> bool {
+    hello
+        .and_then(|h| h.capabilities.as_ref())
+        .is_some_and(|c| c.supported_kinds.contains(&(JobKind::IsingGenerate as i32)))
+}
+
+fn lease_topology() -> Topology {
+    // An eight-node ring with four opposite-node chords: connected, degree three.
+    Topology {
+        hash: vec![0x33; 32],
+        nodes: (0..8).collect(),
+        edges: Some(EdgeList {
+            u: vec![0, 1, 2, 3, 4, 5, 6, 0, 0, 1, 2, 3],
+            v: vec![1, 2, 3, 4, 5, 6, 7, 7, 4, 5, 6, 7],
+        }),
+        allowed_h_milli: vec![-1000, 0, 1000],
+        allowed_j_milli: vec![-1000, 1000],
+    }
+}
+
+fn lease_generator() -> IsingProblemGenerator {
+    IsingProblemGenerator {
+        algorithm: quip_proto::v1::GeneratorAlgorithm::Blake3Chacha8V1 as i32,
+        topology_hash: lease_topology().hash,
+        last_proof_block_hash: vec![0x11; 32],
+        miner_account: vec![0x22; 32],
+        base_salt: vec![0x44; 32],
+        salt_start: 10,
+        salt_count: u64::from(LEASE_SALTS),
+    }
+}
+
+fn lease_target() -> SetTarget {
+    SetTarget {
+        max_energy_milli: i64::MAX,
+        min_solutions: 1,
+        min_diversity_milli: 0,
+        max_proof_solutions: 32,
+        num_reads: 1,
+        num_sweeps: CONFIGURED_SWEEPS,
+        ..Default::default()
+    }
+}
+
+async fn run_lease(
+    tx: &mpsc::Sender<Result<CoordMsg, Status>>,
+    inbound: &mut Streaming<MinerMsg>,
+    outcome: &mut SessionOutcome,
+) {
+    outcome.lease = Some(LeaseOutcome::default());
+    let _ = send(tx, coord_msg::Msg::Topology(lease_topology())).await;
+    let _ = send(tx, coord_msg::Msg::SetTarget(lease_target())).await;
+    let _ = dispatch(
+        tx,
+        outcome,
+        Job {
+            job_id: LEASE_JOB_ID.to_vec(),
+            kind: JobKind::IsingGenerate as i32,
+            generation: CANCEL_GENERATION + 1,
+            generator: Some(lease_generator()),
+            // Zero means no deadline. The driver's timeout bounds this scenario.
+            deadline_ms: 0,
+            ..Default::default()
+        },
+        None,
+    )
+    .await;
+    // Bound the whole scenario, including its refund, even if messages keep arriving.
+    if tokio::time::timeout(
+        PHASE_TIMEOUT,
+        read_until(inbound, outcome, "salt-lease", |o| {
+            o.lease
+                .as_ref()
+                .is_some_and(|l| l.lease_done.is_some() && l.credit_refunded)
+        }),
+    )
+    .await
+    .is_err()
+    {
+        outcome.timed_out_phases.push("salt-lease".to_owned());
     }
 }
 
@@ -991,7 +1188,7 @@ async fn run_script(
     if !send(
         tx,
         coord_msg::Msg::Welcome(Welcome {
-            protocol_version: 1,
+            protocol_version: 2,
         }),
     )
     .await
@@ -1071,10 +1268,11 @@ async fn run_script(
     )
     .await;
     // Only a solver that says it uses the states is held to using them.
-    let advertises_initial_spins = outcome
-        .hello
-        .as_ref()
-        .is_some_and(|h| h.features.iter().any(|f| f == INITIAL_SPINS_FEATURE));
+    let advertises_initial_spins = outcome.hello.as_ref().is_some_and(|h| {
+        h.capabilities
+            .as_ref()
+            .is_some_and(|c| c.features.iter().any(|f| f == INITIAL_SPINS_FEATURE))
+    });
     if advertises_initial_spins {
         let _ = dispatch(
             tx,
@@ -1119,7 +1317,7 @@ async fn run_script(
     // 8. The four rejection paths: h length not a multiple of 4, j length not
     //    a multiple of 4, an unsupported kind, and a deadline in the past.
     let mut malformed_h = valid_ising();
-    malformed_h.h_milli_le32 = vec![0x01, 0x02, 0x03]; // len 3, not a multiple of 4
+    malformed_h.h = vec![0x01, 0x02, 0x03]; // len 3, not a multiple of 4
     let _ = dispatch(
         tx,
         &mut outcome,
@@ -1129,7 +1327,7 @@ async fn run_script(
     .await;
 
     let mut malformed_j = valid_ising();
-    malformed_j.j_milli_le32 = vec![0x01, 0x02, 0x03];
+    malformed_j.j = vec![0x01, 0x02, 0x03];
     let _ = dispatch(
         tx,
         &mut outcome,
@@ -1198,7 +1396,12 @@ async fn run_script(
     })
     .await;
 
-    // 11. Shutdown -> miner flushes and exits 0, closing its send stream.
+    // 11. Generation runs above the cancellation watermark from the plain jobs.
+    if advertises_lease(outcome.hello.as_ref()) {
+        run_lease(tx, inbound, &mut outcome).await;
+    }
+
+    // 12. Shutdown -> miner flushes and exits 0, closing its send stream.
     let _ = send(tx, coord_msg::Msg::Shutdown(Shutdown { grace_ms: 1000 })).await;
     drain_to_end(inbound, &mut outcome).await;
 
@@ -1221,7 +1424,7 @@ async fn run_script_bad_welcome(
     if !send(
         tx,
         coord_msg::Msg::Welcome(Welcome {
-            protocol_version: 2,
+            protocol_version: 1,
         }),
     )
     .await
@@ -1249,7 +1452,7 @@ async fn run_script_one_job(
     if !send(
         tx,
         coord_msg::Msg::Welcome(Welcome {
-            protocol_version: 1,
+            protocol_version: 2,
         }),
     )
     .await
@@ -1305,7 +1508,7 @@ async fn run_script_close(
         && !send(
             &tx,
             coord_msg::Msg::Welcome(Welcome {
-                protocol_version: 1,
+                protocol_version: 2,
             }),
         )
         .await
@@ -1320,6 +1523,42 @@ async fn run_script_close(
 
     drain_to_end(inbound, &mut outcome).await;
     outcome
+}
+
+/// Wait up to five seconds for the stderr reader, then return what it captured.
+/// A read error, a failed reader task, or a timeout appends an
+/// incomplete-capture marker line. On timeout the reader task is aborted.
+async fn finish_stderr_capture(
+    mut reader: Option<tokio::task::JoinHandle<std::io::Result<()>>>,
+    captured: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+) -> String {
+    let incomplete_reason = match reader.as_mut() {
+        Some(reader) => match tokio::time::timeout(Duration::from_secs(5), &mut *reader).await {
+            Ok(Ok(Ok(()))) => None,
+            Ok(Ok(Err(error))) => Some(format!("read error: {error}")),
+            Ok(Err(error)) => Some(format!("reader task failed: {error}")),
+            Err(_) => {
+                reader.abort();
+                Some("the pipe stayed open after the miner exited".to_owned())
+            }
+        },
+        None => None,
+    };
+    let bytes = {
+        let mut bytes = match captured.lock() {
+            Ok(bytes) => bytes,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        std::mem::take(&mut *bytes)
+    };
+    let mut stderr = String::from_utf8_lossy(&bytes).into_owned();
+    if let Some(reason) = incomplete_reason {
+        if !stderr.is_empty() && !stderr.ends_with('\n') {
+            stderr.push('\n');
+        }
+        let _ = writeln!(stderr, "[stderr capture incomplete: {reason}]");
+    }
+    stderr
 }
 
 /// Bind a UDS mock coordinator, spawn `bin_path` as a miner client against it,
@@ -1359,8 +1598,28 @@ async fn drive_miner_with_script(bin_path: &str, socket: &str, script: ScriptKin
         .arg("--miner-id")
         .arg("mock-0")
         .env("QUIP_SESSION_TOKEN", "test-token")
+        .stderr(std::process::Stdio::piped())
         .spawn()
         .expect("spawn miner");
+    let captured_stderr = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let stderr_reader = child.stderr.take().map(|mut pipe| {
+        let captured_stderr = std::sync::Arc::clone(&captured_stderr);
+        tokio::spawn(async move {
+            use tokio::io::AsyncReadExt as _;
+            let mut chunk = [0_u8; 8192];
+            loop {
+                let count = pipe.read(&mut chunk).await?;
+                if count == 0 {
+                    return Ok::<(), std::io::Error>(());
+                }
+                let mut bytes = match captured_stderr.lock() {
+                    Ok(bytes) => bytes,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                bytes.extend(chunk.iter().take(count).copied());
+            }
+        })
+    });
 
     // Bound the wait so a hung miner can't hang the test suite; on timeout,
     // kill the child and report a sentinel exit code so callers fail loudly
@@ -1376,6 +1635,7 @@ async fn drive_miner_with_script(bin_path: &str, socket: &str, script: ScriptKin
         let _ = child.kill().await;
         -1
     };
+    let stderr = finish_stderr_capture(stderr_reader, captured_stderr).await;
     // The session handler sends the outcome as the miner closes its stream on
     // exit; the timeout guards a miner that dies before ever connecting.
     let outcome = tokio::time::timeout(OUTCOME_TIMEOUT, orx)
@@ -1387,6 +1647,7 @@ async fn drive_miner_with_script(bin_path: &str, socket: &str, script: ScriptKin
     let _ = std::fs::remove_file(&path);
 
     DriverReport {
+        lease: outcome.lease,
         handshake_ok: outcome.handshake_ok,
         hello: outcome.hello,
         ready_received: outcome.ready_received,
@@ -1403,6 +1664,7 @@ async fn drive_miner_with_script(bin_path: &str, socket: &str, script: ScriptKin
         terminal: outcome.terminal,
         timed_out_phases: outcome.timed_out_phases,
         exit_code,
+        stderr,
     }
 }
 
@@ -1498,6 +1760,7 @@ mod tests {
 
     fn bare_report() -> DriverReport {
         DriverReport {
+            lease: None,
             handshake_ok: true,
             hello: None,
             ready_received: false,
@@ -1514,35 +1777,31 @@ mod tests {
             terminal: Terminal::Open,
             timed_out_phases: vec![],
             exit_code: 0,
+            stderr: String::new(),
         }
     }
 
     fn hello(backend: &str) -> Hello {
         Hello {
-            miner_id: "mock-0".to_owned(),
-            session_token: "test-token".to_owned(),
-            protocol_version: 1,
-            backend: backend.to_owned(),
-            algorithm: "sa".to_owned(),
-            supported_kinds: vec![JobKind::IsingSample as i32],
-            max_nodes: 100,
-            max_edges: 200,
-            native_topology_hash: None,
-            features: vec![],
+            miner_id: "mock-0".into(),
+            session_token: "test-token".into(),
+            capabilities: Some(caps(backend)),
         }
     }
 
     fn caps(backend: &str) -> Capabilities {
         Capabilities {
-            backend: backend.to_owned(),
-            algorithm: "sa".to_owned(),
+            backend: quip_protocol::session::backend_from_name(backend).unwrap() as i32,
+            algorithm: quip_proto::v1::Algorithm::Sa as i32,
             supported_kinds: vec![JobKind::IsingSample as i32],
             max_nodes: 100,
             max_edges: 200,
             features: vec!["streaming".to_owned()],
-            protocol_version: 1,
+            protocol_version: 2,
             stream_width: 1,
             native_topology_hash: None,
+            encodings: vec![quip_proto::v1::CoefficientEncoding::I32 as i32],
+            generators: vec![],
         }
     }
 
@@ -1615,6 +1874,282 @@ mod tests {
         // field, so this must pass or they prove nothing.
         let r = conformant_report();
         assert!(r.is_conformant(), "{r:?}");
+    }
+
+    fn lease_report() -> DriverReport {
+        let mut r = conformant_report();
+        let caps = r.hello.as_mut().unwrap().capabilities.as_mut().unwrap();
+        caps.supported_kinds.push(JobKind::IsingGenerate as i32);
+        r.capabilities_received = Some(caps.clone());
+        r
+    }
+
+    #[test]
+    fn advertised_lease_requires_an_outcome() {
+        let r = lease_report();
+        assert!(!r.is_conformant());
+    }
+
+    #[test]
+    fn lease_requires_four_verified_results_done_and_refund() {
+        let mut r = lease_report();
+        r.lease = Some(LeaseOutcome {
+            results: 4,
+            results_verified: 4,
+            lease_done: Some((4, -1000)),
+            credit_refunded: true,
+        });
+        assert!(r.is_conformant());
+        for bad in [
+            LeaseOutcome {
+                lease_done: Some((3, -1000)),
+                ..r.lease.clone().unwrap()
+            },
+            LeaseOutcome {
+                results: 3,
+                ..r.lease.clone().unwrap()
+            },
+            LeaseOutcome {
+                results_verified: 3,
+                ..r.lease.clone().unwrap()
+            },
+            LeaseOutcome {
+                lease_done: None,
+                ..r.lease.clone().unwrap()
+            },
+            LeaseOutcome {
+                credit_refunded: false,
+                ..r.lease.clone().unwrap()
+            },
+        ] {
+            let mut failed = r.clone();
+            failed.lease = Some(bad);
+            assert!(!failed.is_conformant());
+        }
+    }
+
+    #[test]
+    fn unadvertised_lease_is_not_graded() {
+        let mut r = conformant_report();
+        assert!(r.is_conformant());
+        r.lease = Some(LeaseOutcome {
+            results: 0,
+            results_verified: 0,
+            lease_done: None,
+            credit_refunded: false,
+        });
+        assert!(r.is_conformant());
+    }
+
+    fn lease_result(index: u64) -> quip_proto::v1::Result {
+        let generator = lease_generator();
+        let spec = quip_protocol::lease::LeaseSpec::from_proto(&generator).unwrap();
+        let topology = TopologyView::from_proto(&lease_topology()).unwrap();
+        let nonce = spec.nonce(index).unwrap();
+        let (h, j) = topology.draw(nonce).unwrap();
+        let spins = vec![1; topology.num_nodes];
+        quip_proto::v1::Result {
+            job_id: LEASE_JOB_ID.to_vec(),
+            salt: spec.salt(index).unwrap().to_vec(),
+            nonce: nonce.to_vec(),
+            solutions: vec![quip_proto::v1::Solution {
+                spins: encode_spins_packed(&spins),
+                energy_milli: quip_protocol::scoring::energy_from_milli(
+                    &spins,
+                    &h,
+                    &j,
+                    &topology.edges,
+                ),
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn lease_fold_verifies_distinct_salts_and_refund_order() {
+        let mut o = SessionOutcome {
+            lease: Some(LeaseOutcome::default()),
+            ..Default::default()
+        };
+        // These credits belong to the earlier plain jobs, not the lease completion.
+        fold(
+            &mut o,
+            miner_msg::Msg::JobRequest(quip_proto::v1::JobRequest { credits: 1 }),
+        );
+        assert!(!o.lease.as_ref().unwrap().credit_refunded);
+        for index in 0..4 {
+            fold(&mut o, miner_msg::Msg::Result(lease_result(index)));
+        }
+        assert!(o.results.is_empty());
+        assert_eq!(o.lease.as_ref().unwrap().results_verified, 4);
+        fold(
+            &mut o,
+            miner_msg::Msg::LeaseDone(quip_proto::v1::LeaseDone {
+                job_id: LEASE_JOB_ID.to_vec(),
+                salts_done: 4,
+                best_energy_milli: -1000,
+            }),
+        );
+        assert!(!o.lease.as_ref().unwrap().credit_refunded);
+        fold(
+            &mut o,
+            miner_msg::Msg::JobRequest(quip_proto::v1::JobRequest { credits: 1 }),
+        );
+        assert!(o.lease.as_ref().unwrap().credit_refunded);
+        let mut r = lease_report();
+        r.lease = o.lease;
+        assert!(r.is_conformant());
+    }
+
+    #[test]
+    fn lease_fold_rejects_duplicate_salts_and_bad_proofs() {
+        let mut o = SessionOutcome {
+            lease: Some(LeaseOutcome::default()),
+            ..Default::default()
+        };
+        fold(&mut o, miner_msg::Msg::Result(lease_result(0)));
+        fold(&mut o, miner_msg::Msg::Result(lease_result(0)));
+        let mut bad_nonce = lease_result(1);
+        bad_nonce.nonce = vec![0; 32];
+        fold(&mut o, miner_msg::Msg::Result(bad_nonce));
+        let mut bad_energy = lease_result(2);
+        bad_energy.solutions.first_mut().unwrap().energy_milli += 1;
+        fold(&mut o, miner_msg::Msg::Result(bad_energy));
+        let lease = o.lease.unwrap();
+        assert_eq!(lease.results, 4);
+        assert_eq!(lease.results_verified, 1);
+    }
+
+    #[test]
+    fn lease_fold_rejects_results_after_completion() {
+        let mut o = SessionOutcome {
+            lease: Some(LeaseOutcome {
+                lease_done: Some((4, -1000)),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        fold(&mut o, miner_msg::Msg::Result(lease_result(0)));
+        let lease = o.lease.unwrap();
+        assert_eq!(lease.results, 1);
+        assert_eq!(lease.results_verified, 0);
+        let mut report = lease_report();
+        report.lease = Some(lease);
+        assert!(!report.is_conformant());
+    }
+
+    #[test]
+    fn lease_fold_rejects_wrong_job_id_during_active_lease() {
+        let mut o = SessionOutcome {
+            lease: Some(LeaseOutcome::default()),
+            ..Default::default()
+        };
+        let mut result = lease_result(0);
+        result.job_id = b"wrong-lease".to_vec();
+        fold(&mut o, miner_msg::Msg::Result(result));
+        assert_eq!(o.lease.as_ref().unwrap().results, 0);
+        assert_eq!(o.results.len(), 1);
+        let mut report = lease_report();
+        report.results.extend(o.results);
+        assert!(!report.is_conformant());
+    }
+
+    struct LeaseTrafficCoordinator(Mutex<Option<oneshot::Sender<SessionOutcome>>>);
+    #[tonic::async_trait]
+    impl MinerService for LeaseTrafficCoordinator {
+        type SessionStream = ReceiverStream<Result<CoordMsg, Status>>;
+        async fn session(
+            &self,
+            request: Request<Streaming<MinerMsg>>,
+        ) -> Result<Response<Self::SessionStream>, Status> {
+            let sender = self.0.lock().await.take().unwrap();
+            let (tx, rx) = mpsc::channel(8);
+            let mut inbound = request.into_inner();
+            let _task = tokio::spawn(async move {
+                let mut outcome = SessionOutcome::default();
+                run_lease(&tx, &mut inbound, &mut outcome).await;
+                let _ = sender.send(outcome);
+            });
+            Ok(Response::new(ReceiverStream::new(rx)))
+        }
+    }
+
+    #[tokio::test]
+    async fn lease_collection_timeout_bounds_continuous_traffic() {
+        use quip_proto::v1::miner_service_client::MinerServiceClient;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (done, outcome) = oneshot::channel();
+        let server = tokio::spawn(
+            Server::builder()
+                .add_service(MinerServiceServer::new(LeaseTrafficCoordinator(
+                    Mutex::new(Some(done)),
+                )))
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener)),
+        );
+        let mut client = MinerServiceClient::connect(format!("http://{address}"))
+            .await
+            .unwrap();
+        let (tx, rx) = mpsc::channel(8);
+        let mut inbound = client
+            .session(ReceiverStream::new(rx))
+            .await
+            .unwrap()
+            .into_inner();
+        for _ in 0..3 {
+            assert!(inbound.message().await.unwrap().is_some());
+        }
+        let traffic = tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_millis(10));
+            loop {
+                let _ = tick.tick().await;
+                if tx
+                    .send(MinerMsg {
+                        msg: Some(miner_msg::Msg::Status(MinerStatus::default())),
+                    })
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        let result = tokio::time::timeout(PHASE_TIMEOUT + Duration::from_secs(2), outcome).await;
+        traffic.abort();
+        server.abort();
+        let outcome = result
+            .expect("continuous traffic must not renew the collection budget")
+            .unwrap();
+        assert_eq!(outcome.timed_out_phases, vec!["salt-lease"]);
+        assert!(!outcome.statuses.is_empty());
+    }
+
+    #[test]
+    fn unsolicited_lease_results_remain_unexpected_plain_results() {
+        let mut o = SessionOutcome::default();
+        fold(&mut o, miner_msg::Msg::Result(lease_result(0)));
+        assert_eq!(o.results.len(), 1);
+        let mut r = conformant_report();
+        r.results.extend(o.results);
+        assert!(!r.is_conformant());
+    }
+
+    #[test]
+    fn extra_lease_refunds_stay_invalid() {
+        let mut o = SessionOutcome {
+            lease: Some(LeaseOutcome {
+                lease_done: Some((4, -1000)),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        for count in 1..=3 {
+            fold(
+                &mut o,
+                miner_msg::Msg::JobRequest(quip_proto::v1::JobRequest { credits: 1 }),
+            );
+            assert_eq!(o.lease.as_ref().unwrap().credit_refunded, count == 1);
+        }
     }
 
     #[test]
@@ -1785,10 +2320,10 @@ mod tests {
         // fail the solver for following the spec.
         let mut r = conformant_report();
         if let Some(h) = r.hello.as_mut() {
-            h.algorithm = "gibbs".to_owned();
+            h.capabilities.as_mut().unwrap().algorithm = quip_proto::v1::Algorithm::Gibbs as i32;
         }
         if let Some(c) = r.capabilities_received.as_mut() {
-            c.algorithm = "gibbs".to_owned();
+            c.algorithm = quip_proto::v1::Algorithm::Gibbs as i32;
         }
         for result in &mut r.results {
             result.meta_sweeps = CONFIGURED_SWEEPS * GIBBS_SWEEP_MULTIPLIER;
@@ -1801,10 +2336,10 @@ mod tests {
         // The un-doubled echo means the solver skipped its own 2x rule.
         let mut r = conformant_report();
         if let Some(h) = r.hello.as_mut() {
-            h.algorithm = "gibbs".to_owned();
+            h.capabilities.as_mut().unwrap().algorithm = quip_proto::v1::Algorithm::Gibbs as i32;
         }
         if let Some(c) = r.capabilities_received.as_mut() {
-            c.algorithm = "gibbs".to_owned();
+            c.algorithm = quip_proto::v1::Algorithm::Gibbs as i32;
         }
         assert!(!r.sweeps_honoured(), "{r:?}");
     }
@@ -1812,7 +2347,7 @@ mod tests {
     #[test]
     fn capabilities_must_match_the_hello_identity() {
         let mut r = conformant_report();
-        r.capabilities_received = Some(caps("something-else"));
+        r.capabilities_received = Some(caps("cuda"));
         assert!(
             !r.capabilities_conformant(),
             "Capabilities.backend must agree with Hello.backend"

@@ -12,8 +12,9 @@
 
 use prost::Message;
 use quip_proto::v1::{
-    Capabilities, EdgeList, Fatal, Hello, IsingProblem, Job, JobKind, Provenance, Reject,
-    RejectReason, Result as JobResult, SamplerMeta, Solution, Status,
+    Algorithm, Backend, Capabilities, CoefficientEncoding, EdgeList, Fatal, GeneratorAlgorithm,
+    Hello, IsingProblem, IsingProblemGenerator, Job, JobKind, LeaseDone, Provenance, Reject,
+    RejectReason, Result as JobResult, SamplerMeta, SetTarget, Solution, Status, Topology,
 };
 use quip_solver_conformance::golden_wire;
 use std::collections::{BTreeMap, HashMap};
@@ -59,6 +60,10 @@ where
         // nothing here would only add a second, less useful failure.
         return;
     };
+    if *hex != to_hex(&msg.encode_to_vec()) {
+        // Report all changed encodings together in the map assertion below.
+        return;
+    }
     let decoded = M::decode(&from_hex(hex)[..]);
     assert!(
         decoded.is_ok(),
@@ -77,19 +82,25 @@ fn hello() -> Hello {
     Hello {
         miner_id: "cpu-0".to_owned(),
         session_token: "tok".to_owned(),
-        protocol_version: 1,
-        backend: "cpu".to_owned(),
-        algorithm: "sa".to_owned(),
-        supported_kinds: vec![JobKind::IsingSample as i32],
-        max_nodes: 4600,
-        max_edges: 40_000,
-        native_topology_hash: Some(vec![0xAB, 0xCD]),
-        features: vec!["streaming".to_owned(), "governor".to_owned()],
+        capabilities: Some(Capabilities {
+            protocol_version: 2,
+            backend: Backend::Cpu as i32,
+            algorithm: Algorithm::Sa as i32,
+            supported_kinds: vec![JobKind::IsingSample as i32],
+            max_nodes: 4600,
+            max_edges: 40_000,
+            native_topology_hash: Some(vec![0xAB, 0xCD]),
+            features: vec!["streaming".to_owned(), "governor".to_owned()],
+            stream_width: 4,
+            encodings: vec![CoefficientEncoding::I32 as i32],
+            generators: vec![GeneratorAlgorithm::Blake3Chacha8V1 as i32],
+        }),
     }
 }
 
 fn job() -> Job {
     Job {
+        generator: None,
         job_id: vec![0x01, 0x02, 0x03, 0x04],
         kind: JobKind::IsingSample as i32,
         generation: 7,
@@ -99,8 +110,10 @@ fn job() -> Job {
                 u: vec![0, 1],
                 v: vec![1, 2],
             })),
-            h_milli_le32: vec![0xE8, 0x03, 0x00, 0x00],
-            j_milli_le32: vec![0xF4, 0x01, 0x00, 0x00],
+            encoding: CoefficientEncoding::I32 as i32,
+            scale: 1000,
+            h: vec![0xE8, 0x03, 0x00, 0x00],
+            j: vec![0xF4, 0x01, 0x00, 0x00],
             num_reads: 128,
             num_sweeps: 512,
             anneal_time_us: 20,
@@ -115,10 +128,12 @@ fn job() -> Job {
 
 fn result() -> JobResult {
     JobResult {
+        salt: vec![0x31; 32],
+        nonce: vec![0x42; 32],
         job_id: vec![0x01, 0x02, 0x03, 0x04],
         solutions: vec![Solution {
-            // 0x01 = +1, 0xFF = -1
-            spins_bytes: vec![0x01, 0xFF, 0x01],
+            // +1, -1, +1, packed least-significant bit first.
+            spins: vec![0x05],
             energy_milli: -1_250,
         }],
         meta: Some(SamplerMeta {
@@ -128,6 +143,58 @@ fn result() -> JobResult {
             qpu_access_us: 64,
             extra: one_entry("chain_breaks", "3"),
         }),
+    }
+}
+
+fn job_generate() -> Job {
+    Job {
+        job_id: vec![5, 6],
+        kind: JobKind::IsingGenerate as i32,
+        generation: 8,
+        deadline_ms: 1_700_000_000_001,
+        generator: Some(IsingProblemGenerator {
+            algorithm: GeneratorAlgorithm::Blake3Chacha8V1 as i32,
+            topology_hash: vec![0xab, 0xcd],
+            last_proof_block_hash: vec![0x11; 32],
+            miner_account: vec![0x22; 32],
+            base_salt: vec![0x33; 32],
+            salt_start: 256,
+            salt_count: 16,
+        }),
+        ..Default::default()
+    }
+}
+
+fn lease_done() -> LeaseDone {
+    LeaseDone {
+        job_id: vec![5, 6],
+        salts_done: 16,
+        best_energy_milli: -1250,
+    }
+}
+
+fn topology() -> Topology {
+    Topology {
+        hash: vec![0xab, 0xcd],
+        nodes: vec![40, 7, 90],
+        edges: Some(EdgeList {
+            u: vec![40, 7],
+            v: vec![7, 90],
+        }),
+        allowed_h_milli: vec![-1000, 1000],
+        allowed_j_milli: vec![-500, 500],
+    }
+}
+
+fn set_target() -> SetTarget {
+    SetTarget {
+        max_energy_milli: -1000,
+        min_solutions: 2,
+        min_diversity_milli: 200,
+        num_reads: 128,
+        num_sweeps: 512,
+        anneal_time_us: 20,
+        max_proof_solutions: 32,
     }
 }
 
@@ -150,13 +217,15 @@ fn status() -> Status {
 
 fn capabilities() -> Capabilities {
     Capabilities {
-        backend: "cuda".to_owned(),
-        algorithm: "sa".to_owned(),
+        encodings: vec![CoefficientEncoding::I32 as i32],
+        generators: vec![GeneratorAlgorithm::Blake3Chacha8V1 as i32],
+        backend: Backend::Cuda as i32,
+        algorithm: Algorithm::Sa as i32,
         supported_kinds: vec![JobKind::IsingSample as i32],
         max_nodes: 4096,
         max_edges: 32_768,
         features: vec!["streaming".to_owned(), "governor".to_owned()],
-        protocol_version: 1,
+        protocol_version: 2,
         stream_width: 4,
         native_topology_hash: Some(vec![0xAB, 0xCD]),
     }
@@ -177,6 +246,10 @@ fn canonical_encodings_match_the_fixture() {
     pin("fatal", &fatal(), &mut generated);
     pin("hello", &hello(), &mut generated);
     pin("job", &job(), &mut generated);
+    pin("job_generate", &job_generate(), &mut generated);
+    pin("lease_done", &lease_done(), &mut generated);
+    pin("topology", &topology(), &mut generated);
+    pin("set_target", &set_target(), &mut generated);
     pin("reject", &reject(), &mut generated);
     pin("result", &result(), &mut generated);
     pin("status", &status(), &mut generated);
@@ -195,73 +268,82 @@ fn canonical_encodings_match_the_fixture() {
 #[test]
 fn enum_numbers_match_the_fixture() {
     let mut generated: BTreeMap<String, BTreeMap<String, i32>> = BTreeMap::new();
-
-    let job_kinds = [
-        JobKind::Unspecified,
-        JobKind::IsingSample,
-        JobKind::GateCircuit,
-    ];
-    let _ = generated.insert(
-        "JobKind".to_owned(),
-        job_kinds
-            .iter()
-            .map(|k| (k.as_str_name().to_owned(), *k as i32))
-            .collect(),
+    macro_rules! pin_enum {
+        ($ty:ident, [$($variant:ident),+ $(,)?]) => {
+            let values = [$($ty::$variant),+];
+            let _ = generated.insert(stringify!($ty).to_owned(), values.iter().map(|v| (v.as_str_name().to_owned(), *v as i32)).collect());
+        };
+    }
+    pin_enum!(
+        JobKind,
+        [Unspecified, IsingSample, GateCircuit, IsingGenerate]
     );
-
-    let reasons = [
-        RejectReason::Unspecified,
-        RejectReason::UnsupportedKind,
-        RejectReason::TooLarge,
-        RejectReason::Expired,
-        RejectReason::Overloaded,
-        RejectReason::ShuttingDown,
-        RejectReason::Malformed,
-        RejectReason::TopologyMismatch,
-        RejectReason::TopologyMissing,
-    ];
-    let _ = generated.insert(
-        "RejectReason".to_owned(),
-        reasons
-            .iter()
-            .map(|r| (r.as_str_name().to_owned(), *r as i32))
-            .collect(),
+    pin_enum!(
+        RejectReason,
+        [
+            Unspecified,
+            UnsupportedKind,
+            TooLarge,
+            Expired,
+            Overloaded,
+            ShuttingDown,
+            Malformed,
+            TopologyMismatch,
+            TopologyMissing,
+            TargetMissing
+        ]
     );
-
-    assert_eq!(
-        generated,
-        golden_wire().enums,
-        "an enum variant changed number. Reordering an enum is source-compatible \
-         and wire-incompatible: old peers keep sending the old number and it now \
-         means something else."
+    pin_enum!(
+        Backend,
+        [Unspecified, Cpu, Cuda, Metal, Ane, DwaveQpu, Exec, Mock]
     );
+    pin_enum!(
+        Algorithm,
+        [
+            Unspecified,
+            Sa,
+            Gibbs,
+            QuantumAnneal,
+            Fsa,
+            Msa,
+            Flatiron,
+            Mps,
+            Mfa,
+            Sb,
+            Bsb,
+            Gbsb,
+            Gdsb,
+            Ggdsb,
+            Hbsb,
+            Hdsb,
+            Sbqa,
+            Tedsb,
+            External
+        ]
+    );
+    pin_enum!(
+        CoefficientEncoding,
+        [Unspecified, I32, I16, I8, F16, F32, F64]
+    );
+    pin_enum!(GeneratorAlgorithm, [Unspecified, Blake3Chacha8V1]);
+    assert_eq!(generated, golden_wire().enums, "enum numbers changed");
 }
 
 #[test]
 fn every_variant_the_fixture_pins_still_parses_from_its_name() {
-    // The fixture keys are the proto names, so a rename shows up here rather
-    // than as a mystery mismatch in the numbers.
     let wire = golden_wire();
-    for name in wire
-        .enums
-        .get("JobKind")
-        .into_iter()
-        .flat_map(BTreeMap::keys)
-    {
-        assert!(
-            JobKind::from_str_name(name).is_some(),
-            "JobKind::{name} no longer exists under that name"
-        );
-    }
-    for name in wire
-        .enums
-        .get("RejectReason")
-        .into_iter()
-        .flat_map(BTreeMap::keys)
-    {
-        assert!(
-            RejectReason::from_str_name(name).is_some(),
-            "RejectReason::{name} no longer exists under that name"
-        );
+    for (kind, names) in &wire.enums {
+        for name in names.keys() {
+            let parsed = match kind.as_str() {
+                "JobKind" => JobKind::from_str_name(name).is_some(),
+                "RejectReason" => RejectReason::from_str_name(name).is_some(),
+                "Backend" => Backend::from_str_name(name).is_some(),
+                "Algorithm" => Algorithm::from_str_name(name).is_some(),
+                "CoefficientEncoding" => CoefficientEncoding::from_str_name(name).is_some(),
+                "GeneratorAlgorithm" => GeneratorAlgorithm::from_str_name(name).is_some(),
+                other => panic!("unexpected enum {other}"),
+            };
+            assert!(parsed, "{kind}::{name} no longer exists");
+        }
     }
 }

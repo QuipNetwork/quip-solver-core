@@ -13,7 +13,9 @@
     reason = "milli values cast to f64 to rebuild the wire coefficients callers pass"
 )]
 
-use quip_protocol::scoring::{energy_milli, set_diversity, ENERGY_MILLI_NON_FINITE};
+use quip_protocol::scoring::{
+    energy_from_milli, energy_milli, set_diversity, ENERGY_MILLI_NON_FINITE,
+};
 use serde_json::Value;
 
 #[expect(
@@ -70,17 +72,39 @@ fn coefficients_of(case: &Value, key: &str) -> Vec<f64> {
         .collect()
 }
 
+/// The wire's `i32` milli coefficients, as `IsingGraph` holds them.
+#[expect(
+    clippy::unwrap_used,
+    reason = "integration-test helper; fixture shape is fixed"
+)]
+fn milli_of(case: &Value, key: &str) -> Vec<i32> {
+    case[key]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| i32::try_from(v.as_i64().unwrap()).unwrap())
+        .collect()
+}
+
 #[test]
 fn energy_matches_golden() {
     for (index, case) in golden()["energy"].as_array().unwrap().iter().enumerate() {
         let spins = spins_of(case);
+        let edges = edges_of(case);
+        let want = case["energy_milli"].as_i64().unwrap();
         let h = coefficients_of(case, "h_milli");
         let j = coefficients_of(case, "j_milli");
-        let edges = edges_of(case);
         assert_eq!(
             energy_milli(&spins, &h, &j, &edges),
-            case["energy_milli"].as_i64().unwrap(),
+            want,
             "energy case {index}"
+        );
+        let h_milli = milli_of(case, "h_milli");
+        let j_milli = milli_of(case, "j_milli");
+        assert_eq!(
+            energy_from_milli(&spins, &h_milli, &j_milli, &edges),
+            want,
+            "energy case {index}, integer path"
         );
     }
 }

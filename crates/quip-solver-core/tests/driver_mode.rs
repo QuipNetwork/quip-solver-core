@@ -31,6 +31,7 @@ fn solve_reads_a_problem_and_writes_solutions() {
         .arg("--solve")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .expect("spawn --solve");
     child
@@ -59,6 +60,7 @@ fn malformed_input_exits_config_invalid() {
         .arg("--solve")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .expect("spawn --solve");
     child
@@ -70,6 +72,7 @@ fn malformed_input_exits_config_invalid() {
     let out = child.wait_with_output().expect("wait");
 
     assert_eq!(out.status.code(), Some(64), "malformed input must exit 64");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("malformed problem JSON on stdin"));
 }
 
 #[test]
@@ -78,6 +81,7 @@ fn sample_error_exits_internal_fatal() {
         .arg("--solve")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .expect("spawn --solve");
     child
@@ -92,6 +96,7 @@ fn sample_error_exits_internal_fatal() {
     let out = child.wait_with_output().expect("wait");
 
     assert_eq!(out.status.code(), Some(70), "SampleError must exit 70");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("solve failed"));
 }
 
 #[test]
@@ -100,6 +105,7 @@ fn missing_session_token_exits_token_rejected_before_network() {
     // therefore exit 77 even when the coordinator URI cannot be reached. Exit
     // 70 here would mean the driver attempted the network first.
     let out = Command::new(example_bin("mock_sampler_miner"))
+        .stderr(Stdio::piped())
         .arg("--quip-coordinator")
         .arg("unix:///nonexistent")
         .env_remove("QUIP_SESSION_TOKEN")
@@ -116,6 +122,7 @@ fn missing_session_token_exits_token_rejected_before_network() {
 #[test]
 fn check_on_working_sampler_exits_clean() {
     let out = Command::new(example_bin("mock_sampler_miner"))
+        .stderr(Stdio::piped())
         .arg("--check")
         .output()
         .expect("spawn --check");
@@ -130,6 +137,7 @@ fn check_on_working_sampler_exits_clean() {
 #[test]
 fn unopenable_sampler_check_exits_env_incompatible() {
     let out = Command::new(example_bin("mock_sampler_unopenable"))
+        .stderr(Stdio::piped())
         .arg("--check")
         .output()
         .expect("spawn unopenable --check");
@@ -146,6 +154,7 @@ fn unopenable_sampler_session_exits_env_incompatible() {
     // Session mode calls open() after the coordinator flag is present and
     // before the token/network path. A failing open must exit 69, not 77/70.
     let out = Command::new(example_bin("mock_sampler_unopenable"))
+        .stderr(Stdio::piped())
         .arg("--quip-coordinator")
         .arg("unix:///nonexistent")
         .env("QUIP_SESSION_TOKEN", "test-token")

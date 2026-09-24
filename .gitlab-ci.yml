@@ -501,6 +501,11 @@ wheel:linux-aarch64:
   tags: [arm64, docker]
   needs: []
   timeout: 30m
+  variables:
+    # Use the image's toolchain as shipped. Without this, rust-toolchain.toml
+    # makes rustup add clippy and rustfmt, which the wheel build never runs,
+    # and on one arm64 runner that install fails on a bin/cargo-fmt conflict.
+    RUSTUP_TOOLCHAIN: "1.97.1"
   before_script:
     - apt-get update && apt-get install -y --no-install-recommends python3 python3-venv
     - python3 -m venv /opt/wheelenv

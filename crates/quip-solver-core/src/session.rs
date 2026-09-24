@@ -5,11 +5,14 @@
 //! Shutdown / idle timeout. Backends supply only a [`Sampler`].
 
 use crate::cli::CommonArgs;
+use crate::coefficient::Coefficient;
 use crate::display::{energy_units, format_duration_ms};
+use crate::job::ExactEnergy;
 use crate::job::{
     finalize_result, miner, num_sweeps_from_toml, prepare_job, status_msg, Prepared, SessionTarget,
     TopologyCache, DEFAULT_NUM_SWEEPS,
 };
+use crate::lease::{self, Expander, LeaseLink};
 use crate::{
     CancelToken, Sampler, StreamJob, StreamOutcome, StreamResult, WarmStart, WarmStreamJob,
 };
@@ -17,10 +20,11 @@ use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
 use quip_proto::v1::miner_service_client::MinerServiceClient;
 use quip_proto::v1::{
-    coord_msg, miner_msg, Capabilities, CoordMsg, Fatal, JobKind, JobRequest, MinerMsg, Ready,
+    coord_msg, miner_msg, Algorithm, Backend, Capabilities, CoefficientEncoding, CoordMsg, Fatal,
+    GeneratorAlgorithm, JobKind, JobRequest, MinerMsg, Ready,
 };
 use quip_protocol::session::{
-    build_hello, check_welcome, BackendCaps, ExitCode, SessionConfig, SessionError,
+    algorithm_name, backend_name, build_hello, check_welcome, ExitCode, SessionConfig, SessionError,
 };
 use serde::Serialize;
 use std::collections::HashMap;
@@ -29,7 +33,7 @@ use std::process::ExitCode as StdExitCode;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch, Semaphore};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::{Endpoint, Uri};
 
@@ -37,9 +41,9 @@ use tonic::transport::{Endpoint, Uri};
 #[derive(Clone, Copy, Debug)]
 pub struct BackendIdentity {
     /// Backend name advertised in Hello / capabilities (e.g. `"cpu"`, `"cuda"`).
-    pub backend: &'static str,
+    pub backend: Backend,
     /// Algorithm name advertised in Hello / capabilities (e.g. `"sa"`, `"gibbs"`).
-    pub algorithm: &'static str,
+    pub algorithm: Algorithm,
     /// Hard cap on variables accepted for a job.
     pub max_nodes: u32,
     /// Hard cap on edges accepted for a job.
@@ -125,28 +129,28 @@ fn coord_msg_name(msg: Option<&coord_msg::Msg>) -> &'static str {
 #[must_use]
 pub fn capabilities(id: &BackendIdentity, stream_width: u32) -> Capabilities {
     Capabilities {
-        backend: id.backend.to_owned(),
-        algorithm: id.algorithm.to_owned(),
-        supported_kinds: vec![JobKind::IsingSample as i32],
+        backend: id.backend as i32,
+        algorithm: id.algorithm as i32,
+        supported_kinds: vec![JobKind::IsingSample as i32, JobKind::IsingGenerate as i32],
         max_nodes: id.max_nodes,
         max_edges: id.max_edges,
         features: id.features.iter().map(|f| (*f).to_owned()).collect(),
         protocol_version: quip_protocol::session::PROTOCOL_VERSION,
         stream_width,
         native_topology_hash: None,
+        encodings: vec![CoefficientEncoding::I32 as i32],
+        generators: vec![GeneratorAlgorithm::Blake3Chacha8V1 as i32],
     }
 }
 
 /// Protobuf JSON view of [`Capabilities`]. Field order matches the message.
 ///
 /// `native_topology_hash` is omitted when unset, which is the protobuf JSON
-/// mapping and keeps the current eight-field output byte-identical. When set,
+/// mapping. When set,
 /// protobuf JSON maps `bytes` to a standard-base64 string, not a number array.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CapabilitiesJson<'a> {
-    backend: &'a str,
-    algorithm: &'a str,
     supported_kinds: Vec<&'a str>,
     max_nodes: u32,
     max_edges: u32,
@@ -155,6 +159,10 @@ struct CapabilitiesJson<'a> {
     stream_width: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     native_topology_hash: Option<String>,
+    encodings: Vec<&'static str>,
+    generators: Vec<&'static str>,
+    backend: &'static str,
+    algorithm: &'static str,
 }
 
 /// The `Capabilities` this solver advertises, from the one place both answers
@@ -167,9 +175,19 @@ struct CapabilitiesJson<'a> {
 /// answer available without an instance. `--capabilities` used to hardcode `1`
 /// here while the session reported the live width, so a multi-lane backend gave
 /// two different numbers for one message.
-fn advertised_capabilities<S: Sampler>(id: &BackendIdentity) -> Capabilities {
+fn advertised_capabilities<S: Sampler<C>, C: Coefficient>(id: &BackendIdentity) -> Capabilities {
     let mut caps = capabilities(id, S::declared_stream_width());
-    caps.features = advertised_features::<S>(id)
+    let own_encoding = match C::WIRE_FORM {
+        crate::coefficient::WireForm::Int { encoding, .. }
+        | crate::coefficient::WireForm::Float(encoding) => Some(encoding as i32),
+        crate::coefficient::WireForm::None => None,
+    };
+    if let Some(encoding) = own_encoding {
+        if !caps.encodings.contains(&encoding) {
+            caps.encodings.push(encoding);
+        }
+    }
+    caps.features = advertised_features::<S, C>(id)
         .into_iter()
         .map(str::to_owned)
         .collect();
@@ -183,7 +201,7 @@ pub const INITIAL_SPINS_FEATURE: &str = "initial-spins";
 /// [`INITIAL_SPINS_FEATURE`] when [`Sampler::accepts_warm_start`] is true.
 /// Deriving it from the trait keeps the advertisement and the behaviour from
 /// drifting apart.
-fn advertised_features<S: Sampler>(id: &BackendIdentity) -> Vec<&'static str> {
+fn advertised_features<S: Sampler<C>, C: Coefficient>(id: &BackendIdentity) -> Vec<&'static str> {
     let mut features = id.features.to_vec();
     if S::accepts_warm_start() && !features.contains(&INITIAL_SPINS_FEATURE) {
         features.push(INITIAL_SPINS_FEATURE);
@@ -192,23 +210,28 @@ fn advertised_features<S: Sampler>(id: &BackendIdentity) -> Vec<&'static str> {
 }
 
 /// The receiving half matching [`JobSender`], moved into the sampler thread.
-enum JobReceiver {
-    Plain(mpsc::Receiver<StreamJob>),
-    Warm(mpsc::Receiver<WarmStreamJob>),
+enum JobReceiver<C: Coefficient> {
+    Plain(mpsc::Receiver<StreamJob<C>>),
+    Warm(mpsc::Receiver<WarmStreamJob<C>>),
 }
 
 /// The sending half of the channel into the sampler thread. Which one depends
 /// on [`Sampler::accepts_warm_start`], fixed for the session.
-enum JobSender {
+#[derive(Clone)]
+pub(crate) enum JobSender<C: Coefficient> {
     /// Feeds [`Sampler::sample_stream`]; warm starts are dropped.
-    Plain(mpsc::Sender<StreamJob>),
+    Plain(mpsc::Sender<StreamJob<C>>),
     /// Feeds [`Sampler::sample_stream_warm`].
-    Warm(mpsc::Sender<WarmStreamJob>),
+    Warm(mpsc::Sender<WarmStreamJob<C>>),
 }
 
-impl JobSender {
+impl<C: Coefficient> JobSender<C> {
     /// Send one job. `Err` means the sampler thread is gone.
-    async fn send(&self, job: StreamJob, warm_start: Option<WarmStart>) -> Result<(), ()> {
+    pub(crate) async fn send(
+        &self,
+        job: StreamJob<C>,
+        warm_start: Option<WarmStart>,
+    ) -> Result<(), ()> {
         match self {
             Self::Plain(tx) => tx.send(job).await.map_err(|_| ()),
             Self::Warm(tx) => tx
@@ -225,8 +248,11 @@ impl JobSender {
 /// declaration: a backend that declares `0` (width unknown until the device
 /// opens) gets the live width filled in, because the session holds the device
 /// open. The static `--capabilities` answer keeps the `0`.
-fn session_capabilities<S: Sampler>(id: &BackendIdentity, live_width: usize) -> Capabilities {
-    let mut caps = advertised_capabilities::<S>(id);
+fn session_capabilities<S: Sampler<C>, C: Coefficient>(
+    id: &BackendIdentity,
+    live_width: usize,
+) -> Capabilities {
+    let mut caps = advertised_capabilities::<S, C>(id);
     if caps.stream_width == 0 {
         caps.stream_width = u32::try_from(live_width).unwrap_or(u32::MAX);
     }
@@ -237,11 +263,23 @@ fn session_capabilities<S: Sampler>(id: &BackendIdentity, live_width: usize) -> 
 ///
 /// The generated prost types carry no serde derives, and adding them to
 /// `quip-proto` would put a serde dependency in the wire crate for one CLI
-/// flag. Nine fields is less code than that.
+/// flag. This view keeps serialization local to the session layer.
 fn capabilities_json_from(c: &Capabilities) -> String {
     let view = CapabilitiesJson {
-        backend: &c.backend,
-        algorithm: &c.algorithm,
+        backend: backend_name(c.backend()),
+        algorithm: algorithm_name(c.algorithm()),
+        encodings: c
+            .encodings
+            .iter()
+            .filter_map(|&e| CoefficientEncoding::try_from(e).ok())
+            .map(|e| e.as_str_name())
+            .collect(),
+        generators: c
+            .generators
+            .iter()
+            .filter_map(|&g| GeneratorAlgorithm::try_from(g).ok())
+            .map(|g| g.as_str_name())
+            .collect(),
         supported_kinds: c
             .supported_kinds
             .iter()
@@ -265,7 +303,7 @@ fn capabilities_json_from(c: &Capabilities) -> String {
     serde_json::to_string(&view).expect("serialize capabilities")
 }
 
-fn print_capabilities<S: Sampler>(id: &BackendIdentity) -> ExitCode {
+fn print_capabilities<S: Sampler<C>, C: Coefficient>(id: &BackendIdentity) -> ExitCode {
     // The protobuf JSON mapping, so the flag and the session reply agree on
     // field names and on every value. Both answers are built by
     // [`advertised_capabilities`].
@@ -274,7 +312,7 @@ fn print_capabilities<S: Sampler>(id: &BackendIdentity) -> ExitCode {
     // `println!` panics on a closed pipe. Reachability does not depend on the
     // output being large enough to fill the pipe buffer — `--capabilities |
     // false` closes the reader before the write happens, and that panics too.
-    let mut line = capabilities_json_from(&advertised_capabilities::<S>(id)).into_bytes();
+    let mut line = capabilities_json_from(&advertised_capabilities::<S, C>(id)).into_bytes();
     line.push(b'\n');
     write_and_map(&mut std::io::stdout(), &line)
 }
@@ -337,24 +375,53 @@ const SAMPLER_JOIN_POLL: Duration = Duration::from_millis(20);
 /// The sampling parameters build the outbound `SamplerMeta`. The rest exists so
 /// the completion log can report an attempt the way the v0.2.1 miner did:
 /// elapsed wall time, and the requirement the attempt was measured against.
-/// Only the read loop sees the session `SetTarget`, so it records the
-/// thresholds here rather than sharing the target with the writer.
-struct PendingJob {
-    num_reads: u32,
-    num_sweeps: u32,
-    started: std::time::Instant,
+/// Plain jobs retain their admission target for logging. Lease results use
+/// the shared current target when the writer scores them.
+pub(crate) struct PendingJob {
+    pub(crate) lease: Option<LeaseLink>,
+    /// Original wire graph, present only for lossy coefficient types.
+    pub(crate) exact_energy: Option<ExactEnergy>,
+    pub(crate) num_reads: u32,
+    pub(crate) num_sweeps: u32,
+    pub(crate) started: std::time::Instant,
     /// Session energy threshold, or `None` when no `SetTarget` has arrived.
-    max_energy_milli: Option<i64>,
-    min_solutions: u32,
+    pub(crate) max_energy_milli: Option<i64>,
+    pub(crate) min_solutions: u32,
     /// This job's cancellation watermark, as `prepare_job` resolved it. The
     /// writer re-checks it so a `Result` for a generation the coordinator
     /// abandoned cannot reach the wire, whatever the backend decided.
-    watermark: Option<u64>,
+    pub(crate) watermark: Option<u64>,
 }
 
 /// `job_id` → its [`PendingJob`], shared between the session's read loop (which
 /// inserts) and its outbound writer (which removes).
-type PendingParams = Arc<StdMutex<HashMap<Vec<u8>, PendingJob>>>;
+pub(crate) type PendingParams = Arc<StdMutex<HashMap<Vec<u8>, PendingJob>>>;
+
+pub(crate) fn pending_id(wire_id: &[u8], salt_index: Option<u64>) -> Vec<u8> {
+    // Internal IDs are 0 || plain wire ID or 1 || lease wire ID || index LE64.
+    // Distinct tags make the namespaces disjoint for arbitrary coordinator IDs.
+    // Stream jobs, completions, and the pending map use them internally. The writer
+    // removes the tag and salt suffix after lookup, before cancellation, rescoring,
+    // logging, and wire replies.
+    let mut id = Vec::with_capacity(1 + wire_id.len() + salt_index.map_or(0, |_| 8));
+    id.push(u8::from(salt_index.is_some()));
+    id.extend_from_slice(wire_id);
+    if let Some(index) = salt_index {
+        id.extend_from_slice(&index.to_le_bytes());
+    }
+    id
+}
+
+fn wire_job_id(id: &[u8]) -> Vec<u8> {
+    match id.split_first() {
+        Some((0, wire)) => wire.to_vec(),
+        Some((1, wire)) => wire
+            .get(..wire.len().saturating_sub(8))
+            .unwrap_or_default()
+            .to_vec(),
+        _ => Vec::new(),
+    }
+}
 
 /// Render the leading bytes of a job id for logs.
 ///
@@ -469,17 +536,104 @@ fn log_attempt(backend: &str, sr: &StreamResult, pending: Option<&PendingJob>) {
 /// What the outbound writer shares with the read loop, gathered so the writer
 /// takes a handful of arguments instead of a list nobody can read.
 struct WriterContext {
+    target: watch::Receiver<Option<SessionTarget>>,
+    aborted: Arc<AtomicBool>,
     /// Prepare-time parameters per job, removed as each one finalizes.
     pending: PendingParams,
-    /// Completed-job counter the read loop publishes in `Status`.
+    /// Completed plain jobs plus sampled lease salts, published in `Status`.
     jobs_done: Arc<AtomicU64>,
     /// Set when the writer sends `Fatal` for an unrecoverable device.
     device_faulted: Arc<AtomicBool>,
     /// Cancellation watermark, re-checked here so no `Result` for an abandoned
     /// generation reaches the wire.
     cancel: CancelToken,
+    /// Lease close deadline, re-checked when each result reaches the writer.
+    shutdown: watch::Receiver<Option<lease::ShutdownDeadlines>>,
     /// Backend name for the log lines.
     backend: &'static str,
+}
+
+/// Local messages retain their stop state until the writer commits them.
+pub(crate) struct Control {
+    msg: MinerMsg,
+    /// Send `JobRequest { credits: 1 }` right after `msg`, from the same reservation.
+    refund: bool,
+    local: Option<(
+        Arc<lease::LeaseState>,
+        watch::Receiver<Option<lease::ShutdownDeadlines>>,
+    )>,
+}
+impl From<MinerMsg> for Control {
+    fn from(msg: MinerMsg) -> Self {
+        Self {
+            msg,
+            refund: false,
+            local: None,
+        }
+    }
+}
+impl Control {
+    pub(crate) fn local(
+        msg: MinerMsg,
+        state: Arc<lease::LeaseState>,
+        shutdown: watch::Receiver<Option<lease::ShutdownDeadlines>>,
+    ) -> Self {
+        Self {
+            msg,
+            refund: false,
+            local: Some((state, shutdown)),
+        }
+    }
+    /// A lease summary and its credit refund. The writer commits both or neither.
+    pub(crate) fn summary(
+        done: MinerMsg,
+        local: Option<(
+            Arc<lease::LeaseState>,
+            watch::Receiver<Option<lease::ShutdownDeadlines>>,
+        )>,
+    ) -> Self {
+        Self {
+            msg: done,
+            refund: true,
+            local,
+        }
+    }
+}
+
+pub(crate) async fn send_control(
+    tx: &mpsc::Sender<MinerMsg>,
+    control: Control,
+    cancel: &CancelToken,
+) -> bool {
+    let count = if control.refund { 2 } else { 1 };
+    // Ready terminal messages must not yield on a depleted task budget at
+    // the grace boundary. Only wait when the channel is actually full.
+    let permits = match tx.try_reserve_many(count) {
+        Ok(permits) => permits,
+        Err(mpsc::error::TrySendError::Closed(())) => return false,
+        Err(mpsc::error::TrySendError::Full(())) => {
+            let Ok(permits) = tx.reserve_many(count).await else {
+                return false;
+            };
+            permits
+        }
+    };
+    let fatal = matches!(control.msg.msg, Some(miner_msg::Msg::Fatal(_)));
+    let mut msgs = vec![control.msg];
+    if control.refund {
+        msgs.push(miner(miner_msg::Msg::JobRequest(JobRequest { credits: 1 })));
+    }
+    if let Some((state, shutdown)) = &control.local {
+        let close_expired = shutdown
+            .borrow()
+            .is_some_and(|deadlines| tokio::time::Instant::now() >= deadlines.close);
+        state.send_local(msgs, permits, cancel, close_expired);
+        return true;
+    }
+    for (permit, msg) in permits.zip(msgs) {
+        permit.send(msg);
+    }
+    !fatal
 }
 
 /// Send every control reply already queued, without waiting for more.
@@ -489,13 +643,14 @@ struct WriterContext {
 /// caller's `select!` from spinning on a closed receiver.
 async fn drain_queued_ctrl(
     tx: &mpsc::Sender<MinerMsg>,
-    ctrl_rx: &mut mpsc::Receiver<MinerMsg>,
+    ctrl_rx: &mut mpsc::Receiver<Control>,
     ctrl_open: &mut bool,
+    cancel: &CancelToken,
 ) -> bool {
     while *ctrl_open {
         match ctrl_rx.try_recv() {
             Ok(msg) => {
-                if tx.send(msg).await.is_err() {
+                if !send_control(tx, msg, cancel).await {
                     return false;
                 }
             }
@@ -504,6 +659,21 @@ async fn drain_queued_ctrl(
         }
     }
     true
+}
+
+fn rescore_result(sr: &mut StreamResult, entry: Option<&PendingJob>, required: bool) {
+    if !required {
+        return;
+    }
+    if let StreamOutcome::Completed(Ok(reads)) = &mut sr.outcome {
+        if let Some(original) = entry.and_then(|job| job.exact_energy.as_ref()) {
+            original.rescore(reads);
+        } else {
+            sr.outcome = StreamOutcome::Completed(Err(crate::SampleError::DeviceFault(
+                "completed lossy job has no original coefficients".into(),
+            )));
+        }
+    }
 }
 
 /// Outbound half of a session.
@@ -528,10 +698,14 @@ async fn drain_queued_ctrl(
 ///
 /// Returns once both inputs are finished, after sending `Fatal` for a device
 /// fault, or as soon as the outbound channel closes.
-async fn outbound_writer(
+#[expect(
+    clippy::too_many_lines,
+    reason = "keep cancellation, scoring, logging, and reply ordering in one writer loop"
+)]
+async fn outbound_writer<C: Coefficient>(
     tx: mpsc::Sender<MinerMsg>,
     mut res_rx: mpsc::Receiver<StreamResult>,
-    mut ctrl_rx: mpsc::Receiver<MinerMsg>,
+    mut ctrl_rx: mpsc::Receiver<Control>,
     ctx: WriterContext,
 ) {
     let WriterContext {
@@ -539,7 +713,10 @@ async fn outbound_writer(
         jobs_done,
         device_faulted,
         cancel,
+        shutdown,
         backend,
+        target,
+        aborted,
     } = ctx;
     // Progress logging (mirrors v0.2 mine_work_item's every-N-attempts line).
     let session_start = std::time::Instant::now();
@@ -563,7 +740,7 @@ async fn outbound_writer(
         // giving up the result-first ordering that keeps the sampler unblocked.
         if result_streak >= RESULT_BATCH {
             result_streak = 0;
-            if !drain_queued_ctrl(&tx, &mut ctrl_rx, &mut ctrl_open).await {
+            if !drain_queued_ctrl(&tx, &mut ctrl_rx, &mut ctrl_open, &cancel).await {
                 return;
             }
             // Same end-of-session test as the control branch below: the read
@@ -575,7 +752,7 @@ async fn outbound_writer(
         tokio::select! {
             biased;
             // Drain completed results first so a busy sampler never backs up.
-            Some(sr) = res_rx.recv() => {
+            Some(mut sr) = res_rx.recv() => {
                 result_streak = result_streak.saturating_add(1);
                 let entry = {
                     let mut p = match pending.lock() {
@@ -592,6 +769,7 @@ async fn outbound_writer(
                     };
                     p.remove(&sr.job_id)
                 };
+                sr.job_id = wire_job_id(&sr.job_id);
                 let (reads, sweeps) = entry
                     .as_ref()
                     .map_or((0, 0), |e| (e.num_reads, e.num_sweeps));
@@ -600,9 +778,18 @@ async fn outbound_writer(
                 // only check at dequeue, and a Result for an abandoned
                 // generation must not reach the wire. Errors are left alone: a
                 // device fault is about the device, not the job.
-                let sr = match sr.outcome {
-                    StreamOutcome::Completed(Ok(_))
-                        if entry.as_ref().is_some_and(|e| cancel.is_cancelled(e.watermark)) =>
+                let stopped = entry.as_ref().is_some_and(|e| {
+                    cancel.is_cancelled(e.watermark)
+                        || e.lease.as_ref().is_some_and(|link| {
+                            link.state.expired()
+                                || aborted.load(Ordering::Relaxed)
+                                || shutdown.borrow().is_some_and(|deadlines| {
+                                    tokio::time::Instant::now() >= deadlines.close
+                                })
+                        })
+                });
+                let mut sr = match sr.outcome {
+                    StreamOutcome::Completed(Ok(_)) if stopped =>
                     {
                         tracing::debug!(
                             "[quip-miner-{backend}] dropping a late Result for cancelled job {}",
@@ -612,6 +799,32 @@ async fn outbound_writer(
                     }
                     _ => sr,
                 };
+                rescore_result(&mut sr, entry.as_ref(), entry.as_ref().map_or(!C::EXACT, |job| job.exact_energy.is_some()));
+                if let Some(link) = entry.as_ref().and_then(|e| e.lease.as_ref()) {
+                    if let StreamOutcome::Completed(Err(error)) = &sr.outcome {
+                        if error.is_fatal() {
+                            aborted.store(true, Ordering::Relaxed);
+                            device_faulted.store(true, Ordering::Relaxed);
+                            let _ = tx.send(miner(miner_msg::Msg::Fatal(Fatal {
+                                exit_code: ExitCode::InternalFatal as u32,
+                                reason: error.to_string(),
+                                restart_required: true,
+                            }))).await;
+                            return;
+                        }
+                        tracing::warn!(%error, "lease salt failed");
+                    }
+                    let reply = lease::handle_result(link, sr, target.borrow().as_ref(), reads, sweeps);
+                    if let Some(reply) = reply {
+                        if tx.send(reply).await.is_err() {
+                            return;
+                        }
+                    }
+                    if lease::finish_result(link, &tx, &cancel).await.is_err() {
+                        return;
+                    }
+                    continue;
+                }
                 // A Cancelled job neither advances progress nor updates
                 // best energy; finalize_result just refunds its credit.
                 let completed = matches!(sr.outcome, StreamOutcome::Completed(_));
@@ -621,6 +834,7 @@ async fn outbound_writer(
                     }
                 }
                 log_attempt(backend, &sr, entry.as_ref());
+                let before = done;
                 for reply in finalize_result(sr, reads, sweeps, &mut done) {
                     let fatal = matches!(reply.msg, Some(miner_msg::Msg::Fatal(_)));
                     if tx.send(reply).await.is_err() {
@@ -630,10 +844,12 @@ async fn outbound_writer(
                         // The device will not recover without a restart. Stop
                         // now rather than keep accepting jobs it cannot serve.
                         device_faulted.store(true, Ordering::Relaxed);
+                        aborted.store(true, Ordering::Relaxed);
                         return;
                     }
                 }
-                jobs_done.store(done, Ordering::Relaxed);
+                // Lease salts add to the same counter, so add rather than overwrite.
+                let _ = jobs_done.fetch_add(done - before, Ordering::Relaxed);
                 if completed && done > 0 && done.is_multiple_of(PROGRESS_LOG_INTERVAL) {
                     log_progress(
                         backend,
@@ -647,7 +863,7 @@ async fn outbound_writer(
             ctrl = ctrl_rx.recv(), if ctrl_open => {
                 result_streak = 0;
                 if let Some(msg) = ctrl {
-                    if tx.send(msg).await.is_err() {
+                    if !send_control(&tx, msg, &cancel).await {
                         return;
                     }
                 } else {
@@ -665,11 +881,34 @@ async fn outbound_writer(
     }
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "single bidi session select-loop; splitting would obscure the control flow"
-)]
-async fn run_session<S: Sampler>(
+// Shared shutdown stage, also exercised with saturated channels in tests.
+pub(crate) async fn join_expanders(
+    expanders: &mut tokio::task::JoinSet<()>,
+    deadline: tokio::time::Instant,
+) -> Option<String> {
+    let mut failure = None;
+    loop {
+        match tokio::time::timeout_at(deadline, expanders.join_next()).await {
+            Ok(Some(Err(error))) => failure = Some(format!("lease expander failed: {error}")),
+            Ok(Some(Ok(()))) => {}
+            Ok(None) => break,
+            Err(_) => {
+                tracing::warn!("lease expanders exceeded the shutdown grace window; aborting them");
+                expanders.shutdown().await;
+                break;
+            }
+        }
+    }
+    failure
+}
+
+/// Leases close this long before the grace deadline, so their summaries reach
+/// the writer while it can still flush them.
+fn summary_margin(grace: Duration) -> Duration {
+    (grace / 4).min(Duration::from_millis(250))
+}
+
+async fn run_session<S: Sampler<C>, C: Coefficient>(
     uri: &str,
     miner_id: &str,
     id: &BackendIdentity,
@@ -678,17 +917,7 @@ async fn run_session<S: Sampler>(
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Resolve token before any network I/O so a missing QUIP_SESSION_TOKEN
     // always maps to exit 77 (never InternalFatal from a connect failure).
-    let hello = build_hello(
-        miner_id,
-        id.backend,
-        id.algorithm,
-        &[JobKind::IsingSample],
-        &advertised_features::<S>(id),
-        BackendCaps {
-            max_nodes: id.max_nodes,
-            max_edges: id.max_edges,
-        },
-    )?;
+    let hello = build_hello(miner_id, advertised_capabilities::<S, C>(id))?;
 
     let path = uri.strip_prefix("unix://").unwrap_or(uri).to_string();
     let channel = Endpoint::try_from("http://[::]:50051")? // dummy authority for UDS
@@ -719,7 +948,23 @@ async fn run_session<S: Sampler>(
     let (tx, rx) = mpsc::channel::<MinerMsg>(16);
     tx.send(miner(miner_msg::Msg::Hello(hello))).await?;
 
-    let mut inbound = client.session(ReceiverStream::new(rx)).await?.into_inner();
+    let inbound = client.session(ReceiverStream::new(rx)).await?.into_inner();
+    run_connected_session(inbound, tx, miner_id, id, sampler, sweeps_per_beta).await
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "single bidi session select-loop; splitting would obscure the control flow"
+)]
+async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
+    mut inbound: impl tokio_stream::Stream<Item = Result<CoordMsg, tonic::Status>> + Unpin,
+    tx: mpsc::Sender<MinerMsg>,
+    miner_id: &str,
+    id: &BackendIdentity,
+    sampler: Arc<S>,
+    sweeps_per_beta: Option<usize>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use tokio_stream::StreamExt as _;
 
     // Streaming sampler on a blocking thread: it pulls StreamJobs and emits
     // StreamResults in completion order, keeping `stream_width` models in flight.
@@ -748,11 +993,13 @@ async fn run_session<S: Sampler>(
     // stalls every cycle waiting for the next job to arrive over the wire.
     let prefetch = width.saturating_mul(2);
     let cap = prefetch.max(8);
+    // Credited jobs occupy at most cap slots. The lease semaphore bounds salts
+    // to width additional slots, so accepting a credited job never blocks.
     let (job_tx, job_rx) = if S::accepts_warm_start() {
-        let (tx, rx) = mpsc::channel::<WarmStreamJob>(cap);
+        let (tx, rx) = mpsc::channel::<WarmStreamJob<C>>(cap + width);
         (JobSender::Warm(tx), JobReceiver::Warm(rx))
     } else {
-        let (tx, rx) = mpsc::channel::<StreamJob>(cap);
+        let (tx, rx) = mpsc::channel::<StreamJob<C>>(cap + width);
         (JobSender::Plain(tx), JobReceiver::Plain(rx))
     };
     let (res_tx, res_rx) = mpsc::channel::<StreamResult>(cap);
@@ -779,7 +1026,15 @@ async fn run_session<S: Sampler>(
     let mut grace_ms: u64 = 5000;
     let mut num_sweeps = DEFAULT_NUM_SWEEPS;
     let mut topology: Option<TopologyCache> = None;
-    let mut target: Option<SessionTarget> = None;
+    let (target_tx, target_rx) = watch::channel::<Option<SessionTarget>>(None);
+    let mut lease_topology = None;
+    let slots = Arc::new(Semaphore::new(width));
+    let (shutdown_tx, shutdown_rx) = watch::channel(None);
+    let aborted = Arc::new(AtomicBool::new(false));
+    let mut expanders = tokio::task::JoinSet::new();
+    let mut lease_threads: Vec<std::thread::JoinHandle<()>> = Vec::new();
+    let mut shutdown_requested = false;
+    let mut credit_window = cap;
     // job_id → (num_reads, num_sweeps) resolved at prepare, for the result meta.
     // Shared: the read loop inserts at prepare, the writer task removes at
     // finalize. The lock is never held across an await.
@@ -787,18 +1042,21 @@ async fn run_session<S: Sampler>(
     // Published by the writer, read here for `Status.jobs_done`.
     let jobs_done = Arc::new(AtomicU64::new(0));
 
-    let (ctrl_tx, ctrl_rx) = mpsc::channel::<MinerMsg>(CTRL_CHANNEL_DEPTH);
+    let (ctrl_tx, ctrl_rx) = mpsc::channel::<Control>(CTRL_CHANNEL_DEPTH);
     let device_faulted = Arc::new(AtomicBool::new(false));
-    let mut writer = tokio::spawn(outbound_writer(
+    let mut writer = tokio::spawn(outbound_writer::<C>(
         tx.clone(),
         res_rx,
         ctrl_rx,
         WriterContext {
+            target: target_rx.clone(),
+            aborted: Arc::clone(&aborted),
             pending: Arc::clone(&pending),
             jobs_done: Arc::clone(&jobs_done),
             device_faulted: Arc::clone(&device_faulted),
             cancel: cancel.clone(),
-            backend: id.backend,
+            shutdown: shutdown_rx.clone(),
+            backend: backend_name(id.backend),
         },
     ));
     // Set when the `select!` below polls `writer` to completion. A
@@ -846,7 +1104,14 @@ async fn run_session<S: Sampler>(
                 }
                 break;
             }
-            msg = inbound.message() => msg,
+            joined = expanders.join_next(), if !expanders.is_empty() => {
+                if let Some(Err(error)) = joined {
+                    writer_failure = Some(format!("lease expander failed: {error}"));
+                    break;
+                }
+                continue;
+            }
+            msg = inbound.next() => msg.transpose(),
         };
         {
             let cm: CoordMsg = match msg {
@@ -900,7 +1165,7 @@ async fn run_session<S: Sampler>(
                     coord_msg_name(cm.msg.as_ref())
                 );
                 if ctrl_tx
-                    .send(fatal_msg(ExitCode::ConfigInvalid, detail.clone()))
+                    .send(fatal_msg(ExitCode::ConfigInvalid, detail.clone()).into())
                     .await
                     .is_err()
                 {
@@ -917,7 +1182,7 @@ async fn run_session<S: Sampler>(
                         // The coordinator learns why the session ended from the
                         // session: it never sees the process exit status.
                         if ctrl_tx
-                            .send(fatal_msg(ExitCode::from(e), e.to_string()))
+                            .send(fatal_msg(ExitCode::from(e), e.to_string()).into())
                             .await
                             .is_err()
                         {
@@ -938,7 +1203,7 @@ async fn run_session<S: Sampler>(
                     // A closed control channel means the writer is gone; break
                     // so the shutdown path runs, rather than returning past it.
                     if ctrl_tx
-                        .send(miner(miner_msg::Msg::Ready(Ready {})))
+                        .send(miner(miner_msg::Msg::Ready(Ready {})).into())
                         .await
                         .is_err()
                     {
@@ -953,16 +1218,17 @@ async fn run_session<S: Sampler>(
                     )]
                     let depth = config.queue_depth.max(prefetch as u32);
                     // INVARIANT: the granted pool must not exceed the job
-                    // channel's capacity (`cap`), or the read loop can block
+                    // channel's credited capacity (`cap`), or the read loop can block
                     // on `job_tx.send` with jobs still arriving — the same
                     // deadlock one layer down. `cap == prefetch` and
                     // `depth <= prefetch` unless the coordinator's
                     // `queue_depth` is larger, so clamp to `cap`.
                     let depth = depth.min(u32::try_from(cap).unwrap_or(u32::MAX));
+                    credit_window = depth as usize;
                     if ctrl_tx
-                        .send(miner(miner_msg::Msg::JobRequest(JobRequest {
-                            credits: depth,
-                        })))
+                        .send(
+                            miner(miner_msg::Msg::JobRequest(JobRequest { credits: depth })).into(),
+                        )
                         .await
                         .is_err()
                     {
@@ -971,11 +1237,131 @@ async fn run_session<S: Sampler>(
                 }
                 Some(coord_msg::Msg::Topology(t)) => {
                     topology = Some(TopologyCache::from_proto(&t));
+                    lease_topology = Some((
+                        t.hash.clone(),
+                        quip_protocol::lease::TopologyView::from_proto(&t)
+                            .map(Arc::new)
+                            .map_err(|_| quip_proto::v1::RejectReason::Malformed),
+                    ));
                 }
                 Some(coord_msg::Msg::SetTarget(s)) => {
-                    target = Some(SessionTarget::from_proto(&s));
+                    let _ = target_tx.send_replace(Some(SessionTarget::from_proto(&s)));
                 }
                 Some(coord_msg::Msg::Job(job)) => {
+                    let target = target_tx.borrow().clone();
+                    if job.kind == JobKind::IsingGenerate as i32 {
+                        match lease::prepare(
+                            &job,
+                            lease_topology.as_ref(),
+                            target.as_ref(),
+                            id,
+                            sampler.max_reads(),
+                            num_sweeps,
+                            sweeps_per_beta,
+                            Arc::clone(&aborted),
+                            Arc::clone(&jobs_done),
+                        ) {
+                            Ok((state, params)) => {
+                                if S::generates_locally() {
+                                    while let Some(index) = lease_threads
+                                        .iter()
+                                        .position(std::thread::JoinHandle::is_finished)
+                                    {
+                                        if let Err(panic) = lease_threads.swap_remove(index).join()
+                                        {
+                                            writer_failure = Some(format!(
+                                                "lease thread panicked: {}",
+                                                panic_payload_message(&*panic)
+                                            ));
+                                        }
+                                    }
+                                    if writer_failure.is_some() {
+                                        break;
+                                    }
+                                    if lease_threads.len() >= credit_window {
+                                        aborted.store(true, Ordering::Relaxed);
+                                        device_faulted.store(true, Ordering::Relaxed);
+                                        let reason = crate::SampleError::DeviceFault(
+                                            "stopped lease workers did not retire".into(),
+                                        )
+                                        .to_string();
+                                        let _ = ctrl_tx
+                                            .send(
+                                                miner(miner_msg::Msg::Fatal(Fatal {
+                                                    exit_code: ExitCode::InternalFatal as u32,
+                                                    reason,
+                                                    restart_required: true,
+                                                }))
+                                                .into(),
+                                            )
+                                            .await;
+                                        break;
+                                    }
+                                    let sink = crate::LeaseSink {
+                                        #[cfg(test)]
+                                        before_send: StdMutex::new(None),
+                                        state: Arc::clone(&state),
+                                        cancel: cancel.clone(),
+                                        shutdown: shutdown_rx.clone(),
+                                        target: target_rx.clone(),
+                                        ctrl: ctrl_tx.downgrade(),
+                                        device_faulted: Arc::clone(&device_faulted),
+                                        params,
+                                    };
+                                    let sampler = Arc::clone(&sampler);
+                                    match std::thread::Builder::new()
+                                        .name("quip-lease".into())
+                                        .spawn(move || sink.run(&*sampler))
+                                    {
+                                        Ok(thread) => lease_threads.push(thread),
+                                        Err(error) => {
+                                            writer_failure =
+                                                Some(format!("lease thread failed: {error}"));
+                                            break;
+                                        }
+                                    }
+                                    let _ = expanders.spawn(lease::monitor_local(
+                                        state,
+                                        cancel.clone(),
+                                        shutdown_rx.clone(),
+                                        tx.clone(),
+                                    ));
+                                } else {
+                                    let expander = Expander {
+                                        jobs: job_tx.clone(),
+                                        pending: Arc::clone(&pending),
+                                        slots: Arc::clone(&slots),
+                                        cancel: cancel.clone(),
+                                        shutdown: shutdown_rx.clone(),
+                                        ctrl: ctrl_tx.clone(),
+                                    };
+                                    let _ = expanders.spawn(expander.run(state, params));
+                                }
+                            }
+                            Err(reason) => {
+                                if ctrl_tx
+                                    .send(crate::job::reject(job.job_id, reason).into())
+                                    .await
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                                if ctrl_tx
+                                    .send(
+                                        miner(miner_msg::Msg::JobRequest(JobRequest {
+                                            credits: 1,
+                                        }))
+                                        .into(),
+                                    )
+                                    .await
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                        }
+                        continue;
+                    }
                     match prepare_job(
                         job,
                         &*sampler,
@@ -990,11 +1376,14 @@ async fn run_session<S: Sampler>(
                             // job, so ask for a replacement credit — same as
                             // a completion — to keep the coordinator's
                             // consume-on-dispatch pool from leaking a slot.
-                            if ctrl_tx.send(msg).await.is_err() {
+                            if ctrl_tx.send(msg.into()).await.is_err() {
                                 break;
                             }
                             if ctrl_tx
-                                .send(miner(miner_msg::Msg::JobRequest(JobRequest { credits: 1 })))
+                                .send(
+                                    miner(miner_msg::Msg::JobRequest(JobRequest { credits: 1 }))
+                                        .into(),
+                                )
                                 .await
                                 .is_err()
                             {
@@ -1002,18 +1391,20 @@ async fn run_session<S: Sampler>(
                             }
                         }
                         Prepared::Sample {
-                            job,
+                            mut job,
                             warm_start,
                             num_reads,
                             num_sweeps: ns,
+                            exact_energy,
                         } => {
                             tracing::debug!(
                                 "{} received job {}: {} nodes, {} edges | reads={num_reads} sweeps={ns}",
-                                id.backend,
+                                backend_name(id.backend),
                                 short_job_id(&job.job_id),
                                 job.graph.num_nodes(),
                                 job.graph.edges.len(),
                             );
+                            job.job_id = pending_id(&job.job_id, None);
                             {
                                 let mut p = match pending.lock() {
                                     Ok(p) => p,
@@ -1032,8 +1423,10 @@ async fn run_session<S: Sampler>(
                                 let _ = p.insert(
                                     job.job_id.clone(),
                                     PendingJob {
+                                        lease: None,
                                         num_reads,
                                         num_sweeps: ns,
+                                        exact_energy,
                                         started: std::time::Instant::now(),
                                         watermark: job.watermark,
                                         // `drive` mode sets no real threshold
@@ -1062,12 +1455,15 @@ async fn run_session<S: Sampler>(
                     // in-flight one at its next checkpoint.
                     cancel.cancel_through(c.max_generation);
                     if ctrl_tx
-                        .send(status_msg(
-                            miner_id,
-                            jobs_done.load(Ordering::Relaxed),
-                            sampler.utilization(),
-                            cancel.abandoned(),
-                        ))
+                        .send(
+                            status_msg(
+                                miner_id,
+                                jobs_done.load(Ordering::Relaxed),
+                                sampler.utilization(),
+                                cancel.abandoned(),
+                            )
+                            .into(),
+                        )
                         .await
                         .is_err()
                     {
@@ -1076,12 +1472,15 @@ async fn run_session<S: Sampler>(
                 }
                 Some(coord_msg::Msg::Ping(_)) => {
                     if ctrl_tx
-                        .send(status_msg(
-                            miner_id,
-                            jobs_done.load(Ordering::Relaxed),
-                            sampler.utilization(),
-                            cancel.abandoned(),
-                        ))
+                        .send(
+                            status_msg(
+                                miner_id,
+                                jobs_done.load(Ordering::Relaxed),
+                                sampler.utilization(),
+                                cancel.abandoned(),
+                            )
+                            .into(),
+                        )
                         .await
                         .is_err()
                     {
@@ -1093,9 +1492,12 @@ async fn run_session<S: Sampler>(
                     // except a device-dependent width declaration (0), which
                     // the open device resolves.
                     if ctrl_tx
-                        .send(miner(miner_msg::Msg::Capabilities(
-                            session_capabilities::<S>(id, width),
-                        )))
+                        .send(
+                            miner(miner_msg::Msg::Capabilities(session_capabilities::<S, C>(
+                                id, width,
+                            )))
+                            .into(),
+                        )
                         .await
                         .is_err()
                     {
@@ -1103,6 +1505,7 @@ async fn run_session<S: Sampler>(
                     }
                 }
                 Some(coord_msg::Msg::Shutdown(s)) => {
+                    shutdown_requested = true;
                     grace_ms = if s.grace_ms == 0 {
                         5000
                     } else {
@@ -1127,11 +1530,53 @@ async fn run_session<S: Sampler>(
     // the sampler, which drops `res_tx`; `ctrl_tx` closes the control side.
     // The writer drains whatever the sampler already produced before returning,
     // so the drain that used to live here now happens there.
+    if !shutdown_requested {
+        aborted.store(true, Ordering::Relaxed);
+    }
+    let grace = Duration::from_millis(grace_ms);
+    let deadline = tokio::time::Instant::now() + grace;
+    // Lease sinks, monitors, and expanders read this value as their close deadline.
+    // Teardown below keeps the full grace deadline.
+    let _ = shutdown_tx.send_replace(Some(lease::ShutdownDeadlines {
+        close: deadline - summary_margin(grace),
+        teardown: deadline,
+    }));
+    if S::generates_locally() {
+        // Local monitors enforce their own grace deadline, including blocked
+        // sends. Let them send terminal summaries before ending the writer.
+        while let Some(result) = expanders.join_next().await {
+            if let Err(error) = result {
+                aborted.store(true, Ordering::Relaxed);
+                writer_failure = Some(format!("local lease monitor failed: {error}"));
+            }
+        }
+    } else if let Some(error) = join_expanders(&mut expanders, deadline).await {
+        aborted.store(true, Ordering::Relaxed);
+        writer_failure = Some(error);
+    }
     drop(job_tx);
     drop(ctrl_tx);
-    let grace = Duration::from_millis(grace_ms);
+    drop(tx);
+    let mut lease_join_tick = tokio::time::interval(SAMPLER_JOIN_POLL);
+    while lease_threads.iter().any(|thread| !thread.is_finished())
+        && tokio::time::Instant::now() < deadline
+    {
+        let _ = tokio::time::timeout_at(deadline, lease_join_tick.tick()).await;
+    }
+    for thread in lease_threads {
+        if thread.is_finished() {
+            if let Err(panic) = thread.join() {
+                writer_failure = Some(format!(
+                    "lease thread panicked: {}",
+                    panic_payload_message(&*panic)
+                ));
+            }
+        } else {
+            tracing::warn!("lease thread exceeded the shutdown grace window; detaching it");
+        }
+    }
     if !writer_joined {
-        match tokio::time::timeout(grace, &mut writer).await {
+        match tokio::time::timeout_at(deadline, &mut writer).await {
             Ok(Ok(())) => {}
             // A panic here is not a clean drain: results the coordinator was
             // waiting for never went out. Surfaced so the process exits 70.
@@ -1166,8 +1611,7 @@ async fn run_session<S: Sampler>(
     // is a backend wedged inside `sample`, and the escalation below is the only
     // lever this layer has over it. If that backend ignores the token too, the
     // process parks here with the error below in the log, waiting for SIGKILL.
-    let sampler_deadline = tokio::time::Instant::now() + grace;
-    while !sampler_thread.is_finished() && tokio::time::Instant::now() < sampler_deadline {
+    while !sampler_thread.is_finished() && tokio::time::Instant::now() < deadline {
         tokio::time::sleep(SAMPLER_JOIN_POLL).await;
     }
     if !sampler_thread.is_finished() {
@@ -1190,15 +1634,14 @@ async fn run_session<S: Sampler>(
         .into());
     }
 
-    drop(tx);
     let drain = async {
-        while inbound.message().await?.is_some() {}
+        while inbound.next().await.transpose()?.is_some() {}
         Ok::<(), tonic::Status>(())
     };
     // Best-effort: the session is over either way, and a peer that errors or
     // stalls while we drain changes nothing. Logged rather than dropped so a
     // coordinator that consistently fails here is visible at all.
-    match tokio::time::timeout(grace, drain).await {
+    match tokio::time::timeout_at(deadline, drain).await {
         Ok(Ok(())) => {}
         Ok(Err(status)) => tracing::debug!(%status, "final inbound drain ended with an error"),
         Err(_) => tracing::debug!("final inbound drain did not finish within the grace window"),
@@ -1241,7 +1684,7 @@ fn join_error_message(e: tokio::task::JoinError) -> String {
 }
 
 /// Format a `JoinHandle` panic payload for logging / error messages.
-fn panic_payload_message(panic: &(dyn std::any::Any + Send)) -> String {
+pub(crate) fn panic_payload_message(panic: &(dyn std::any::Any + Send)) -> String {
     if let Some(s) = panic.downcast_ref::<&str>() {
         (*s).to_owned()
     } else if let Some(s) = panic.downcast_ref::<String>() {
@@ -1287,11 +1730,12 @@ fn map_err_to_exit(err: Box<dyn std::error::Error>, backend: &str) -> ExitCode {
 /// Prefer [`run`] from a Rust `main`. This variant exists because
 /// `std::process::ExitCode` cannot be read back into a number, which a foreign
 /// function interface has to do to return the code to its own caller.
-pub fn run_code<S: Sampler>(
+pub fn run_code<S: Sampler<C>, C: Coefficient>(
     id: BackendIdentity,
     common: &CommonArgs,
     open: impl FnOnce() -> Result<S, OpenError>,
 ) -> ExitCode {
+    let backend = backend_name(id.backend);
     // Install the subscriber before anything else can log. `--capabilities`
     // writes JSON to stdout and must stay parseable, but the subscriber writes
     // to stderr, so installing first is safe for it too.
@@ -1301,32 +1745,29 @@ pub fn run_code<S: Sampler>(
             reason = "the subscriber failed to install, so tracing would discard this"
         )]
         {
-            eprintln!("quip-miner-{}: {e}", id.backend);
+            eprintln!("quip-miner-{backend}: {e}");
         }
         return ExitCode::ConfigInvalid;
     }
 
     if common.capabilities {
-        return print_capabilities::<S>(&id);
+        return print_capabilities::<S, C>(&id);
     }
     if common.solve {
         let sampler = match open() {
             Ok(s) => s,
             Err(OpenError(e)) => {
-                tracing::error!("[quip-solver-{}] cannot open device: {e}", id.backend);
+                tracing::error!("[quip-solver-{}] cannot open device: {e}", backend);
                 return ExitCode::EnvIncompatible;
             }
         };
         let mut input = Vec::new();
         if let Err(e) = std::io::Read::read_to_end(&mut std::io::stdin(), &mut input) {
-            tracing::error!("[quip-solver-{}] cannot read stdin: {e}", id.backend);
+            tracing::error!("[quip-solver-{}] cannot read stdin: {e}", backend);
             return ExitCode::ConfigInvalid;
         }
         if serde_json::from_slice::<crate::driver::ProblemJson>(&input).is_err() {
-            tracing::error!(
-                "[quip-solver-{}] malformed problem JSON on stdin",
-                id.backend
-            );
+            tracing::error!("[quip-solver-{}] malformed problem JSON on stdin", backend);
             return ExitCode::ConfigInvalid;
         }
         return match crate::driver::solve(&sampler, &input) {
@@ -1342,12 +1783,12 @@ pub fn run_code<S: Sampler>(
             Err(crate::driver::SolveError::Malformed(detail)) => {
                 tracing::error!(
                     "[quip-solver-{}] malformed problem JSON on stdin: {detail}",
-                    id.backend
+                    backend
                 );
                 ExitCode::ConfigInvalid
             }
             Err(e @ crate::driver::SolveError::Sample(_)) => {
-                tracing::error!("[quip-solver-{}] solve failed: {e}", id.backend);
+                tracing::error!("[quip-solver-{}] solve failed: {e}", backend);
                 ExitCode::InternalFatal
             }
         };
@@ -1356,7 +1797,7 @@ pub fn run_code<S: Sampler>(
         return match open() {
             Ok(_) => ExitCode::Clean,
             Err(e) => {
-                tracing::error!("{} check failed: {}", id.backend, e.0);
+                tracing::error!("{} check failed: {}", backend, e.0);
                 ExitCode::EnvIncompatible
             }
         };
@@ -1369,12 +1810,12 @@ pub fn run_code<S: Sampler>(
     let miner_id = common
         .miner_id
         .clone()
-        .unwrap_or_else(|| format!("{}-0", id.backend));
+        .unwrap_or_else(|| format!("{backend}-0"));
 
     let sampler = match open() {
         Ok(s) => s,
         Err(e) => {
-            tracing::error!("failed to open {} device: {}", id.backend, e.0);
+            tracing::error!("failed to open {} device: {}", backend, e.0);
             return ExitCode::EnvIncompatible;
         }
     };
@@ -1395,14 +1836,14 @@ pub fn run_code<S: Sampler>(
         common.sweeps_per_beta,
     )) {
         Ok(()) => ExitCode::Clean,
-        Err(e) => map_err_to_exit(e, id.backend),
+        Err(e) => map_err_to_exit(e, backend),
     }
 }
 
 /// Miner entry point. Dispatches `--capabilities`/`--solve`/`--check`/session mode.
 ///
 /// Thin wrapper over [`run_code`] for use as a Rust `main` return value.
-pub fn run<S: Sampler>(
+pub fn run<S: Sampler<C>, C: Coefficient>(
     id: BackendIdentity,
     common: &CommonArgs,
     open: impl FnOnce() -> Result<S, OpenError>,
@@ -1414,31 +1855,62 @@ pub fn run<S: Sampler>(
 mod tests {
     use super::*;
 
+    #[test]
+    #[expect(
+        clippy::duration_suboptimal_units,
+        reason = "The test uses the specified grace value in milliseconds."
+    )]
+    fn leases_close_before_the_grace_deadline() {
+        assert_eq!(
+            summary_margin(Duration::from_millis(5000)),
+            Duration::from_millis(250)
+        );
+        assert_eq!(
+            summary_margin(Duration::from_millis(400)),
+            Duration::from_millis(100)
+        );
+        assert_eq!(
+            summary_margin(Duration::from_millis(1)),
+            Duration::from_micros(250)
+        );
+    }
+
     /// One outbound writer wired to fresh channels, for the writer tests.
     struct WriterHarness {
         res_tx: mpsc::Sender<StreamResult>,
-        ctrl_tx: mpsc::Sender<MinerMsg>,
+        ctrl_tx: mpsc::Sender<Control>,
         out_rx: mpsc::Receiver<MinerMsg>,
         pending: PendingParams,
+        jobs_done: Arc<AtomicU64>,
+        shutdown_tx: watch::Sender<Option<lease::ShutdownDeadlines>>,
         cancel: CancelToken,
         writer: tokio::task::JoinHandle<()>,
     }
 
     fn spawn_writer(depth: usize) -> WriterHarness {
+        spawn_writer_for::<crate::coefficient::Milli>(depth)
+    }
+
+    fn spawn_writer_for<C: Coefficient>(depth: usize) -> WriterHarness {
         let (tx, out_rx) = mpsc::channel::<MinerMsg>(depth);
         let (res_tx, res_rx) = mpsc::channel::<StreamResult>(depth);
-        let (ctrl_tx, ctrl_rx) = mpsc::channel::<MinerMsg>(depth);
+        let (ctrl_tx, ctrl_rx) = mpsc::channel::<Control>(depth);
         let pending: PendingParams = Arc::new(StdMutex::new(HashMap::new()));
         let cancel = CancelToken::default();
-        let writer = tokio::spawn(outbound_writer(
+        let jobs_done = Arc::new(AtomicU64::new(0));
+        let (shutdown_tx, shutdown) = watch::channel(None);
+        let writer = tokio::spawn(outbound_writer::<C>(
             tx,
             res_rx,
             ctrl_rx,
             WriterContext {
+                target: watch::channel(None).1,
+                aborted: Arc::new(AtomicBool::new(false)),
                 pending: Arc::clone(&pending),
-                jobs_done: Arc::new(AtomicU64::new(0)),
+                jobs_done: Arc::clone(&jobs_done),
                 device_faulted: Arc::new(AtomicBool::new(false)),
                 cancel: cancel.clone(),
+                shutdown,
                 backend: "test",
             },
         ));
@@ -1447,14 +1919,379 @@ mod tests {
             ctrl_tx,
             out_rx,
             pending,
+            jobs_done,
+            shutdown_tx,
             cancel,
             writer,
         }
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn lease_result_reaching_writer_after_close_is_not_counted() {
+        let mut harness = spawn_writer(4);
+        let (link, _state) = lease::test_link();
+        let internal_id = pending_id(b"lease", Some(0));
+        let _ = harness.pending.lock().unwrap().insert(
+            internal_id.clone(),
+            PendingJob {
+                lease: Some(link),
+                exact_energy: None,
+                num_reads: 1,
+                num_sweeps: 1,
+                started: std::time::Instant::now(),
+                max_energy_milli: None,
+                min_solutions: 0,
+                watermark: None,
+            },
+        );
+        let now = tokio::time::Instant::now();
+        let _ = harness
+            .shutdown_tx
+            .send_replace(Some(lease::ShutdownDeadlines {
+                close: now,
+                teardown: now + Duration::from_millis(10),
+            }));
+        harness
+            .res_tx
+            .send(StreamResult {
+                job_id: internal_id,
+                outcome: StreamOutcome::Completed(Ok(vec![crate::SamplerResult {
+                    spins: vec![1],
+                    energy_milli: -1000,
+                }])),
+                device_access_time_us: 0,
+            })
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            harness.out_rx.recv().await.unwrap().msg,
+            Some(miner_msg::Msg::LeaseDone(done)) if done.salts_done == 0
+        ));
+        assert_eq!(harness.jobs_done.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            harness.out_rx.recv().await.unwrap().msg,
+            Some(miner_msg::Msg::JobRequest(JobRequest { credits: 1 }))
+        );
+        drop(harness.res_tx);
+        drop(harness.ctrl_tx);
+        harness.writer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn terminal_control_uses_available_capacity_with_exhausted_task_budget() {
+        use std::future::Future as _;
+        let (tx, mut rx) = mpsc::channel(2);
+        let cancel = CancelToken::default();
+        let message = miner(miner_msg::Msg::JobRequest(JobRequest { credits: 1 }));
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        // Consume the current task budget without yielding to another task.
+        while std::pin::pin!(tokio::task::consume_budget())
+            .poll(&mut context)
+            .is_ready()
+        {}
+        assert!(
+            std::pin::pin!(send_control(&tx, message.into(), &cancel))
+                .poll(&mut context)
+                .is_ready(),
+            "ready terminal send yielded past the grace deadline"
+        );
+        assert!(rx.try_recv().is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_summary_and_its_refund_are_committed_together() {
+        use std::future::Future as _;
+        let (tx, mut rx) = mpsc::channel(2);
+        let cancel = CancelToken::default();
+        tx.send(miner(miner_msg::Msg::JobRequest(JobRequest { credits: 7 })))
+            .await
+            .unwrap();
+        let done = miner(miner_msg::Msg::LeaseDone(quip_proto::v1::LeaseDone {
+            job_id: b"lease".to_vec(),
+            salts_done: 3,
+            best_energy_milli: -5,
+        }));
+        let send = send_control(&tx, Control::summary(done.clone(), None), &cancel);
+        tokio::pin!(send);
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(
+            send.as_mut().poll(&mut context).is_pending(),
+            "one free slot must not take half a summary"
+        );
+        assert_eq!(
+            rx.try_recv().unwrap().msg,
+            Some(miner_msg::Msg::JobRequest(JobRequest { credits: 7 }))
+        );
+        assert!(rx.try_recv().is_err());
+        assert!(send.as_mut().poll(&mut context).is_ready());
+        assert_eq!(rx.try_recv().unwrap(), done);
+        assert_eq!(
+            rx.try_recv().unwrap().msg,
+            Some(miner_msg::Msg::JobRequest(JobRequest { credits: 1 }))
+        );
+    }
+
+    struct PausingLocalSampler(Arc<dyn Fn() + Send + Sync>);
+    impl Sampler<crate::coefficient::Milli> for PausingLocalSampler {
+        fn generates_locally() -> bool {
+            true
+        }
+        fn sample(
+            &self,
+            _: &crate::IsingGraph<crate::coefficient::Milli>,
+            _: &crate::SampleParams,
+        ) -> Result<Vec<crate::SamplerResult>, crate::SampleError> {
+            Ok(vec![])
+        }
+        fn sample_lease(
+            &self,
+            _: &crate::Lease,
+            _: &quip_protocol::lease::TopologyView,
+            _: &crate::SampleParams,
+            out: &crate::LeaseSink,
+        ) -> Result<(), crate::SampleError> {
+            let pause = Arc::clone(&self.0);
+            *out.before_send.lock().unwrap() = Some(Box::new(move || pause()));
+            let _ = out.push(
+                0,
+                vec![crate::SamplerResult {
+                    spins: vec![1],
+                    energy_milli: 1000,
+                }],
+            );
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "keep the barrier, real Cancel acknowledgement, and terminal ordering in one regression"
+    )]
+    async fn local_winner_paused_after_stop_check_is_dropped_after_cancel_ack() {
+        let (paused, pause_rx) = tokio::sync::oneshot::channel();
+        let paused = StdMutex::new(Some(paused));
+        let (resume, resume_rx) = std::sync::mpsc::channel();
+        let resume_rx = StdMutex::new(resume_rx);
+        let sampler = Arc::new(PausingLocalSampler(Arc::new(move || {
+            paused.lock().unwrap().take().unwrap().send(()).unwrap();
+            resume_rx.lock().unwrap().recv().unwrap();
+        })));
+        let (input, incoming) = mpsc::channel(8);
+        let (out, mut replies) = mpsc::channel(8);
+        let identity = test_identity();
+        let session = run_connected_session(
+            ReceiverStream::new(incoming),
+            out,
+            "test",
+            &identity,
+            sampler,
+            None,
+        );
+        let coordinator = async move {
+            let send = |msg| input.send(Ok(CoordMsg { msg: Some(msg) }));
+            send(coord_msg::Msg::Welcome(quip_proto::v1::Welcome {
+                protocol_version: 2,
+            }))
+            .await
+            .unwrap();
+            send(coord_msg::Msg::Configure(
+                quip_proto::v1::Configure::default(),
+            ))
+            .await
+            .unwrap();
+            assert!(matches!(
+                replies.recv().await.unwrap().msg,
+                Some(miner_msg::Msg::Ready(_))
+            ));
+            assert!(matches!(
+                replies.recv().await.unwrap().msg,
+                Some(miner_msg::Msg::JobRequest(_))
+            ));
+            send(coord_msg::Msg::Topology(quip_proto::v1::Topology {
+                hash: vec![7; 32],
+                nodes: vec![1],
+                allowed_h_milli: vec![1000],
+                ..Default::default()
+            }))
+            .await
+            .unwrap();
+            send(coord_msg::Msg::SetTarget(quip_proto::v1::SetTarget {
+                max_energy_milli: i64::MAX,
+                min_solutions: 1,
+                max_proof_solutions: 32,
+                num_reads: 1,
+                num_sweeps: 1,
+                ..Default::default()
+            }))
+            .await
+            .unwrap();
+            send(coord_msg::Msg::Job(quip_proto::v1::Job {
+                job_id: b"local".to_vec(),
+                kind: JobKind::IsingGenerate as i32,
+                generation: 1,
+                generator: Some(quip_proto::v1::IsingProblemGenerator {
+                    algorithm: 1,
+                    topology_hash: vec![7; 32],
+                    last_proof_block_hash: vec![1; 32],
+                    miner_account: vec![2; 32],
+                    base_salt: vec![0; 32],
+                    salt_count: 1,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }))
+            .await
+            .unwrap();
+            pause_rx.await.unwrap();
+            send(coord_msg::Msg::Cancel(quip_proto::v1::Cancel {
+                max_generation: 1,
+            }))
+            .await
+            .unwrap();
+            assert!(
+                matches!(replies.recv().await.unwrap().msg, Some(miner_msg::Msg::Status(s)) if s.abandoned_generation == 1)
+            );
+            resume.send(()).unwrap();
+            assert!(
+                matches!(replies.recv().await.unwrap().msg, Some(miner_msg::Msg::LeaseDone(d)) if d.job_id == b"local")
+            );
+            assert!(
+                matches!(replies.recv().await.unwrap().msg, Some(miner_msg::Msg::JobRequest(r)) if r.credits == 1)
+            );
+            send(coord_msg::Msg::Shutdown(quip_proto::v1::Shutdown {
+                grace_ms: 200,
+            }))
+            .await
+            .unwrap();
+            assert!(
+                replies.recv().await.is_none(),
+                "late local winner reached coordinator"
+            );
+        };
+        let (result, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(session, coordinator)
+        })
+        .await
+        .unwrap();
+        result.unwrap();
+    }
+
+    struct Sampled(StdMutex<Option<tokio::sync::oneshot::Sender<()>>>);
+    impl Sampler<crate::coefficient::Milli> for Sampled {
+        fn sample(
+            &self,
+            _: &crate::IsingGraph<crate::coefficient::Milli>,
+            _: &crate::SampleParams,
+        ) -> Result<Vec<crate::SamplerResult>, crate::SampleError> {
+            if let Some(tx) = self.0.lock().unwrap().take() {
+                let _ = tx.send(());
+            }
+            Ok(Vec::new())
+        }
+    }
+
+    #[tokio::test]
+    async fn stalled_outbound_session_ends_within_shutdown_grace() {
+        let (input, incoming) = mpsc::channel(1);
+        let (out, _stalled_receiver) = mpsc::channel(1);
+        out.send(miner(miner_msg::Msg::Ready(Ready {})))
+            .await
+            .unwrap();
+        let (sampled_tx, sampled_rx) = tokio::sync::oneshot::channel();
+        let sampler = Arc::new(Sampled(StdMutex::new(Some(sampled_tx))));
+        let identity = test_identity();
+        let session = run_connected_session(
+            ReceiverStream::new(incoming),
+            out,
+            "test",
+            &identity,
+            sampler,
+            None,
+        );
+        let coordinator = async move {
+            let send = |msg| input.send(Ok(CoordMsg { msg: Some(msg) }));
+            send(coord_msg::Msg::Welcome(quip_proto::v1::Welcome {
+                protocol_version: 2,
+            }))
+            .await
+            .unwrap();
+            send(coord_msg::Msg::Configure(
+                quip_proto::v1::Configure::default(),
+            ))
+            .await
+            .unwrap();
+            // Configure produces two replies. The blocked writer holds one and
+            // these pings fill every remaining control slot before lease admission.
+            for _ in 0..CTRL_CHANNEL_DEPTH - 1 {
+                send(coord_msg::Msg::Ping(quip_proto::v1::Ping {}))
+                    .await
+                    .unwrap();
+            }
+            send(coord_msg::Msg::Topology(quip_proto::v1::Topology {
+                hash: vec![7; 32],
+                nodes: vec![1],
+                allowed_h_milli: vec![1000],
+                ..Default::default()
+            }))
+            .await
+            .unwrap();
+            send(coord_msg::Msg::SetTarget(quip_proto::v1::SetTarget {
+                max_energy_milli: i64::MAX,
+                min_solutions: 1,
+                max_proof_solutions: 1,
+                num_reads: 1,
+                num_sweeps: 1,
+                ..Default::default()
+            }))
+            .await
+            .unwrap();
+            let lease = |id| {
+                coord_msg::Msg::Job(quip_proto::v1::Job {
+                    job_id: vec![id],
+                    kind: JobKind::IsingGenerate as i32,
+                    generator: Some(quip_proto::v1::IsingProblemGenerator {
+                        algorithm: GeneratorAlgorithm::Blake3Chacha8V1 as i32,
+                        topology_hash: vec![7; 32],
+                        last_proof_block_hash: vec![1; 32],
+                        miner_account: vec![2; 32],
+                        base_salt: vec![0; 32],
+                        salt_count: 10,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                })
+            };
+            send(lease(1)).await.unwrap();
+            sampled_rx.await.unwrap();
+            // The first lease owns the sole permit until its result is written.
+            // The second expander closes without dispatching and blocks in send_done.
+            send(lease(2)).await.unwrap();
+            let start = tokio::time::Instant::now();
+            send(coord_msg::Msg::Shutdown(quip_proto::v1::Shutdown {
+                grace_ms: 200,
+            }))
+            .await
+            .unwrap();
+            start
+        };
+        let run = async {
+            let (result, start) = tokio::join!(session, coordinator);
+            assert!(result.is_ok(), "{result:?}");
+            assert!(start.elapsed() < Duration::from_millis(1200));
+        };
+        assert!(
+            tokio::time::timeout(Duration::from_secs(10), run)
+                .await
+                .is_ok(),
+            "session never completed shutdown with saturated control and outbound queues"
+        );
+    }
+
     fn completed_result(job_id: u8) -> StreamResult {
         StreamResult {
-            job_id: vec![job_id],
+            job_id: pending_id(&[job_id], None),
             outcome: StreamOutcome::Completed(Ok(vec![crate::SamplerResult {
                 spins: vec![1i8, -1],
                 energy_milli: -1000,
@@ -1465,6 +2302,8 @@ mod tests {
 
     fn pending_job(watermark: Option<u64>) -> PendingJob {
         PendingJob {
+            lease: None,
+            exact_energy: None,
             num_reads: 1,
             num_sweeps: 1,
             started: std::time::Instant::now(),
@@ -1508,7 +2347,7 @@ mod tests {
         // And it is still serving the result side while the control side is shut.
         res_tx
             .send(StreamResult {
-                job_id: vec![1, 2, 3],
+                job_id: pending_id(&[1, 2, 3], None),
                 outcome: StreamOutcome::Cancelled,
                 device_access_time_us: 0,
             })
@@ -1530,8 +2369,8 @@ mod tests {
 
     fn test_identity() -> BackendIdentity {
         BackendIdentity {
-            backend: "mock",
-            algorithm: "sa",
+            backend: Backend::Mock,
+            algorithm: Algorithm::Sa,
             max_nodes: 100,
             max_edges: 200,
             features: &["streaming"],
@@ -1553,8 +2392,14 @@ mod tests {
         let c = capabilities(&id, 4);
         let v: serde_json::Value =
             serde_json::from_str(&capabilities_json_from(&c)).expect("printer emits JSON");
-        assert_eq!(v.get("backend"), Some(&serde_json::json!(c.backend)));
-        assert_eq!(v.get("algorithm"), Some(&serde_json::json!(c.algorithm)));
+        assert_eq!(
+            v.get("backend"),
+            Some(&serde_json::json!(backend_name(c.backend())))
+        );
+        assert_eq!(
+            v.get("algorithm"),
+            Some(&serde_json::json!(algorithm_name(c.algorithm())))
+        );
         assert_eq!(v.get("maxNodes"), Some(&serde_json::json!(c.max_nodes)));
         assert_eq!(v.get("maxEdges"), Some(&serde_json::json!(c.max_edges)));
         assert_eq!(
@@ -1568,9 +2413,12 @@ mod tests {
         assert_eq!(v.get("features"), Some(&serde_json::json!(["streaming"])));
         assert_eq!(
             v.get("supportedKinds"),
-            Some(&serde_json::json!(["ISING_SAMPLE"]))
+            Some(&serde_json::json!(["ISING_SAMPLE", "ISING_GENERATE"]))
         );
-        assert_eq!(c.supported_kinds, vec![JobKind::IsingSample as i32]);
+        assert_eq!(
+            c.supported_kinds,
+            vec![JobKind::IsingSample as i32, JobKind::IsingGenerate as i32]
+        );
         assert_eq!(c.features, vec!["streaming"]);
         assert_eq!(c.native_topology_hash, None);
     }
@@ -1578,8 +2426,8 @@ mod tests {
     #[test]
     fn capabilities_json_escapes_quotes_in_features() {
         let id = BackendIdentity {
-            backend: "mock",
-            algorithm: "sa",
+            backend: Backend::Mock,
+            algorithm: Algorithm::Sa,
             max_nodes: 1,
             max_edges: 1,
             features: &[r#"has"quote"#],
@@ -1651,7 +2499,7 @@ mod tests {
             res_tx.send(completed_result(i)).await.expect("send result");
         }
         ctrl_tx
-            .send(status_msg("miner", 0, 0.0, 0))
+            .send(status_msg("miner", 0, 0.0, 0).into())
             .await
             .expect("send status");
 
@@ -1692,11 +2540,12 @@ mod tests {
             pending,
             cancel,
             writer,
+            ..
         } = spawn_writer(16);
 
         {
             let mut p = pending.lock().expect("fresh mutex");
-            let _ = p.insert(vec![7], pending_job(Some(4)));
+            let _ = p.insert(pending_id(&[7], None), pending_job(Some(4)));
         }
         cancel.cancel_through(4);
         res_tx.send(completed_result(7)).await.expect("send result");
@@ -1732,7 +2581,7 @@ mod tests {
 
         {
             let mut p = pending.lock().expect("fresh mutex");
-            let _ = p.insert(vec![7], pending_job(Some(4)));
+            let _ = p.insert(pending_id(&[7], None), pending_job(Some(4)));
         }
         res_tx.send(completed_result(7)).await.expect("send result");
 
@@ -1839,7 +2688,7 @@ mod tests {
 
         let id = test_identity();
         // What GetCapabilities replies with.
-        let reply = advertised_capabilities::<WideSampler>(&id);
+        let reply = advertised_capabilities::<WideSampler, f64>(&id);
         assert_eq!(reply.stream_width, 8);
         // What `--capabilities` prints, from the same function.
         let v: serde_json::Value =
@@ -1879,11 +2728,11 @@ mod tests {
 
         let id = test_identity();
         assert_eq!(
-            advertised_capabilities::<Warm>(&id).features,
+            advertised_capabilities::<Warm, f64>(&id).features,
             vec!["streaming", INITIAL_SPINS_FEATURE]
         );
         assert_eq!(
-            advertised_capabilities::<Cold>(&id).features,
+            advertised_capabilities::<Cold, f64>(&id).features,
             vec!["streaming"]
         );
         // An identity that already lists the feature does not get it twice.
@@ -1892,7 +2741,7 @@ mod tests {
             ..test_identity()
         };
         assert_eq!(
-            advertised_features::<Warm>(&listed),
+            advertised_features::<Warm, f64>(&listed),
             vec![INITIAL_SPINS_FEATURE]
         );
     }
@@ -1920,9 +2769,9 @@ mod tests {
         }
 
         let id = test_identity();
-        let flag = advertised_capabilities::<DeviceWidthSampler>(&id);
+        let flag = advertised_capabilities::<DeviceWidthSampler, f64>(&id);
         assert_eq!(flag.stream_width, 0);
-        let reply = session_capabilities::<DeviceWidthSampler>(&id, 6);
+        let reply = session_capabilities::<DeviceWidthSampler, f64>(&id, 6);
         assert_eq!(reply.stream_width, 6);
     }
 
@@ -1938,5 +2787,266 @@ mod tests {
             write_and_map(&mut FailWrite(std::io::ErrorKind::Other), b"x"),
             ExitCode::InternalFatal
         );
+    }
+
+    struct WrongNarrow;
+    impl Sampler<crate::coefficient::Fixed<i8, 1>> for WrongNarrow {
+        fn sample(
+            &self,
+            graph: &crate::IsingGraph<crate::coefficient::Fixed<i8, 1>>,
+            _: &crate::SampleParams,
+        ) -> Result<Vec<crate::SamplerResult>, crate::SampleError> {
+            Ok(vec![crate::SamplerResult {
+                spins: vec![1; graph.num_nodes()],
+                energy_milli: 777,
+            }])
+        }
+        fn accepts_warm_start() -> bool {
+            true
+        }
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        clippy::panic_in_result_fn,
+        reason = "one end-to-end test asserts both stream paths and returns fixture errors"
+    )]
+    async fn lossy_plain_and_warm_results_are_rescored_out_of_order(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use crate::coefficient::Fixed;
+        let WriterHarness {
+            res_tx,
+            ctrl_tx,
+            mut out_rx,
+            pending,
+            writer,
+            ..
+        } = spawn_writer(16);
+        let id = BackendIdentity {
+            backend: Backend::Mock,
+            algorithm: Algorithm::Sa,
+            max_nodes: 0,
+            max_edges: 0,
+            features: &[],
+            adapt: crate::adapt::AdaptBounds {
+                min_sweeps: 1,
+                max_sweeps: 1,
+                min_reads: 1,
+                max_reads: 1,
+                reads_solution_min_factor: 1,
+                reads_solution_max_factor: 1,
+                reads_solution_floor_factor: 0,
+            },
+        };
+        assert!(
+            advertised_features::<WrongNarrow, Fixed<i8, 1>>(&id).contains(&INITIAL_SPINS_FEATURE)
+        );
+        let mut jobs = Vec::new();
+        for (key, coefficient) in [(1_u8, 499), (2, -501), (3, 1000)] {
+            let incoming = quip_proto::v1::Job {
+                job_id: vec![key],
+                kind: JobKind::IsingSample as i32,
+                ising: Some(quip_proto::v1::IsingProblem {
+                    encoding: CoefficientEncoding::I32 as i32,
+                    scale: 1000,
+                    h: quip_protocol::wire::encode_i32_le(&[coefficient]),
+                    num_reads: 1,
+                    initial_spins: if key == 2 { vec![vec![1]] } else { vec![] },
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            let Prepared::Sample {
+                mut job,
+                warm_start,
+                exact_energy,
+                ..
+            } = prepare_job(incoming, &WrongNarrow, &id, 1, None, None, None)
+            else {
+                return Err("valid fixture must prepare".into());
+            };
+            assert_eq!(exact_energy.is_some(), key != 3);
+            let mut entry = pending_job(None);
+            entry.exact_energy = exact_energy;
+            let _ = pending
+                .lock()
+                .expect("mutex")
+                .insert(pending_id(&[key], None), entry);
+            job.job_id = pending_id(&job.job_id, None);
+            jobs.push((job, warm_start));
+        }
+        // Reverse completion order and use a different stream method for each job.
+        for (job, warm_start) in jobs.into_iter().rev() {
+            let warm = warm_start.is_some();
+            let out = res_tx.clone();
+            if warm {
+                let (tx, rx) = mpsc::channel(1);
+                tx.send(WarmStreamJob { job, warm_start })
+                    .await
+                    .expect("warm job");
+                drop(tx);
+                tokio::task::spawn_blocking(move || {
+                    WrongNarrow.sample_stream_warm(rx, out, CancelToken::default());
+                })
+                .await
+                .expect("warm worker");
+            } else {
+                let (tx, rx) = mpsc::channel(1);
+                tx.send(job).await.expect("plain job");
+                drop(tx);
+                tokio::task::spawn_blocking(move || {
+                    WrongNarrow.sample_stream(rx, out, CancelToken::default());
+                })
+                .await
+                .expect("plain worker");
+            }
+        }
+        drop(res_tx);
+        drop(ctrl_tx);
+        let mut energies = Vec::new();
+        let mut credits = 0;
+        while let Some(msg) = out_rx.recv().await {
+            match msg.msg {
+                Some(miner_msg::Msg::Result(result)) => {
+                    energies.push((
+                        result.job_id,
+                        result.solutions.first().map(|r| r.energy_milli),
+                    ));
+                }
+                Some(miner_msg::Msg::JobRequest(request)) => credits += request.credits,
+                _ => {}
+            }
+        }
+        writer.await.expect("writer");
+        assert_eq!(
+            energies,
+            vec![
+                (vec![3], Some(777)),
+                (vec![2], Some(-501)),
+                (vec![1], Some(499))
+            ]
+        );
+        assert_eq!(credits, 3);
+        assert!(pending.lock().expect("mutex").is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn lossy_writer_missing_pending_job_is_a_device_fault() {
+        let WriterHarness {
+            res_tx,
+            ctrl_tx,
+            mut out_rx,
+            pending,
+            writer,
+            ..
+        } = spawn_writer_for::<crate::coefficient::Fixed<i8, 1>>(16);
+        assert!(pending.lock().unwrap().is_empty());
+        res_tx.send(completed_result(1)).await.unwrap();
+        drop(res_tx);
+        drop(ctrl_tx);
+
+        let mut results = 0;
+        let mut credits = 0;
+        let mut fatals = Vec::new();
+        let mut rejects = Vec::new();
+        while let Some(msg) = out_rx.recv().await {
+            match msg.msg {
+                Some(miner_msg::Msg::Result(_)) => results += 1,
+                Some(miner_msg::Msg::JobRequest(request)) => credits += request.credits,
+                Some(miner_msg::Msg::Fatal(fatal)) => fatals.push(fatal),
+                Some(miner_msg::Msg::Reject(reject)) => rejects.push(reject),
+                _ => {}
+            }
+        }
+        writer.await.unwrap();
+        assert_eq!(
+            (results, credits, fatals.len(), rejects.len()),
+            (0, 0, 1, 1)
+        );
+        let fatal = fatals.first().unwrap();
+        assert_eq!(fatal.exit_code, ExitCode::InternalFatal as u32);
+        assert!(fatal.restart_required);
+        let reject = rejects.first().unwrap();
+        assert_eq!(reject.job_id, vec![1]);
+        assert_eq!(
+            reject.reason,
+            quip_proto::v1::RejectReason::Overloaded as i32
+        );
+    }
+
+    #[tokio::test]
+    async fn lossy_cancellation_and_device_fault_release_pending_state() {
+        use crate::job::ExactEnergy;
+        let WriterHarness {
+            res_tx,
+            ctrl_tx,
+            mut out_rx,
+            pending,
+            cancel,
+            writer,
+            ..
+        } = spawn_writer(16);
+        for key in [1_u8, 2] {
+            let mut entry = pending_job(Some(1));
+            entry.exact_energy = Some(ExactEnergy::new(vec![499], vec![], vec![]));
+            let _ = pending
+                .lock()
+                .expect("mutex")
+                .insert(pending_id(&[key], None), entry);
+        }
+        cancel.cancel_through(1);
+        res_tx
+            .send(completed_result(1))
+            .await
+            .expect("late completion");
+        res_tx
+            .send(StreamResult {
+                job_id: pending_id(&[2], None),
+                device_access_time_us: 0,
+                outcome: StreamOutcome::Completed(Err(crate::SampleError::DeviceFault(
+                    "device".into(),
+                ))),
+            })
+            .await
+            .expect("fault");
+        drop(res_tx);
+        drop(ctrl_tx);
+        let mut results = 0;
+        let mut credits = 0;
+        let mut fatals = 0;
+        while let Some(msg) = out_rx.recv().await {
+            match msg.msg {
+                Some(miner_msg::Msg::Result(_)) => results += 1,
+                Some(miner_msg::Msg::JobRequest(request)) => credits += request.credits,
+                Some(miner_msg::Msg::Fatal(_)) => fatals += 1,
+                _ => {}
+            }
+        }
+        writer.await.expect("writer");
+        assert_eq!((results, credits, fatals), (0, 1, 1));
+        assert!(pending.lock().expect("mutex").is_empty());
+    }
+
+    #[test]
+    fn per_job_scoring_requires_metadata_only_for_lossy_problems() {
+        let mut entry = pending_job(None);
+        for (original, expected) in [(Some(499), 499), (None, 777)] {
+            entry.exact_energy = original.map(|m| ExactEnergy::new(vec![m], vec![], vec![]));
+            let mut result = completed_result(1);
+            result.outcome = StreamOutcome::Completed(Ok(vec![crate::SamplerResult {
+                spins: vec![1],
+                energy_milli: 777,
+            }]));
+            rescore_result(&mut result, Some(&entry), entry.exact_energy.is_some());
+            let StreamOutcome::Completed(Ok(reads)) = result.outcome else {
+                panic!("valid result must remain successful");
+            };
+            assert_eq!(reads.first().map(|read| read.energy_milli), Some(expected));
+        }
+        let mut exact = completed_result(1);
+        rescore_result(&mut exact, None, false);
+        assert!(matches!(exact.outcome, StreamOutcome::Completed(Ok(_))));
     }
 }

@@ -13,11 +13,12 @@
   },
   "scripts": {
     "build": "tsc && chmod +x dist/mock_miner.js",
-    "start": "node dist/mock_miner.js"
+    "start": "node dist/mock_miner.js",
+    "test": "npm run build && node --test dist/*.test.js"
   },
   "dependencies": {
     "@grpc/grpc-js": "^1.14.4",
-    "@quip.network/quip-solver-core": "file:../../npm/quip.network-quip-solver-core-0.0.2-rc1.tgz"
+    "@quip.network/quip-solver-core": "file:../../npm/quip.network-quip-solver-core-0.0.2-rc3.tgz"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

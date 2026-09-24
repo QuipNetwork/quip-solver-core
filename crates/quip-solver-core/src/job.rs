@@ -2,6 +2,7 @@
 //! `Result`/`Reject`.
 
 use crate::adapt::adapt_params;
+use crate::coefficient::Coefficient;
 use crate::ising::{IsingGraph, SampleParams, WarmStart};
 use crate::session::BackendIdentity;
 use crate::Sampler;
@@ -11,7 +12,7 @@ use quip_proto::v1::{
     RejectReason, Result as JobResult, SamplerMeta, Solution, Status, Topology,
 };
 use quip_protocol::session::ExitCode;
-use quip_protocol::wire::{decode_i32_le, decode_spins_packed, encode_spins, WireError};
+use quip_protocol::wire::{decode_spins_packed, encode_spins_packed};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -88,20 +89,34 @@ impl TopologyCache {
 
 /// Session difficulty target from `SetTarget`. The miner adapts its sampling
 /// budget from `max_energy_milli`; the `num_*` fields are optional overrides.
+#[derive(Clone)]
 pub(crate) struct SessionTarget {
     pub(crate) max_energy_milli: i64,
     pub(crate) min_solutions: u32,
+    pub(crate) min_diversity_milli: u32,
+    pub(crate) max_proof_solutions: u32,
     pub(crate) num_reads: u32,
     pub(crate) num_sweeps: u32,
 }
 
 impl SessionTarget {
+    pub(crate) fn to_target(&self) -> quip_protocol::target::Target {
+        quip_protocol::target::Target {
+            max_energy_milli: self.max_energy_milli,
+            min_solutions: self.min_solutions,
+            min_diversity_milli: self.min_diversity_milli,
+            max_proof_solutions: self.max_proof_solutions,
+        }
+    }
+
     // anneal_time_us is ignored on the SA/GPU Rust path (QPU adapt lives in the
     // Python dwave miner).
     pub(crate) fn from_proto(s: &quip_proto::v1::SetTarget) -> Self {
         Self {
             max_energy_milli: s.max_energy_milli,
             min_solutions: s.min_solutions,
+            min_diversity_milli: s.min_diversity_milli,
+            max_proof_solutions: s.max_proof_solutions,
             num_reads: s.num_reads,
             num_sweeps: s.num_sweeps,
         }
@@ -110,7 +125,7 @@ impl SessionTarget {
 
 /// Resolve one sampling param: per-job override, else `SetTarget` override,
 /// else the adapted value, else the fallback. `0` means "unset".
-fn pick_param(job: u32, target: u32, adapt: Option<u32>, fallback: u32) -> u32 {
+pub(crate) fn pick_param(job: u32, target: u32, adapt: Option<u32>, fallback: u32) -> u32 {
     if job != 0 {
         job
     } else if target != 0 {
@@ -163,7 +178,7 @@ pub(crate) fn now_unix_ms() -> Option<u64> {
 /// transient (exhausted descriptors, a seccomp filter, an unseeded early-boot
 /// pool). Rejecting the one job instead keeps the miner up and tells the
 /// coordinator to place the work elsewhere.
-fn os_seed() -> Option<u64> {
+pub(crate) fn os_seed() -> Option<u64> {
     let mut bytes = [0u8; 8];
     match getrandom::getrandom(&mut bytes) {
         Ok(()) => Some(u64::from_le_bytes(bytes)),
@@ -198,14 +213,6 @@ pub(crate) fn reject(job_id: Vec<u8>, reason: RejectReason) -> MinerMsg {
         job_id,
         reason: reason as i32,
     }))
-}
-
-/// Milli-int-encoded field → float vector.
-fn decode_milli_f64(bytes: &[u8]) -> Result<Vec<f64>, WireError> {
-    Ok(decode_i32_le(bytes)?
-        .iter()
-        .map(|&v| f64::from(v) / 1000.0)
-        .collect())
 }
 
 fn resolve_edges(
@@ -287,16 +294,15 @@ pub(crate) fn validate_shape(
 }
 
 /// Validate wire fields and build the base Ising graph, or a reject reason.
-fn parse_ising(
+fn parse_ising<C: Coefficient>(
     ising: &IsingProblem,
     max_nodes: u32,
     max_edges: u32,
     cache: Option<&TopologyCache>,
-) -> Result<IsingGraph, RejectReason> {
-    let h = decode_milli_f64(&ising.h_milli_le32).map_err(|_| RejectReason::Malformed)?;
-    let j = decode_milli_f64(&ising.j_milli_le32).map_err(|_| RejectReason::Malformed)?;
+) -> Result<ParsedIsing<C>, RejectReason> {
+    let decoded = crate::encoding::decode_problem::<C>(ising)?;
     let edges = resolve_edges(ising, cache)?;
-    let n = h.len();
+    let n = decoded.h.len();
 
     // A topology-hash job names the cached graph, so its biases must cover
     // exactly that graph's nodes. The endpoint bounds in `validate_shape` only
@@ -312,9 +318,9 @@ fn parse_ising(
     // Shape before size: a malformed problem is malformed at any size, and
     // answering TooLarge would invite the coordinator to retry it on a bigger
     // miner, where it fails exactly the same way.
-    validate_shape(n, j.len(), &edges).map_err(|_| RejectReason::Malformed)?;
+    validate_shape(n, decoded.j.len(), &edges).map_err(|_| RejectReason::Malformed)?;
 
-    // `0` means "no limit" in the advertised caps (see BackendCaps in
+    // `0` means "no limit" in the advertised caps (see Capabilities in
     // quip_protocol::session; the coordinator's router reads it the same way).
     // A zero-initialized C identity therefore advertises "unlimited", and must
     // not then reject every job it is sent as TooLarge.
@@ -324,7 +330,18 @@ fn parse_ising(
         return Err(RejectReason::TooLarge);
     }
 
-    Ok(IsingGraph::new(h, j, edges))
+    let graph = IsingGraph {
+        h: decoded.h,
+        j: decoded.j,
+        edges,
+    };
+    let exact_energy = decoded
+        .exact_milli
+        .map(|(h, j)| ExactEnergy::new(h, j, graph.edges.clone()));
+    Ok(ParsedIsing {
+        graph,
+        exact_energy,
+    })
 }
 
 /// Validate the warm-start fields (`IsingProblem` 9 to 12) against a job of
@@ -411,17 +428,50 @@ pub(crate) fn num_sweeps_from_toml(backend_toml: &str) -> usize {
     }
 }
 
+/// Original wire coefficients retained only for lossy samplers.
+#[derive(Debug)]
+pub(crate) struct ExactEnergy {
+    h: Vec<i32>,
+    j: Vec<i32>,
+    edges: Vec<(usize, usize)>,
+}
+
+impl ExactEnergy {
+    pub(crate) fn new(h: Vec<i32>, j: Vec<i32>, edges: Vec<(usize, usize)>) -> Self {
+        Self { h, j, edges }
+    }
+
+    pub(crate) fn rescore(&self, reads: &mut [crate::SamplerResult]) {
+        for read in reads {
+            read.energy_milli = quip_protocol::scoring::energy_from_milli(
+                &read.spins,
+                &self.h,
+                &self.j,
+                &self.edges,
+            );
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ParsedIsing<C: Coefficient> {
+    graph: IsingGraph<C>,
+    exact_energy: Option<ExactEnergy>,
+}
+
 /// A validated job ready to sample, or an immediate reject reply.
-pub(crate) enum Prepared {
+pub(crate) enum Prepared<C: Coefficient> {
     /// Reject reply to send now (no sampling).
     Reject(MinerMsg),
     /// Hand to the streaming sampler; `num_reads`/`num_sweeps` are the resolved
     /// values, carried so [`finalize_result`] can build `SamplerMeta`.
     Sample {
-        job: StreamJob,
+        job: StreamJob<C>,
         /// Decoded start states, `Some` only for a seeded job sent to a
         /// sampler whose `accepts_warm_start` is true.
         warm_start: Option<WarmStart>,
+        /// Original coefficients when sampler conversion loses information.
+        exact_energy: Option<ExactEnergy>,
         num_reads: u32,
         num_sweeps: u32,
     },
@@ -430,7 +480,7 @@ pub(crate) enum Prepared {
 /// Validate + resolve one job: reject reasons short-circuit; otherwise resolve
 /// the sampling budget (per-job override > `SetTarget` override > adapt > default)
 /// and return a [`StreamJob`] for the streaming sampler.
-pub(crate) fn prepare_job<S: Sampler>(
+pub(crate) fn prepare_job<S: Sampler<C>, C: Coefficient>(
     job: Job,
     sampler: &S,
     id: &BackendIdentity,
@@ -438,7 +488,7 @@ pub(crate) fn prepare_job<S: Sampler>(
     sweeps_per_beta: Option<usize>,
     cache: Option<&TopologyCache>,
     target: Option<&SessionTarget>,
-) -> Prepared {
+) -> Prepared<C> {
     let job_id = job.job_id.clone();
 
     if job.kind != JobKind::IsingSample as i32 {
@@ -466,8 +516,11 @@ pub(crate) fn prepare_job<S: Sampler>(
         return Prepared::Reject(reject(job_id, RejectReason::Malformed));
     };
 
-    let graph = match parse_ising(&ising, id.max_nodes, id.max_edges, cache) {
-        Ok(g) => g,
+    let ParsedIsing {
+        graph,
+        exact_energy,
+    } = match parse_ising::<C>(&ising, id.max_nodes, id.max_edges, cache) {
+        Ok(parsed) => parsed,
         Err(reason) => return Prepared::Reject(reject(job_id, reason)),
     };
 
@@ -478,7 +531,7 @@ pub(crate) fn prepare_job<S: Sampler>(
         adapt_params(
             t.max_energy_milli,
             t.min_solutions.max(1),
-            graph.h.len(),
+            graph.num_nodes(),
             graph.edges.len(),
             allowed_h,
             &id.adapt,
@@ -497,7 +550,7 @@ pub(crate) fn prepare_job<S: Sampler>(
         adapt.map(|a| a.num_sweeps),
         default_sweeps as u32,
     );
-    let num_sweeps = if id.algorithm == "gibbs" {
+    let num_sweeps = if id.algorithm == quip_proto::v1::Algorithm::Gibbs {
         num_sweeps.saturating_mul(GIBBS_SWEEP_MULTIPLIER)
     } else {
         num_sweeps
@@ -543,6 +596,7 @@ pub(crate) fn prepare_job<S: Sampler>(
             watermark: (job.generation != 0).then_some(job.generation),
         },
         warm_start,
+        exact_energy,
         num_reads,
         num_sweeps,
     }
@@ -594,7 +648,7 @@ pub(crate) fn finalize_result(
     let solutions: Vec<Solution> = samples
         .into_iter()
         .map(|r| Solution {
-            spins_bytes: encode_spins(&r.spins),
+            spins: encode_spins_packed(&r.spins),
             energy_milli: r.energy_milli,
         })
         .collect();
@@ -602,6 +656,8 @@ pub(crate) fn finalize_result(
     *jobs_done = jobs_done.saturating_add(1);
 
     let result = JobResult {
+        salt: vec![],
+        nonce: vec![],
         job_id: sr.job_id,
         solutions,
         meta: Some(SamplerMeta {
@@ -651,8 +707,8 @@ mod tests {
 
     fn identity(algorithm: &'static str) -> BackendIdentity {
         BackendIdentity {
-            backend: "test",
-            algorithm,
+            backend: quip_proto::v1::Backend::Mock,
+            algorithm: quip_protocol::session::algorithm_from_name(algorithm).unwrap(),
             max_nodes: 100_000,
             max_edges: 1_000_000,
             features: &[],
@@ -673,6 +729,7 @@ mod tests {
 
     fn edges_job(job_id: u8) -> Job {
         Job {
+            generator: None,
             job_id: vec![job_id],
             kind: JobKind::IsingSample as i32,
             generation: 0,
@@ -682,8 +739,10 @@ mod tests {
                     u: vec![0],
                     v: vec![1],
                 })),
-                h_milli_le32: encode_i32_le(&[1000, 1000]),
-                j_milli_le32: encode_i32_le(&[1000]),
+                encoding: quip_proto::v1::CoefficientEncoding::I32 as i32,
+                scale: 1000,
+                h: encode_i32_le(&[1000, 1000]),
+                j: encode_i32_le(&[1000]),
                 num_reads: 0,
                 num_sweeps: 0,
                 anneal_time_us: 0,
@@ -696,8 +755,10 @@ mod tests {
     fn hash_job(hash: Vec<u8>, h_milli: &[i32], j_milli: &[i32]) -> IsingProblem {
         IsingProblem {
             graph: Some(Graph::TopologyHash(hash)),
-            h_milli_le32: encode_i32_le(h_milli),
-            j_milli_le32: encode_i32_le(j_milli),
+            encoding: quip_proto::v1::CoefficientEncoding::I32 as i32,
+            scale: 1000,
+            h: encode_i32_le(h_milli),
+            j: encode_i32_le(j_milli),
             num_reads: 0,
             num_sweeps: 0,
             anneal_time_us: 0,
@@ -706,8 +767,40 @@ mod tests {
     }
 
     #[test]
+    fn wire_v2_rejects_invalid_encoding_and_scale() {
+        let mut ising = edges_job(1).ising.unwrap();
+        for (encoding, scale) in [(0, 1000), (99, 1000), (1, 0), (4, 5), (5, 5), (6, 5)] {
+            ising.encoding = encoding;
+            ising.scale = scale;
+            assert_eq!(
+                parse_ising::<f64>(&ising, 100, 100, None).unwrap_err(),
+                RejectReason::Malformed
+            );
+        }
+        ising.encoding = quip_proto::v1::CoefficientEncoding::I32 as i32;
+        ising.scale = 1000;
+        assert!(parse_ising::<f64>(&ising, 100, 100, None).is_ok());
+    }
+
+    #[test]
+    fn generator_jobs_are_not_accepted_before_lease_support() {
+        let mut job = edges_job(1);
+        job.kind = JobKind::IsingGenerate as i32;
+        let Prepared::Reject(message) =
+            prepare_job(job, &StubSampler, &identity("sa"), 64, None, None, None)
+        else {
+            panic!("generator job must be rejected");
+        };
+        let Some(miner_msg::Msg::Reject(reject)) = message.msg else {
+            panic!("expected rejection");
+        };
+        assert_eq!(reject.reason, RejectReason::UnsupportedKind as i32);
+    }
+
+    #[test]
     fn topology_cache_maps_sparse_ids_to_positions() {
         let topo = Topology {
+            allowed_j_milli: vec![],
             hash: vec![0xAB; 32],
             nodes: vec![0, 12, 2400],
             allowed_h_milli: vec![],
@@ -728,6 +821,7 @@ mod tests {
     #[test]
     fn hash_job_resolves_sparse_edges_to_positions() {
         let topo = Topology {
+            allowed_j_milli: vec![],
             hash: vec![7; 32],
             nodes: vec![0, 12, 2400],
             allowed_h_milli: vec![],
@@ -738,7 +832,9 @@ mod tests {
         };
         let cache = TopologyCache::from_proto(&topo);
         let ising = hash_job(vec![7; 32], &[1000, -1000, 1000], &[1000, -1000]);
-        let g = parse_ising(&ising, 100_000, 1_000_000, Some(&cache)).unwrap();
+        let g = parse_ising::<f64>(&ising, 100_000, 1_000_000, Some(&cache))
+            .unwrap()
+            .graph;
         assert_eq!(g.edges, vec![(0, 1), (1, 2)]);
         assert_eq!(g.h, vec![1.0, -1.0, 1.0]);
         assert_eq!(g.j, vec![1.0, -1.0]);
@@ -747,13 +843,14 @@ mod tests {
     #[test]
     fn hash_job_without_cache_rejects_missing() {
         let ising = hash_job(vec![7; 32], &[1000], &[]);
-        let err = parse_ising(&ising, 100_000, 1_000_000, None).unwrap_err();
+        let err = parse_ising::<f64>(&ising, 100_000, 1_000_000, None).unwrap_err();
         assert_eq!(err, RejectReason::TopologyMissing);
     }
 
     #[test]
     fn hash_job_wrong_hash_rejects_mismatch() {
         let topo = Topology {
+            allowed_j_milli: vec![],
             hash: vec![1; 32],
             nodes: vec![0],
             allowed_h_milli: vec![],
@@ -761,7 +858,7 @@ mod tests {
         };
         let cache = TopologyCache::from_proto(&topo);
         let ising = hash_job(vec![2; 32], &[1000], &[]);
-        let err = parse_ising(&ising, 100_000, 1_000_000, Some(&cache)).unwrap_err();
+        let err = parse_ising::<f64>(&ising, 100_000, 1_000_000, Some(&cache)).unwrap_err();
         assert_eq!(err, RejectReason::TopologyMismatch);
     }
 
@@ -780,6 +877,7 @@ mod tests {
     #[test]
     fn session_target_from_proto_carries_target_and_overrides() {
         let s = quip_proto::v1::SetTarget {
+            max_proof_solutions: 0,
             max_energy_milli: -14_700_000,
             min_solutions: 5,
             min_diversity_milli: 200,
@@ -798,6 +896,7 @@ mod tests {
     fn hash_job_edge_id_absent_from_map_rejects_malformed() {
         // edge references id 999, which is not in nodes → no position.
         let topo = Topology {
+            allowed_j_milli: vec![],
             hash: vec![7; 32],
             nodes: vec![0, 1],
             allowed_h_milli: vec![],
@@ -808,7 +907,7 @@ mod tests {
         };
         let cache = TopologyCache::from_proto(&topo);
         let ising = hash_job(vec![7; 32], &[1000, 1000], &[1000]);
-        let err = parse_ising(&ising, 100_000, 1_000_000, Some(&cache)).unwrap_err();
+        let err = parse_ising::<f64>(&ising, 100_000, 1_000_000, Some(&cache)).unwrap_err();
         assert_eq!(err, RejectReason::Malformed);
     }
 
@@ -817,8 +916,10 @@ mod tests {
     fn inline_job(h_milli: &[i32], j_milli: &[i32], u: Vec<u32>, v: Vec<u32>) -> IsingProblem {
         IsingProblem {
             graph: Some(Graph::Edges(EdgeList { u, v })),
-            h_milli_le32: encode_i32_le(h_milli),
-            j_milli_le32: encode_i32_le(j_milli),
+            encoding: quip_proto::v1::CoefficientEncoding::I32 as i32,
+            scale: 1000,
+            h: encode_i32_le(h_milli),
+            j: encode_i32_le(j_milli),
             num_reads: 0,
             num_sweeps: 0,
             anneal_time_us: 0,
@@ -837,15 +938,17 @@ mod tests {
     fn a_problem_with_no_graph_but_couplings_is_malformed() {
         let ising = IsingProblem {
             graph: None,
-            h_milli_le32: encode_i32_le(&[1000, 1000, 1000]),
-            j_milli_le32: encode_i32_le(&[1000, -1000, 1000]),
+            encoding: quip_proto::v1::CoefficientEncoding::I32 as i32,
+            scale: 1000,
+            h: encode_i32_le(&[1000, 1000, 1000]),
+            j: encode_i32_le(&[1000, -1000, 1000]),
             num_reads: 0,
             num_sweeps: 0,
             anneal_time_us: 0,
             ..Default::default()
         };
         assert_eq!(
-            parse_ising(&ising, 100_000, 1_000_000, None).unwrap_err(),
+            parse_ising::<f64>(&ising, 100_000, 1_000_000, None).unwrap_err(),
             RejectReason::Malformed,
             "3 couplings against 0 edges must never reach a sampler"
         );
@@ -857,15 +960,19 @@ mod tests {
     fn a_problem_with_no_graph_and_no_couplings_is_accepted() {
         let ising = IsingProblem {
             graph: None,
-            h_milli_le32: encode_i32_le(&[1000, 1000]),
-            j_milli_le32: encode_i32_le(&[]),
+            encoding: quip_proto::v1::CoefficientEncoding::I32 as i32,
+            scale: 1000,
+            h: encode_i32_le(&[1000, 1000]),
+            j: encode_i32_le(&[]),
             num_reads: 0,
             num_sweeps: 0,
             anneal_time_us: 0,
             ..Default::default()
         };
-        let g = parse_ising(&ising, 100_000, 1_000_000, None).expect("an edgeless problem is fine");
-        assert_eq!(g.h.len(), 2);
+        let g = parse_ising::<f64>(&ising, 100_000, 1_000_000, None)
+            .expect("an edgeless problem is fine")
+            .graph;
+        assert_eq!(g.num_nodes(), 2);
         assert!(g.edges.is_empty());
         assert!(g.j.is_empty());
     }
@@ -875,7 +982,7 @@ mod tests {
         // resolve_edges rejects the pair before it can zip-truncate.
         let ising = inline_job(&[1000, 1000, 1000], &[1000, 1000], vec![0, 1], vec![1]);
         assert_eq!(
-            parse_ising(&ising, 100_000, 1_000_000, None).unwrap_err(),
+            parse_ising::<f64>(&ising, 100_000, 1_000_000, None).unwrap_err(),
             RejectReason::Malformed
         );
     }
@@ -885,13 +992,13 @@ mod tests {
         // 2 edges, 1 coupling.
         let ising = inline_job(&[1000, 1000, 1000], &[1000], vec![0, 1], vec![1, 2]);
         assert_eq!(
-            parse_ising(&ising, 100_000, 1_000_000, None).unwrap_err(),
+            parse_ising::<f64>(&ising, 100_000, 1_000_000, None).unwrap_err(),
             RejectReason::Malformed
         );
         // 1 edge, 2 couplings — the direction that used to reach the C ABI.
         let ising = inline_job(&[1000, 1000], &[1000, 1000], vec![0], vec![1]);
         assert_eq!(
-            parse_ising(&ising, 100_000, 1_000_000, None).unwrap_err(),
+            parse_ising::<f64>(&ising, 100_000, 1_000_000, None).unwrap_err(),
             RejectReason::Malformed
         );
     }
@@ -900,7 +1007,7 @@ mod tests {
     fn an_edge_endpoint_outside_h_is_malformed() {
         let ising = inline_job(&[1000, 1000], &[1000], vec![0], vec![7]);
         assert_eq!(
-            parse_ising(&ising, 100_000, 1_000_000, None).unwrap_err(),
+            parse_ising::<f64>(&ising, 100_000, 1_000_000, None).unwrap_err(),
             RejectReason::Malformed
         );
     }
@@ -909,6 +1016,7 @@ mod tests {
 
     fn topology(nodes: Vec<u32>, u: Vec<u32>, v: Vec<u32>) -> Topology {
         Topology {
+            allowed_j_milli: vec![],
             hash: vec![7; 32],
             nodes,
             allowed_h_milli: vec![],
@@ -924,7 +1032,7 @@ mod tests {
         let cache = TopologyCache::from_proto(&topology(vec![0, 1, 2], vec![0, 1], vec![1]));
         let ising = hash_job(vec![7; 32], &[1000, 1000, 1000], &[1000]);
         assert_eq!(
-            parse_ising(&ising, 100_000, 1_000_000, Some(&cache)).unwrap_err(),
+            parse_ising::<f64>(&ising, 100_000, 1_000_000, Some(&cache)).unwrap_err(),
             RejectReason::Malformed
         );
     }
@@ -937,7 +1045,7 @@ mod tests {
         let cache = TopologyCache::from_proto(&topology(vec![0, 1, 1], vec![0], vec![1]));
         let ising = hash_job(vec![7; 32], &[1000, 1000, 1000], &[1000]);
         assert_eq!(
-            parse_ising(&ising, 100_000, 1_000_000, Some(&cache)).unwrap_err(),
+            parse_ising::<f64>(&ising, 100_000, 1_000_000, Some(&cache)).unwrap_err(),
             RejectReason::Malformed
         );
     }
@@ -950,7 +1058,7 @@ mod tests {
         let cache = TopologyCache::from_proto(&topology(vec![0, 1, 1], vec![0], vec![1]));
         let ising = hash_job(vec![9; 32], &[1000, 1000, 1000], &[1000]);
         assert_eq!(
-            parse_ising(&ising, 100_000, 1_000_000, Some(&cache)).unwrap_err(),
+            parse_ising::<f64>(&ising, 100_000, 1_000_000, Some(&cache)).unwrap_err(),
             RejectReason::TopologyMismatch
         );
     }
@@ -968,7 +1076,7 @@ mod tests {
         ] {
             let ising = hash_job(vec![7; 32], &h, &[1000, 1000]);
             assert_eq!(
-                parse_ising(&ising, 100_000, 1_000_000, Some(&cache)).unwrap_err(),
+                parse_ising::<f64>(&ising, 100_000, 1_000_000, Some(&cache)).unwrap_err(),
                 RejectReason::Malformed,
                 "h of {} against a 3-node topology must not sample",
                 h.len()
@@ -976,8 +1084,10 @@ mod tests {
         }
         // The matching length still works.
         let ising = hash_job(vec![7; 32], &[1000, 1000, 1000], &[1000, 1000]);
-        let g = parse_ising(&ising, 100_000, 1_000_000, Some(&cache)).expect("matching h");
-        assert_eq!(g.h.len(), 3);
+        let g = parse_ising::<f64>(&ising, 100_000, 1_000_000, Some(&cache))
+            .expect("matching h")
+            .graph;
+        assert_eq!(g.num_nodes(), 3);
     }
 
     // ---- quip-solver-core-vva: `0` means unlimited ----
@@ -986,14 +1096,17 @@ mod tests {
     fn a_size_cap_admits_a_job_exactly_at_the_limit_and_rejects_one_past_it() {
         // 3 nodes, 2 edges.
         let ising = inline_job(&[1000, 1000, 1000], &[1000, 1000], vec![0, 1], vec![1, 2]);
-        assert!(parse_ising(&ising, 3, 2, None).is_ok(), "n == max_nodes");
+        assert!(
+            parse_ising::<f64>(&ising, 3, 2, None).is_ok(),
+            "n == max_nodes"
+        );
         assert_eq!(
-            parse_ising(&ising, 2, 2, None).unwrap_err(),
+            parse_ising::<f64>(&ising, 2, 2, None).unwrap_err(),
             RejectReason::TooLarge,
             "n == max_nodes + 1"
         );
         assert_eq!(
-            parse_ising(&ising, 3, 1, None).unwrap_err(),
+            parse_ising::<f64>(&ising, 3, 1, None).unwrap_err(),
             RejectReason::TooLarge,
             "edges == max_edges + 1"
         );
@@ -1006,15 +1119,15 @@ mod tests {
     fn a_zero_size_cap_means_unlimited_not_a_zero_ceiling() {
         let ising = inline_job(&[1000, 1000, 1000], &[1000, 1000], vec![0, 1], vec![1, 2]);
         assert!(
-            parse_ising(&ising, 0, 0, None).is_ok(),
+            parse_ising::<f64>(&ising, 0, 0, None).is_ok(),
             "max_nodes/max_edges of 0 must accept a large problem, not reject every one"
         );
         // Each bound is independently unlimited.
-        assert!(parse_ising(&ising, 0, 2, None).is_ok());
-        assert!(parse_ising(&ising, 3, 0, None).is_ok());
+        assert!(parse_ising::<f64>(&ising, 0, 2, None).is_ok());
+        assert!(parse_ising::<f64>(&ising, 3, 0, None).is_ok());
         // A zero cap on one axis does not excuse a real cap on the other.
         assert_eq!(
-            parse_ising(&ising, 0, 1, None).unwrap_err(),
+            parse_ising::<f64>(&ising, 0, 1, None).unwrap_err(),
             RejectReason::TooLarge
         );
     }
@@ -1315,7 +1428,10 @@ mod tests {
         job
     }
 
-    fn prepared_warm_start<S: Sampler>(job: Job, sampler: &S) -> Result<Option<WarmStart>, i32> {
+    fn prepared_warm_start<S: Sampler<C>, C: Coefficient>(
+        job: Job,
+        sampler: &S,
+    ) -> Result<Option<WarmStart>, i32> {
         match prepare_job(job, sampler, &identity("sa"), 64, None, None, None) {
             Prepared::Sample { warm_start, .. } => Ok(warm_start),
             Prepared::Reject(MinerMsg {
@@ -1385,5 +1501,35 @@ mod tests {
             prepared_warm_start(job, &WarmSampler),
             Err(RejectReason::Malformed as i32)
         );
+    }
+
+    #[test]
+    fn lossy_decode_keeps_originals_but_exact_types_do_not() {
+        use crate::coefficient::{Fixed, Milli};
+        let problem = hash_job(vec![], &[499, -501], &[1501]);
+        let problem = IsingProblem {
+            graph: Some(Graph::Edges(EdgeList {
+                u: vec![0],
+                v: vec![1],
+            })),
+            ..problem
+        };
+        let parsed = parse_ising::<Fixed<i8, 1>>(&problem, 0, 0, None).expect("valid");
+        assert_eq!(parsed.graph.h, vec![Fixed(0), Fixed(-1)]);
+        assert_eq!(parsed.graph.j, vec![Fixed(2)]);
+        let mut reads = vec![SamplerResult {
+            spins: vec![1, -1],
+            energy_milli: 123,
+        }];
+        parsed
+            .exact_energy
+            .expect("lossy input retained")
+            .rescore(&mut reads);
+        assert_eq!(reads.first().map(|r| r.energy_milli), Some(-501));
+        let float = parse_ising::<f64>(&problem, 0, 0, None).expect("valid");
+        let milli = parse_ising::<Milli>(&problem, 0, 0, None).expect("valid");
+        assert!(float.exact_energy.is_none());
+        assert!(milli.exact_energy.is_none());
+        assert_eq!(milli.graph.h, vec![Fixed(499), Fixed(-501)]);
     }
 }

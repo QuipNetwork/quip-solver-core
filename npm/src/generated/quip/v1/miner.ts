@@ -20,11 +20,317 @@ import {
 
 export const protobufPackage = "quip.v1";
 
+export enum Backend {
+  BACKEND_UNSPECIFIED = 0,
+  BACKEND_CPU = 1,
+  BACKEND_CUDA = 2,
+  BACKEND_METAL = 3,
+  BACKEND_ANE = 4,
+  BACKEND_DWAVE_QPU = 5,
+  BACKEND_EXEC = 6,
+  BACKEND_MOCK = 7,
+  UNRECOGNIZED = -1,
+}
+
+export function backendFromJSON(object: any): Backend {
+  switch (object) {
+    case 0:
+    case "BACKEND_UNSPECIFIED":
+      return Backend.BACKEND_UNSPECIFIED;
+    case 1:
+    case "BACKEND_CPU":
+      return Backend.BACKEND_CPU;
+    case 2:
+    case "BACKEND_CUDA":
+      return Backend.BACKEND_CUDA;
+    case 3:
+    case "BACKEND_METAL":
+      return Backend.BACKEND_METAL;
+    case 4:
+    case "BACKEND_ANE":
+      return Backend.BACKEND_ANE;
+    case 5:
+    case "BACKEND_DWAVE_QPU":
+      return Backend.BACKEND_DWAVE_QPU;
+    case 6:
+    case "BACKEND_EXEC":
+      return Backend.BACKEND_EXEC;
+    case 7:
+    case "BACKEND_MOCK":
+      return Backend.BACKEND_MOCK;
+    case -1:
+    case "UNRECOGNIZED":
+    default:
+      return Backend.UNRECOGNIZED;
+  }
+}
+
+export function backendToJSON(object: Backend): string {
+  switch (object) {
+    case Backend.BACKEND_UNSPECIFIED:
+      return "BACKEND_UNSPECIFIED";
+    case Backend.BACKEND_CPU:
+      return "BACKEND_CPU";
+    case Backend.BACKEND_CUDA:
+      return "BACKEND_CUDA";
+    case Backend.BACKEND_METAL:
+      return "BACKEND_METAL";
+    case Backend.BACKEND_ANE:
+      return "BACKEND_ANE";
+    case Backend.BACKEND_DWAVE_QPU:
+      return "BACKEND_DWAVE_QPU";
+    case Backend.BACKEND_EXEC:
+      return "BACKEND_EXEC";
+    case Backend.BACKEND_MOCK:
+      return "BACKEND_MOCK";
+    case Backend.UNRECOGNIZED:
+    default:
+      return "UNRECOGNIZED";
+  }
+}
+
+export enum Algorithm {
+  ALGORITHM_UNSPECIFIED = 0,
+  ALGORITHM_SA = 1,
+  ALGORITHM_GIBBS = 2,
+  ALGORITHM_QUANTUM_ANNEAL = 3,
+  ALGORITHM_FSA = 4,
+  ALGORITHM_MSA = 5,
+  ALGORITHM_FLATIRON = 6,
+  ALGORITHM_MPS = 7,
+  ALGORITHM_MFA = 8,
+  ALGORITHM_SB = 9,
+  ALGORITHM_BSB = 10,
+  ALGORITHM_GBSB = 11,
+  ALGORITHM_GDSB = 12,
+  ALGORITHM_GGDSB = 13,
+  ALGORITHM_HBSB = 14,
+  ALGORITHM_HDSB = 15,
+  ALGORITHM_SBQA = 16,
+  ALGORITHM_TEDSB = 17,
+  ALGORITHM_EXTERNAL = 18,
+  UNRECOGNIZED = -1,
+}
+
+export function algorithmFromJSON(object: any): Algorithm {
+  switch (object) {
+    case 0:
+    case "ALGORITHM_UNSPECIFIED":
+      return Algorithm.ALGORITHM_UNSPECIFIED;
+    case 1:
+    case "ALGORITHM_SA":
+      return Algorithm.ALGORITHM_SA;
+    case 2:
+    case "ALGORITHM_GIBBS":
+      return Algorithm.ALGORITHM_GIBBS;
+    case 3:
+    case "ALGORITHM_QUANTUM_ANNEAL":
+      return Algorithm.ALGORITHM_QUANTUM_ANNEAL;
+    case 4:
+    case "ALGORITHM_FSA":
+      return Algorithm.ALGORITHM_FSA;
+    case 5:
+    case "ALGORITHM_MSA":
+      return Algorithm.ALGORITHM_MSA;
+    case 6:
+    case "ALGORITHM_FLATIRON":
+      return Algorithm.ALGORITHM_FLATIRON;
+    case 7:
+    case "ALGORITHM_MPS":
+      return Algorithm.ALGORITHM_MPS;
+    case 8:
+    case "ALGORITHM_MFA":
+      return Algorithm.ALGORITHM_MFA;
+    case 9:
+    case "ALGORITHM_SB":
+      return Algorithm.ALGORITHM_SB;
+    case 10:
+    case "ALGORITHM_BSB":
+      return Algorithm.ALGORITHM_BSB;
+    case 11:
+    case "ALGORITHM_GBSB":
+      return Algorithm.ALGORITHM_GBSB;
+    case 12:
+    case "ALGORITHM_GDSB":
+      return Algorithm.ALGORITHM_GDSB;
+    case 13:
+    case "ALGORITHM_GGDSB":
+      return Algorithm.ALGORITHM_GGDSB;
+    case 14:
+    case "ALGORITHM_HBSB":
+      return Algorithm.ALGORITHM_HBSB;
+    case 15:
+    case "ALGORITHM_HDSB":
+      return Algorithm.ALGORITHM_HDSB;
+    case 16:
+    case "ALGORITHM_SBQA":
+      return Algorithm.ALGORITHM_SBQA;
+    case 17:
+    case "ALGORITHM_TEDSB":
+      return Algorithm.ALGORITHM_TEDSB;
+    case 18:
+    case "ALGORITHM_EXTERNAL":
+      return Algorithm.ALGORITHM_EXTERNAL;
+    case -1:
+    case "UNRECOGNIZED":
+    default:
+      return Algorithm.UNRECOGNIZED;
+  }
+}
+
+export function algorithmToJSON(object: Algorithm): string {
+  switch (object) {
+    case Algorithm.ALGORITHM_UNSPECIFIED:
+      return "ALGORITHM_UNSPECIFIED";
+    case Algorithm.ALGORITHM_SA:
+      return "ALGORITHM_SA";
+    case Algorithm.ALGORITHM_GIBBS:
+      return "ALGORITHM_GIBBS";
+    case Algorithm.ALGORITHM_QUANTUM_ANNEAL:
+      return "ALGORITHM_QUANTUM_ANNEAL";
+    case Algorithm.ALGORITHM_FSA:
+      return "ALGORITHM_FSA";
+    case Algorithm.ALGORITHM_MSA:
+      return "ALGORITHM_MSA";
+    case Algorithm.ALGORITHM_FLATIRON:
+      return "ALGORITHM_FLATIRON";
+    case Algorithm.ALGORITHM_MPS:
+      return "ALGORITHM_MPS";
+    case Algorithm.ALGORITHM_MFA:
+      return "ALGORITHM_MFA";
+    case Algorithm.ALGORITHM_SB:
+      return "ALGORITHM_SB";
+    case Algorithm.ALGORITHM_BSB:
+      return "ALGORITHM_BSB";
+    case Algorithm.ALGORITHM_GBSB:
+      return "ALGORITHM_GBSB";
+    case Algorithm.ALGORITHM_GDSB:
+      return "ALGORITHM_GDSB";
+    case Algorithm.ALGORITHM_GGDSB:
+      return "ALGORITHM_GGDSB";
+    case Algorithm.ALGORITHM_HBSB:
+      return "ALGORITHM_HBSB";
+    case Algorithm.ALGORITHM_HDSB:
+      return "ALGORITHM_HDSB";
+    case Algorithm.ALGORITHM_SBQA:
+      return "ALGORITHM_SBQA";
+    case Algorithm.ALGORITHM_TEDSB:
+      return "ALGORITHM_TEDSB";
+    case Algorithm.ALGORITHM_EXTERNAL:
+      return "ALGORITHM_EXTERNAL";
+    case Algorithm.UNRECOGNIZED:
+    default:
+      return "UNRECOGNIZED";
+  }
+}
+
+export enum CoefficientEncoding {
+  COEFFICIENT_ENCODING_UNSPECIFIED = 0,
+  COEFFICIENT_ENCODING_I32 = 1,
+  COEFFICIENT_ENCODING_I16 = 2,
+  COEFFICIENT_ENCODING_I8 = 3,
+  COEFFICIENT_ENCODING_F16 = 4,
+  COEFFICIENT_ENCODING_F32 = 5,
+  COEFFICIENT_ENCODING_F64 = 6,
+  UNRECOGNIZED = -1,
+}
+
+export function coefficientEncodingFromJSON(object: any): CoefficientEncoding {
+  switch (object) {
+    case 0:
+    case "COEFFICIENT_ENCODING_UNSPECIFIED":
+      return CoefficientEncoding.COEFFICIENT_ENCODING_UNSPECIFIED;
+    case 1:
+    case "COEFFICIENT_ENCODING_I32":
+      return CoefficientEncoding.COEFFICIENT_ENCODING_I32;
+    case 2:
+    case "COEFFICIENT_ENCODING_I16":
+      return CoefficientEncoding.COEFFICIENT_ENCODING_I16;
+    case 3:
+    case "COEFFICIENT_ENCODING_I8":
+      return CoefficientEncoding.COEFFICIENT_ENCODING_I8;
+    case 4:
+    case "COEFFICIENT_ENCODING_F16":
+      return CoefficientEncoding.COEFFICIENT_ENCODING_F16;
+    case 5:
+    case "COEFFICIENT_ENCODING_F32":
+      return CoefficientEncoding.COEFFICIENT_ENCODING_F32;
+    case 6:
+    case "COEFFICIENT_ENCODING_F64":
+      return CoefficientEncoding.COEFFICIENT_ENCODING_F64;
+    case -1:
+    case "UNRECOGNIZED":
+    default:
+      return CoefficientEncoding.UNRECOGNIZED;
+  }
+}
+
+export function coefficientEncodingToJSON(object: CoefficientEncoding): string {
+  switch (object) {
+    case CoefficientEncoding.COEFFICIENT_ENCODING_UNSPECIFIED:
+      return "COEFFICIENT_ENCODING_UNSPECIFIED";
+    case CoefficientEncoding.COEFFICIENT_ENCODING_I32:
+      return "COEFFICIENT_ENCODING_I32";
+    case CoefficientEncoding.COEFFICIENT_ENCODING_I16:
+      return "COEFFICIENT_ENCODING_I16";
+    case CoefficientEncoding.COEFFICIENT_ENCODING_I8:
+      return "COEFFICIENT_ENCODING_I8";
+    case CoefficientEncoding.COEFFICIENT_ENCODING_F16:
+      return "COEFFICIENT_ENCODING_F16";
+    case CoefficientEncoding.COEFFICIENT_ENCODING_F32:
+      return "COEFFICIENT_ENCODING_F32";
+    case CoefficientEncoding.COEFFICIENT_ENCODING_F64:
+      return "COEFFICIENT_ENCODING_F64";
+    case CoefficientEncoding.UNRECOGNIZED:
+    default:
+      return "UNRECOGNIZED";
+  }
+}
+
+export enum GeneratorAlgorithm {
+  GENERATOR_ALGORITHM_UNSPECIFIED = 0,
+  /**
+   * GENERATOR_ALGORITHM_BLAKE3_CHACHA8_V1 - nonce = BLAKE3(last_proof_block_hash || miner_account || salt).
+   * ChaCha8 seeded with the nonce draws h for each node, then j for each
+   * edge, each value allowed[next_u32 % len], in cached Topology order.
+   */
+  GENERATOR_ALGORITHM_BLAKE3_CHACHA8_V1 = 1,
+  UNRECOGNIZED = -1,
+}
+
+export function generatorAlgorithmFromJSON(object: any): GeneratorAlgorithm {
+  switch (object) {
+    case 0:
+    case "GENERATOR_ALGORITHM_UNSPECIFIED":
+      return GeneratorAlgorithm.GENERATOR_ALGORITHM_UNSPECIFIED;
+    case 1:
+    case "GENERATOR_ALGORITHM_BLAKE3_CHACHA8_V1":
+      return GeneratorAlgorithm.GENERATOR_ALGORITHM_BLAKE3_CHACHA8_V1;
+    case -1:
+    case "UNRECOGNIZED":
+    default:
+      return GeneratorAlgorithm.UNRECOGNIZED;
+  }
+}
+
+export function generatorAlgorithmToJSON(object: GeneratorAlgorithm): string {
+  switch (object) {
+    case GeneratorAlgorithm.GENERATOR_ALGORITHM_UNSPECIFIED:
+      return "GENERATOR_ALGORITHM_UNSPECIFIED";
+    case GeneratorAlgorithm.GENERATOR_ALGORITHM_BLAKE3_CHACHA8_V1:
+      return "GENERATOR_ALGORITHM_BLAKE3_CHACHA8_V1";
+    case GeneratorAlgorithm.UNRECOGNIZED:
+    default:
+      return "UNRECOGNIZED";
+  }
+}
+
 export enum JobKind {
   JOB_KIND_UNSPECIFIED = 0,
   ISING_SAMPLE = 1,
   /** GATE_CIRCUIT - reserved */
   GATE_CIRCUIT = 2,
+  ISING_GENERATE = 3,
   UNRECOGNIZED = -1,
 }
 
@@ -39,6 +345,9 @@ export function jobKindFromJSON(object: any): JobKind {
     case 2:
     case "GATE_CIRCUIT":
       return JobKind.GATE_CIRCUIT;
+    case 3:
+    case "ISING_GENERATE":
+      return JobKind.ISING_GENERATE;
     case -1:
     case "UNRECOGNIZED":
     default:
@@ -54,6 +363,8 @@ export function jobKindToJSON(object: JobKind): string {
       return "ISING_SAMPLE";
     case JobKind.GATE_CIRCUIT:
       return "GATE_CIRCUIT";
+    case JobKind.ISING_GENERATE:
+      return "ISING_GENERATE";
     case JobKind.UNRECOGNIZED:
     default:
       return "UNRECOGNIZED";
@@ -70,6 +381,7 @@ export enum RejectReason {
   MALFORMED = 6,
   TOPOLOGY_MISMATCH = 7,
   TOPOLOGY_MISSING = 8,
+  TARGET_MISSING = 9,
   UNRECOGNIZED = -1,
 }
 
@@ -102,6 +414,9 @@ export function rejectReasonFromJSON(object: any): RejectReason {
     case 8:
     case "TOPOLOGY_MISSING":
       return RejectReason.TOPOLOGY_MISSING;
+    case 9:
+    case "TARGET_MISSING":
+      return RejectReason.TARGET_MISSING;
     case -1:
     case "UNRECOGNIZED":
     default:
@@ -129,6 +444,8 @@ export function rejectReasonToJSON(object: RejectReason): string {
       return "TOPOLOGY_MISMATCH";
     case RejectReason.TOPOLOGY_MISSING:
       return "TOPOLOGY_MISSING";
+    case RejectReason.TARGET_MISSING:
+      return "TARGET_MISSING";
     case RejectReason.UNRECOGNIZED:
     default:
       return "UNRECOGNIZED";
@@ -144,6 +461,7 @@ export interface MinerMsg {
   status?: Status | undefined;
   fatal?: Fatal | undefined;
   capabilities?: Capabilities | undefined;
+  leaseDone?: LeaseDone | undefined;
 }
 
 export interface CoordMsg {
@@ -161,17 +479,7 @@ export interface CoordMsg {
 export interface Hello {
   minerId: string;
   sessionToken: string;
-  /** this spec: 1 */
-  protocolVersion: number;
-  /** cpu | cuda | metal | dwave-qpu */
-  backend: string;
-  /** sa | gibbs | quantum-anneal */
-  algorithm: string;
-  supportedKinds: JobKind[];
-  maxNodes: number;
-  maxEdges: number;
-  nativeTopologyHash?: Uint8Array | undefined;
-  features: string[];
+  capabilities: Capabilities | undefined;
 }
 
 export interface Welcome {
@@ -199,6 +507,7 @@ export interface Topology {
     | undefined;
   /** for the miner's adapt difficulty band */
   allowedHMilli: number[];
+  allowedJMilli: number[];
 }
 
 /**
@@ -218,6 +527,7 @@ export interface SetTarget {
   numSweeps: number;
   /** 0 = unset */
   annealTimeUs: number;
+  maxProofSolutions: number;
 }
 
 export interface EdgeList {
@@ -229,15 +539,22 @@ export interface IsingProblem {
   topologyHash?:
     | Uint8Array
     | undefined;
-  /** u/v are dense positions into h_milli_le32, not node ids */
-  edges?: EdgeList | undefined;
-  hMilliLe32: Uint8Array;
+  /** u/v are dense positions into h, not node ids */
+  edges?:
+    | EdgeList
+    | undefined;
   /**
-   * Coupling coefficients, little-endian int32 milli-units. Normative
-   * invariant: len(j_milli_le32) == len(edges) after decoding (one i32 per
-   * edge, in the same order as EdgeList.u/v or the cached Topology edges).
+   * h and j contain little-endian elements of encoding's type, one per node
+   * and edge respectively, in EdgeList.u/v or cached Topology order.
+   * Integer unit values are stored / scale, with
+   * I32 at scale 1000 the canonical milli form. Float encodings use scale 0.
+   * Reject unspecified encoding, invalid scale, partial elements, non-finite
+   * floats, and values that do not convert exactly to i32 milli-units.
    */
-  jMilliLe32: Uint8Array;
+  encoding: CoefficientEncoding;
+  scale: number;
+  h: Uint8Array;
+  j: Uint8Array;
   /** per-job override; 0 = unset -> SetTarget/adapt */
   numReads: number;
   /** per-job override; 0 = unset */
@@ -284,7 +601,11 @@ export interface Job {
   generation: bigint;
   deadlineMs: bigint;
   ising: IsingProblem | undefined;
-  provenance: Provenance | undefined;
+  provenance:
+    | Provenance
+    | undefined;
+  /** ISING_GENERATE only */
+  generator: IsingProblemGenerator | undefined;
 }
 
 export interface JobRequest {
@@ -303,9 +624,12 @@ export interface Shutdown {
 }
 
 export interface Solution {
-  /** one byte/spin: 0x01=+1, 0xFF=-1 */
-  spinsBytes: Uint8Array;
   energyMilli: bigint;
+  /**
+   * Node i is bit i % 8 of byte i / 8, LSB first: 1 = +1, 0 = -1.
+   * Exactly ceil(num_nodes / 8) bytes, with zero padding bits.
+   */
+  spins: Uint8Array;
 }
 
 export interface SamplerMeta {
@@ -324,7 +648,13 @@ export interface SamplerMeta_ExtraEntry {
 export interface Result {
   jobId: Uint8Array;
   solutions: Solution[];
-  meta: SamplerMeta | undefined;
+  meta:
+    | SamplerMeta
+    | undefined;
+  /** ISING_GENERATE only, 32 bytes */
+  salt: Uint8Array;
+  /** ISING_GENERATE only, 32 bytes */
+  nonce: Uint8Array;
 }
 
 export interface Reject {
@@ -366,19 +696,40 @@ export interface GetCapabilities {
  * launch the binary at all, so it must answer without touching the device.
  */
 export interface Capabilities {
-  /** cpu | cuda | metal | dwave-qpu */
-  backend: string;
-  /** sa | gibbs | quantum-anneal */
-  algorithm: string;
   supportedKinds: JobKind[];
   maxNodes: number;
   maxEdges: number;
+  /** initial-spins, streaming */
   features: string[];
-  /** this spec: 1 */
+  /** this spec: 2 */
   protocolVersion: number;
   /** models kept in flight; 1 = serial */
   streamWidth: number;
   nativeTopologyHash?: Uint8Array | undefined;
+  encodings: CoefficientEncoding[];
+  generators: GeneratorAlgorithm[];
+  backend: Backend;
+  algorithm: Algorithm;
+}
+
+export interface IsingProblemGenerator {
+  algorithm: GeneratorAlgorithm;
+  /** cached Topology */
+  topologyHash: Uint8Array;
+  /** 32 bytes */
+  lastProofBlockHash: Uint8Array;
+  /** 32 bytes */
+  minerAccount: Uint8Array;
+  /** 32 bytes */
+  baseSalt: Uint8Array;
+  saltStart: bigint;
+  saltCount: bigint;
+}
+
+export interface LeaseDone {
+  jobId: Uint8Array;
+  saltsDone: bigint;
+  bestEnergyMilli: bigint;
 }
 
 function createBaseMinerMsg(): MinerMsg {
@@ -391,6 +742,7 @@ function createBaseMinerMsg(): MinerMsg {
     status: undefined,
     fatal: undefined,
     capabilities: undefined,
+    leaseDone: undefined,
   };
 }
 
@@ -419,6 +771,9 @@ export const MinerMsg: MessageFns<MinerMsg> = {
     }
     if (message.capabilities !== undefined) {
       Capabilities.encode(message.capabilities, writer.uint32(66).fork()).join();
+    }
+    if (message.leaseDone !== undefined) {
+      LeaseDone.encode(message.leaseDone, writer.uint32(74).fork()).join();
     }
     return writer;
   },
@@ -494,6 +849,14 @@ export const MinerMsg: MessageFns<MinerMsg> = {
           message.capabilities = Capabilities.decode(reader, reader.uint32());
           continue;
         }
+        case 9: {
+          if (tag !== 74) {
+            break;
+          }
+
+          message.leaseDone = LeaseDone.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -517,6 +880,11 @@ export const MinerMsg: MessageFns<MinerMsg> = {
       status: isSet(object.status) ? Status.fromJSON(object.status) : undefined,
       fatal: isSet(object.fatal) ? Fatal.fromJSON(object.fatal) : undefined,
       capabilities: isSet(object.capabilities) ? Capabilities.fromJSON(object.capabilities) : undefined,
+      leaseDone: isSet(object.leaseDone)
+        ? LeaseDone.fromJSON(object.leaseDone)
+        : isSet(object.lease_done)
+        ? LeaseDone.fromJSON(object.lease_done)
+        : undefined,
     };
   },
 
@@ -546,6 +914,9 @@ export const MinerMsg: MessageFns<MinerMsg> = {
     if (message.capabilities !== undefined) {
       obj.capabilities = Capabilities.toJSON(message.capabilities);
     }
+    if (message.leaseDone !== undefined) {
+      obj.leaseDone = LeaseDone.toJSON(message.leaseDone);
+    }
     return obj;
   },
 
@@ -571,6 +942,9 @@ export const MinerMsg: MessageFns<MinerMsg> = {
     message.fatal = (object.fatal !== undefined && object.fatal !== null) ? Fatal.fromPartial(object.fatal) : undefined;
     message.capabilities = (object.capabilities !== undefined && object.capabilities !== null)
       ? Capabilities.fromPartial(object.capabilities)
+      : undefined;
+    message.leaseDone = (object.leaseDone !== undefined && object.leaseDone !== null)
+      ? LeaseDone.fromPartial(object.leaseDone)
       : undefined;
     return message;
   },
@@ -797,18 +1171,7 @@ export const CoordMsg: MessageFns<CoordMsg> = {
 };
 
 function createBaseHello(): Hello {
-  return {
-    minerId: "",
-    sessionToken: "",
-    protocolVersion: 0,
-    backend: "",
-    algorithm: "",
-    supportedKinds: [],
-    maxNodes: 0,
-    maxEdges: 0,
-    nativeTopologyHash: undefined,
-    features: [],
-  };
+  return { minerId: "", sessionToken: "", capabilities: undefined };
 }
 
 export const Hello: MessageFns<Hello> = {
@@ -819,31 +1182,8 @@ export const Hello: MessageFns<Hello> = {
     if (message.sessionToken !== "") {
       writer.uint32(18).string(message.sessionToken);
     }
-    if (message.protocolVersion !== 0) {
-      writer.uint32(24).uint32(message.protocolVersion);
-    }
-    if (message.backend !== "") {
-      writer.uint32(34).string(message.backend);
-    }
-    if (message.algorithm !== "") {
-      writer.uint32(42).string(message.algorithm);
-    }
-    writer.uint32(50).fork();
-    for (const v of message.supportedKinds) {
-      writer.int32(v);
-    }
-    writer.join();
-    if (message.maxNodes !== 0) {
-      writer.uint32(56).uint32(message.maxNodes);
-    }
-    if (message.maxEdges !== 0) {
-      writer.uint32(64).uint32(message.maxEdges);
-    }
-    if (message.nativeTopologyHash !== undefined) {
-      writer.uint32(74).bytes(message.nativeTopologyHash);
-    }
-    for (const v of message.features) {
-      writer.uint32(82).string(v!);
+    if (message.capabilities !== undefined) {
+      Capabilities.encode(message.capabilities, writer.uint32(90).fork()).join();
     }
     return writer;
   },
@@ -871,78 +1211,12 @@ export const Hello: MessageFns<Hello> = {
           message.sessionToken = reader.string();
           continue;
         }
-        case 3: {
-          if (tag !== 24) {
+        case 11: {
+          if (tag !== 90) {
             break;
           }
 
-          message.protocolVersion = reader.uint32();
-          continue;
-        }
-        case 4: {
-          if (tag !== 34) {
-            break;
-          }
-
-          message.backend = reader.string();
-          continue;
-        }
-        case 5: {
-          if (tag !== 42) {
-            break;
-          }
-
-          message.algorithm = reader.string();
-          continue;
-        }
-        case 6: {
-          if (tag === 48) {
-            message.supportedKinds.push(reader.int32() as any);
-
-            continue;
-          }
-
-          if (tag === 50) {
-            const end2 = reader.uint32() + reader.pos;
-            while (reader.pos < end2) {
-              message.supportedKinds.push(reader.int32() as any);
-            }
-
-            continue;
-          }
-
-          break;
-        }
-        case 7: {
-          if (tag !== 56) {
-            break;
-          }
-
-          message.maxNodes = reader.uint32();
-          continue;
-        }
-        case 8: {
-          if (tag !== 64) {
-            break;
-          }
-
-          message.maxEdges = reader.uint32();
-          continue;
-        }
-        case 9: {
-          if (tag !== 74) {
-            break;
-          }
-
-          message.nativeTopologyHash = reader.bytes();
-          continue;
-        }
-        case 10: {
-          if (tag !== 82) {
-            break;
-          }
-
-          message.features.push(reader.string());
+          message.capabilities = Capabilities.decode(reader, reader.uint32());
           continue;
         }
       }
@@ -966,36 +1240,7 @@ export const Hello: MessageFns<Hello> = {
         : isSet(object.session_token)
         ? globalThis.String(object.session_token)
         : "",
-      protocolVersion: isSet(object.protocolVersion)
-        ? globalThis.Number(object.protocolVersion)
-        : isSet(object.protocol_version)
-        ? globalThis.Number(object.protocol_version)
-        : 0,
-      backend: isSet(object.backend) ? globalThis.String(object.backend) : "",
-      algorithm: isSet(object.algorithm) ? globalThis.String(object.algorithm) : "",
-      supportedKinds: globalThis.Array.isArray(object?.supportedKinds)
-        ? object.supportedKinds.map((e: any) => jobKindFromJSON(e))
-        : globalThis.Array.isArray(object?.supported_kinds)
-        ? object.supported_kinds.map((e: any) => jobKindFromJSON(e))
-        : [],
-      maxNodes: isSet(object.maxNodes)
-        ? globalThis.Number(object.maxNodes)
-        : isSet(object.max_nodes)
-        ? globalThis.Number(object.max_nodes)
-        : 0,
-      maxEdges: isSet(object.maxEdges)
-        ? globalThis.Number(object.maxEdges)
-        : isSet(object.max_edges)
-        ? globalThis.Number(object.max_edges)
-        : 0,
-      nativeTopologyHash: isSet(object.nativeTopologyHash)
-        ? bytesFromBase64(object.nativeTopologyHash)
-        : isSet(object.native_topology_hash)
-        ? bytesFromBase64(object.native_topology_hash)
-        : undefined,
-      features: globalThis.Array.isArray(object?.features)
-        ? object.features.map((e: any) => globalThis.String(e))
-        : [],
+      capabilities: isSet(object.capabilities) ? Capabilities.fromJSON(object.capabilities) : undefined,
     };
   },
 
@@ -1007,29 +1252,8 @@ export const Hello: MessageFns<Hello> = {
     if (message.sessionToken !== "") {
       obj.sessionToken = message.sessionToken;
     }
-    if (message.protocolVersion !== 0) {
-      obj.protocolVersion = Math.round(message.protocolVersion);
-    }
-    if (message.backend !== "") {
-      obj.backend = message.backend;
-    }
-    if (message.algorithm !== "") {
-      obj.algorithm = message.algorithm;
-    }
-    if (message.supportedKinds?.length) {
-      obj.supportedKinds = message.supportedKinds.map((e) => jobKindToJSON(e));
-    }
-    if (message.maxNodes !== 0) {
-      obj.maxNodes = Math.round(message.maxNodes);
-    }
-    if (message.maxEdges !== 0) {
-      obj.maxEdges = Math.round(message.maxEdges);
-    }
-    if (message.nativeTopologyHash !== undefined) {
-      obj.nativeTopologyHash = base64FromBytes(message.nativeTopologyHash);
-    }
-    if (message.features?.length) {
-      obj.features = message.features;
+    if (message.capabilities !== undefined) {
+      obj.capabilities = Capabilities.toJSON(message.capabilities);
     }
     return obj;
   },
@@ -1041,14 +1265,9 @@ export const Hello: MessageFns<Hello> = {
     const message = createBaseHello();
     message.minerId = object.minerId ?? "";
     message.sessionToken = object.sessionToken ?? "";
-    message.protocolVersion = object.protocolVersion ?? 0;
-    message.backend = object.backend ?? "";
-    message.algorithm = object.algorithm ?? "";
-    message.supportedKinds = object.supportedKinds?.map((e) => e) || [];
-    message.maxNodes = object.maxNodes ?? 0;
-    message.maxEdges = object.maxEdges ?? 0;
-    message.nativeTopologyHash = object.nativeTopologyHash ?? undefined;
-    message.features = object.features?.map((e) => e) || [];
+    message.capabilities = (object.capabilities !== undefined && object.capabilities !== null)
+      ? Capabilities.fromPartial(object.capabilities)
+      : undefined;
     return message;
   },
 };
@@ -1305,7 +1524,7 @@ export const Ready: MessageFns<Ready> = {
 };
 
 function createBaseTopology(): Topology {
-  return { hash: new Uint8Array(0), nodes: [], edges: undefined, allowedHMilli: [] };
+  return { hash: new Uint8Array(0), nodes: [], edges: undefined, allowedHMilli: [], allowedJMilli: [] };
 }
 
 export const Topology: MessageFns<Topology> = {
@@ -1323,6 +1542,11 @@ export const Topology: MessageFns<Topology> = {
     }
     writer.uint32(34).fork();
     for (const v of message.allowedHMilli) {
+      writer.int32(v);
+    }
+    writer.join();
+    writer.uint32(42).fork();
+    for (const v of message.allowedJMilli) {
       writer.int32(v);
     }
     writer.join();
@@ -1388,6 +1612,24 @@ export const Topology: MessageFns<Topology> = {
 
           break;
         }
+        case 5: {
+          if (tag === 40) {
+            message.allowedJMilli.push(reader.int32());
+
+            continue;
+          }
+
+          if (tag === 42) {
+            const end2 = reader.uint32() + reader.pos;
+            while (reader.pos < end2) {
+              message.allowedJMilli.push(reader.int32());
+            }
+
+            continue;
+          }
+
+          break;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -1407,6 +1649,11 @@ export const Topology: MessageFns<Topology> = {
         : globalThis.Array.isArray(object?.allowed_h_milli)
         ? object.allowed_h_milli.map((e: any) => globalThis.Number(e))
         : [],
+      allowedJMilli: globalThis.Array.isArray(object?.allowedJMilli)
+        ? object.allowedJMilli.map((e: any) => globalThis.Number(e))
+        : globalThis.Array.isArray(object?.allowed_j_milli)
+        ? object.allowed_j_milli.map((e: any) => globalThis.Number(e))
+        : [],
     };
   },
 
@@ -1424,6 +1671,9 @@ export const Topology: MessageFns<Topology> = {
     if (message.allowedHMilli?.length) {
       obj.allowedHMilli = message.allowedHMilli.map((e) => Math.round(e));
     }
+    if (message.allowedJMilli?.length) {
+      obj.allowedJMilli = message.allowedJMilli.map((e) => Math.round(e));
+    }
     return obj;
   },
 
@@ -1438,12 +1688,21 @@ export const Topology: MessageFns<Topology> = {
       ? EdgeList.fromPartial(object.edges)
       : undefined;
     message.allowedHMilli = object.allowedHMilli?.map((e) => e) || [];
+    message.allowedJMilli = object.allowedJMilli?.map((e) => e) || [];
     return message;
   },
 };
 
 function createBaseSetTarget(): SetTarget {
-  return { maxEnergyMilli: 0n, minSolutions: 0, minDiversityMilli: 0, numReads: 0, numSweeps: 0, annealTimeUs: 0 };
+  return {
+    maxEnergyMilli: 0n,
+    minSolutions: 0,
+    minDiversityMilli: 0,
+    numReads: 0,
+    numSweeps: 0,
+    annealTimeUs: 0,
+    maxProofSolutions: 0,
+  };
 }
 
 export const SetTarget: MessageFns<SetTarget> = {
@@ -1468,6 +1727,9 @@ export const SetTarget: MessageFns<SetTarget> = {
     }
     if (message.annealTimeUs !== 0) {
       writer.uint32(48).uint32(message.annealTimeUs);
+    }
+    if (message.maxProofSolutions !== 0) {
+      writer.uint32(56).uint32(message.maxProofSolutions);
     }
     return writer;
   },
@@ -1527,6 +1789,14 @@ export const SetTarget: MessageFns<SetTarget> = {
           message.annealTimeUs = reader.uint32();
           continue;
         }
+        case 7: {
+          if (tag !== 56) {
+            break;
+          }
+
+          message.maxProofSolutions = reader.uint32();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -1568,6 +1838,11 @@ export const SetTarget: MessageFns<SetTarget> = {
         : isSet(object.anneal_time_us)
         ? globalThis.Number(object.anneal_time_us)
         : 0,
+      maxProofSolutions: isSet(object.maxProofSolutions)
+        ? globalThis.Number(object.maxProofSolutions)
+        : isSet(object.max_proof_solutions)
+        ? globalThis.Number(object.max_proof_solutions)
+        : 0,
     };
   },
 
@@ -1591,6 +1866,9 @@ export const SetTarget: MessageFns<SetTarget> = {
     if (message.annealTimeUs !== 0) {
       obj.annealTimeUs = Math.round(message.annealTimeUs);
     }
+    if (message.maxProofSolutions !== 0) {
+      obj.maxProofSolutions = Math.round(message.maxProofSolutions);
+    }
     return obj;
   },
 
@@ -1607,6 +1885,7 @@ export const SetTarget: MessageFns<SetTarget> = {
     message.numReads = object.numReads ?? 0;
     message.numSweeps = object.numSweeps ?? 0;
     message.annealTimeUs = object.annealTimeUs ?? 0;
+    message.maxProofSolutions = object.maxProofSolutions ?? 0;
     return message;
   },
 };
@@ -1715,8 +1994,10 @@ function createBaseIsingProblem(): IsingProblem {
   return {
     topologyHash: undefined,
     edges: undefined,
-    hMilliLe32: new Uint8Array(0),
-    jMilliLe32: new Uint8Array(0),
+    encoding: 0,
+    scale: 0,
+    h: new Uint8Array(0),
+    j: new Uint8Array(0),
     numReads: 0,
     numSweeps: 0,
     annealTimeUs: 0,
@@ -1735,11 +2016,17 @@ export const IsingProblem: MessageFns<IsingProblem> = {
     if (message.edges !== undefined) {
       EdgeList.encode(message.edges, writer.uint32(18).fork()).join();
     }
-    if (message.hMilliLe32.length !== 0) {
-      writer.uint32(26).bytes(message.hMilliLe32);
+    if (message.encoding !== 0) {
+      writer.uint32(104).int32(message.encoding);
     }
-    if (message.jMilliLe32.length !== 0) {
-      writer.uint32(34).bytes(message.jMilliLe32);
+    if (message.scale !== 0) {
+      writer.uint32(112).uint32(message.scale);
+    }
+    if (message.h.length !== 0) {
+      writer.uint32(122).bytes(message.h);
+    }
+    if (message.j.length !== 0) {
+      writer.uint32(130).bytes(message.j);
     }
     if (message.numReads !== 0) {
       writer.uint32(40).uint32(message.numReads);
@@ -1788,20 +2075,36 @@ export const IsingProblem: MessageFns<IsingProblem> = {
           message.edges = EdgeList.decode(reader, reader.uint32());
           continue;
         }
-        case 3: {
-          if (tag !== 26) {
+        case 13: {
+          if (tag !== 104) {
             break;
           }
 
-          message.hMilliLe32 = reader.bytes();
+          message.encoding = reader.int32() as any;
           continue;
         }
-        case 4: {
-          if (tag !== 34) {
+        case 14: {
+          if (tag !== 112) {
             break;
           }
 
-          message.jMilliLe32 = reader.bytes();
+          message.scale = reader.uint32();
+          continue;
+        }
+        case 15: {
+          if (tag !== 122) {
+            break;
+          }
+
+          message.h = reader.bytes();
+          continue;
+        }
+        case 16: {
+          if (tag !== 130) {
+            break;
+          }
+
+          message.j = reader.bytes();
           continue;
         }
         case 5: {
@@ -1877,16 +2180,10 @@ export const IsingProblem: MessageFns<IsingProblem> = {
         ? bytesFromBase64(object.topology_hash)
         : undefined,
       edges: isSet(object.edges) ? EdgeList.fromJSON(object.edges) : undefined,
-      hMilliLe32: isSet(object.hMilliLe32)
-        ? bytesFromBase64(object.hMilliLe32)
-        : isSet(object.h_milli_le32)
-        ? bytesFromBase64(object.h_milli_le32)
-        : new Uint8Array(0),
-      jMilliLe32: isSet(object.jMilliLe32)
-        ? bytesFromBase64(object.jMilliLe32)
-        : isSet(object.j_milli_le32)
-        ? bytesFromBase64(object.j_milli_le32)
-        : new Uint8Array(0),
+      encoding: isSet(object.encoding) ? coefficientEncodingFromJSON(object.encoding) : 0,
+      scale: isSet(object.scale) ? globalThis.Number(object.scale) : 0,
+      h: isSet(object.h) ? bytesFromBase64(object.h) : new Uint8Array(0),
+      j: isSet(object.j) ? bytesFromBase64(object.j) : new Uint8Array(0),
       numReads: isSet(object.numReads)
         ? globalThis.Number(object.numReads)
         : isSet(object.num_reads)
@@ -1933,11 +2230,17 @@ export const IsingProblem: MessageFns<IsingProblem> = {
     if (message.edges !== undefined) {
       obj.edges = EdgeList.toJSON(message.edges);
     }
-    if (message.hMilliLe32.length !== 0) {
-      obj.hMilliLe32 = base64FromBytes(message.hMilliLe32);
+    if (message.encoding !== 0) {
+      obj.encoding = coefficientEncodingToJSON(message.encoding);
     }
-    if (message.jMilliLe32.length !== 0) {
-      obj.jMilliLe32 = base64FromBytes(message.jMilliLe32);
+    if (message.scale !== 0) {
+      obj.scale = Math.round(message.scale);
+    }
+    if (message.h.length !== 0) {
+      obj.h = base64FromBytes(message.h);
+    }
+    if (message.j.length !== 0) {
+      obj.j = base64FromBytes(message.j);
     }
     if (message.numReads !== 0) {
       obj.numReads = Math.round(message.numReads);
@@ -1972,8 +2275,10 @@ export const IsingProblem: MessageFns<IsingProblem> = {
     message.edges = (object.edges !== undefined && object.edges !== null)
       ? EdgeList.fromPartial(object.edges)
       : undefined;
-    message.hMilliLe32 = object.hMilliLe32 ?? new Uint8Array(0);
-    message.jMilliLe32 = object.jMilliLe32 ?? new Uint8Array(0);
+    message.encoding = object.encoding ?? 0;
+    message.scale = object.scale ?? 0;
+    message.h = object.h ?? new Uint8Array(0);
+    message.j = object.j ?? new Uint8Array(0);
     message.numReads = object.numReads ?? 0;
     message.numSweeps = object.numSweeps ?? 0;
     message.annealTimeUs = object.annealTimeUs ?? 0;
@@ -2070,7 +2375,15 @@ export const Provenance: MessageFns<Provenance> = {
 };
 
 function createBaseJob(): Job {
-  return { jobId: new Uint8Array(0), kind: 0, generation: 0n, deadlineMs: 0n, ising: undefined, provenance: undefined };
+  return {
+    jobId: new Uint8Array(0),
+    kind: 0,
+    generation: 0n,
+    deadlineMs: 0n,
+    ising: undefined,
+    provenance: undefined,
+    generator: undefined,
+  };
 }
 
 export const Job: MessageFns<Job> = {
@@ -2098,6 +2411,9 @@ export const Job: MessageFns<Job> = {
     }
     if (message.provenance !== undefined) {
       Provenance.encode(message.provenance, writer.uint32(50).fork()).join();
+    }
+    if (message.generator !== undefined) {
+      IsingProblemGenerator.encode(message.generator, writer.uint32(58).fork()).join();
     }
     return writer;
   },
@@ -2157,6 +2473,14 @@ export const Job: MessageFns<Job> = {
           message.provenance = Provenance.decode(reader, reader.uint32());
           continue;
         }
+        case 7: {
+          if (tag !== 58) {
+            break;
+          }
+
+          message.generator = IsingProblemGenerator.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -2182,6 +2506,7 @@ export const Job: MessageFns<Job> = {
         : 0n,
       ising: isSet(object.ising) ? IsingProblem.fromJSON(object.ising) : undefined,
       provenance: isSet(object.provenance) ? Provenance.fromJSON(object.provenance) : undefined,
+      generator: isSet(object.generator) ? IsingProblemGenerator.fromJSON(object.generator) : undefined,
     };
   },
 
@@ -2205,6 +2530,9 @@ export const Job: MessageFns<Job> = {
     if (message.provenance !== undefined) {
       obj.provenance = Provenance.toJSON(message.provenance);
     }
+    if (message.generator !== undefined) {
+      obj.generator = IsingProblemGenerator.toJSON(message.generator);
+    }
     return obj;
   },
 
@@ -2226,6 +2554,9 @@ export const Job: MessageFns<Job> = {
       : undefined;
     message.provenance = (object.provenance !== undefined && object.provenance !== null)
       ? Provenance.fromPartial(object.provenance)
+      : undefined;
+    message.generator = (object.generator !== undefined && object.generator !== null)
+      ? IsingProblemGenerator.fromPartial(object.generator)
       : undefined;
     return message;
   },
@@ -2466,19 +2797,19 @@ export const Shutdown: MessageFns<Shutdown> = {
 };
 
 function createBaseSolution(): Solution {
-  return { spinsBytes: new Uint8Array(0), energyMilli: 0n };
+  return { energyMilli: 0n, spins: new Uint8Array(0) };
 }
 
 export const Solution: MessageFns<Solution> = {
   encode(message: Solution, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
-    if (message.spinsBytes.length !== 0) {
-      writer.uint32(10).bytes(message.spinsBytes);
-    }
     if (message.energyMilli !== 0n) {
       if (BigInt.asIntN(64, message.energyMilli) !== message.energyMilli) {
         throw new globalThis.Error("value provided for field message.energyMilli of type int64 too large");
       }
       writer.uint32(16).int64(message.energyMilli);
+    }
+    if (message.spins.length !== 0) {
+      writer.uint32(26).bytes(message.spins);
     }
     return writer;
   },
@@ -2490,20 +2821,20 @@ export const Solution: MessageFns<Solution> = {
     while (reader.pos < end) {
       const tag = reader.uint32();
       switch (tag >>> 3) {
-        case 1: {
-          if (tag !== 10) {
-            break;
-          }
-
-          message.spinsBytes = reader.bytes();
-          continue;
-        }
         case 2: {
           if (tag !== 16) {
             break;
           }
 
           message.energyMilli = reader.int64() as bigint;
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.spins = reader.bytes();
           continue;
         }
       }
@@ -2517,26 +2848,22 @@ export const Solution: MessageFns<Solution> = {
 
   fromJSON(object: any): Solution {
     return {
-      spinsBytes: isSet(object.spinsBytes)
-        ? bytesFromBase64(object.spinsBytes)
-        : isSet(object.spins_bytes)
-        ? bytesFromBase64(object.spins_bytes)
-        : new Uint8Array(0),
       energyMilli: isSet(object.energyMilli)
         ? BigInt(object.energyMilli)
         : isSet(object.energy_milli)
         ? BigInt(object.energy_milli)
         : 0n,
+      spins: isSet(object.spins) ? bytesFromBase64(object.spins) : new Uint8Array(0),
     };
   },
 
   toJSON(message: Solution): unknown {
     const obj: any = {};
-    if (message.spinsBytes.length !== 0) {
-      obj.spinsBytes = base64FromBytes(message.spinsBytes);
-    }
     if (message.energyMilli !== 0n) {
       obj.energyMilli = message.energyMilli.toString();
+    }
+    if (message.spins.length !== 0) {
+      obj.spins = base64FromBytes(message.spins);
     }
     return obj;
   },
@@ -2546,10 +2873,10 @@ export const Solution: MessageFns<Solution> = {
   },
   fromPartial(object: DeepPartial<Solution>): Solution {
     const message = createBaseSolution();
-    message.spinsBytes = object.spinsBytes ?? new Uint8Array(0);
     message.energyMilli = (object.energyMilli !== undefined && object.energyMilli !== null)
       ? BigInt(object.energyMilli)
       : 0n;
+    message.spins = object.spins ?? new Uint8Array(0);
     return message;
   },
 };
@@ -2798,7 +3125,13 @@ export const SamplerMeta_ExtraEntry: MessageFns<SamplerMeta_ExtraEntry> = {
 };
 
 function createBaseResult(): Result {
-  return { jobId: new Uint8Array(0), solutions: [], meta: undefined };
+  return {
+    jobId: new Uint8Array(0),
+    solutions: [],
+    meta: undefined,
+    salt: new Uint8Array(0),
+    nonce: new Uint8Array(0),
+  };
 }
 
 export const Result: MessageFns<Result> = {
@@ -2811,6 +3144,12 @@ export const Result: MessageFns<Result> = {
     }
     if (message.meta !== undefined) {
       SamplerMeta.encode(message.meta, writer.uint32(26).fork()).join();
+    }
+    if (message.salt.length !== 0) {
+      writer.uint32(34).bytes(message.salt);
+    }
+    if (message.nonce.length !== 0) {
+      writer.uint32(42).bytes(message.nonce);
     }
     return writer;
   },
@@ -2846,6 +3185,22 @@ export const Result: MessageFns<Result> = {
           message.meta = SamplerMeta.decode(reader, reader.uint32());
           continue;
         }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.salt = reader.bytes();
+          continue;
+        }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.nonce = reader.bytes();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -2866,6 +3221,8 @@ export const Result: MessageFns<Result> = {
         ? object.solutions.map((e: any) => Solution.fromJSON(e))
         : [],
       meta: isSet(object.meta) ? SamplerMeta.fromJSON(object.meta) : undefined,
+      salt: isSet(object.salt) ? bytesFromBase64(object.salt) : new Uint8Array(0),
+      nonce: isSet(object.nonce) ? bytesFromBase64(object.nonce) : new Uint8Array(0),
     };
   },
 
@@ -2880,6 +3237,12 @@ export const Result: MessageFns<Result> = {
     if (message.meta !== undefined) {
       obj.meta = SamplerMeta.toJSON(message.meta);
     }
+    if (message.salt.length !== 0) {
+      obj.salt = base64FromBytes(message.salt);
+    }
+    if (message.nonce.length !== 0) {
+      obj.nonce = base64FromBytes(message.nonce);
+    }
     return obj;
   },
 
@@ -2893,6 +3256,8 @@ export const Result: MessageFns<Result> = {
     message.meta = (object.meta !== undefined && object.meta !== null)
       ? SamplerMeta.fromPartial(object.meta)
       : undefined;
+    message.salt = object.salt ?? new Uint8Array(0);
+    message.nonce = object.nonce ?? new Uint8Array(0);
     return message;
   },
 };
@@ -3375,8 +3740,6 @@ export const GetCapabilities: MessageFns<GetCapabilities> = {
 
 function createBaseCapabilities(): Capabilities {
   return {
-    backend: "",
-    algorithm: "",
     supportedKinds: [],
     maxNodes: 0,
     maxEdges: 0,
@@ -3384,17 +3747,15 @@ function createBaseCapabilities(): Capabilities {
     protocolVersion: 0,
     streamWidth: 0,
     nativeTopologyHash: undefined,
+    encodings: [],
+    generators: [],
+    backend: 0,
+    algorithm: 0,
   };
 }
 
 export const Capabilities: MessageFns<Capabilities> = {
   encode(message: Capabilities, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
-    if (message.backend !== "") {
-      writer.uint32(10).string(message.backend);
-    }
-    if (message.algorithm !== "") {
-      writer.uint32(18).string(message.algorithm);
-    }
     writer.uint32(26).fork();
     for (const v of message.supportedKinds) {
       writer.int32(v);
@@ -3418,6 +3779,22 @@ export const Capabilities: MessageFns<Capabilities> = {
     if (message.nativeTopologyHash !== undefined) {
       writer.uint32(74).bytes(message.nativeTopologyHash);
     }
+    writer.uint32(82).fork();
+    for (const v of message.encodings) {
+      writer.int32(v);
+    }
+    writer.join();
+    writer.uint32(90).fork();
+    for (const v of message.generators) {
+      writer.int32(v);
+    }
+    writer.join();
+    if (message.backend !== 0) {
+      writer.uint32(96).int32(message.backend);
+    }
+    if (message.algorithm !== 0) {
+      writer.uint32(104).int32(message.algorithm);
+    }
     return writer;
   },
 
@@ -3428,22 +3805,6 @@ export const Capabilities: MessageFns<Capabilities> = {
     while (reader.pos < end) {
       const tag = reader.uint32();
       switch (tag >>> 3) {
-        case 1: {
-          if (tag !== 10) {
-            break;
-          }
-
-          message.backend = reader.string();
-          continue;
-        }
-        case 2: {
-          if (tag !== 18) {
-            break;
-          }
-
-          message.algorithm = reader.string();
-          continue;
-        }
         case 3: {
           if (tag === 24) {
             message.supportedKinds.push(reader.int32() as any);
@@ -3510,6 +3871,58 @@ export const Capabilities: MessageFns<Capabilities> = {
           message.nativeTopologyHash = reader.bytes();
           continue;
         }
+        case 10: {
+          if (tag === 80) {
+            message.encodings.push(reader.int32() as any);
+
+            continue;
+          }
+
+          if (tag === 82) {
+            const end2 = reader.uint32() + reader.pos;
+            while (reader.pos < end2) {
+              message.encodings.push(reader.int32() as any);
+            }
+
+            continue;
+          }
+
+          break;
+        }
+        case 11: {
+          if (tag === 88) {
+            message.generators.push(reader.int32() as any);
+
+            continue;
+          }
+
+          if (tag === 90) {
+            const end2 = reader.uint32() + reader.pos;
+            while (reader.pos < end2) {
+              message.generators.push(reader.int32() as any);
+            }
+
+            continue;
+          }
+
+          break;
+        }
+        case 12: {
+          if (tag !== 96) {
+            break;
+          }
+
+          message.backend = reader.int32() as any;
+          continue;
+        }
+        case 13: {
+          if (tag !== 104) {
+            break;
+          }
+
+          message.algorithm = reader.int32() as any;
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -3521,8 +3934,6 @@ export const Capabilities: MessageFns<Capabilities> = {
 
   fromJSON(object: any): Capabilities {
     return {
-      backend: isSet(object.backend) ? globalThis.String(object.backend) : "",
-      algorithm: isSet(object.algorithm) ? globalThis.String(object.algorithm) : "",
       supportedKinds: globalThis.Array.isArray(object?.supportedKinds)
         ? object.supportedKinds.map((e: any) => jobKindFromJSON(e))
         : globalThis.Array.isArray(object?.supported_kinds)
@@ -3554,17 +3965,19 @@ export const Capabilities: MessageFns<Capabilities> = {
         : isSet(object.native_topology_hash)
         ? bytesFromBase64(object.native_topology_hash)
         : undefined,
+      encodings: globalThis.Array.isArray(object?.encodings)
+        ? object.encodings.map((e: any) => coefficientEncodingFromJSON(e))
+        : [],
+      generators: globalThis.Array.isArray(object?.generators)
+        ? object.generators.map((e: any) => generatorAlgorithmFromJSON(e))
+        : [],
+      backend: isSet(object.backend) ? backendFromJSON(object.backend) : 0,
+      algorithm: isSet(object.algorithm) ? algorithmFromJSON(object.algorithm) : 0,
     };
   },
 
   toJSON(message: Capabilities): unknown {
     const obj: any = {};
-    if (message.backend !== "") {
-      obj.backend = message.backend;
-    }
-    if (message.algorithm !== "") {
-      obj.algorithm = message.algorithm;
-    }
     if (message.supportedKinds?.length) {
       obj.supportedKinds = message.supportedKinds.map((e) => jobKindToJSON(e));
     }
@@ -3586,6 +3999,18 @@ export const Capabilities: MessageFns<Capabilities> = {
     if (message.nativeTopologyHash !== undefined) {
       obj.nativeTopologyHash = base64FromBytes(message.nativeTopologyHash);
     }
+    if (message.encodings?.length) {
+      obj.encodings = message.encodings.map((e) => coefficientEncodingToJSON(e));
+    }
+    if (message.generators?.length) {
+      obj.generators = message.generators.map((e) => generatorAlgorithmToJSON(e));
+    }
+    if (message.backend !== 0) {
+      obj.backend = backendToJSON(message.backend);
+    }
+    if (message.algorithm !== 0) {
+      obj.algorithm = algorithmToJSON(message.algorithm);
+    }
     return obj;
   },
 
@@ -3594,8 +4019,6 @@ export const Capabilities: MessageFns<Capabilities> = {
   },
   fromPartial(object: DeepPartial<Capabilities>): Capabilities {
     const message = createBaseCapabilities();
-    message.backend = object.backend ?? "";
-    message.algorithm = object.algorithm ?? "";
     message.supportedKinds = object.supportedKinds?.map((e) => e) || [];
     message.maxNodes = object.maxNodes ?? 0;
     message.maxEdges = object.maxEdges ?? 0;
@@ -3603,6 +4026,316 @@ export const Capabilities: MessageFns<Capabilities> = {
     message.protocolVersion = object.protocolVersion ?? 0;
     message.streamWidth = object.streamWidth ?? 0;
     message.nativeTopologyHash = object.nativeTopologyHash ?? undefined;
+    message.encodings = object.encodings?.map((e) => e) || [];
+    message.generators = object.generators?.map((e) => e) || [];
+    message.backend = object.backend ?? 0;
+    message.algorithm = object.algorithm ?? 0;
+    return message;
+  },
+};
+
+function createBaseIsingProblemGenerator(): IsingProblemGenerator {
+  return {
+    algorithm: 0,
+    topologyHash: new Uint8Array(0),
+    lastProofBlockHash: new Uint8Array(0),
+    minerAccount: new Uint8Array(0),
+    baseSalt: new Uint8Array(0),
+    saltStart: 0n,
+    saltCount: 0n,
+  };
+}
+
+export const IsingProblemGenerator: MessageFns<IsingProblemGenerator> = {
+  encode(message: IsingProblemGenerator, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.algorithm !== 0) {
+      writer.uint32(8).int32(message.algorithm);
+    }
+    if (message.topologyHash.length !== 0) {
+      writer.uint32(18).bytes(message.topologyHash);
+    }
+    if (message.lastProofBlockHash.length !== 0) {
+      writer.uint32(26).bytes(message.lastProofBlockHash);
+    }
+    if (message.minerAccount.length !== 0) {
+      writer.uint32(34).bytes(message.minerAccount);
+    }
+    if (message.baseSalt.length !== 0) {
+      writer.uint32(42).bytes(message.baseSalt);
+    }
+    if (message.saltStart !== 0n) {
+      if (BigInt.asUintN(64, message.saltStart) !== message.saltStart) {
+        throw new globalThis.Error("value provided for field message.saltStart of type uint64 too large");
+      }
+      writer.uint32(48).uint64(message.saltStart);
+    }
+    if (message.saltCount !== 0n) {
+      if (BigInt.asUintN(64, message.saltCount) !== message.saltCount) {
+        throw new globalThis.Error("value provided for field message.saltCount of type uint64 too large");
+      }
+      writer.uint32(56).uint64(message.saltCount);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): IsingProblemGenerator {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseIsingProblemGenerator();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.algorithm = reader.int32() as any;
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.topologyHash = reader.bytes();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.lastProofBlockHash = reader.bytes();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.minerAccount = reader.bytes();
+          continue;
+        }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.baseSalt = reader.bytes();
+          continue;
+        }
+        case 6: {
+          if (tag !== 48) {
+            break;
+          }
+
+          message.saltStart = reader.uint64() as bigint;
+          continue;
+        }
+        case 7: {
+          if (tag !== 56) {
+            break;
+          }
+
+          message.saltCount = reader.uint64() as bigint;
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): IsingProblemGenerator {
+    return {
+      algorithm: isSet(object.algorithm) ? generatorAlgorithmFromJSON(object.algorithm) : 0,
+      topologyHash: isSet(object.topologyHash)
+        ? bytesFromBase64(object.topologyHash)
+        : isSet(object.topology_hash)
+        ? bytesFromBase64(object.topology_hash)
+        : new Uint8Array(0),
+      lastProofBlockHash: isSet(object.lastProofBlockHash)
+        ? bytesFromBase64(object.lastProofBlockHash)
+        : isSet(object.last_proof_block_hash)
+        ? bytesFromBase64(object.last_proof_block_hash)
+        : new Uint8Array(0),
+      minerAccount: isSet(object.minerAccount)
+        ? bytesFromBase64(object.minerAccount)
+        : isSet(object.miner_account)
+        ? bytesFromBase64(object.miner_account)
+        : new Uint8Array(0),
+      baseSalt: isSet(object.baseSalt)
+        ? bytesFromBase64(object.baseSalt)
+        : isSet(object.base_salt)
+        ? bytesFromBase64(object.base_salt)
+        : new Uint8Array(0),
+      saltStart: isSet(object.saltStart)
+        ? BigInt(object.saltStart)
+        : isSet(object.salt_start)
+        ? BigInt(object.salt_start)
+        : 0n,
+      saltCount: isSet(object.saltCount)
+        ? BigInt(object.saltCount)
+        : isSet(object.salt_count)
+        ? BigInt(object.salt_count)
+        : 0n,
+    };
+  },
+
+  toJSON(message: IsingProblemGenerator): unknown {
+    const obj: any = {};
+    if (message.algorithm !== 0) {
+      obj.algorithm = generatorAlgorithmToJSON(message.algorithm);
+    }
+    if (message.topologyHash.length !== 0) {
+      obj.topologyHash = base64FromBytes(message.topologyHash);
+    }
+    if (message.lastProofBlockHash.length !== 0) {
+      obj.lastProofBlockHash = base64FromBytes(message.lastProofBlockHash);
+    }
+    if (message.minerAccount.length !== 0) {
+      obj.minerAccount = base64FromBytes(message.minerAccount);
+    }
+    if (message.baseSalt.length !== 0) {
+      obj.baseSalt = base64FromBytes(message.baseSalt);
+    }
+    if (message.saltStart !== 0n) {
+      obj.saltStart = message.saltStart.toString();
+    }
+    if (message.saltCount !== 0n) {
+      obj.saltCount = message.saltCount.toString();
+    }
+    return obj;
+  },
+
+  create(base?: DeepPartial<IsingProblemGenerator>): IsingProblemGenerator {
+    return IsingProblemGenerator.fromPartial(base ?? {});
+  },
+  fromPartial(object: DeepPartial<IsingProblemGenerator>): IsingProblemGenerator {
+    const message = createBaseIsingProblemGenerator();
+    message.algorithm = object.algorithm ?? 0;
+    message.topologyHash = object.topologyHash ?? new Uint8Array(0);
+    message.lastProofBlockHash = object.lastProofBlockHash ?? new Uint8Array(0);
+    message.minerAccount = object.minerAccount ?? new Uint8Array(0);
+    message.baseSalt = object.baseSalt ?? new Uint8Array(0);
+    message.saltStart = (object.saltStart !== undefined && object.saltStart !== null) ? BigInt(object.saltStart) : 0n;
+    message.saltCount = (object.saltCount !== undefined && object.saltCount !== null) ? BigInt(object.saltCount) : 0n;
+    return message;
+  },
+};
+
+function createBaseLeaseDone(): LeaseDone {
+  return { jobId: new Uint8Array(0), saltsDone: 0n, bestEnergyMilli: 0n };
+}
+
+export const LeaseDone: MessageFns<LeaseDone> = {
+  encode(message: LeaseDone, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.jobId.length !== 0) {
+      writer.uint32(10).bytes(message.jobId);
+    }
+    if (message.saltsDone !== 0n) {
+      if (BigInt.asUintN(64, message.saltsDone) !== message.saltsDone) {
+        throw new globalThis.Error("value provided for field message.saltsDone of type uint64 too large");
+      }
+      writer.uint32(16).uint64(message.saltsDone);
+    }
+    if (message.bestEnergyMilli !== 0n) {
+      if (BigInt.asIntN(64, message.bestEnergyMilli) !== message.bestEnergyMilli) {
+        throw new globalThis.Error("value provided for field message.bestEnergyMilli of type int64 too large");
+      }
+      writer.uint32(24).int64(message.bestEnergyMilli);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): LeaseDone {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseLeaseDone();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.jobId = reader.bytes();
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.saltsDone = reader.uint64() as bigint;
+          continue;
+        }
+        case 3: {
+          if (tag !== 24) {
+            break;
+          }
+
+          message.bestEnergyMilli = reader.int64() as bigint;
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): LeaseDone {
+    return {
+      jobId: isSet(object.jobId)
+        ? bytesFromBase64(object.jobId)
+        : isSet(object.job_id)
+        ? bytesFromBase64(object.job_id)
+        : new Uint8Array(0),
+      saltsDone: isSet(object.saltsDone)
+        ? BigInt(object.saltsDone)
+        : isSet(object.salts_done)
+        ? BigInt(object.salts_done)
+        : 0n,
+      bestEnergyMilli: isSet(object.bestEnergyMilli)
+        ? BigInt(object.bestEnergyMilli)
+        : isSet(object.best_energy_milli)
+        ? BigInt(object.best_energy_milli)
+        : 0n,
+    };
+  },
+
+  toJSON(message: LeaseDone): unknown {
+    const obj: any = {};
+    if (message.jobId.length !== 0) {
+      obj.jobId = base64FromBytes(message.jobId);
+    }
+    if (message.saltsDone !== 0n) {
+      obj.saltsDone = message.saltsDone.toString();
+    }
+    if (message.bestEnergyMilli !== 0n) {
+      obj.bestEnergyMilli = message.bestEnergyMilli.toString();
+    }
+    return obj;
+  },
+
+  create(base?: DeepPartial<LeaseDone>): LeaseDone {
+    return LeaseDone.fromPartial(base ?? {});
+  },
+  fromPartial(object: DeepPartial<LeaseDone>): LeaseDone {
+    const message = createBaseLeaseDone();
+    message.jobId = object.jobId ?? new Uint8Array(0);
+    message.saltsDone = (object.saltsDone !== undefined && object.saltsDone !== null) ? BigInt(object.saltsDone) : 0n;
+    message.bestEnergyMilli = (object.bestEnergyMilli !== undefined && object.bestEnergyMilli !== null)
+      ? BigInt(object.bestEnergyMilli)
+      : 0n;
     return message;
   },
 };

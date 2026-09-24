@@ -9,13 +9,16 @@
 pub mod adapt;
 pub mod beta;
 pub mod cli;
+pub mod coefficient;
 pub mod config;
 pub mod csr;
 mod display;
 pub mod driver;
+mod encoding;
 pub mod error;
 pub mod ising;
 mod job;
+mod lease;
 pub mod logging;
 mod session;
 
@@ -23,6 +26,8 @@ pub use cli::CommonArgs;
 pub use csr::CsrGraph;
 pub use error::SampleError;
 pub use ising::{Algorithm, IsingGraph, SampleParams, SamplerResult, WarmStart};
+pub use lease::{Lease, LeaseSink, LeaseStopped};
+pub use quip_protocol::lease::TopologyView;
 pub use session::{capabilities, run, run_code, BackendIdentity, OpenError, INITIAL_SPINS_FEATURE};
 
 /// The generated protobuf and tonic stubs for the wire contract.
@@ -40,6 +45,8 @@ pub use quip_protocol;
 /// Process exit codes from SPEC section 2, and the values `Fatal.exit_code`
 /// carries.
 pub use quip_protocol::session::ExitCode;
+
+use crate::coefficient::Coefficient;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -119,11 +126,11 @@ mod cancel_tests {
 }
 
 /// One job entering the streaming sampler.
-pub struct StreamJob {
+pub struct StreamJob<C: Coefficient = f64> {
     /// Opaque job id from the coordinator (echoed on Result/Reject).
     pub job_id: Vec<u8>,
     /// Wire-parsed Ising problem for this job.
-    pub graph: IsingGraph,
+    pub graph: IsingGraph<C>,
     /// Resolved sampling knobs for this job.
     pub params: SampleParams,
     /// Cancellation watermark for this job, or `None` when the job cannot be
@@ -134,9 +141,9 @@ pub struct StreamJob {
 /// One job entering [`Sampler::sample_stream_warm`]: the plain job, plus its
 /// warm start when the coordinator sent one.
 #[non_exhaustive]
-pub struct WarmStreamJob {
+pub struct WarmStreamJob<C: Coefficient = f64> {
     /// The job, exactly as [`Sampler::sample_stream`] would receive it.
-    pub job: StreamJob,
+    pub job: StreamJob<C>,
     /// Start states and anneal start point, or `None` for a cold job.
     pub warm_start: Option<WarmStart>,
 }
@@ -166,8 +173,38 @@ pub enum StreamOutcome {
 /// Implementations own their device and algorithm. Only [`sample`](Sampler::sample)
 /// is required; the other methods default to a no-governor, uncapped backend
 /// (the CPU miner's shape).
-pub trait Sampler: Send + Sync + 'static {
+pub trait Sampler<C: Coefficient = f64>: Send + Sync + 'static {
+    /// Whether the backend draws lease problems itself, without opening a device.
+    #[must_use]
+    fn generates_locally() -> bool
+    where
+        Self: Sized,
+    {
+        false
+    }
+
+    /// Work a lease on a dedicated thread. Poll the sink to observe stops.
+    ///
+    /// # Errors
+    /// Returns a device condition, or a device fault if local generation is unsupported.
+    fn sample_lease(
+        &self,
+        _lease: &Lease,
+        _topology: &TopologyView,
+        _params: &SampleParams,
+        _out: &LeaseSink,
+    ) -> Result<(), SampleError> {
+        Err(SampleError::DeviceFault(
+            "sample_lease called on a sampler that does not generate locally".into(),
+        ))
+    }
+
     /// Sample one job.
+    ///
+    /// Each reported energy must be the exact energy of the model received by
+    /// the solver, as required for an `f64` solver. The session skips rescoring
+    /// when coefficient conversion preserves the exact problem. Otherwise it
+    /// scores the returned spins against the original milli coefficients.
     ///
     /// # Errors
     ///
@@ -176,7 +213,7 @@ pub trait Sampler: Send + Sync + 'static {
     /// `DeviceFault` for a state that needs a restart.
     fn sample(
         &self,
-        graph: &IsingGraph,
+        graph: &IsingGraph<C>,
         params: &SampleParams,
     ) -> Result<Vec<SamplerResult>, SampleError>;
 
@@ -189,7 +226,7 @@ pub trait Sampler: Send + Sync + 'static {
     /// [`stream_width`]: Sampler::stream_width
     fn sample_stream(
         &self,
-        jobs: tokio::sync::mpsc::Receiver<StreamJob>,
+        jobs: tokio::sync::mpsc::Receiver<StreamJob<C>>,
         out: tokio::sync::mpsc::Sender<StreamResult>,
         cancel: CancelToken,
     ) {
@@ -224,7 +261,7 @@ pub trait Sampler: Send + Sync + 'static {
     /// Same as [`sample`](Sampler::sample).
     fn sample_warm(
         &self,
-        graph: &IsingGraph,
+        graph: &IsingGraph<C>,
         params: &SampleParams,
         warm: &WarmStart,
     ) -> Result<Vec<SamplerResult>, SampleError> {
@@ -239,7 +276,7 @@ pub trait Sampler: Send + Sync + 'static {
     /// seeded job and [`sample`](Sampler::sample) for a cold one.
     fn sample_stream_warm(
         &self,
-        jobs: tokio::sync::mpsc::Receiver<WarmStreamJob>,
+        jobs: tokio::sync::mpsc::Receiver<WarmStreamJob<C>>,
         out: tokio::sync::mpsc::Sender<StreamResult>,
         cancel: CancelToken,
     ) {
@@ -307,14 +344,15 @@ pub trait Sampler: Send + Sync + 'static {
 /// The serial loop behind the default [`Sampler::sample_stream`] and
 /// [`Sampler::sample_stream_warm`]. `split` pulls the plain job and its
 /// optional warm start out of the channel item.
-fn serial_stream<S, J>(
+fn serial_stream<S, J, C>(
     sampler: &S,
     mut jobs: tokio::sync::mpsc::Receiver<J>,
     out: &tokio::sync::mpsc::Sender<StreamResult>,
     cancel: &CancelToken,
-    split: impl Fn(J) -> (StreamJob, Option<WarmStart>),
+    split: impl Fn(J) -> (StreamJob<C>, Option<WarmStart>),
 ) where
-    S: Sampler + ?Sized,
+    S: Sampler<C> + ?Sized,
+    C: Coefficient,
 {
     while let Some(item) = jobs.blocking_recv() {
         let (j, warm) = split(item);
@@ -390,7 +428,7 @@ mod stream_tests {
             _params: &SampleParams,
         ) -> Result<Vec<SamplerResult>, SampleError> {
             Ok(vec![SamplerResult {
-                spins: vec![1i8; graph.h.len()],
+                spins: vec![1i8; graph.num_nodes()],
                 energy_milli: 0,
             }])
         }
@@ -451,7 +489,7 @@ mod stream_tests {
             use std::sync::atomic::Ordering;
             let _ = self.0.fetch_add(1, Ordering::SeqCst);
             Ok(vec![SamplerResult {
-                spins: vec![1i8; graph.h.len()],
+                spins: vec![1i8; graph.num_nodes()],
                 energy_milli: 0,
             }])
         }
@@ -614,7 +652,7 @@ mod stream_tests {
             _params: &SampleParams,
         ) -> Result<Vec<SamplerResult>, SampleError> {
             Ok(vec![SamplerResult {
-                spins: vec![1i8; graph.h.len()],
+                spins: vec![1i8; graph.num_nodes()],
                 energy_milli: 0,
             }])
         }
@@ -700,5 +738,65 @@ mod stream_tests {
             usize::try_from(declared),
             Ok(OneResultSampler.stream_width())
         );
+    }
+
+    struct NarrowFixedSampler;
+    impl Sampler<coefficient::Fixed<i8, 1>> for NarrowFixedSampler {
+        fn sample(
+            &self,
+            graph: &IsingGraph<coefficient::Fixed<i8, 1>>,
+            _params: &SampleParams,
+        ) -> Result<Vec<SamplerResult>, SampleError> {
+            Ok(vec![SamplerResult {
+                spins: vec![1; graph.num_nodes()],
+                energy_milli: 7,
+            }])
+        }
+    }
+
+    /// The default warm stream forwards one cold narrow job through `sample`.
+    #[test]
+    fn default_sample_stream_warm_runs_a_narrow_job() {
+        use coefficient::Fixed;
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("rt");
+        let (job_tx, job_rx) = tokio::sync::mpsc::channel::<WarmStreamJob<Fixed<i8, 1>>>(8);
+        let (res_tx, mut res_rx) = tokio::sync::mpsc::channel::<StreamResult>(8);
+        let worker = std::thread::spawn(move || {
+            NarrowFixedSampler.sample_stream_warm(job_rx, res_tx, CancelToken::default());
+        });
+
+        rt.block_on(async {
+            job_tx
+                .send(WarmStreamJob {
+                    job: StreamJob {
+                        job_id: b"n1".to_vec(),
+                        graph: IsingGraph::<Fixed<i8, 1>> {
+                            h: vec![Fixed(1), Fixed(-1)],
+                            j: vec![Fixed(1)],
+                            edges: vec![(0, 1)],
+                        },
+                        params: SampleParams::default(),
+                        watermark: None,
+                    },
+                    warm_start: None,
+                })
+                .await
+                .expect("send job");
+            drop(job_tx);
+
+            let result = res_rx.recv().await.expect("one result");
+            assert!(res_rx.recv().await.is_none(), "exactly one result");
+            assert_eq!(result.job_id, b"n1");
+            let StreamOutcome::Completed(Ok(reads)) = result.outcome else {
+                panic!("expected Completed(Ok)");
+            };
+            assert_eq!(reads.len(), 1);
+            let read = reads.first().expect("one read");
+            assert_eq!(read.spins.len(), 2);
+        });
+        worker.join().expect("worker join");
     }
 }

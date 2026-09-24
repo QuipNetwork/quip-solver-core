@@ -1,12 +1,12 @@
 //! Energy and diversity scoring in integer-milli arithmetic.
 //!
-//! Wire coefficients travel as `i32` milli (`wire::decode_i32_le`). `energy_milli`
-//! keeps the historical `f64` signature, but recovers each coefficient's exact
-//! milli value and accumulates in integers, so it agrees with the integer-milli
-//! re-score the coordinator and chain perform (`quantum_validation`) instead of
-//! approximating it. A miner-reported `energy_milli` is still never the basis for
-//! the accept decision — the coordinator always re-scores — but the two no longer
-//! disagree on ordinary problems.
+//! Wire coefficients travel as `i32` milli (`wire::decode_i32_le`).
+//! [`energy_from_milli`] scores them directly. [`energy_milli`] keeps the
+//! historical `f64` signature for the Python, WASM, and C bindings, but recovers
+//! each coefficient's exact milli value and accumulates in integers, so both
+//! agree with the integer-milli re-score the coordinator and chain perform
+//! (`quantum_validation`). A miner-reported `energy_milli` is still never the
+//! basis for the accept decision. The coordinator always re-scores.
 
 /// The value [`energy_milli`] returns when a coefficient it reads is not finite.
 ///
@@ -56,6 +56,15 @@ fn coefficient_milli(c: f64) -> Option<i64> {
     Some((c * 1000.0).round() as i64)
 }
 
+/// Clamp an `i128` sum to the `i64` the wire carries.
+fn saturate_i64(acc: i128) -> i64 {
+    i64::try_from(acc).unwrap_or(if acc.is_negative() {
+        i64::MIN
+    } else {
+        i64::MAX
+    })
+}
+
 /// Ising energy `Σ h_i·s_i + Σ j_k·s_u·s_v`, in milli.
 ///
 /// Coefficients are read as exact integer milli (see `coefficient_milli`) and
@@ -95,11 +104,40 @@ pub fn energy_milli(spins: &[i8], h: &[f64], j: &[f64], edges: &[(usize, usize)]
         acc = acc.saturating_add(i128::from(milli) * i128::from(sign(su)) * i128::from(sign(sv)));
     }
     // i128 holds any sum the i64-bounded terms can reach; clamp to the wire type.
-    i64::try_from(acc).unwrap_or(if acc.is_negative() {
-        i64::MIN
-    } else {
-        i64::MAX
-    })
+    saturate_i64(acc)
+}
+
+/// Ising energy `Σ h_i·s_i + Σ j_k·s_u·s_v` from milli coefficients, in milli.
+///
+/// The integer form of [`energy_milli`], with the same rules: an entry with no
+/// matching spin and an edge naming an out-of-range node contribute nothing, a
+/// spin greater than zero is `+1` and any other spin is `-1`, and the `i128`
+/// sum saturates to `i64::MIN` or `i64::MAX`. For every input it returns what
+/// [`energy_milli`] returns on the `v / 1000.0` floats. Integer input cannot be
+/// non-finite, so the non-finite condition cannot arise. A saturated or exact
+/// sum can still equal the [`ENERGY_MILLI_NON_FINITE`] value.
+#[must_use]
+pub fn energy_from_milli(
+    spins: &[i8],
+    h_milli: &[i32],
+    j_milli: &[i32],
+    edges: &[(usize, usize)],
+) -> i64 {
+    let mut acc: i128 = 0;
+    // `zip` stops at the shorter slice, so a spin with no bias contributes
+    // nothing.
+    for (&s, &milli) in spins.iter().zip(h_milli) {
+        acc = acc.saturating_add(i128::from(milli) * i128::from(sign(s)));
+    }
+    for (k, &(u, v)) in edges.iter().enumerate() {
+        // An edge is scored only when its coupling and both endpoints exist.
+        let (Some(&milli), Some(&su), Some(&sv)) = (j_milli.get(k), spins.get(u), spins.get(v))
+        else {
+            continue;
+        };
+        acc = acc.saturating_add(i128::from(milli) * i128::from(sign(su)) * i128::from(sign(sv)));
+    }
+    saturate_i64(acc)
 }
 
 /// Flip-invariant Hamming distance between two spin vectors, `min(d, n - d)`.
@@ -351,5 +389,101 @@ mod tests {
         // distance is flip-invariant.
         let d = set_diversity(&[vec![1, 1, -1, -1], vec![1, -1, 1, -1], vec![1, 1, 1, -1]]);
         assert!((0.0..=0.5).contains(&d), "diversity {d} outside [0, 0.5]");
+    }
+
+    use crate::chacha8::ChaCha8Rng;
+
+    /// The unit-float form a binding builds from milli coefficients.
+    fn unit(milli: &[i32]) -> Vec<f64> {
+        milli.iter().map(|&v| f64::from(v) / 1000.0).collect()
+    }
+
+    #[test]
+    fn energy_from_milli_sign_and_scaling() {
+        // Same problem as energy_sign_and_scaling, in milli.
+        assert_eq!(
+            energy_from_milli(&[1, -1], &[1000, -500], &[2000], &[(0, 1)]),
+            -500
+        );
+    }
+
+    #[test]
+    fn energy_from_milli_skips_what_energy_milli_skips() {
+        // Spin 2 has no bias, coupling 1 has no edge, and edge (0, 5) names a
+        // node that does not exist. Only the two biases score: 1000 - 1000.
+        assert_eq!(
+            energy_from_milli(&[1, -1, 1], &[1000, 1000], &[1000, 7000], &[(0, 5)]),
+            0
+        );
+    }
+
+    #[test]
+    fn energy_from_milli_maps_non_positive_spins_to_minus_one() {
+        // 0 and i8::MIN score as -1. 2 and i8::MAX score as +1.
+        assert_eq!(
+            energy_from_milli(&[0, i8::MIN, 2, i8::MAX], &[1, 10, 100, 1000], &[], &[]),
+            -1 - 10 + 100 + 1000
+        );
+    }
+
+    #[test]
+    fn energy_from_milli_sums_i32_extremes_exactly() {
+        let n = 1000;
+        assert_eq!(
+            energy_from_milli(&vec![1; n], &vec![i32::MIN; n], &[], &[]),
+            i64::from(i32::MIN) * 1000
+        );
+        assert_eq!(
+            energy_from_milli(&[-1, -1], &[0, 0], &[i32::MAX], &[(0, 1)]),
+            i64::from(i32::MAX)
+        );
+    }
+
+    #[test]
+    fn saturate_i64_clamps_both_ends() {
+        assert_eq!(saturate_i64(i128::from(i64::MAX) + 1), i64::MAX);
+        assert_eq!(saturate_i64(i128::from(i64::MIN) - 1), i64::MIN);
+        assert_eq!(saturate_i64(-7), -7);
+    }
+
+    /// A value in `0..bound`.
+    fn below(rng: &mut ChaCha8Rng, bound: u32) -> usize {
+        usize::try_from(rng.next_u32() % bound).unwrap()
+    }
+
+    /// Any `i32`, with each extreme drawn one time in eight.
+    fn random_milli(rng: &mut ChaCha8Rng) -> i32 {
+        match rng.next_u32() % 8 {
+            0 => i32::MIN,
+            1 => i32::MAX,
+            _ => i32::from_le_bytes(rng.next_u32().to_le_bytes()),
+        }
+    }
+
+    #[test]
+    fn energy_from_milli_matches_energy_milli_on_random_problems() {
+        let mut rng = ChaCha8Rng::from_seed([0x5A; 32]);
+        for case in 0..2000 {
+            // Up to 39 spins. Bias, coupling, and edge counts vary on their
+            // own, and endpoints reach past the last spin, so every skip rule
+            // is exercised.
+            let spins: Vec<i8> = (0..below(&mut rng, 40))
+                .map(|_| i8::from_le_bytes([rng.next_u32().to_le_bytes()[0]]))
+                .collect();
+            let h: Vec<i32> = (0..below(&mut rng, 44))
+                .map(|_| random_milli(&mut rng))
+                .collect();
+            let edges: Vec<(usize, usize)> = (0..below(&mut rng, 80))
+                .map(|_| (below(&mut rng, 44), below(&mut rng, 44)))
+                .collect();
+            let j: Vec<i32> = (0..below(&mut rng, 84))
+                .map(|_| random_milli(&mut rng))
+                .collect();
+            assert_eq!(
+                energy_from_milli(&spins, &h, &j, &edges),
+                energy_milli(&spins, &unit(&h), &unit(&j), &edges),
+                "case {case}"
+            );
+        }
     }
 }

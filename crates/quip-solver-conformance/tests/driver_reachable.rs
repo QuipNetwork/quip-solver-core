@@ -18,9 +18,17 @@ fn drive_miner_is_exported_from_the_conformance_crate() {
 fn the_verdict_surface_is_exported_too() {
     // A solver repository grades itself with these, so they are as much of the
     // contract as the drive functions are.
-    use quip_solver_conformance::driver::{DriverReport, Terminal};
+    use quip_solver_conformance::driver::{DriverReport, LeaseOutcome, Terminal};
 
     let _ = DriverReport::is_conformant;
+    let _ = DriverReport::lease_conformant;
+    let lease = LeaseOutcome {
+        results: 4,
+        results_verified: 4,
+        lease_done: Some((4, -1000)),
+        credit_refunded: true,
+    };
+    assert_eq!(lease.results, lease.results_verified);
     let _ = DriverReport::bad_welcome_conformant;
     let _ = DriverReport::close_after_welcome_conformant;
     let _ = DriverReport::close_before_welcome_conformant;

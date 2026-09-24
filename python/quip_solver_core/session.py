@@ -1,11 +1,44 @@
 import os
-from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
 from quip.v1 import miner_pb2
 
 # Protocol version this SDK speaks. Welcome.protocol_version must equal this.
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
+
+# Stable lowercase names for the wire identity enums. The strings are the
+# quip_protocol::session maps (backend_name / algorithm_name).
+BACKEND_NAMES: dict[int, str] = {
+    miner_pb2.BACKEND_UNSPECIFIED: "unspecified",
+    miner_pb2.BACKEND_CPU: "cpu",
+    miner_pb2.BACKEND_CUDA: "cuda",
+    miner_pb2.BACKEND_METAL: "metal",
+    miner_pb2.BACKEND_ANE: "ane",
+    miner_pb2.BACKEND_DWAVE_QPU: "dwave-qpu",
+    miner_pb2.BACKEND_EXEC: "exec",
+    miner_pb2.BACKEND_MOCK: "mock",
+}
+ALGORITHM_NAMES: dict[int, str] = {
+    miner_pb2.ALGORITHM_UNSPECIFIED: "unspecified",
+    miner_pb2.ALGORITHM_SA: "sa",
+    miner_pb2.ALGORITHM_GIBBS: "gibbs",
+    miner_pb2.ALGORITHM_QUANTUM_ANNEAL: "quantum-anneal",
+    miner_pb2.ALGORITHM_FSA: "fsa",
+    miner_pb2.ALGORITHM_MSA: "msa",
+    miner_pb2.ALGORITHM_FLATIRON: "flatiron",
+    miner_pb2.ALGORITHM_MPS: "mps",
+    miner_pb2.ALGORITHM_MFA: "mfa",
+    miner_pb2.ALGORITHM_SB: "sb",
+    miner_pb2.ALGORITHM_BSB: "bsb",
+    miner_pb2.ALGORITHM_GBSB: "gbsb",
+    miner_pb2.ALGORITHM_GDSB: "gdsb",
+    miner_pb2.ALGORITHM_GGDSB: "ggdsb",
+    miner_pb2.ALGORITHM_HBSB: "hbsb",
+    miner_pb2.ALGORITHM_HDSB: "hdsb",
+    miner_pb2.ALGORITHM_SBQA: "sbqa",
+    miner_pb2.ALGORITHM_TEDSB: "tedsb",
+    miner_pb2.ALGORITHM_EXTERNAL: "external",
+}
 
 # Configure zeros mean "use the SDK default". These match
 # quip_protocol::session::SessionConfig::from_configure.
@@ -50,37 +83,16 @@ class SessionConfig:
     num_sweeps: int
 
 
-def build_hello(
-    miner_id: str,
-    backend: str,
-    algorithm: str,
-    supported_kinds: Iterable[int],
-    max_nodes: int,
-    max_edges: int,
-    features: Sequence[str] | None = None,
-    native_topology_hash: bytes | None = None,
-) -> miner_pb2.Hello:
-    """Build the miner Hello, reading QUIP_SESSION_TOKEN from the env.
-
-    `max_nodes` / `max_edges` of 0 mean unlimited, matching Rust `BackendCaps`.
-    """
+def build_hello(miner_id: str, capabilities: miner_pb2.Capabilities) -> miner_pb2.Hello:
+    """Build the miner Hello, reading QUIP_SESSION_TOKEN from the env."""
     token = os.environ.get("QUIP_SESSION_TOKEN")
     if not token:
         raise MissingToken("QUIP_SESSION_TOKEN unset")
-    hello = miner_pb2.Hello(
+    return miner_pb2.Hello(
         miner_id=miner_id,
         session_token=token,
-        protocol_version=PROTOCOL_VERSION,
-        backend=backend,
-        algorithm=algorithm,
-        supported_kinds=list(supported_kinds),
-        max_nodes=max_nodes,
-        max_edges=max_edges,
-        features=list(features or ()),
+        capabilities=capabilities,
     )
-    if native_topology_hash is not None:
-        hello.native_topology_hash = native_topology_hash
-    return hello
 
 
 def check_welcome(welcome: miner_pb2.Welcome) -> None:

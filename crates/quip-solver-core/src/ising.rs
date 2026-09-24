@@ -4,6 +4,8 @@
 //! derive their own representation from it: the CPU miner builds an adjacency
 //! list, the GPU miners build [`crate::csr::CsrGraph`].
 
+use crate::coefficient::Coefficient;
+
 /// Sampling algorithm selected by the binary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Algorithm {
@@ -77,13 +79,13 @@ pub struct SamplerResult {
     pub energy_milli: i64,
 }
 
-/// Wire-parsed Ising problem: dense biases, flat couplings, and edge list.
+/// Wire-parsed Ising problem in the sampler's coefficient representation.
 #[derive(Clone, Debug)]
-pub struct IsingGraph {
-    /// Linear biases, one per variable.
-    pub h: Vec<f64>,
-    /// Couplings aligned with `edges`.
-    pub j: Vec<f64>,
+pub struct IsingGraph<C: Coefficient = f64> {
+    /// Linear biases, one per variable, in the sampler's coefficient type.
+    pub h: Vec<C>,
+    /// Couplings aligned with `edges`, in the sampler's coefficient type.
+    pub j: Vec<C>,
     /// Undirected edge list `(u, v)` in received order.
     pub edges: Vec<(usize, usize)>,
 }
@@ -94,26 +96,82 @@ impl IsingGraph {
     pub fn new(h: Vec<f64>, j: Vec<f64>, edges: Vec<(usize, usize)>) -> Self {
         Self { h, j, edges }
     }
+}
 
-    /// Number of variables (length of `h`).
+impl<C: Coefficient> IsingGraph<C> {
+    /// Number of variables, equal to the bias count.
     #[must_use]
     pub fn num_nodes(&self) -> usize {
         self.h.len()
     }
 }
 
+/// Read one pinned graph from the shared conformance fixtures.
+#[cfg(test)]
+pub(crate) fn golden_graph<C: Coefficient>(section: &str, index: usize) -> IsingGraph<C> {
+    let golden: serde_json::Value =
+        serde_json::from_str(quip_solver_conformance::GOLDEN_VECTORS).expect("golden JSON");
+    let case = golden
+        .pointer(&format!("/{section}/{index}"))
+        .expect("golden case");
+    let coefficients = |key: &str| {
+        case.get(key)
+            .and_then(serde_json::Value::as_array)
+            .expect("milli array")
+            .iter()
+            .map(|v| C::from_milli(i32::try_from(v.as_i64().expect("integer")).expect("i32 milli")))
+            .collect()
+    };
+    let edges = case
+        .get("edges")
+        .and_then(serde_json::Value::as_array)
+        .expect("edges array")
+        .iter()
+        .map(|edge| {
+            let end = |i| {
+                usize::try_from(
+                    edge.get(i)
+                        .and_then(serde_json::Value::as_u64)
+                        .expect("endpoint"),
+                )
+                .expect("usize endpoint")
+            };
+            (end(0), end(1))
+        })
+        .collect();
+    IsingGraph {
+        h: coefficients("h_milli"),
+        j: coefficients("j_milli"),
+        edges,
+    }
+}
+
+/// Every golden graph the pinned beta and CSR tests cover, as
+/// `(section, index)`.
+#[cfg(test)]
+pub(crate) const GOLDEN_GRAPHS: [(&str, usize); 9] = [
+    ("energy", 0),
+    ("energy", 1),
+    ("energy", 2),
+    ("energy", 3),
+    ("energy", 4),
+    ("energy", 5),
+    ("energy", 6),
+    ("ising", 0),
+    ("ising", 1),
+];
+
 #[cfg(test)]
 mod tests {
-    use super::*;
-
+    use super::IsingGraph;
     #[test]
     fn num_nodes_counts_biases() {
-        let g = IsingGraph::new(
+        let graph = IsingGraph::new(
             vec![1.0, -0.5, 0.0, 0.25],
             vec![1.0, -1.0, -1.0, 1.0],
             vec![(0, 1), (1, 2), (2, 3), (0, 3)],
         );
-        assert_eq!(g.num_nodes(), 4);
-        assert_eq!(g.edges.len(), 4);
+        assert_eq!(graph.num_nodes(), 4);
+        assert_eq!(graph.edges.len(), 4);
     }
 }

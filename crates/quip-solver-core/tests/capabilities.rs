@@ -38,7 +38,7 @@ fn capabilities_flag_emits_the_typed_message() {
     assert_eq!(v.get("algorithm"), Some(&serde_json::json!("sa")));
     assert_eq!(
         v.get("supportedKinds"),
-        Some(&serde_json::json!(["ISING_SAMPLE"]))
+        Some(&serde_json::json!(["ISING_SAMPLE", "ISING_GENERATE"]))
     );
     assert!(v
         .get("maxNodes")
@@ -48,7 +48,20 @@ fn capabilities_flag_emits_the_typed_message() {
         .get("maxEdges")
         .and_then(serde_json::Value::as_u64)
         .is_some());
-    assert_eq!(v.get("protocolVersion"), Some(&serde_json::json!(1)));
+    assert_eq!(v.get("protocolVersion"), Some(&serde_json::json!(2)));
+    assert_eq!(
+        v.get("encodings"),
+        Some(&serde_json::json!([
+            "COEFFICIENT_ENCODING_I32",
+            "COEFFICIENT_ENCODING_F64"
+        ]))
+    );
+    assert_eq!(
+        v.get("generators"),
+        Some(&serde_json::json!([
+            "GENERATOR_ALGORITHM_BLAKE3_CHACHA8_V1"
+        ]))
+    );
     assert!(v
         .get("streamWidth")
         .and_then(serde_json::Value::as_u64)
