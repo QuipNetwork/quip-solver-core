@@ -43,6 +43,37 @@ impl Lease {
     }
 }
 
+/// Salt indices a local sampler already pushed, stored as merged `start..end` ranges.
+/// A backend that pushes in rough order keeps this to a few entries.
+#[derive(Default)]
+struct PushedSalts(std::collections::BTreeMap<u64, u64>);
+impl PushedSalts {
+    /// Record `index`. Returns `false` if it was already recorded.
+    fn insert(&mut self, index: u64) -> bool {
+        let before = self
+            .0
+            .range(..=index)
+            .next_back()
+            .map(|(&start, &end)| (start, end));
+        if before.is_some_and(|(_, end)| index < end) {
+            return false;
+        }
+        let mut start = index;
+        if let Some((prev_start, prev_end)) = before {
+            if prev_end == index {
+                start = prev_start;
+            }
+        }
+        // `index < salt_count <= u64::MAX`, so this never saturates in practice.
+        let mut end = index.saturating_add(1);
+        if let Some(next_end) = self.0.remove(&end) {
+            end = next_end;
+        }
+        let _ = self.0.insert(start, end);
+        true
+    }
+}
+
 struct Progress {
     dispatched: u64,
     finished: u64,
@@ -50,6 +81,7 @@ struct Progress {
     best_energy_milli: i64,
     closed: bool,
     done_sent: bool,
+    pushed: PushedSalts,
 }
 
 pub(crate) struct LeaseState {
@@ -241,6 +273,7 @@ pub(crate) fn prepare(
             best_energy_milli: i64::MAX,
             closed: false,
             done_sent: false,
+            pushed: PushedSalts::default(),
         }),
     });
     Ok((
@@ -492,7 +525,8 @@ impl LeaseSink {
     }
 
     /// Submit all reads for a finished salt from a blocking sampler thread.
-    /// During shutdown, already running work may submit until grace expires.
+    /// During shutdown, already running work may submit until the lease closes.
+    /// A repeated `salt_index` is ignored and logged. It sends and counts nothing.
     ///
     /// # Errors
     /// Returns a stop if the lease has ended, the index is outside its range,
@@ -505,6 +539,14 @@ impl LeaseSink {
             let mut progress = self.state.progress();
             if progress.closed {
                 return Err(LeaseStopped);
+            }
+            if !progress.pushed.insert(salt_index) {
+                drop(progress);
+                tracing::warn!(
+                    salt_index,
+                    "local sampler pushed a salt twice; ignoring the repeat"
+                );
+                return Ok(());
             }
             progress.dispatched += 1;
         }
@@ -723,8 +765,53 @@ mod tests {
                 best_energy_milli: i64::MAX,
                 closed: false,
                 done_sent: false,
+                pushed: PushedSalts::default(),
             }),
         })
+    }
+
+    #[test]
+    fn pushed_salts_merge_ranges_and_reject_repeats() {
+        let mut pushed = PushedSalts::default();
+        for index in [0, 1, 2, 5, 4, 3] {
+            assert!(pushed.insert(index), "{index} is new");
+        }
+        assert_eq!(pushed.0.len(), 1, "0..6 must merge into one range");
+        for index in 0..6 {
+            assert!(!pushed.insert(index), "{index} repeats");
+        }
+        assert!(pushed.insert(u64::MAX - 1));
+        assert!(!pushed.insert(u64::MAX - 1));
+    }
+
+    #[test]
+    fn a_repeated_local_salt_counts_once() {
+        let state = test_state(None);
+        let (ctrl, _ctrl_rx) = mpsc::channel::<Control>(4);
+        let sink = LeaseSink {
+            before_send: Mutex::new(None),
+            state: Arc::clone(&state),
+            cancel: CancelToken::default(),
+            shutdown: watch::channel(None).1,
+            // No target: push counts the salt and sends nothing.
+            target: watch::channel(None).1,
+            ctrl: ctrl.downgrade(),
+            device_faulted: Arc::new(AtomicBool::new(false)),
+            params: SampleParams::default(),
+        };
+        let read = || {
+            vec![SamplerResult {
+                spins: vec![1],
+                energy_milli: -1000,
+            }]
+        };
+        assert_eq!(sink.push(0, read()), Ok(()));
+        assert_eq!(sink.push(0, read()), Ok(()));
+        let progress = state.progress();
+        assert_eq!(
+            (progress.dispatched, progress.finished, progress.salts_done),
+            (1, 1, 1)
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -863,6 +950,7 @@ mod tests {
                 best_energy_milli: i64::MAX,
                 closed: false,
                 done_sent: false,
+                pushed: PushedSalts::default(),
             }),
         });
         let (jobs, _jobs_rx) = mpsc::channel::<StreamJob<Milli>>(1);
