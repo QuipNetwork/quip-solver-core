@@ -619,6 +619,44 @@ impl LeaseSink {
         result
     }
 
+    /// Count a salt the backend screened out, from a blocking sampler thread.
+    /// Its energy folds into the lease's best energy. Sends nothing.
+    /// A repeated `salt_index` is ignored and logged.
+    ///
+    /// # Errors
+    /// Returns a stop if the lease has ended, the index is outside its range,
+    /// or the writer has gone.
+    pub fn screen(&self, salt_index: u64, energy_milli: i64) -> Result<(), LeaseStopped> {
+        if self.rejects_push() || salt_index >= self.state.lease.salt_count() {
+            return Err(LeaseStopped);
+        }
+        let mut progress = self.state.progress();
+        if progress.closed || progress.done_sent {
+            return Err(LeaseStopped);
+        }
+        if !progress.pushed.insert(salt_index) {
+            drop(progress);
+            tracing::warn!(
+                salt_index,
+                "local sampler screened a salt twice; ignoring the repeat"
+            );
+            return Ok(());
+        }
+        progress.dispatched += 1;
+        progress.finished += 1;
+        progress.salts_done += 1;
+        progress.best_energy_milli = progress.best_energy_milli.min(energy_milli);
+        drop(progress);
+        let _ = self.state.jobs_done.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// The live session target's `max_energy_milli`, or `None` without one.
+    #[must_use]
+    pub fn target_energy_milli(&self) -> Option<i64> {
+        self.target.borrow().as_ref().map(|t| t.max_energy_milli)
+    }
+
     fn push_winner(&self, index: u64, reads: Vec<SamplerResult>) -> Result<(), LeaseStopped> {
         let target = self.target.borrow().clone();
         let meta = SamplerMeta {
@@ -817,21 +855,28 @@ mod tests {
         assert!(!pushed.insert(u64::MAX - 1));
     }
 
+    fn sink_for(
+        state: &Arc<LeaseState>,
+        target: Option<SessionTarget>,
+        ctrl: &mpsc::Sender<Control>,
+    ) -> LeaseSink {
+        LeaseSink {
+            before_send: Mutex::new(None),
+            state: Arc::clone(state),
+            cancel: CancelToken::default(),
+            shutdown: watch::channel(None).1,
+            target: watch::channel(target).1,
+            ctrl: ctrl.downgrade(),
+            device_faulted: Arc::new(AtomicBool::new(false)),
+            params: SampleParams::default(),
+        }
+    }
+
     #[test]
     fn a_repeated_local_salt_counts_once() {
         let state = test_state(None);
         let (ctrl, _ctrl_rx) = mpsc::channel::<Control>(4);
-        let sink = LeaseSink {
-            before_send: Mutex::new(None),
-            state: Arc::clone(&state),
-            cancel: CancelToken::default(),
-            shutdown: watch::channel(None).1,
-            // No target: push counts the salt and sends nothing.
-            target: watch::channel(None).1,
-            ctrl: ctrl.downgrade(),
-            device_faulted: Arc::new(AtomicBool::new(false)),
-            params: SampleParams::default(),
-        };
+        let sink = sink_for(&state, None, &ctrl);
         let read = || {
             vec![SamplerResult {
                 spins: vec![1],
@@ -844,6 +889,53 @@ mod tests {
         assert_eq!(
             (progress.dispatched, progress.finished, progress.salts_done),
             (1, 1, 1)
+        );
+    }
+
+    #[test]
+    fn a_screened_salt_counts_and_folds_its_energy_without_sending() {
+        let state = test_state(None);
+        let (ctrl, mut ctrl_rx) = mpsc::channel::<Control>(4);
+        let sink = sink_for(&state, None, &ctrl);
+        assert_eq!(sink.screen(0, -700), Ok(()));
+        assert_eq!(sink.screen(0, -900), Ok(()), "a repeat is ignored");
+        assert_eq!(sink.screen(1, -900), Err(LeaseStopped), "outside the lease");
+        let progress = state.progress();
+        assert_eq!(
+            (progress.dispatched, progress.finished, progress.salts_done),
+            (1, 1, 1)
+        );
+        assert_eq!(progress.best_energy_milli, -700);
+        drop(progress);
+        assert!(ctrl_rx.try_recv().is_err(), "screen sends nothing");
+    }
+
+    #[test]
+    fn a_closed_lease_refuses_screens() {
+        let state = test_state(None);
+        state.progress().closed = true;
+        let (ctrl, _ctrl_rx) = mpsc::channel::<Control>(4);
+        let sink = sink_for(&state, None, &ctrl);
+        assert_eq!(sink.screen(0, -1), Err(LeaseStopped));
+        assert_eq!(state.progress().salts_done, 0);
+    }
+
+    #[test]
+    fn target_energy_follows_the_session_target() {
+        let state = test_state(None);
+        let (ctrl, _ctrl_rx) = mpsc::channel::<Control>(4);
+        assert_eq!(sink_for(&state, None, &ctrl).target_energy_milli(), None);
+        let target = SessionTarget {
+            max_energy_milli: -1234,
+            min_solutions: 0,
+            min_diversity_milli: 0,
+            max_proof_solutions: 0,
+            num_reads: 0,
+            num_sweeps: 0,
+        };
+        assert_eq!(
+            sink_for(&state, Some(target), &ctrl).target_energy_milli(),
+            Some(-1234)
         );
     }
 

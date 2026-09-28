@@ -5,6 +5,15 @@ This file documents changes to the Quip solver contract.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.0.2-rc4
+
+### Added
+
+- `LeaseSink::screen` counts a salt the backend screened out and folds its
+  energy into the lease's best energy, without sending reads.
+- `LeaseSink::target_energy_milli` returns the live session target's
+  maximum energy.
+
 ## 0.0.2-rc3
 
 ### Added
