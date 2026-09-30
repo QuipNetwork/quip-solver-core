@@ -428,11 +428,11 @@ async fn a_lease_reports_every_salt_even_below_an_unreachable_target() {
         .min()
         .unwrap();
     s.send(coord_msg::Msg::Job(j)).await;
-    // solver-core no longer filters lease Results by target: every completed
-    // salt is reported, regardless of whether it clears the (unreachable)
-    // target set here. `verify` checks structure against a permissive
-    // target, not the session's actual one, since solver-core no longer
-    // applies the session's target to what it reports.
+    // Every completed salt is reported here, regardless of whether it
+    // clears the (unreachable) target set above: a lease Result carries no
+    // target filtering. `verify` checks structure against a permissive
+    // target, not the session's actual one, since a lease Result carries no
+    // target of its own.
     for _ in 0..5 {
         let miner_msg::Msg::Result(r) = s.recv().await else {
             panic!("expected every salt to be reported")
@@ -686,8 +686,8 @@ async fn a_new_target_applies_to_later_salts_and_the_topology_is_a_snapshot() {
     s.ack().await;
     release(&mut after_confirmation).await;
     let releases = s.release_remaining();
-    // solver-core no longer filters lease Results by target, an unreachable
-    // one included: every remaining salt is still reported as it completes.
+    // Every remaining salt is still reported as it completes, an unreachable
+    // target included: a lease Result carries no target filtering.
     let done = loop {
         match s.recv().await {
             miner_msg::Msg::Result(r) => verify(&r),
@@ -938,10 +938,10 @@ async fn a_panicking_local_sampler_is_a_device_fault_without_shutdown() {
     );
 }
 
-// solver-core no longer redraws or rescores a local push: it forwards
-// whatever the backend reports, mismatched energy included. The device's
-// own energy audit, and any verification of what a backend reports, is the
-// miner's and the coordinator's job, not solver-core's.
+// A local push forwards whatever the backend reports, mismatched energy
+// included: it does not redraw or rescore the reads. The device's own
+// energy audit, and verification of what a backend reports, is the
+// miner's and the coordinator's job.
 #[tokio::test]
 async fn a_mismatched_local_draw_is_forwarded_unchanged() {
     let mut s = Session::start_mode(false, false, Some("wrong-draw")).await;

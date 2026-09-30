@@ -44,7 +44,7 @@ Retired numbers stay reserved and must never carry another meaning.
 | `IsingProblemGenerator.salt_count` | Absent | 7 | Add range length |
 | `Solution.spins_bytes` | 1 | `spins`, 3 | Remove and reserve old name and number |
 | `Solution.spins` | Absent | 3 | Add bit-packed spins |
-| `Result.salt` | Absent | 4 | Add winning lease salt |
+| `Result.salt` | Absent | 4 | Add reported lease salt |
 | `Result.nonce` | Absent | 5 | Add derived nonce |
 | `LeaseDone.job_id` | Absent | 1 | Add lease identifier |
 | `LeaseDone.salts_done` | Absent | 2 | Add completed salt count |
@@ -219,14 +219,29 @@ Use its `encode_spins_packed` and `decode_spins_packed` for v2 solutions.
 
 Replace local target and lease verification copies with `quip-protocol` functions.
 The default `session` feature enables the protobuf adapters.
-`meets_target` chooses a proof from raw reads.
-It keeps energy-valid reads, sorts stably by energy, and caps the set at `max_proof_solutions`.
-It then checks energy, solution count, and integer diversity.
-Energy must be below the ceiling. Diversity may equal the threshold.
 
-Use `verify_lease_result` on the received proof without selecting another set.
-It checks salt membership, the derived nonce, packed spins, host energies, and the submitted proof's target gates.
-It does not check `Result.job_id` or select the topology for you.
+`Result.solutions` now carries every read the backend reported for a salt, unfiltered and
+uncapped: solver-core no longer selects or caps a proof set before sending.
+Verify and select in two separate steps. Do not change `verify_lease_result` to do this.
+Call it twice, with two different targets, instead.
+
+First, verify authenticity, target-free. Redraw the problem from the lease's generator and
+the `Result`'s salt and nonce. Check every solution's spins and recompute every reported
+energy. A mismatch anywhere in the set drops the whole `Result`.
+Call `verify_lease_result` with a permissive target so only the authenticity checks can fail:
+every energy clears it and any solution count passes.
+A `Result` that passes this call counts as participation for the round, whether it later
+clears the live target or not.
+
+Second, call `meets_target` with the live target and the same decoded reads to select.
+It keeps energy-valid reads and sorts them stably by energy.
+It caps the set at `max_proof_solutions`, then checks energy, solution count, and integer diversity.
+Energy must be below the ceiling. Diversity may equal the threshold.
+`ProofSet.indices` gives the submitted proof set, in proof order.
+A `Result` that clears the target submits that set.
+Hold a `Result` that does not clear it for the chain's decay-ratchet stash rather than drop it.
+
+`verify_lease_result` does not check `Result.job_id` or select the topology for you.
 Match the job identifier and use the lease's topology snapshot before calling it.
 
 ```rust
@@ -234,27 +249,34 @@ use quip_proto::v1::{IsingProblemGenerator, Result as WireResult, SetTarget, Top
 use quip_protocol::lease::{verify_lease_result, TopologyView, Verified};
 use quip_protocol::target::{meets_target, ProofSet, Target, TargetMiss};
 
+/// Only the authenticity checks in `verify_lease_result` can fail against
+/// this target: every energy clears it and any solution count is accepted.
+const PARTICIPATION: Target = Target {
+    max_energy_milli: i64::MAX,
+    min_solutions: 0,
+    min_diversity_milli: 0,
+    max_proof_solutions: u32::MAX,
+};
+
+fn authenticate(
+    lease: &IsingProblemGenerator,
+    topology: &Topology,
+    result: &WireResult,
+) -> Result<Verified, String> {
+    let topology = TopologyView::from_proto(topology).map_err(|e| format!("{e:?}"))?;
+    verify_lease_result(lease, &topology, &PARTICIPATION, result).map_err(|e| e.to_string())
+}
+
 fn choose(reads: &[(&[i8], i64)], wire_target: &SetTarget)
     -> Result<ProofSet, TargetMiss>
 {
     meets_target(reads, &Target::from_proto(wire_target))
 }
-
-fn verify(
-    lease: &IsingProblemGenerator,
-    topology: &Topology,
-    wire_target: &SetTarget,
-    result: &WireResult,
-) -> Result<Verified, String> {
-    let topology = TopologyView::from_proto(topology).map_err(|e| format!("{e:?}"))?;
-    verify_lease_result(lease, &topology, &Target::from_proto(wire_target), result)
-        .map_err(|e| e.to_string())
-}
 ```
 
 `ProofSet.indices` identifies the chosen reads in proof order.
 `Verified` holds the salt, nonce, and `ProofStats`, not another solution list.
-Submit `Result.solutions` unchanged and in order, after decoding spins for the chain proof.
+Submit the solutions `choose` selected, decoded and in proof order, for the chain proof.
 Reordering equal-energy reads can change diversity selection ties.
 
 ## Stop rules

@@ -100,8 +100,8 @@ pub(crate) struct SessionTarget {
 
 impl SessionTarget {
     // anneal_time_us is ignored on the SA/GPU Rust path (QPU adapt lives in the
-    // Python dwave miner). min_diversity_milli is not carried: solver-core no
-    // longer builds a proof set from it (lease results go out unfiltered).
+    // Python dwave miner). min_diversity_milli is not carried: lease results
+    // go out unfiltered, with no proof set built from it here.
     pub(crate) fn from_proto(s: &quip_proto::v1::SetTarget) -> Self {
         Self {
             max_energy_milli: s.max_energy_milli,

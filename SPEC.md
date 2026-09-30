@@ -177,7 +177,8 @@ For each completed salt with a non-empty read set, the session sends one `Result
 `Result.solutions` carries every read for that salt, unfiltered by target.
 A lease `Result` is a salt the backend chose to report.
 The coordinator decides whether it clears the target.
-`quip_protocol::lease::verify_lease_result` verifies the complete wire result with a lease, topology, and target.
+`quip_protocol::lease::verify_lease_result` verifies a lease, topology, a target, and a selected proof set, not the raw `Result.solutions`.
+The coordinator selects that proof set itself before calling it.
 
 After its last result, a completed lease sends one `LeaseDone` with a one-credit refund.
 `salts_done` counts successfully completed salt samples, including empty read sets.
@@ -341,7 +342,7 @@ C solvers use the default lease path and have no local-generation callback.
 
 For a plain job, `DeviceFault` sends a reject and `Fatal` with `exit_code = 70`.
 For a lease, a device fault ends the session with `Fatal` without a per-salt reject.
-Nonfatal lease sampling errors do not produce winning results.
+Nonfatal lease sampling errors do not produce results.
 
 The session calls `sample_stream_warm` instead of `sample_stream` only when
 `accepts_warm_start` returns `true`. The session then passes each job as a

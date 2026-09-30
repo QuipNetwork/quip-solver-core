@@ -547,7 +547,7 @@ impl std::fmt::Display for LeaseStopped {
 }
 impl std::error::Error for LeaseStopped {}
 
-/// Receives locally generated salts and verifies winning reads on the host.
+/// Receives locally generated salts and forwards the reads the backend reports.
 pub struct LeaseSink {
     #[cfg(test)]
     pub(crate) before_send: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
@@ -590,8 +590,6 @@ impl LeaseSink {
     /// # Errors
     /// Returns a stop if the lease has ended, the index is outside its
     /// range, or the writer has gone.
-    // The backend hands off ownership of its read buffer at this boundary;
-    // taking `Vec` avoids forcing every caller to manage a borrow.
     #[expect(
         clippy::needless_pass_by_value,
         reason = "public API takes ownership of the backend's read buffer"
@@ -770,8 +768,8 @@ pub(crate) async fn monitor_local(
             state.finish_locked(&mut progress, close_expired)
         };
         if let Some(done) = done {
-            // Stop summaries bypass queued winners after cancellation or the
-            // close deadline. The writer drops those winners using the same state.
+            // Stop summaries bypass queued results after cancellation or the
+            // close deadline. The writer drops those results using the same state.
             let control = Control::summary(done, Some((Arc::clone(&state), shutdown.clone())));
             let send = crate::session::send_control(&tx, control, &cancel);
             tokio::pin!(send);
