@@ -14,6 +14,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `LeaseSink::target_energy_milli` returns the live session target's
   maximum energy.
 
+### Changed
+
+- A lease `Result` is now a salt the backend chose to report, not a winner
+  solver-core selected. `LeaseSink::push` for local generation and the
+  default sampler-stream lease path both send a `Result` for every
+  completed salt with a non-empty read set. Each `Result` carries every
+  read, unfiltered by target. Solver-core no longer redraws or rescores a
+  locally pushed salt to check its energy. The backend owns its own
+  device-energy audit. The coordinator verifies everything it receives and
+  decides whether a reported salt clears the target.
+
 ## 0.0.2-rc3
 
 ### Added

@@ -398,8 +398,8 @@ fn reap_lease_threads(threads: &mut Vec<std::thread::JoinHandle<()>>) -> Option<
 /// The sampling parameters build the outbound `SamplerMeta`. The rest exists so
 /// the completion log can report an attempt the way the v0.2.1 miner did:
 /// elapsed wall time, and the requirement the attempt was measured against.
-/// Plain jobs retain their admission target for logging. Lease results use
-/// the shared current target when the writer scores them.
+/// Plain jobs retain their admission target for logging. Lease results carry
+/// no target: the writer reports every completed salt's reads unfiltered.
 pub(crate) struct PendingJob {
     pub(crate) lease: Option<LeaseLink>,
     /// Original wire graph, present only for lossy coefficient types.
@@ -559,7 +559,6 @@ fn log_attempt(backend: &str, sr: &StreamResult, pending: Option<&PendingJob>) {
 /// What the outbound writer shares with the read loop, gathered so the writer
 /// takes a handful of arguments instead of a list nobody can read.
 struct WriterContext {
-    target: watch::Receiver<Option<SessionTarget>>,
     aborted: Arc<AtomicBool>,
     /// Prepare-time parameters per job, removed as each one finalizes.
     pending: PendingParams,
@@ -738,7 +737,6 @@ async fn outbound_writer<C: Coefficient>(
         cancel,
         shutdown,
         backend,
-        target,
         aborted,
     } = ctx;
     // Progress logging (mirrors v0.2 mine_work_item's every-N-attempts line).
@@ -837,7 +835,7 @@ async fn outbound_writer<C: Coefficient>(
                         }
                         tracing::warn!(%error, "lease salt failed");
                     }
-                    let reply = lease::handle_result(link, sr, target.borrow().as_ref(), reads, sweeps);
+                    let reply = lease::handle_result(link, sr, reads, sweeps);
                     if let Some(reply) = reply {
                         if tx.send(reply).await.is_err() {
                             return;
@@ -1072,7 +1070,6 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
         res_rx,
         ctrl_rx,
         WriterContext {
-            target: target_rx.clone(),
             aborted: Arc::clone(&aborted),
             pending: Arc::clone(&pending),
             jobs_done: Arc::clone(&jobs_done),
@@ -1934,7 +1931,6 @@ mod tests {
             res_rx,
             ctrl_rx,
             WriterContext {
-                target: watch::channel(None).1,
                 aborted: Arc::new(AtomicBool::new(false)),
                 pending: Arc::clone(&pending),
                 jobs_done: Arc::clone(&jobs_done),

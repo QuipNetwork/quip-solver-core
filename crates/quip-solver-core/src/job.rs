@@ -93,29 +93,19 @@ impl TopologyCache {
 pub(crate) struct SessionTarget {
     pub(crate) max_energy_milli: i64,
     pub(crate) min_solutions: u32,
-    pub(crate) min_diversity_milli: u32,
     pub(crate) max_proof_solutions: u32,
     pub(crate) num_reads: u32,
     pub(crate) num_sweeps: u32,
 }
 
 impl SessionTarget {
-    pub(crate) fn to_target(&self) -> quip_protocol::target::Target {
-        quip_protocol::target::Target {
-            max_energy_milli: self.max_energy_milli,
-            min_solutions: self.min_solutions,
-            min_diversity_milli: self.min_diversity_milli,
-            max_proof_solutions: self.max_proof_solutions,
-        }
-    }
-
     // anneal_time_us is ignored on the SA/GPU Rust path (QPU adapt lives in the
-    // Python dwave miner).
+    // Python dwave miner). min_diversity_milli is not carried: solver-core no
+    // longer builds a proof set from it (lease results go out unfiltered).
     pub(crate) fn from_proto(s: &quip_proto::v1::SetTarget) -> Self {
         Self {
             max_energy_milli: s.max_energy_milli,
             min_solutions: s.min_solutions,
-            min_diversity_milli: s.min_diversity_milli,
             max_proof_solutions: s.max_proof_solutions,
             num_reads: s.num_reads,
             num_sweeps: s.num_sweeps,

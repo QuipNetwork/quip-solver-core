@@ -414,7 +414,7 @@ async fn a_lease_reports_winners_then_one_lease_done() {
     s.finish().await;
 }
 #[tokio::test]
-async fn a_lease_with_no_winners_still_reports_its_count() {
+async fn a_lease_reports_every_salt_even_below_an_unreachable_target() {
     let mut s = Session::start(false).await;
     s.setup(i64::MIN).await;
     let j = job(5);
@@ -428,6 +428,17 @@ async fn a_lease_with_no_winners_still_reports_its_count() {
         .min()
         .unwrap();
     s.send(coord_msg::Msg::Job(j)).await;
+    // solver-core no longer filters lease Results by target: every completed
+    // salt is reported, regardless of whether it clears the (unreachable)
+    // target set here. `verify` checks structure against a permissive
+    // target, not the session's actual one, since solver-core no longer
+    // applies the session's target to what it reports.
+    for _ in 0..5 {
+        let miner_msg::Msg::Result(r) = s.recv().await else {
+            panic!("expected every salt to be reported")
+        };
+        verify(&r);
+    }
     assert!(
         matches!(s.recv().await, miner_msg::Msg::LeaseDone(d) if d.salts_done == 5 && d.best_energy_milli == best)
     );
@@ -675,8 +686,16 @@ async fn a_new_target_applies_to_later_salts_and_the_topology_is_a_snapshot() {
     s.ack().await;
     release(&mut after_confirmation).await;
     let releases = s.release_remaining();
-    // No winner can pass the acknowledged target, including the blocked salt.
-    assert!(matches!(s.recv().await, miner_msg::Msg::LeaseDone(d) if d.salts_done == 40));
+    // solver-core no longer filters lease Results by target, an unreachable
+    // one included: every remaining salt is still reported as it completes.
+    let done = loop {
+        match s.recv().await {
+            miner_msg::Msg::Result(r) => verify(&r),
+            miner_msg::Msg::LeaseDone(d) => break d,
+            other => panic!("unexpected {other:?}"),
+        }
+    };
+    assert_eq!(done.salts_done, 40);
     s.refund().await;
     s.finish().await;
     releases.abort();
@@ -919,22 +938,29 @@ async fn a_panicking_local_sampler_is_a_device_fault_without_shutdown() {
     );
 }
 
+// solver-core no longer redraws or rescores a local push: it forwards
+// whatever the backend reports, mismatched energy included. The device's
+// own energy audit, and any verification of what a backend reports, is the
+// miner's and the coordinator's job, not solver-core's.
 #[tokio::test]
-async fn a_wrong_device_draw_is_a_device_fault() {
+async fn a_mismatched_local_draw_is_forwarded_unchanged() {
     let mut s = Session::start_mode(false, false, Some("wrong-draw")).await;
     s.setup(i64::MAX).await;
     s.send(coord_msg::Msg::Job(job(5))).await;
-    assert!(matches!(s.recv().await, miner_msg::Msg::Fatal(f)
-        if f.restart_required && f.exit_code == 70));
-    s.tx = mpsc::channel(1).0;
-    assert_eq!(
-        tokio::time::timeout(Duration::from_secs(10), s.child.wait())
-            .await
-            .unwrap()
-            .unwrap()
-            .code(),
-        Some(70)
-    );
+    for _ in 0..5 {
+        let miner_msg::Msg::Result(r) = s.recv().await else {
+            panic!("expected a forwarded result, not a fault")
+        };
+        assert_eq!(r.job_id, b"lease");
+        assert_eq!(
+            r.solutions.len(),
+            1,
+            "push forwards the backend's single read unchanged"
+        );
+    }
+    assert!(matches!(s.recv().await, miner_msg::Msg::LeaseDone(d) if d.salts_done == 5));
+    s.refund().await;
+    s.finish().await;
 }
 
 #[tokio::test]

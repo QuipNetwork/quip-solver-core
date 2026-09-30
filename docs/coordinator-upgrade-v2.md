@@ -141,8 +141,10 @@ A session-wide bound limits generated salts in flight to `stream_width`.
 Plain jobs can run while a lease is active and refund their own credits.
 
 The lease keeps its admission topology snapshot.
-Each completed salt uses the target current at scoring time.
-A winner produces one `Result` with that salt, nonce, and proof set.
+Each completed salt with a non-empty read set produces one `Result` with that salt, nonce,
+and every read, unfiltered by target.
+A lease `Result` is a salt the miner chose to report.
+The coordinator decides whether it clears the target.
 After the last result, the session sends one `LeaseDone` with a one-credit refund.
 `salts_done` counts completed successful salt samples, including empty read sets.
 Empty reads produce no result and leave `best_energy_milli` unchanged.
@@ -273,8 +275,9 @@ A local sampler can push the same salt index twice, but the second push sends an
 
 For local generation, `LeaseSink::is_stopped()` covers cancellation, deadlines, shutdown, completion, and a closed writer.
 On shutdown, stop starting salts immediately.
-The sink accepts verified winners from work already running until the lease close deadline.
-Cancellation and lease expiry reject later pushes and queued winners after the summary.
+The sink accepts pushed results from work already running until the lease close deadline.
+It forwards them unchanged: it does not filter by target, redraw, or rescore.
+Cancellation and lease expiry reject later pushes and queued results after the summary.
 A session task closes cancelled local leases even if the sampler does not return.
 A local fatal error or panic sends `Fatal` without a completion summary or credit refund for that lease.
 

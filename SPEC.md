@@ -107,7 +107,7 @@ M is the solver. C is the coordinator.
 | `Ready` | M→C | Configured and ready to accept jobs. |
 | `JobRequest` | M→C | Grant credits. |
 | `Job` | C→M | One Ising problem or a salt lease. |
-| `Result` | M→C | Plain job solutions or one winning lease salt. |
+| `Result` | M→C | Plain job solutions or the reads a lease backend chose to report for one salt. |
 | `LeaseDone` | M→C | Finish a lease and report its counts and lowest energy. |
 | `Reject` | M→C | Decline a job, with a reason. |
 | `Cancel` | C→M | Abandon stale generations. |
@@ -170,12 +170,13 @@ One lease consumes one credit.
 The default session draws salt problems and sends them through the sampler stream.
 A session-wide bound keeps at most `stream_width` generated salts in flight.
 Plain jobs can interleave with leases and refund their own credits.
-Each lease keeps its topology snapshot, but each salt uses the target current at scoring time.
+Each lease keeps its topology snapshot.
 
-For each winning salt, the session sends one `Result` with 32-byte `salt` and `nonce` fields.
-`Result.solutions` holds the selected proof set in proof order.
-The coordinator verifies and submits that set unchanged and in order.
-`quip_protocol::target::meets_target` selects the proof set.
+For each completed salt with a non-empty read set, the session sends one `Result` with
+32-byte `salt` and `nonce` fields.
+`Result.solutions` carries every read for that salt, unfiltered by target.
+A lease `Result` is a salt the backend chose to report.
+The coordinator decides whether it clears the target.
 `quip_protocol::lease::verify_lease_result` verifies the complete wire result with a lease, topology, and target.
 
 After its last result, a completed lease sends one `LeaseDone` with a one-credit refund.
@@ -321,11 +322,11 @@ Poll `LeaseSink::is_stopped()` before more work.
 It covers cancellation, deadlines, shutdown, completion, and a closed writer.
 This method has no `CancelToken` parameter.
 
-The session first tests reported energies with the current target.
-For a candidate winner, it redraws the problem on the host and rescores every submitted read.
-It checks each spin vector and compares every reported energy with the host energy.
-It checks the current target again before sending the winner.
-A mismatch or a sampler panic is a device fault and ends the run.
+`LeaseSink::push` packages every non-empty read set into a `Result` and sends it unchanged.
+It does not filter by target and does not redraw or rescore the submitted reads.
+The backend owns its own device-energy audit.
+The coordinator verifies everything it receives.
+A sampler panic is still a device fault and ends the run.
 C solvers use the default lease path and have no local-generation callback.
 
 ### Sampling errors
@@ -389,9 +390,10 @@ If the connection stays open, the coordinator receives both messages together.
 `Status.jobs_done` counts completed plain jobs plus sampled lease salts.
 
 For local generation, shutdown makes `LeaseSink::is_stopped()` true immediately, so the sampler starts no new salts.
-The sink accepts verified winners from work already running until the lease close deadline.
+The sink accepts pushed results from work already running until the lease close deadline.
+It forwards them unchanged: it does not filter by target, redraw, or rescore.
 `LeaseSink::push` ignores a repeated salt index.
-Cancellation and lease expiry reject later pushes and queued winners after the summary.
+Cancellation and lease expiry reject later pushes and queued results after the summary.
 A session task closes cancelled local leases even when the sampler does not return.
 A local fatal error or panic sends `Fatal` without `LeaseDone` or a credit refund for that lease.
 

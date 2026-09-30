@@ -10,7 +10,6 @@ use quip_proto::v1::{
     miner_msg, Job, JobRequest, LeaseDone, MinerMsg, RejectReason, SamplerMeta, Solution,
 };
 use quip_protocol::lease::{Generator, LeaseSpec, TopologyView};
-use quip_protocol::target::meets_target;
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
     Arc, Mutex, MutexGuard,
@@ -461,11 +460,13 @@ impl<C: Coefficient> Expander<C> {
     }
 }
 
-/// Score one salt. The writer sends the returned winner before counting it finished.
+/// Report one salt. The writer sends the returned result before counting it finished.
+/// Every completed salt with a non-empty read set becomes a `Result` carrying
+/// its reads; solver-core does not filter by target here, either. The miner
+/// and the coordinator decide what to do with what it reports.
 pub(crate) fn handle_result(
     link: &LeaseLink,
     result: StreamResult,
-    target: Option<&SessionTarget>,
     reads: u32,
     sweeps: u32,
 ) -> Option<MinerMsg> {
@@ -475,11 +476,10 @@ pub(crate) fn handle_result(
     if !record_samples(&link.state, &samples) {
         return None;
     }
-    winner(
+    package_result(
         &link.state,
         link.index,
         &samples,
-        target,
         SamplerMeta {
             reads,
             sweeps,
@@ -500,23 +500,19 @@ fn record_samples(state: &LeaseState, samples: &[SamplerResult]) -> bool {
     }
     true
 }
-fn winner(
+/// Package a salt's reads into a wire `Result`, unfiltered. `None` for an
+/// empty read set: a salt with no reads has nothing worth reporting.
+fn package_result(
     state: &LeaseState,
     index: u64,
     samples: &[SamplerResult],
-    target: Option<&SessionTarget>,
     meta: SamplerMeta,
 ) -> Option<MinerMsg> {
-    let target = target?.to_target();
-    let pairs = samples
+    if samples.is_empty() {
+        return None;
+    }
+    let solutions = samples
         .iter()
-        .map(|s| (s.spins.as_slice(), s.energy_milli))
-        .collect::<Vec<_>>();
-    let proof = meets_target(&pairs, &target).ok()?;
-    let solutions = proof
-        .indices
-        .into_iter()
-        .filter_map(|i| samples.get(i))
         .map(|s| Solution {
             spins: quip_protocol::wire::encode_spins_packed(&s.spins),
             energy_milli: s.energy_milli,
@@ -585,12 +581,21 @@ impl LeaseSink {
     }
 
     /// Submit all reads for a finished salt from a blocking sampler thread.
-    /// During shutdown, already running work may submit until the lease closes.
-    /// A repeated `salt_index` is ignored and logged. It sends and counts nothing.
+    /// The backend decides which salts to report; every non-empty read set
+    /// becomes a wire `Result`, forwarded without target filtering or
+    /// re-verification. During shutdown, already running work may submit
+    /// until the lease closes. A repeated `salt_index` is ignored and
+    /// logged. It sends and counts nothing.
     ///
     /// # Errors
-    /// Returns a stop if the lease has ended, the index is outside its range,
-    /// the writer has gone, or host verification detects a device fault.
+    /// Returns a stop if the lease has ended, the index is outside its
+    /// range, or the writer has gone.
+    // The backend hands off ownership of its read buffer at this boundary;
+    // taking `Vec` avoids forcing every caller to manage a borrow.
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "public API takes ownership of the backend's read buffer"
+    )]
     pub fn push(&self, salt_index: u64, reads: Vec<SamplerResult>) -> Result<(), LeaseStopped> {
         if self.rejects_push() || salt_index >= self.state.lease.salt_count() {
             return Err(LeaseStopped);
@@ -614,7 +619,7 @@ impl LeaseSink {
             self.state.progress().finished += 1;
             return Err(LeaseStopped);
         }
-        let result = self.push_winner(salt_index, reads);
+        let result = self.send_result(salt_index, &reads);
         self.state.progress().finished += 1;
         result
     }
@@ -657,69 +662,31 @@ impl LeaseSink {
         self.target.borrow().as_ref().map(|t| t.max_energy_milli)
     }
 
-    fn push_winner(&self, index: u64, reads: Vec<SamplerResult>) -> Result<(), LeaseStopped> {
-        let target = self.target.borrow().clone();
+    /// Package the backend's reads for `index` into a wire `Result` and send it.
+    /// The backend decides which salts to report; solver-core forwards them
+    /// without filtering by target or re-verifying energies. An empty read
+    /// set carries nothing worth reporting, so it sends nothing.
+    fn send_result(&self, index: u64, reads: &[SamplerResult]) -> Result<(), LeaseStopped> {
         let meta = SamplerMeta {
             reads: u32::try_from(self.params.num_reads).unwrap_or(u32::MAX),
             sweeps: u32::try_from(self.params.num_sweeps).unwrap_or(u32::MAX),
             ..Default::default()
         };
-        let Some(target) = target else {
+        let Some(reply) = package_result(&self.state, index, reads, meta) else {
             return Ok(());
         };
-        let pairs = reads
-            .iter()
-            .map(|read| (read.spins.as_slice(), read.energy_milli))
-            .collect::<Vec<_>>();
-        if meets_target(&pairs, &target.to_target()).is_err() {
-            return Ok(());
-        }
-        let (h, j) = self
-            .state
-            .topology
-            .draw(self.state.lease.nonce(index))
-            .map_err(|error| {
-                self.fault(&SampleError::DeviceFault(error.to_string()));
-                LeaseStopped
-            })?;
-        let mut rescored = Vec::with_capacity(reads.len());
-        for read in reads {
-            let energy = quip_protocol::scoring::energy_from_milli(
-                &read.spins,
-                &h,
-                &j,
-                &self.state.topology.edges,
-            );
-            if read.spins.len() != self.state.topology.num_nodes
-                || read.spins.iter().any(|spin| !matches!(spin, -1 | 1))
-                || energy != read.energy_milli
-            {
-                self.fault(&SampleError::DeviceFault(
-                    "local lease draw disagrees with host energy".into(),
-                ));
-                return Err(LeaseStopped);
-            }
-            rescored.push(SamplerResult {
-                spins: read.spins,
-                energy_milli: energy,
-            });
-        }
         if self.rejects_push() {
             return Err(LeaseStopped);
         }
-        let target = self.target.borrow().clone();
-        if let Some(reply) = winner(&self.state, index, &rescored, target.as_ref(), meta) {
-            #[cfg(test)]
-            if let Some(pause) = &*self
-                .before_send
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-            {
-                pause();
-            }
-            self.send(reply)?;
+        #[cfg(test)]
+        if let Some(pause) = &*self
+            .before_send
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        {
+            pause();
         }
-        Ok(())
+        self.send(reply)
     }
 
     fn send(&self, msg: MinerMsg) -> Result<(), LeaseStopped> {
@@ -928,7 +895,6 @@ mod tests {
         let target = SessionTarget {
             max_energy_milli: -1234,
             min_solutions: 0,
-            min_diversity_milli: 0,
             max_proof_solutions: 0,
             num_reads: 0,
             num_sweeps: 0,
