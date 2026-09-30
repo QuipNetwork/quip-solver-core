@@ -1024,8 +1024,9 @@ async fn local_shutdown_accepts_a_finished_salt_during_grace() {
 async fn stopped_local_workers_cannot_exceed_the_credit_window() {
     let mut s = Session::start_mode(false, false, Some("ignore-stop")).await;
     s.setup(i64::MAX).await;
-    // Configure requests eight credits, clamped to the session capacity.
-    for generation in 1..=8 {
+    // Configure requests eight credits, clamped to the session capacity, and
+    // the coordinator seeds another eight (`queue_depth`) on `Ready`.
+    for generation in 1..=16 {
         let mut lease = job(u64::MAX - 10);
         lease.generation = generation;
         s.send(coord_msg::Msg::Job(lease)).await;
@@ -1053,7 +1054,7 @@ async fn stopped_local_workers_cannot_exceed_the_credit_window() {
         }
     }
     let mut lease = job(1);
-    lease.generation = 9;
+    lease.generation = 17;
     s.send(coord_msg::Msg::Job(lease)).await;
     assert!(
         matches!(s.recv().await, miner_msg::Msg::Fatal(f) if f.reason.contains("stopped lease workers did not retire") && f.restart_required)

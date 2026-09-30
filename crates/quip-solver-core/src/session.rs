@@ -369,6 +369,29 @@ const KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(20);
 /// out the shutdown grace window.
 const SAMPLER_JOIN_POLL: Duration = Duration::from_millis(20);
 
+/// How long a new lease waits for finished lease threads to exit before the
+/// session calls them stuck. A lease refunds its credit just before its
+/// thread returns, so the next lease can arrive while that thread still runs.
+const LEASE_RETIRE_GRACE: Duration = Duration::from_secs(1);
+
+/// Join every finished lease thread. Returns the message of a thread that
+/// panicked, if any did.
+fn reap_lease_threads(threads: &mut Vec<std::thread::JoinHandle<()>>) -> Option<String> {
+    let mut failure = None;
+    while let Some(index) = threads
+        .iter()
+        .position(std::thread::JoinHandle::is_finished)
+    {
+        if let Err(panic) = threads.swap_remove(index).join() {
+            failure = Some(format!(
+                "lease thread panicked: {}",
+                panic_payload_message(&*panic)
+            ));
+        }
+    }
+    failure
+}
+
 /// What the read loop knew about a job at prepare time, held until the writer
 /// finalizes it.
 ///
@@ -1224,7 +1247,10 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
                     // `depth <= prefetch` unless the coordinator's
                     // `queue_depth` is larger, so clamp to `cap`.
                     let depth = depth.min(u32::try_from(cap).unwrap_or(u32::MAX));
-                    credit_window = depth as usize;
+                    // The coordinator also seeds `queue_depth` credits when it
+                    // reads `Ready`, before this request arrives, so that many
+                    // more jobs can be outstanding.
+                    credit_window = depth as usize + config.queue_depth.max(1) as usize;
                     if ctrl_tx
                         .send(
                             miner(miner_msg::Msg::JobRequest(JobRequest { credits: depth })).into(),
@@ -1263,17 +1289,21 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
                         ) {
                             Ok((state, params)) => {
                                 if S::generates_locally() {
-                                    while let Some(index) = lease_threads
-                                        .iter()
-                                        .position(std::thread::JoinHandle::is_finished)
-                                    {
-                                        if let Err(panic) = lease_threads.swap_remove(index).join()
+                                    let retire_by =
+                                        tokio::time::Instant::now() + LEASE_RETIRE_GRACE;
+                                    loop {
+                                        if let Some(failure) =
+                                            reap_lease_threads(&mut lease_threads)
                                         {
-                                            writer_failure = Some(format!(
-                                                "lease thread panicked: {}",
-                                                panic_payload_message(&*panic)
-                                            ));
+                                            writer_failure = Some(failure);
                                         }
+                                        if writer_failure.is_some()
+                                            || lease_threads.len() < credit_window
+                                            || tokio::time::Instant::now() >= retire_by
+                                        {
+                                            break;
+                                        }
+                                        tokio::time::sleep(Duration::from_millis(1)).await;
                                     }
                                     if writer_failure.is_some() {
                                         break;
