@@ -314,6 +314,8 @@ Use indices in `0..lease.salt_count()` with `lease.salt(i)` and `lease.nonce(i)`
 Those two methods return zero arrays for an out-of-range index.
 `TopologyView` holds the node count, dense edges, and allowed values in draw order.
 `TopologyView::draw(nonce)` provides the host draw.
+`quip_protocol::chacha8::draw_into` draws any range of the draw stream, so threads or devices can split one problem.
+The [miner hardware guide](docs/miner-side-generation.md) gives the complete draw for a device that draws its own problems.
 
 Call `LeaseSink::push(salt_index, reads)` once for each finished salt, including an empty read set.
 It takes `Vec<SamplerResult>` and returns `Result<(), LeaseStopped>`.

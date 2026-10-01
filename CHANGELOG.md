@@ -5,6 +5,27 @@ This file documents changes to the Quip solver contract.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.0.2-rc4
+
+### Added
+
+- `chacha8::draw_into` draws any range of the draw stream from its first keystream word.
+  Threads can draw separate ranges of one problem and join them, and the result is the same as one sequential draw.
+- `chacha8::draw_ising` draws into a table of any `Copy` type that has one entry for each allowed milli value.
+- `derive::NonceDeriver` compresses the BLAKE3 block that all salts in a lease share once, then derives each nonce with one compression.
+  `Lease::nonce` uses it.
+- The [miner hardware guide](docs/miner-side-generation.md) describes the complete draw for GPU and other device implementations.
+
+### Changed
+
+- The `ChaCha8` draw computes four keystream blocks in each pass, or eight with AVX2.
+  On `x86_64` it checks for AVX2 at run time.
+  The output stays the same, and the golden vectors and the scalar `ChaCha8Rng` pin it.
+- Lease expansion draws directly into the solver coefficient type when every allowed value converts without loss.
+  On a topology with 4577 nodes and 41,515 edges, one salt takes 41 µs, down from 383 µs.
+- `IsingGraph::edges` and `CsrGraph::edges` are `Arc<[(usize, usize)]>`, and the graphs of one lease share one edge list.
+  This change breaks samplers that build a graph or iterate `&graph.edges`. See [MIGRATING.md](MIGRATING.md).
+
 ## 0.0.2-rc3
 
 ### Added

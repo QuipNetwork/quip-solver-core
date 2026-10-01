@@ -11,10 +11,19 @@ pub(crate) struct Decoded<C> {
     pub(crate) exact_milli: Option<MilliPair>,
 }
 
+/// Convert one milli value and report whether it survived without loss.
 #[expect(
     clippy::float_cmp,
     reason = "exactness requires equality, not a tolerance"
 )]
+fn exact_from_milli<C: Coefficient>(milli: i32) -> (C, bool) {
+    let value = C::from_milli(milli);
+    (
+        value,
+        C::EXACT || value.to_unit() * 1000.0 == f64::from(milli),
+    )
+}
+
 pub(crate) fn convert_milli<C: Coefficient>(
     h: Vec<i32>,
     j: Vec<i32>,
@@ -24,8 +33,8 @@ pub(crate) fn convert_milli<C: Coefficient>(
         values
             .iter()
             .map(|&m| {
-                let value = C::from_milli(m);
-                exact &= C::EXACT || value.to_unit() * 1000.0 == f64::from(m);
+                let (value, lossless) = exact_from_milli::<C>(m);
+                exact &= lossless;
                 value
             })
             .collect()
@@ -33,6 +42,20 @@ pub(crate) fn convert_milli<C: Coefficient>(
     let converted_h = convert(&h);
     let converted_j = convert(&j);
     (converted_h, converted_j, (!exact).then_some((h, j)))
+}
+
+/// Convert an allowed milli set entry for entry, or `None` when any entry
+/// loses precision. A draw over an exact table is exact.
+pub(crate) fn exact_table<C: Coefficient>(milli: &[i32]) -> Option<Vec<C>> {
+    let mut table = Vec::with_capacity(milli.len());
+    for &m in milli {
+        let (value, lossless) = exact_from_milli::<C>(m);
+        if !lossless {
+            return None;
+        }
+        table.push(value);
+    }
+    Some(table)
 }
 
 fn integer_milli(value: i128, scale: u32) -> Result<i32, RejectReason> {

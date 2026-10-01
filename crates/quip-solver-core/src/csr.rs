@@ -17,8 +17,8 @@ pub struct CsrGraph {
     /// Couplings aligned with `edges`. Holds the graph's coefficients in units as `f64`.
     /// Exact scoring for a lossy type uses the original coefficients, which the harness re-scores from.
     pub j: Vec<f64>,
-    /// Undirected edge list `(u, v)` in received order.
-    pub edges: Vec<(usize, usize)>,
+    /// Undirected edge list `(u, v)` in received order, shared with the base graph.
+    pub edges: std::sync::Arc<[(usize, usize)]>,
     /// CSR row pointers, length `N + 1`.
     pub row_ptr: Vec<i32>,
     /// CSR column indices, length `nnz`.
@@ -94,7 +94,7 @@ impl CsrGraph {
         Self {
             h: g.h.iter().map(|&v| v.to_unit()).collect(),
             j: g.j.iter().map(|&v| v.to_unit()).collect(),
-            edges: g.edges.clone(),
+            edges: std::sync::Arc::clone(&g.edges),
             row_ptr,
             col_ind,
             j_csr,
@@ -215,7 +215,7 @@ mod tests {
         let base = IsingGraph {
             h: vec![Fixed::<i8, 2>(1), Fixed::<i8, 2>(-1)],
             j: vec![Fixed::<i8, 2>(4), Fixed::<i8, 2>(3)],
-            edges: vec![(0, 0), (0, 1), (1, 0), (1, 9)],
+            edges: vec![(0, 0), (0, 1), (1, 0), (1, 9)].into(),
         };
         let csr = CsrGraph::from_base(&base);
         assert_eq!(csr.row_ptr, vec![0, 2, 4]);

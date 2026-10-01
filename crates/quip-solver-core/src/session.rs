@@ -2990,7 +2990,7 @@ mod tests {
         } = spawn_writer(16);
         for key in [1_u8, 2] {
             let mut entry = pending_job(Some(1));
-            entry.exact_energy = Some(ExactEnergy::new(vec![499], vec![], vec![]));
+            entry.exact_energy = Some(ExactEnergy::new(vec![499], vec![], Arc::new([])));
             let _ = pending
                 .lock()
                 .expect("mutex")
@@ -3033,7 +3033,7 @@ mod tests {
     fn per_job_scoring_requires_metadata_only_for_lossy_problems() {
         let mut entry = pending_job(None);
         for (original, expected) in [(Some(499), 499), (None, 777)] {
-            entry.exact_energy = original.map(|m| ExactEnergy::new(vec![m], vec![], vec![]));
+            entry.exact_energy = original.map(|m| ExactEnergy::new(vec![m], vec![], Arc::new([])));
             let mut result = completed_result(1);
             result.outcome = StreamOutcome::Completed(Ok(vec![crate::SamplerResult {
                 spins: vec![1],

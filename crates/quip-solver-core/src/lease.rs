@@ -9,6 +9,7 @@ use crate::{
 use quip_proto::v1::{
     miner_msg, Job, JobRequest, LeaseDone, MinerMsg, RejectReason, SamplerMeta, Solution,
 };
+use quip_protocol::derive::NonceDeriver;
 use quip_protocol::lease::{Generator, LeaseSpec, TopologyView};
 use quip_protocol::target::meets_target;
 use std::sync::{
@@ -25,27 +26,39 @@ pub(crate) struct ShutdownDeadlines {
 
 /// A decoded salt range and its deterministic generator.
 #[derive(Clone, Debug)]
-pub struct Lease(LeaseSpec);
+pub struct Lease {
+    spec: LeaseSpec,
+    /// Nonce state after the block every salt in this lease shares.
+    nonces: NonceDeriver,
+}
 impl Lease {
+    pub(crate) fn new(spec: LeaseSpec) -> Self {
+        Self {
+            nonces: NonceDeriver::new(spec.last_proof_block_hash, spec.miner_account),
+            spec,
+        }
+    }
     /// Number of salts in the range.
     #[must_use]
     pub const fn salt_count(&self) -> u64 {
-        self.0.salt_count
+        self.spec.salt_count
     }
     /// Salt at `index`. Returns the zero array outside `0..salt_count()`.
     #[must_use]
     pub fn salt(&self, index: u64) -> [u8; 32] {
-        self.0.salt(index).unwrap_or([0; 32])
+        self.spec.salt(index).unwrap_or([0; 32])
     }
     /// Nonce at `index`. Returns the zero array outside `0..salt_count()`.
     #[must_use]
     pub fn nonce(&self, index: u64) -> [u8; 32] {
-        self.0.nonce(index).unwrap_or([0; 32])
+        self.spec
+            .salt(index)
+            .map_or([0; 32], |salt| self.nonces.derive(salt))
     }
     /// Generator used by this lease.
     #[must_use]
     pub const fn generator(&self) -> Generator {
-        self.0.generator
+        self.spec.generator
     }
 }
 
@@ -94,6 +107,8 @@ pub(crate) struct LeaseState {
     job_id: Vec<u8>,
     lease: Lease,
     topology: Arc<TopologyView>,
+    /// `topology.edges`, copied once so every drawn graph shares it.
+    edges: Arc<[(usize, usize)]>,
     watermark: Option<u64>,
     deadline_ms: u64,
     aborted: Arc<AtomicBool>,
@@ -201,13 +216,14 @@ pub(crate) fn test_state(watermark: Option<u64>) -> Arc<LeaseState> {
     let spec = LeaseSpec::new(Generator::Blake3Chacha8V1, [1; 32], [2; 32], [3; 32], 0, 1).unwrap();
     Arc::new(LeaseState {
         job_id: b"lease".to_vec(),
-        lease: Lease(spec),
+        lease: Lease::new(spec),
         topology: Arc::new(TopologyView {
             num_nodes: 1,
             edges: vec![],
             allowed_h_milli: vec![1000],
             allowed_j_milli: vec![],
         }),
+        edges: Arc::new([]),
         watermark,
         deadline_ms: 0,
         aborted: Arc::new(AtomicBool::new(false)),
@@ -316,8 +332,9 @@ pub(crate) fn prepare(
     }
     let state = Arc::new(LeaseState {
         job_id: job.job_id.clone(),
-        lease: Lease(spec),
+        lease: Lease::new(spec),
         topology: Arc::clone(topology),
+        edges: topology.edges.as_slice().into(),
         watermark: (job.generation != 0).then_some(job.generation),
         deadline_ms: job.deadline_ms,
         aborted,
@@ -343,19 +360,45 @@ pub(crate) fn prepare(
     ))
 }
 
-/// Convert each draw and retain milli coefficients only when conversion loses precision.
+/// Draw the salt at `index` as an [`IsingGraph`].
+///
+/// When every allowed value converts to `C` without loss, the draw selects
+/// from the converted tables directly and no milli copy is kept. Otherwise it
+/// draws milli values, converts each one, and keeps the milli coefficients
+/// for exact rescoring.
 fn draw_graph<C: Coefficient>(
     state: &LeaseState,
     index: u64,
 ) -> Result<(IsingGraph<C>, Option<ExactEnergy>), quip_protocol::chacha8::DrawError> {
-    let (h, j) = state.topology.draw(state.lease.nonce(index))?;
+    let topology = &*state.topology;
+    let nonce = state.lease.nonce(index);
+    let tables = (
+        crate::encoding::exact_table::<C>(&topology.allowed_h_milli),
+        crate::encoding::exact_table::<C>(&topology.allowed_j_milli),
+    );
+    if let (Some(h_table), Some(j_table)) = tables {
+        let (h, j) = quip_protocol::chacha8::draw_ising(
+            nonce,
+            topology.num_nodes,
+            topology.edges.len(),
+            &h_table,
+            &j_table,
+        )?;
+        let graph = IsingGraph {
+            h,
+            j,
+            edges: Arc::clone(&state.edges),
+        };
+        return Ok((graph, None));
+    }
+    let (h, j) = topology.draw(nonce)?;
     let (h, j, exact_milli) = crate::encoding::convert_milli::<C>(h, j);
     let graph = IsingGraph {
         h,
         j,
-        edges: state.topology.edges.clone(),
+        edges: Arc::clone(&state.edges),
     };
-    let exact = exact_milli.map(|(h, j)| ExactEnergy::new(h, j, graph.edges.clone()));
+    let exact = exact_milli.map(|(h, j)| ExactEnergy::new(h, j, Arc::clone(&state.edges)));
     Ok((graph, exact))
 }
 
@@ -1011,37 +1054,62 @@ mod tests {
     #[ignore = "manual release-mode timing check on an Advantage2-sized synthetic topology"]
     #[expect(clippy::print_stdout, reason = "manual timing result for --nocapture")]
     fn lease_draw_advantage2_timing() -> Result<(), Box<dyn std::error::Error>> {
-        use crate::{coefficient::Fixed, encoding::convert_milli};
+        use crate::coefficient::Fixed;
         use std::{hint::black_box, time::Instant};
 
         const NODES: usize = 4577;
         const EDGES: usize = 41_515;
-        const ITERATIONS: u32 = 200;
-        let topology = TopologyView {
-            num_nodes: NODES,
-            edges: (1..NODES)
-                .flat_map(|offset| (0..NODES).map(move |u| (u, (u + offset) % NODES)))
-                .take(EDGES)
-                .collect(),
-            allowed_h_milli: vec![-1000, 0, 1000],
-            allowed_j_milli: vec![-1000, 1000],
+        const SALTS: u64 = 200;
+        let spec = LeaseSpec::new(
+            Generator::Blake3Chacha8V1,
+            [1; 32],
+            [2; 32],
+            [3; 32],
+            0,
+            SALTS,
+        )?;
+        let state = LeaseState {
+            job_id: b"lease".to_vec(),
+            lease: Lease::new(spec),
+            topology: Arc::new(TopologyView {
+                num_nodes: NODES,
+                edges: (1..NODES)
+                    .flat_map(|offset| (0..NODES).map(move |u| (u, (u + offset) % NODES)))
+                    .take(EDGES)
+                    .collect(),
+                allowed_h_milli: vec![-1000, 0, 1000],
+                allowed_j_milli: vec![-1000, 1000],
+            }),
+            edges: Arc::new([]),
+            watermark: None,
+            deadline_ms: 0,
+            aborted: Arc::new(AtomicBool::new(false)),
+            jobs_done: Arc::new(AtomicU64::new(0)),
+            progress: Mutex::new(Progress {
+                dispatched: 0,
+                finished: 0,
+                salts_done: 0,
+                best_energy_milli: i64::MAX,
+                closed: false,
+                done_sent: false,
+                pushed: PushedSalts::default(),
+            }),
         };
 
         let start = Instant::now();
-        for salt in 0..ITERATIONS {
-            let mut nonce = [0; 32];
-            for (byte, value) in nonce.iter_mut().zip(salt.to_le_bytes()) {
-                *byte = value;
-            }
-            let (h, j) = topology.draw(black_box(nonce))?;
-            let (h, j, exact_milli) = black_box(convert_milli::<Fixed<i8, 1>>(h, j));
-            if exact_milli.is_some() {
+        for index in 0..SALTS {
+            let (graph, exact) = draw_graph::<Fixed<i8, 1>>(&state, black_box(index))?;
+            if exact.is_some() {
                 return Err("draw did not convert exactly to Fixed<i8, 1>".into());
             }
-            drop(black_box((h, j)));
+            drop(black_box(graph));
         }
-        let mean = start.elapsed().as_secs_f64() / f64::from(ITERATIONS);
-        println!("lease_draw_advantage2_timing: {ITERATIONS} salts, mean {mean:.9} s per salt");
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a 200-salt count is exact in f64"
+        )]
+        let mean = start.elapsed().as_secs_f64() / SALTS as f64;
+        println!("lease_draw_advantage2_timing: {SALTS} salts, mean {mean:.9} s per salt");
         Ok(())
     }
 
@@ -1063,7 +1131,8 @@ mod tests {
         .unwrap();
         let state = Arc::new(LeaseState {
             job_id: b"lease".to_vec(),
-            lease: Lease(spec),
+            lease: Lease::new(spec),
+            edges: topology.edges.as_slice().into(),
             topology: Arc::new(topology),
             watermark: None,
             deadline_ms: 0,
@@ -1121,7 +1190,7 @@ mod tests {
     fn lease_wrapper_maps_out_of_range_indices_to_zero() {
         let spec =
             LeaseSpec::new(Generator::Blake3Chacha8V1, [1; 32], [2; 32], [3; 32], 10, 2).unwrap();
-        let lease = Lease(spec);
+        let lease = Lease::new(spec);
         assert_eq!(lease.salt_count(), 2);
         assert_eq!(lease.generator(), Generator::Blake3Chacha8V1);
         for index in 0..2 {
