@@ -1,4 +1,4 @@
-# Migrating to quip-solver-core 0.0.2-rc3
+# Migrating to quip-solver-core 0.0.2
 
 Update the coordinator and solver together.
 This release requires protocol version 2 and rejects version 1 handshakes.
