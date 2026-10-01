@@ -5,9 +5,10 @@ Any device that reproduces the draw bit for bit can make the problem itself.
 The default draw in `quip-protocol` is the reference and a fast CPU path.
 A miner with a GPU or other accelerator can replace it with a device draw.
 
-The host redraws every candidate winner on the CPU and rescores each read.
-A device draw that differs from the reference is a device fault and ends the run.
-It never produces an invalid proof.
+Solver-core does not redraw or rescore the salts that a device draw reports.
+The coordinator redraws each reported salt from the lease and drops a `Result` that does not match.
+A device draw that differs from the reference wastes work and produces no valid result.
+Compare it with the reference before you connect it to a coordinator.
 
 ## The default path
 
