@@ -5,6 +5,7 @@
 //! list, the GPU miners build [`crate::csr::CsrGraph`].
 
 use crate::coefficient::Coefficient;
+use std::sync::Arc;
 
 /// Sampling algorithm selected by the binary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -87,14 +88,20 @@ pub struct IsingGraph<C: Coefficient = f64> {
     /// Couplings aligned with `edges`, in the sampler's coefficient type.
     pub j: Vec<C>,
     /// Undirected edge list `(u, v)` in received order.
-    pub edges: Vec<(usize, usize)>,
+    ///
+    /// Shared, so jobs on one topology reuse a single allocation.
+    pub edges: Arc<[(usize, usize)]>,
 }
 
 impl IsingGraph {
     /// Store flat `h` / `j` / edge lists as the base problem.
     #[must_use]
     pub fn new(h: Vec<f64>, j: Vec<f64>, edges: Vec<(usize, usize)>) -> Self {
-        Self { h, j, edges }
+        Self {
+            h,
+            j,
+            edges: edges.into(),
+        }
     }
 }
 
@@ -122,7 +129,7 @@ pub(crate) fn golden_graph<C: Coefficient>(section: &str, index: usize) -> Ising
             .map(|v| C::from_milli(i32::try_from(v.as_i64().expect("integer")).expect("i32 milli")))
             .collect()
     };
-    let edges = case
+    let edges: Vec<(usize, usize)> = case
         .get("edges")
         .and_then(serde_json::Value::as_array)
         .expect("edges array")
@@ -142,7 +149,7 @@ pub(crate) fn golden_graph<C: Coefficient>(section: &str, index: usize) -> Ising
     IsingGraph {
         h: coefficients("h_milli"),
         j: coefficients("j_milli"),
-        edges,
+        edges: edges.into(),
     }
 }
 

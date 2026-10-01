@@ -184,6 +184,8 @@ pub trait Sampler<C: Coefficient = f64>: Send + Sync + 'static {
     }
 
     /// Work a lease on a dedicated thread. Poll the sink to observe stops.
+    /// Report each salt once, with `LeaseSink::push` for its reads or
+    /// `LeaseSink::screen` when the backend screened it out.
     ///
     /// # Errors
     /// Returns a device condition, or a device fault if local generation is unsupported.
@@ -776,7 +778,7 @@ mod stream_tests {
                         graph: IsingGraph::<Fixed<i8, 1>> {
                             h: vec![Fixed(1), Fixed(-1)],
                             j: vec![Fixed(1)],
-                            edges: vec![(0, 1)],
+                            edges: vec![(0, 1)].into(),
                         },
                         params: SampleParams::default(),
                         watermark: None,

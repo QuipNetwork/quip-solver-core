@@ -369,14 +369,37 @@ const KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(20);
 /// out the shutdown grace window.
 const SAMPLER_JOIN_POLL: Duration = Duration::from_millis(20);
 
+/// How long a new lease waits for finished lease threads to exit before the
+/// session calls them stuck. A lease refunds its credit just before its
+/// thread returns, so the next lease can arrive while that thread still runs.
+const LEASE_RETIRE_GRACE: Duration = Duration::from_secs(1);
+
+/// Join every finished lease thread. Returns the message of a thread that
+/// panicked, if any did.
+fn reap_lease_threads(threads: &mut Vec<std::thread::JoinHandle<()>>) -> Option<String> {
+    let mut failure = None;
+    while let Some(index) = threads
+        .iter()
+        .position(std::thread::JoinHandle::is_finished)
+    {
+        if let Err(panic) = threads.swap_remove(index).join() {
+            failure = Some(format!(
+                "lease thread panicked: {}",
+                panic_payload_message(&*panic)
+            ));
+        }
+    }
+    failure
+}
+
 /// What the read loop knew about a job at prepare time, held until the writer
 /// finalizes it.
 ///
 /// The sampling parameters build the outbound `SamplerMeta`. The rest exists so
 /// the completion log can report an attempt the way the v0.2.1 miner did:
 /// elapsed wall time, and the requirement the attempt was measured against.
-/// Plain jobs retain their admission target for logging. Lease results use
-/// the shared current target when the writer scores them.
+/// Plain jobs retain their admission target for logging. Lease results carry
+/// no target: the writer reports every completed salt's reads unfiltered.
 pub(crate) struct PendingJob {
     pub(crate) lease: Option<LeaseLink>,
     /// Original wire graph, present only for lossy coefficient types.
@@ -536,7 +559,6 @@ fn log_attempt(backend: &str, sr: &StreamResult, pending: Option<&PendingJob>) {
 /// What the outbound writer shares with the read loop, gathered so the writer
 /// takes a handful of arguments instead of a list nobody can read.
 struct WriterContext {
-    target: watch::Receiver<Option<SessionTarget>>,
     aborted: Arc<AtomicBool>,
     /// Prepare-time parameters per job, removed as each one finalizes.
     pending: PendingParams,
@@ -715,7 +737,6 @@ async fn outbound_writer<C: Coefficient>(
         cancel,
         shutdown,
         backend,
-        target,
         aborted,
     } = ctx;
     // Progress logging (mirrors v0.2 mine_work_item's every-N-attempts line).
@@ -814,7 +835,7 @@ async fn outbound_writer<C: Coefficient>(
                         }
                         tracing::warn!(%error, "lease salt failed");
                     }
-                    let reply = lease::handle_result(link, sr, target.borrow().as_ref(), reads, sweeps);
+                    let reply = lease::handle_result(link, sr, reads, sweeps);
                     if let Some(reply) = reply {
                         if tx.send(reply).await.is_err() {
                             return;
@@ -1049,7 +1070,6 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
         res_rx,
         ctrl_rx,
         WriterContext {
-            target: target_rx.clone(),
             aborted: Arc::clone(&aborted),
             pending: Arc::clone(&pending),
             jobs_done: Arc::clone(&jobs_done),
@@ -1224,7 +1244,10 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
                     // `depth <= prefetch` unless the coordinator's
                     // `queue_depth` is larger, so clamp to `cap`.
                     let depth = depth.min(u32::try_from(cap).unwrap_or(u32::MAX));
-                    credit_window = depth as usize;
+                    // The coordinator also seeds `queue_depth` credits when it
+                    // reads `Ready`, before this request arrives, so that many
+                    // more jobs can be outstanding.
+                    credit_window = depth as usize + config.queue_depth.max(1) as usize;
                     if ctrl_tx
                         .send(
                             miner(miner_msg::Msg::JobRequest(JobRequest { credits: depth })).into(),
@@ -1263,17 +1286,21 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
                         ) {
                             Ok((state, params)) => {
                                 if S::generates_locally() {
-                                    while let Some(index) = lease_threads
-                                        .iter()
-                                        .position(std::thread::JoinHandle::is_finished)
-                                    {
-                                        if let Err(panic) = lease_threads.swap_remove(index).join()
+                                    let retire_by =
+                                        tokio::time::Instant::now() + LEASE_RETIRE_GRACE;
+                                    loop {
+                                        if let Some(failure) =
+                                            reap_lease_threads(&mut lease_threads)
                                         {
-                                            writer_failure = Some(format!(
-                                                "lease thread panicked: {}",
-                                                panic_payload_message(&*panic)
-                                            ));
+                                            writer_failure = Some(failure);
                                         }
+                                        if writer_failure.is_some()
+                                            || lease_threads.len() < credit_window
+                                            || tokio::time::Instant::now() >= retire_by
+                                        {
+                                            break;
+                                        }
+                                        tokio::time::sleep(Duration::from_millis(1)).await;
                                     }
                                     if writer_failure.is_some() {
                                         break;
@@ -1904,7 +1931,6 @@ mod tests {
             res_rx,
             ctrl_rx,
             WriterContext {
-                target: watch::channel(None).1,
                 aborted: Arc::new(AtomicBool::new(false)),
                 pending: Arc::clone(&pending),
                 jobs_done: Arc::clone(&jobs_done),
@@ -2990,7 +3016,7 @@ mod tests {
         } = spawn_writer(16);
         for key in [1_u8, 2] {
             let mut entry = pending_job(Some(1));
-            entry.exact_energy = Some(ExactEnergy::new(vec![499], vec![], vec![]));
+            entry.exact_energy = Some(ExactEnergy::new(vec![499], vec![], Arc::new([])));
             let _ = pending
                 .lock()
                 .expect("mutex")
@@ -3033,7 +3059,7 @@ mod tests {
     fn per_job_scoring_requires_metadata_only_for_lossy_problems() {
         let mut entry = pending_job(None);
         for (original, expected) in [(Some(499), 499), (None, 777)] {
-            entry.exact_energy = original.map(|m| ExactEnergy::new(vec![m], vec![], vec![]));
+            entry.exact_energy = original.map(|m| ExactEnergy::new(vec![m], vec![], Arc::new([])));
             let mut result = completed_result(1);
             result.outcome = StreamOutcome::Completed(Ok(vec![crate::SamplerResult {
                 spins: vec![1],

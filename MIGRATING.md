@@ -4,6 +4,24 @@ Update the coordinator and solver together.
 This release requires protocol version 2 and rejects version 1 handshakes.
 Follow the [coordinator upgrade guide](docs/coordinator-upgrade-v2.md) for wire changes and verification examples.
 
+
+## Shared edge lists (0.0.2-rc4)
+
+`IsingGraph::edges` and `CsrGraph::edges` are now `Arc<[(usize, usize)]>`, not `Vec<(usize, usize)>`.
+All graphs drawn from one lease share one edge list.
+Read access through `graph.edges.iter()`, `graph.edges.len()`, and `&graph.edges` as a slice argument does not change.
+
+Change these uses:
+
+| Before | After |
+| --- | --- |
+| `for &(u, v) in &graph.edges` | `for &(u, v) in graph.edges.iter()` |
+| `IsingGraph { edges: vec, .. }` | `IsingGraph { edges: vec.into(), .. }` |
+| `graph.edges.clone()` to keep a copy | `Arc::clone(&graph.edges)` |
+| `graph.edges == vec` | `*graph.edges == vec[..]` |
+
+`IsingGraph::new` still takes a `Vec`.
+
 ## Identity names
 
 Replace strings in `BackendIdentity.backend` and `.algorithm` with `quip_proto::v1::Backend` and `quip_proto::v1::Algorithm` values.

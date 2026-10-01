@@ -5,6 +5,39 @@ This file documents changes to the Quip solver contract.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.0.2-rc4
+
+### Added
+
+- `LeaseSink::screen` counts a salt the backend screened out and folds its
+  energy into the lease's best energy, without sending reads.
+- `LeaseSink::target_energy_milli` returns the live session target's
+  maximum energy.
+- `chacha8::draw_into` draws any range of the draw stream from its first keystream word.
+  Threads can draw separate ranges of one problem and join them, and the result is the same as one sequential draw.
+- `chacha8::draw_ising` draws into a table of any `Copy` type that has one entry for each allowed milli value.
+- `derive::NonceDeriver` compresses the BLAKE3 block that all salts in a lease share once, then derives each nonce with one compression.
+  `Lease::nonce` uses it.
+- The [miner hardware guide](docs/miner-side-generation.md) describes the complete draw for GPU and other device implementations.
+
+### Changed
+
+- A lease `Result` is now a salt the backend chose to report, not a winner
+  solver-core selected. `LeaseSink::push` for local generation and the
+  default sampler-stream lease path both send a `Result` for every
+  completed salt with a non-empty read set. Each `Result` carries every
+  read, unfiltered by target. Solver-core no longer redraws or rescores a
+  locally pushed salt to check its energy. The backend owns its own
+  device-energy audit. The coordinator verifies everything it receives and
+  decides whether a reported salt clears the target.
+- The `ChaCha8` draw computes four keystream blocks in each pass, or eight with AVX2.
+  On `x86_64` it checks for AVX2 at run time.
+  The output stays the same, and the golden vectors and the scalar `ChaCha8Rng` pin it.
+- Lease expansion draws directly into the solver coefficient type when every allowed value converts without loss.
+  On a topology with 4577 nodes and 41,515 edges, one salt takes 41 µs, down from 383 µs.
+- `IsingGraph::edges` and `CsrGraph::edges` are `Arc<[(usize, usize)]>`, and the graphs of one lease share one edge list.
+  This change breaks samplers that build a graph or iterate `&graph.edges`. See [MIGRATING.md](MIGRATING.md).
+
 ## 0.0.2-rc3
 
 ### Added

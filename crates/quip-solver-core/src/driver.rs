@@ -149,11 +149,12 @@ pub fn solve<S: Sampler<C>, C: Coefficient>(
             .map(crate::encoding::float_milli)
             .collect::<Result<Vec<_>, _>>()
     };
+    let edges: std::sync::Arc<[(usize, usize)]> = p.edges.into();
     let (h, j, exact_energy, rescore_units) = match (milli(&p.h), milli(&p.j)) {
         (Ok(h), Ok(j)) => {
             let (h, j, original) = crate::encoding::convert_milli::<C>(h, j);
-            let exact_energy =
-                original.map(|(h, j)| crate::job::ExactEnergy::new(h, j, p.edges.clone()));
+            let exact_energy = original
+                .map(|(h, j)| crate::job::ExactEnergy::new(h, j, std::sync::Arc::clone(&edges)));
             (h, j, exact_energy, false)
         }
         _ => (
@@ -163,11 +164,7 @@ pub fn solve<S: Sampler<C>, C: Coefficient>(
             !C::EXACT,
         ),
     };
-    let graph = IsingGraph::<C> {
-        h,
-        j,
-        edges: p.edges,
-    };
+    let graph = IsingGraph::<C> { h, j, edges };
     let params = SampleParams {
         num_reads: p.num_reads,
         num_sweeps: p.num_sweeps,

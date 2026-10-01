@@ -93,29 +93,19 @@ impl TopologyCache {
 pub(crate) struct SessionTarget {
     pub(crate) max_energy_milli: i64,
     pub(crate) min_solutions: u32,
-    pub(crate) min_diversity_milli: u32,
     pub(crate) max_proof_solutions: u32,
     pub(crate) num_reads: u32,
     pub(crate) num_sweeps: u32,
 }
 
 impl SessionTarget {
-    pub(crate) fn to_target(&self) -> quip_protocol::target::Target {
-        quip_protocol::target::Target {
-            max_energy_milli: self.max_energy_milli,
-            min_solutions: self.min_solutions,
-            min_diversity_milli: self.min_diversity_milli,
-            max_proof_solutions: self.max_proof_solutions,
-        }
-    }
-
     // anneal_time_us is ignored on the SA/GPU Rust path (QPU adapt lives in the
-    // Python dwave miner).
+    // Python dwave miner). min_diversity_milli is not carried: lease results
+    // go out unfiltered, with no proof set built from it here.
     pub(crate) fn from_proto(s: &quip_proto::v1::SetTarget) -> Self {
         Self {
             max_energy_milli: s.max_energy_milli,
             min_solutions: s.min_solutions,
-            min_diversity_milli: s.min_diversity_milli,
             max_proof_solutions: s.max_proof_solutions,
             num_reads: s.num_reads,
             num_sweeps: s.num_sweeps,
@@ -333,11 +323,11 @@ fn parse_ising<C: Coefficient>(
     let graph = IsingGraph {
         h: decoded.h,
         j: decoded.j,
-        edges,
+        edges: edges.into(),
     };
     let exact_energy = decoded
         .exact_milli
-        .map(|(h, j)| ExactEnergy::new(h, j, graph.edges.clone()));
+        .map(|(h, j)| ExactEnergy::new(h, j, std::sync::Arc::clone(&graph.edges)));
     Ok(ParsedIsing {
         graph,
         exact_energy,
@@ -433,11 +423,11 @@ pub(crate) fn num_sweeps_from_toml(backend_toml: &str) -> usize {
 pub(crate) struct ExactEnergy {
     h: Vec<i32>,
     j: Vec<i32>,
-    edges: Vec<(usize, usize)>,
+    edges: std::sync::Arc<[(usize, usize)]>,
 }
 
 impl ExactEnergy {
-    pub(crate) fn new(h: Vec<i32>, j: Vec<i32>, edges: Vec<(usize, usize)>) -> Self {
+    pub(crate) fn new(h: Vec<i32>, j: Vec<i32>, edges: std::sync::Arc<[(usize, usize)]>) -> Self {
         Self { h, j, edges }
     }
 
@@ -835,7 +825,7 @@ mod tests {
         let g = parse_ising::<f64>(&ising, 100_000, 1_000_000, Some(&cache))
             .unwrap()
             .graph;
-        assert_eq!(g.edges, vec![(0, 1), (1, 2)]);
+        assert_eq!(*g.edges, [(0, 1), (1, 2)]);
         assert_eq!(g.h, vec![1.0, -1.0, 1.0]);
         assert_eq!(g.j, vec![1.0, -1.0]);
     }

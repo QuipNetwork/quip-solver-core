@@ -9,8 +9,8 @@ use crate::{
 use quip_proto::v1::{
     miner_msg, Job, JobRequest, LeaseDone, MinerMsg, RejectReason, SamplerMeta, Solution,
 };
+use quip_protocol::derive::NonceDeriver;
 use quip_protocol::lease::{Generator, LeaseSpec, TopologyView};
-use quip_protocol::target::meets_target;
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
     Arc, Mutex, MutexGuard,
@@ -25,27 +25,39 @@ pub(crate) struct ShutdownDeadlines {
 
 /// A decoded salt range and its deterministic generator.
 #[derive(Clone, Debug)]
-pub struct Lease(LeaseSpec);
+pub struct Lease {
+    spec: LeaseSpec,
+    /// Nonce state after the block every salt in this lease shares.
+    nonces: NonceDeriver,
+}
 impl Lease {
+    pub(crate) fn new(spec: LeaseSpec) -> Self {
+        Self {
+            nonces: NonceDeriver::new(spec.last_proof_block_hash, spec.miner_account),
+            spec,
+        }
+    }
     /// Number of salts in the range.
     #[must_use]
     pub const fn salt_count(&self) -> u64 {
-        self.0.salt_count
+        self.spec.salt_count
     }
     /// Salt at `index`. Returns the zero array outside `0..salt_count()`.
     #[must_use]
     pub fn salt(&self, index: u64) -> [u8; 32] {
-        self.0.salt(index).unwrap_or([0; 32])
+        self.spec.salt(index).unwrap_or([0; 32])
     }
     /// Nonce at `index`. Returns the zero array outside `0..salt_count()`.
     #[must_use]
     pub fn nonce(&self, index: u64) -> [u8; 32] {
-        self.0.nonce(index).unwrap_or([0; 32])
+        self.spec
+            .salt(index)
+            .map_or([0; 32], |salt| self.nonces.derive(salt))
     }
     /// Generator used by this lease.
     #[must_use]
     pub const fn generator(&self) -> Generator {
-        self.0.generator
+        self.spec.generator
     }
 }
 
@@ -94,6 +106,8 @@ pub(crate) struct LeaseState {
     job_id: Vec<u8>,
     lease: Lease,
     topology: Arc<TopologyView>,
+    /// `topology.edges`, copied once so every drawn graph shares it.
+    edges: Arc<[(usize, usize)]>,
     watermark: Option<u64>,
     deadline_ms: u64,
     aborted: Arc<AtomicBool>,
@@ -201,13 +215,14 @@ pub(crate) fn test_state(watermark: Option<u64>) -> Arc<LeaseState> {
     let spec = LeaseSpec::new(Generator::Blake3Chacha8V1, [1; 32], [2; 32], [3; 32], 0, 1).unwrap();
     Arc::new(LeaseState {
         job_id: b"lease".to_vec(),
-        lease: Lease(spec),
+        lease: Lease::new(spec),
         topology: Arc::new(TopologyView {
             num_nodes: 1,
             edges: vec![],
             allowed_h_milli: vec![1000],
             allowed_j_milli: vec![],
         }),
+        edges: Arc::new([]),
         watermark,
         deadline_ms: 0,
         aborted: Arc::new(AtomicBool::new(false)),
@@ -316,8 +331,9 @@ pub(crate) fn prepare(
     }
     let state = Arc::new(LeaseState {
         job_id: job.job_id.clone(),
-        lease: Lease(spec),
+        lease: Lease::new(spec),
         topology: Arc::clone(topology),
+        edges: topology.edges.as_slice().into(),
         watermark: (job.generation != 0).then_some(job.generation),
         deadline_ms: job.deadline_ms,
         aborted,
@@ -343,19 +359,45 @@ pub(crate) fn prepare(
     ))
 }
 
-/// Convert each draw and retain milli coefficients only when conversion loses precision.
+/// Draw the salt at `index` as an [`IsingGraph`].
+///
+/// When every allowed value converts to `C` without loss, the draw selects
+/// from the converted tables directly and no milli copy is kept. Otherwise it
+/// draws milli values, converts each one, and keeps the milli coefficients
+/// for exact rescoring.
 fn draw_graph<C: Coefficient>(
     state: &LeaseState,
     index: u64,
 ) -> Result<(IsingGraph<C>, Option<ExactEnergy>), quip_protocol::chacha8::DrawError> {
-    let (h, j) = state.topology.draw(state.lease.nonce(index))?;
+    let topology = &*state.topology;
+    let nonce = state.lease.nonce(index);
+    let tables = (
+        crate::encoding::exact_table::<C>(&topology.allowed_h_milli),
+        crate::encoding::exact_table::<C>(&topology.allowed_j_milli),
+    );
+    if let (Some(h_table), Some(j_table)) = tables {
+        let (h, j) = quip_protocol::chacha8::draw_ising(
+            nonce,
+            topology.num_nodes,
+            topology.edges.len(),
+            &h_table,
+            &j_table,
+        )?;
+        let graph = IsingGraph {
+            h,
+            j,
+            edges: Arc::clone(&state.edges),
+        };
+        return Ok((graph, None));
+    }
+    let (h, j) = topology.draw(nonce)?;
     let (h, j, exact_milli) = crate::encoding::convert_milli::<C>(h, j);
     let graph = IsingGraph {
         h,
         j,
-        edges: state.topology.edges.clone(),
+        edges: Arc::clone(&state.edges),
     };
-    let exact = exact_milli.map(|(h, j)| ExactEnergy::new(h, j, graph.edges.clone()));
+    let exact = exact_milli.map(|(h, j)| ExactEnergy::new(h, j, Arc::clone(&state.edges)));
     Ok((graph, exact))
 }
 
@@ -461,11 +503,13 @@ impl<C: Coefficient> Expander<C> {
     }
 }
 
-/// Score one salt. The writer sends the returned winner before counting it finished.
+/// Report one salt. The writer sends the returned result before counting it finished.
+/// Every completed salt with a non-empty read set becomes a `Result` carrying
+/// its reads; solver-core does not filter by target here, either. The miner
+/// and the coordinator decide what to do with what it reports.
 pub(crate) fn handle_result(
     link: &LeaseLink,
     result: StreamResult,
-    target: Option<&SessionTarget>,
     reads: u32,
     sweeps: u32,
 ) -> Option<MinerMsg> {
@@ -475,11 +519,10 @@ pub(crate) fn handle_result(
     if !record_samples(&link.state, &samples) {
         return None;
     }
-    winner(
+    package_result(
         &link.state,
         link.index,
         &samples,
-        target,
         SamplerMeta {
             reads,
             sweeps,
@@ -500,23 +543,19 @@ fn record_samples(state: &LeaseState, samples: &[SamplerResult]) -> bool {
     }
     true
 }
-fn winner(
+/// Package a salt's reads into a wire `Result`, unfiltered. `None` for an
+/// empty read set: a salt with no reads has nothing worth reporting.
+fn package_result(
     state: &LeaseState,
     index: u64,
     samples: &[SamplerResult],
-    target: Option<&SessionTarget>,
     meta: SamplerMeta,
 ) -> Option<MinerMsg> {
-    let target = target?.to_target();
-    let pairs = samples
+    if samples.is_empty() {
+        return None;
+    }
+    let solutions = samples
         .iter()
-        .map(|s| (s.spins.as_slice(), s.energy_milli))
-        .collect::<Vec<_>>();
-    let proof = meets_target(&pairs, &target).ok()?;
-    let solutions = proof
-        .indices
-        .into_iter()
-        .filter_map(|i| samples.get(i))
         .map(|s| Solution {
             spins: quip_protocol::wire::encode_spins_packed(&s.spins),
             energy_milli: s.energy_milli,
@@ -551,7 +590,7 @@ impl std::fmt::Display for LeaseStopped {
 }
 impl std::error::Error for LeaseStopped {}
 
-/// Receives locally generated salts and verifies winning reads on the host.
+/// Receives locally generated salts and forwards the reads the backend reports.
 pub struct LeaseSink {
     #[cfg(test)]
     pub(crate) before_send: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
@@ -585,12 +624,19 @@ impl LeaseSink {
     }
 
     /// Submit all reads for a finished salt from a blocking sampler thread.
-    /// During shutdown, already running work may submit until the lease closes.
-    /// A repeated `salt_index` is ignored and logged. It sends and counts nothing.
+    /// The backend decides which salts to report; every non-empty read set
+    /// becomes a wire `Result`, forwarded without target filtering or
+    /// re-verification. During shutdown, already running work may submit
+    /// until the lease closes. A repeated `salt_index` is ignored and
+    /// logged. It sends and counts nothing.
     ///
     /// # Errors
-    /// Returns a stop if the lease has ended, the index is outside its range,
-    /// the writer has gone, or host verification detects a device fault.
+    /// Returns a stop if the lease has ended, the index is outside its
+    /// range, or the writer has gone.
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "public API takes ownership of the backend's read buffer"
+    )]
     pub fn push(&self, salt_index: u64, reads: Vec<SamplerResult>) -> Result<(), LeaseStopped> {
         if self.rejects_push() || salt_index >= self.state.lease.salt_count() {
             return Err(LeaseStopped);
@@ -614,74 +660,74 @@ impl LeaseSink {
             self.state.progress().finished += 1;
             return Err(LeaseStopped);
         }
-        let result = self.push_winner(salt_index, reads);
+        let result = self.send_result(salt_index, &reads);
         self.state.progress().finished += 1;
         result
     }
 
-    fn push_winner(&self, index: u64, reads: Vec<SamplerResult>) -> Result<(), LeaseStopped> {
-        let target = self.target.borrow().clone();
+    /// Count a salt the backend screened out, from a blocking sampler thread.
+    /// Its energy folds into the lease's best energy. Sends nothing.
+    /// A repeated `salt_index` is ignored and logged.
+    ///
+    /// # Errors
+    /// Returns a stop if the lease has ended, the index is outside its range,
+    /// or the writer has gone.
+    pub fn screen(&self, salt_index: u64, energy_milli: i64) -> Result<(), LeaseStopped> {
+        if self.rejects_push() || salt_index >= self.state.lease.salt_count() {
+            return Err(LeaseStopped);
+        }
+        let mut progress = self.state.progress();
+        if progress.closed || progress.done_sent {
+            return Err(LeaseStopped);
+        }
+        if !progress.pushed.insert(salt_index) {
+            drop(progress);
+            tracing::warn!(
+                salt_index,
+                "local sampler screened a salt twice; ignoring the repeat"
+            );
+            return Ok(());
+        }
+        progress.dispatched += 1;
+        progress.finished += 1;
+        progress.salts_done += 1;
+        progress.best_energy_milli = progress.best_energy_milli.min(energy_milli);
+        drop(progress);
+        let _ = self.state.jobs_done.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// The live session target's `max_energy_milli`, or `None` without one.
+    #[must_use]
+    pub fn target_energy_milli(&self) -> Option<i64> {
+        self.target.borrow().as_ref().map(|t| t.max_energy_milli)
+    }
+
+    /// Package the backend's reads for `index` into a wire `Result` and send it.
+    /// The backend decides which salts to report; solver-core forwards them
+    /// without filtering by target or re-verifying energies. An empty read
+    /// set carries nothing worth reporting, so it sends nothing.
+    fn send_result(&self, index: u64, reads: &[SamplerResult]) -> Result<(), LeaseStopped> {
         let meta = SamplerMeta {
             reads: u32::try_from(self.params.num_reads).unwrap_or(u32::MAX),
             sweeps: u32::try_from(self.params.num_sweeps).unwrap_or(u32::MAX),
             ..Default::default()
         };
-        let Some(target) = target else {
+        let Some(reply) = package_result(&self.state, index, reads, meta) else {
             return Ok(());
         };
-        let pairs = reads
-            .iter()
-            .map(|read| (read.spins.as_slice(), read.energy_milli))
-            .collect::<Vec<_>>();
-        if meets_target(&pairs, &target.to_target()).is_err() {
-            return Ok(());
-        }
-        let (h, j) = self
-            .state
-            .topology
-            .draw(self.state.lease.nonce(index))
-            .map_err(|error| {
-                self.fault(&SampleError::DeviceFault(error.to_string()));
-                LeaseStopped
-            })?;
-        let mut rescored = Vec::with_capacity(reads.len());
-        for read in reads {
-            let energy = quip_protocol::scoring::energy_from_milli(
-                &read.spins,
-                &h,
-                &j,
-                &self.state.topology.edges,
-            );
-            if read.spins.len() != self.state.topology.num_nodes
-                || read.spins.iter().any(|spin| !matches!(spin, -1 | 1))
-                || energy != read.energy_milli
-            {
-                self.fault(&SampleError::DeviceFault(
-                    "local lease draw disagrees with host energy".into(),
-                ));
-                return Err(LeaseStopped);
-            }
-            rescored.push(SamplerResult {
-                spins: read.spins,
-                energy_milli: energy,
-            });
-        }
         if self.rejects_push() {
             return Err(LeaseStopped);
         }
-        let target = self.target.borrow().clone();
-        if let Some(reply) = winner(&self.state, index, &rescored, target.as_ref(), meta) {
-            #[cfg(test)]
-            if let Some(pause) = &*self
-                .before_send
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-            {
-                pause();
-            }
-            self.send(reply)?;
+        #[cfg(test)]
+        if let Some(pause) = &*self
+            .before_send
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        {
+            pause();
         }
-        Ok(())
+        self.send(reply)
     }
 
     fn send(&self, msg: MinerMsg) -> Result<(), LeaseStopped> {
@@ -765,8 +811,8 @@ pub(crate) async fn monitor_local(
             state.finish_locked(&mut progress, close_expired)
         };
         if let Some(done) = done {
-            // Stop summaries bypass queued winners after cancellation or the
-            // close deadline. The writer drops those winners using the same state.
+            // Stop summaries bypass queued results after cancellation or the
+            // close deadline. The writer drops those results using the same state.
             let control = Control::summary(done, Some((Arc::clone(&state), shutdown.clone())));
             let send = crate::session::send_control(&tx, control, &cancel);
             tokio::pin!(send);
@@ -817,21 +863,28 @@ mod tests {
         assert!(!pushed.insert(u64::MAX - 1));
     }
 
+    fn sink_for(
+        state: &Arc<LeaseState>,
+        target: Option<SessionTarget>,
+        ctrl: &mpsc::Sender<Control>,
+    ) -> LeaseSink {
+        LeaseSink {
+            before_send: Mutex::new(None),
+            state: Arc::clone(state),
+            cancel: CancelToken::default(),
+            shutdown: watch::channel(None).1,
+            target: watch::channel(target).1,
+            ctrl: ctrl.downgrade(),
+            device_faulted: Arc::new(AtomicBool::new(false)),
+            params: SampleParams::default(),
+        }
+    }
+
     #[test]
     fn a_repeated_local_salt_counts_once() {
         let state = test_state(None);
         let (ctrl, _ctrl_rx) = mpsc::channel::<Control>(4);
-        let sink = LeaseSink {
-            before_send: Mutex::new(None),
-            state: Arc::clone(&state),
-            cancel: CancelToken::default(),
-            shutdown: watch::channel(None).1,
-            // No target: push counts the salt and sends nothing.
-            target: watch::channel(None).1,
-            ctrl: ctrl.downgrade(),
-            device_faulted: Arc::new(AtomicBool::new(false)),
-            params: SampleParams::default(),
-        };
+        let sink = sink_for(&state, None, &ctrl);
         let read = || {
             vec![SamplerResult {
                 spins: vec![1],
@@ -844,6 +897,52 @@ mod tests {
         assert_eq!(
             (progress.dispatched, progress.finished, progress.salts_done),
             (1, 1, 1)
+        );
+    }
+
+    #[test]
+    fn a_screened_salt_counts_and_folds_its_energy_without_sending() {
+        let state = test_state(None);
+        let (ctrl, mut ctrl_rx) = mpsc::channel::<Control>(4);
+        let sink = sink_for(&state, None, &ctrl);
+        assert_eq!(sink.screen(0, -700), Ok(()));
+        assert_eq!(sink.screen(0, -900), Ok(()), "a repeat is ignored");
+        assert_eq!(sink.screen(1, -900), Err(LeaseStopped), "outside the lease");
+        let progress = state.progress();
+        assert_eq!(
+            (progress.dispatched, progress.finished, progress.salts_done),
+            (1, 1, 1)
+        );
+        assert_eq!(progress.best_energy_milli, -700);
+        drop(progress);
+        assert!(ctrl_rx.try_recv().is_err(), "screen sends nothing");
+    }
+
+    #[test]
+    fn a_closed_lease_refuses_screens() {
+        let state = test_state(None);
+        state.progress().closed = true;
+        let (ctrl, _ctrl_rx) = mpsc::channel::<Control>(4);
+        let sink = sink_for(&state, None, &ctrl);
+        assert_eq!(sink.screen(0, -1), Err(LeaseStopped));
+        assert_eq!(state.progress().salts_done, 0);
+    }
+
+    #[test]
+    fn target_energy_follows_the_session_target() {
+        let state = test_state(None);
+        let (ctrl, _ctrl_rx) = mpsc::channel::<Control>(4);
+        assert_eq!(sink_for(&state, None, &ctrl).target_energy_milli(), None);
+        let target = SessionTarget {
+            max_energy_milli: -1234,
+            min_solutions: 0,
+            max_proof_solutions: 0,
+            num_reads: 0,
+            num_sweeps: 0,
+        };
+        assert_eq!(
+            sink_for(&state, Some(target), &ctrl).target_energy_milli(),
+            Some(-1234)
         );
     }
 
@@ -1011,37 +1110,62 @@ mod tests {
     #[ignore = "manual release-mode timing check on an Advantage2-sized synthetic topology"]
     #[expect(clippy::print_stdout, reason = "manual timing result for --nocapture")]
     fn lease_draw_advantage2_timing() -> Result<(), Box<dyn std::error::Error>> {
-        use crate::{coefficient::Fixed, encoding::convert_milli};
+        use crate::coefficient::Fixed;
         use std::{hint::black_box, time::Instant};
 
         const NODES: usize = 4577;
         const EDGES: usize = 41_515;
-        const ITERATIONS: u32 = 200;
-        let topology = TopologyView {
-            num_nodes: NODES,
-            edges: (1..NODES)
-                .flat_map(|offset| (0..NODES).map(move |u| (u, (u + offset) % NODES)))
-                .take(EDGES)
-                .collect(),
-            allowed_h_milli: vec![-1000, 0, 1000],
-            allowed_j_milli: vec![-1000, 1000],
+        const SALTS: u64 = 200;
+        let spec = LeaseSpec::new(
+            Generator::Blake3Chacha8V1,
+            [1; 32],
+            [2; 32],
+            [3; 32],
+            0,
+            SALTS,
+        )?;
+        let state = LeaseState {
+            job_id: b"lease".to_vec(),
+            lease: Lease::new(spec),
+            topology: Arc::new(TopologyView {
+                num_nodes: NODES,
+                edges: (1..NODES)
+                    .flat_map(|offset| (0..NODES).map(move |u| (u, (u + offset) % NODES)))
+                    .take(EDGES)
+                    .collect(),
+                allowed_h_milli: vec![-1000, 0, 1000],
+                allowed_j_milli: vec![-1000, 1000],
+            }),
+            edges: Arc::new([]),
+            watermark: None,
+            deadline_ms: 0,
+            aborted: Arc::new(AtomicBool::new(false)),
+            jobs_done: Arc::new(AtomicU64::new(0)),
+            progress: Mutex::new(Progress {
+                dispatched: 0,
+                finished: 0,
+                salts_done: 0,
+                best_energy_milli: i64::MAX,
+                closed: false,
+                done_sent: false,
+                pushed: PushedSalts::default(),
+            }),
         };
 
         let start = Instant::now();
-        for salt in 0..ITERATIONS {
-            let mut nonce = [0; 32];
-            for (byte, value) in nonce.iter_mut().zip(salt.to_le_bytes()) {
-                *byte = value;
-            }
-            let (h, j) = topology.draw(black_box(nonce))?;
-            let (h, j, exact_milli) = black_box(convert_milli::<Fixed<i8, 1>>(h, j));
-            if exact_milli.is_some() {
+        for index in 0..SALTS {
+            let (graph, exact) = draw_graph::<Fixed<i8, 1>>(&state, black_box(index))?;
+            if exact.is_some() {
                 return Err("draw did not convert exactly to Fixed<i8, 1>".into());
             }
-            drop(black_box((h, j)));
+            drop(black_box(graph));
         }
-        let mean = start.elapsed().as_secs_f64() / f64::from(ITERATIONS);
-        println!("lease_draw_advantage2_timing: {ITERATIONS} salts, mean {mean:.9} s per salt");
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a 200-salt count is exact in f64"
+        )]
+        let mean = start.elapsed().as_secs_f64() / SALTS as f64;
+        println!("lease_draw_advantage2_timing: {SALTS} salts, mean {mean:.9} s per salt");
         Ok(())
     }
 
@@ -1063,7 +1187,8 @@ mod tests {
         .unwrap();
         let state = Arc::new(LeaseState {
             job_id: b"lease".to_vec(),
-            lease: Lease(spec),
+            lease: Lease::new(spec),
+            edges: topology.edges.as_slice().into(),
             topology: Arc::new(topology),
             watermark: None,
             deadline_ms: 0,
@@ -1121,7 +1246,7 @@ mod tests {
     fn lease_wrapper_maps_out_of_range_indices_to_zero() {
         let spec =
             LeaseSpec::new(Generator::Blake3Chacha8V1, [1; 32], [2; 32], [3; 32], 10, 2).unwrap();
-        let lease = Lease(spec);
+        let lease = Lease::new(spec);
         assert_eq!(lease.salt_count(), 2);
         assert_eq!(lease.generator(), Generator::Blake3Chacha8V1);
         for index in 0..2 {
