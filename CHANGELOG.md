@@ -5,6 +5,49 @@ This file documents changes to the Quip solver contract.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.0.2
+
+Protocol version 2, salt leases, selectable coefficient types, warm starts,
+and faster lease generation. This section consolidates the four release
+candidates below. Nothing shipped in 0.0.2 that was not in 0.0.2-rc4.
+
+Protocol version 2 breaks the v1 wire contract. Update the coordinator and
+solvers together, using the
+[coordinator upgrade guide](docs/coordinator-upgrade-v2.md).
+[MIGRATING.md](MIGRATING.md) lists the solver API changes.
+
+### Added
+
+- `ISING_GENERATE` salt leases. The coordinator sends a lease description,
+  and the miner derives each nonce and draws each problem itself.
+  `Lease`, `LeaseSink`, `generates_locally`, and `sample_lease` let a Rust
+  sampler draw and sample a lease on its own device. `LeaseSink::screen`
+  counts a salt that the backend screened out.
+- `IsingGraph<C>` and `Sampler<C>` select the coefficient type: `f64`,
+  `f32`, `half::f16`, or fixed-point integers. `CoefficientEncoding` adds
+  integer and float wire forms.
+- Warm starts: `IsingProblem.initial_spins` and the seeded-anneal fields,
+  with the `initial-spins` feature.
+- `meets_target` and `verify_lease_result` give the coordinator one shared
+  verification path, with golden vectors.
+- `chacha8::draw_into`, `chacha8::draw_ising`, and `derive::NonceDeriver`,
+  with the [miner hardware guide](docs/miner-side-generation.md).
+
+### Changed
+
+- Lease expansion takes 41 µs per salt, down from 383 µs, on a topology with
+  4577 nodes and 41,515 edges.
+- A lease `Result` carries every read for each salt that the backend
+  reports. The coordinator verifies and selects against the target.
+- `IsingGraph::edges` and `CsrGraph::edges` are `Arc<[(usize, usize)]>`.
+- `Solution.spins` uses bit-packed spins.
+
+### Removed
+
+- The v1 `Hello` and `Capabilities` string fields,
+  `IsingProblem.h_milli_le32`, `IsingProblem.j_milli_le32`, and
+  `Solution.spins_bytes`.
+
 ## 0.0.2-rc4
 
 ### Added

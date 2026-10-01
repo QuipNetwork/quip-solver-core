@@ -9,7 +9,7 @@ The Python wheel and npm package carry consensus primitives and generated gRPC s
 Python and TypeScript solvers provide their own session loops.
 
 The full contract is in [SPEC.md](SPEC.md).
-[CHANGELOG.md](CHANGELOG.md) lists the 0.0.2-rc4 changes.
+[CHANGELOG.md](CHANGELOG.md) lists the 0.0.2 changes.
 [MIGRATING.md](MIGRATING.md) covers solver API changes.
 Releases from `0.0.2-rc3` require protocol version 2.
 Update the coordinator and solvers together using the
@@ -37,10 +37,10 @@ artifact, because a C consumer wants the compiled object and the header.
 
 ```toml
 [dependencies]
-quip-solver-core = "0.0.2-rc4"
+quip-solver-core = "0.0.2"
 
 [dev-dependencies]
-quip-solver-conformance = "0.0.2-rc4"
+quip-solver-conformance = "0.0.2"
 ```
 
 One dependency is enough. `quip-solver-core` re-exports `quip_proto` and
@@ -62,7 +62,7 @@ pip install quip-solver-core
 ### Node packages
 
 ```sh
-npm install @quip.network/quip-solver-core@rc
+npm install @quip.network/quip-solver-core
 ```
 
 ### Native libraries
