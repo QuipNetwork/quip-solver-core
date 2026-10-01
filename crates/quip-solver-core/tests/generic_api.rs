@@ -69,7 +69,7 @@ fn default_graph_and_json_keep_sub_milli_values() -> Result<(), Box<dyn std::err
     let graph = IsingGraph {
         h: vec![0.0004],
         j: vec![],
-        edges: vec![],
+        edges: vec![].into(),
     };
     assert!(DefaultSampler
         .sample(&graph, &SampleParams::default())
@@ -84,7 +84,7 @@ fn default_graph_and_json_keep_sub_milli_values() -> Result<(), Box<dyn std::err
     let milli = IsingGraph::<Milli> {
         h: vec![Fixed(1)],
         j: vec![],
-        edges: vec![],
+        edges: vec![].into(),
     };
     assert_eq!(milli.num_nodes(), 1);
     Ok(())
@@ -135,7 +135,7 @@ fn narrow_stream_signatures_are_callable() {
                 graph: IsingGraph::<Fixed<i8, 1>> {
                     h: vec![Fixed(1), Fixed(-1)],
                     j: vec![Fixed(1)],
-                    edges: vec![(0, 1)],
+                    edges: vec![(0, 1)].into(),
                 },
                 params: SampleParams::default(),
                 watermark: None,

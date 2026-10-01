@@ -328,7 +328,7 @@ impl CSampler {
 
         let num_nodes = graph.h.len();
         let mut flat = Vec::with_capacity(flat_len);
-        for &(u, v) in &graph.edges {
+        for &(u, v) in graph.edges.iter() {
             for endpoint in [u, v] {
                 if endpoint >= num_nodes {
                     return Err(format!(

@@ -778,7 +778,7 @@ mod stream_tests {
                         graph: IsingGraph::<Fixed<i8, 1>> {
                             h: vec![Fixed(1), Fixed(-1)],
                             j: vec![Fixed(1)],
-                            edges: vec![(0, 1)],
+                            edges: vec![(0, 1)].into(),
                         },
                         params: SampleParams::default(),
                         watermark: None,

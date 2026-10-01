@@ -10,7 +10,7 @@
 )]
 
 use quip_protocol::chacha8::{draw_ising_milli, ChaCha8Rng};
-use quip_protocol::derive::derive_nonce;
+use quip_protocol::derive::{derive_nonce, NonceDeriver};
 use serde_json::Value;
 
 #[expect(
@@ -50,6 +50,11 @@ fn derive_nonce_matches_golden() {
             derive_nonce(last_proof, miner, salt),
             expected,
             "derive_nonce case {index}"
+        );
+        assert_eq!(
+            NonceDeriver::new(last_proof, miner).derive(salt),
+            expected,
+            "NonceDeriver case {index}"
         );
     }
 }

@@ -323,11 +323,11 @@ fn parse_ising<C: Coefficient>(
     let graph = IsingGraph {
         h: decoded.h,
         j: decoded.j,
-        edges,
+        edges: edges.into(),
     };
     let exact_energy = decoded
         .exact_milli
-        .map(|(h, j)| ExactEnergy::new(h, j, graph.edges.clone()));
+        .map(|(h, j)| ExactEnergy::new(h, j, std::sync::Arc::clone(&graph.edges)));
     Ok(ParsedIsing {
         graph,
         exact_energy,
@@ -423,11 +423,11 @@ pub(crate) fn num_sweeps_from_toml(backend_toml: &str) -> usize {
 pub(crate) struct ExactEnergy {
     h: Vec<i32>,
     j: Vec<i32>,
-    edges: Vec<(usize, usize)>,
+    edges: std::sync::Arc<[(usize, usize)]>,
 }
 
 impl ExactEnergy {
-    pub(crate) fn new(h: Vec<i32>, j: Vec<i32>, edges: Vec<(usize, usize)>) -> Self {
+    pub(crate) fn new(h: Vec<i32>, j: Vec<i32>, edges: std::sync::Arc<[(usize, usize)]>) -> Self {
         Self { h, j, edges }
     }
 
@@ -825,7 +825,7 @@ mod tests {
         let g = parse_ising::<f64>(&ising, 100_000, 1_000_000, Some(&cache))
             .unwrap()
             .graph;
-        assert_eq!(g.edges, vec![(0, 1), (1, 2)]);
+        assert_eq!(*g.edges, [(0, 1), (1, 2)]);
         assert_eq!(g.h, vec![1.0, -1.0, 1.0]);
         assert_eq!(g.j, vec![1.0, -1.0]);
     }
