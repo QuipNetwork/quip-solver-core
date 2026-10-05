@@ -1014,13 +1014,18 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
     // stalls every cycle waiting for the next job to arrive over the wire.
     let prefetch = width.saturating_mul(2);
     let cap = prefetch.max(8);
+    // Lease salts get the same look-ahead: one running and one NEXT per lane.
+    // Bounded to `width`, they fill only the first half of the lanes (the
+    // backend loads an ACTIVE and a NEXT job lane by lane) and leave the rest
+    // idle: on an RTX 2070 that cut msa from 7.90 jobs/s to 4.64 salts/s.
+    let lease_depth = prefetch;
     // Credited jobs occupy at most cap slots. The lease semaphore bounds salts
-    // to width additional slots, so accepting a credited job never blocks.
+    // to lease_depth additional slots, so accepting a credited job never blocks.
     let (job_tx, job_rx) = if S::accepts_warm_start() {
-        let (tx, rx) = mpsc::channel::<WarmStreamJob<C>>(cap + width);
+        let (tx, rx) = mpsc::channel::<WarmStreamJob<C>>(cap + lease_depth);
         (JobSender::Warm(tx), JobReceiver::Warm(rx))
     } else {
-        let (tx, rx) = mpsc::channel::<StreamJob<C>>(cap + width);
+        let (tx, rx) = mpsc::channel::<StreamJob<C>>(cap + lease_depth);
         (JobSender::Plain(tx), JobReceiver::Plain(rx))
     };
     let (res_tx, res_rx) = mpsc::channel::<StreamResult>(cap);
@@ -1049,7 +1054,7 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
     let mut topology: Option<TopologyCache> = None;
     let (target_tx, target_rx) = watch::channel::<Option<SessionTarget>>(None);
     let mut lease_topology = None;
-    let slots = Arc::new(Semaphore::new(width));
+    let slots = Arc::new(Semaphore::new(lease_depth));
     let (shutdown_tx, shutdown_rx) = watch::channel(None);
     let aborted = Arc::new(AtomicBool::new(false));
     let mut expanders = tokio::task::JoinSet::new();
@@ -2202,6 +2207,167 @@ mod tests {
         .await
         .unwrap();
         result.unwrap();
+    }
+
+    /// A device whose lanes never finish on their own: it holds every job the
+    /// session hands over until the test releases it, then answers them all.
+    struct Hoarding {
+        width: usize,
+        seen: Arc<std::sync::atomic::AtomicUsize>,
+        release: StdMutex<std::sync::mpsc::Receiver<()>>,
+    }
+    impl Sampler<crate::coefficient::Milli> for Hoarding {
+        fn sample(
+            &self,
+            _: &crate::IsingGraph<crate::coefficient::Milli>,
+            _: &crate::SampleParams,
+        ) -> Result<Vec<crate::SamplerResult>, crate::SampleError> {
+            Ok(Vec::new())
+        }
+        fn stream_width(&self) -> usize {
+            self.width
+        }
+        fn sample_stream(
+            &self,
+            mut jobs: mpsc::Receiver<StreamJob<crate::coefficient::Milli>>,
+            out: mpsc::Sender<StreamResult>,
+            _: CancelToken,
+        ) {
+            let answer = |job: StreamJob<crate::coefficient::Milli>| {
+                drop(out.blocking_send(StreamResult {
+                    job_id: job.job_id,
+                    outcome: StreamOutcome::Completed(Ok(Vec::new())),
+                    device_access_time_us: 0,
+                }));
+            };
+            let mut held = Vec::new();
+            loop {
+                match jobs.try_recv() {
+                    Ok(job) => {
+                        let _ = self.seen.fetch_add(1, Ordering::SeqCst);
+                        held.push(job);
+                    }
+                    Err(mpsc::error::TryRecvError::Empty) => {
+                        if self.release.lock().unwrap().try_recv().is_ok() {
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    Err(mpsc::error::TryRecvError::Disconnected) => break,
+                }
+            }
+            held.into_iter().for_each(&answer);
+            while let Some(job) = jobs.blocking_recv() {
+                answer(job);
+            }
+        }
+    }
+
+    /// The CUDA backend keeps two jobs per lane: the one running and the NEXT
+    /// one pre-loaded, filled lane by lane. Plain jobs get `2 * width` credits
+    /// for exactly that reason. Lease salts must reach the same depth, or the
+    /// lanes past the first half sit idle (measured on an RTX 2070: 4.64 lease
+    /// salts/s against 7.90 plain jobs/s from the same binary).
+    #[tokio::test]
+    async fn lease_salts_fill_the_same_prefetch_depth_as_plain_jobs() {
+        let width = 4;
+        let seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (release, release_rx) = std::sync::mpsc::channel();
+        let sampler = Arc::new(Hoarding {
+            width,
+            seen: Arc::clone(&seen),
+            release: StdMutex::new(release_rx),
+        });
+        let (input, incoming) = mpsc::channel(8);
+        let (out, mut replies) = mpsc::channel(64);
+        let drain = tokio::spawn(async move { while replies.recv().await.is_some() {} });
+        let identity = test_identity();
+        let session = run_connected_session(
+            ReceiverStream::new(incoming),
+            out,
+            "test",
+            &identity,
+            sampler,
+            None,
+        );
+        let coordinator = async move {
+            let send = |msg| input.send(Ok(CoordMsg { msg: Some(msg) }));
+            send(coord_msg::Msg::Welcome(quip_proto::v1::Welcome {
+                protocol_version: 2,
+            }))
+            .await
+            .unwrap();
+            send(coord_msg::Msg::Configure(
+                quip_proto::v1::Configure::default(),
+            ))
+            .await
+            .unwrap();
+            send(coord_msg::Msg::Topology(quip_proto::v1::Topology {
+                hash: vec![7; 32],
+                nodes: vec![1],
+                allowed_h_milli: vec![1000],
+                ..Default::default()
+            }))
+            .await
+            .unwrap();
+            send(coord_msg::Msg::SetTarget(quip_proto::v1::SetTarget {
+                max_energy_milli: i64::MAX,
+                min_solutions: 1,
+                max_proof_solutions: 32,
+                num_reads: 1,
+                num_sweeps: 1,
+                ..Default::default()
+            }))
+            .await
+            .unwrap();
+            send(coord_msg::Msg::Job(quip_proto::v1::Job {
+                job_id: b"lease".to_vec(),
+                kind: JobKind::IsingGenerate as i32,
+                generation: 1,
+                generator: Some(quip_proto::v1::IsingProblemGenerator {
+                    algorithm: 1,
+                    topology_hash: vec![7; 32],
+                    last_proof_block_hash: vec![1; 32],
+                    miner_account: vec![2; 32],
+                    base_salt: vec![0; 32],
+                    salt_count: 100,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }))
+            .await
+            .unwrap();
+            // Wait for the hand-over to settle: no new job for 200 ms.
+            let mut last = usize::MAX;
+            loop {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                let now = seen.load(Ordering::SeqCst);
+                if now == last {
+                    break;
+                }
+                last = now;
+            }
+            let in_flight = seen.load(Ordering::SeqCst);
+            release.send(()).unwrap();
+            send(coord_msg::Msg::Shutdown(quip_proto::v1::Shutdown {
+                grace_ms: 200,
+            }))
+            .await
+            .unwrap();
+            in_flight
+        };
+        let (result, in_flight) = tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(session, coordinator)
+        })
+        .await
+        .unwrap();
+        result.unwrap();
+        drain.await.unwrap();
+        assert_eq!(
+            in_flight,
+            2 * width,
+            "lease salts handed to a {width}-lane device"
+        );
     }
 
     struct Sampled(StdMutex<Option<tokio::sync::oneshot::Sender<()>>>);
