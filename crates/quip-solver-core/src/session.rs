@@ -487,7 +487,7 @@ fn log_progress(
     let (reads, sweeps) = pending.map_or((0, 0), |p| (p.num_reads, p.num_sweeps));
     let requirement = format_requirement(pending);
     tracing::info!(
-        "[quip-miner-{backend}] progress: {jobs_done} jobs | {rate:.1} jobs/s | reads={reads} sweeps={sweeps} | best={best} | {requirement}"
+        "[quip-solver-{backend}] progress: {jobs_done} jobs | {rate:.1} jobs/s | reads={reads} sweeps={sweeps} | best={best} | {requirement}"
     );
 }
 
@@ -540,18 +540,18 @@ fn log_attempt(backend: &str, sr: &StreamResult, pending: Option<&PendingJob>) {
                 None => samples.len(),
             };
             tracing::info!(
-                "[quip-miner-{backend}] attempt {job}: energy {}, valid {valid}/{} \
+                "[quip-solver-{backend}] attempt {job}: energy {}, valid {valid}/{} \
                  | {wall} wall, {device} device",
                 best.map_or_else(|| "n/a".to_owned(), |e| energy_units(e).to_string()),
                 samples.len(),
             );
         }
         StreamOutcome::Completed(Err(err)) => {
-            tracing::warn!("[quip-miner-{backend}] attempt {job}: rejected {err} | {wall} wall",);
+            tracing::warn!("[quip-solver-{backend}] attempt {job}: rejected {err} | {wall} wall",);
         }
         // Expected on every reseed, so this is not a degraded condition.
         StreamOutcome::Cancelled => {
-            tracing::debug!("[quip-miner-{backend}] attempt {job}: cancelled after {wall}");
+            tracing::debug!("[quip-solver-{backend}] attempt {job}: cancelled after {wall}");
         }
     }
 }
@@ -813,7 +813,7 @@ async fn outbound_writer<C: Coefficient>(
                     StreamOutcome::Completed(Ok(_)) if stopped =>
                     {
                         tracing::debug!(
-                            "[quip-miner-{backend}] dropping a late Result for cancelled job {}",
+                            "[quip-solver-{backend}] dropping a late Result for cancelled job {}",
                             short_job_id(&sr.job_id),
                         );
                         StreamResult { outcome: StreamOutcome::Cancelled, ..sr }
@@ -1744,7 +1744,7 @@ fn map_err_to_exit(err: Box<dyn std::error::Error>, backend: &str) -> ExitCode {
     if msg.contains("unexpected protocol version") {
         return ExitCode::ConfigInvalid;
     }
-    tracing::error!("quip-miner-{backend} fatal: {err}");
+    tracing::error!("quip-solver-{backend} fatal: {err}");
     ExitCode::InternalFatal
 }
 
@@ -1772,7 +1772,7 @@ pub fn run_code<S: Sampler<C>, C: Coefficient>(
             reason = "the subscriber failed to install, so tracing would discard this"
         )]
         {
-            eprintln!("quip-miner-{backend}: {e}");
+            eprintln!("quip-solver-{backend}: {e}");
         }
         return ExitCode::ConfigInvalid;
     }
