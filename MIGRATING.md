@@ -158,7 +158,9 @@ names the old types fails.
 
 ## Dependency
 
-The crate moved. Change the git source and the package name.
+The crate was renamed from `quip-miner-core` and is published on crates.io.
+The `quip-protocol` repository it came from no longer exists. Replace the git
+dependency with the crates.io release.
 
 Before:
 
@@ -171,10 +173,8 @@ After:
 
 ```toml
 [dependencies]
-quip-solver-core = { git = "https://gitlab.com/quip.network/quip-solver-core.git", tag = "<tag>" }
+quip-solver-core = "0.0.1"
 ```
-
-Replace `<tag>` with the tag chosen at publication.
 
 ## `Sampler::sample` error type
 
