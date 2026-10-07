@@ -1010,7 +1010,7 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
     // Prefetch a full extra batch beyond the active set: the backend keeps each
     // stream lane's NEXT slot pre-loaded so a completed slot rotates into a
     // ready one with no idle gap while it is downloaded and refilled (the
-    // 3-slot pipeline in quip-miner-cuda). Without this look-ahead the lane
+    // 3-slot pipeline in quip-solver-cuda). Without this look-ahead the lane
     // stalls every cycle waiting for the next job to arrive over the wire.
     let prefetch = width.saturating_mul(2);
     let cap = prefetch.max(8);

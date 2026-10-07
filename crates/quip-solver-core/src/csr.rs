@@ -37,7 +37,7 @@ impl CsrGraph {
     /// a self-loop in a neighbor row would inject a spurious self-force into
     /// that node's local field, while `energy_milli` scores the loop as an
     /// unoptimizable constant. This matches `CpuGraph::from_base` and
-    /// `SbGraph::from_base` in quip-miner-cpu. Couplings shorter than edges
+    /// `SbGraph::from_base` in quip-solver-cpu. Couplings shorter than edges
     /// are treated as 0 for the missing entries.
     #[must_use]
     pub fn from_base<C: Coefficient>(g: &IsingGraph<C>) -> Self {
@@ -138,7 +138,7 @@ mod tests {
     /// A self-loop `(u, u)` must not appear in the CSR adjacency: it should
     /// contribute no entry to `col_ind`/`j_csr` and not inflate `row_ptr`,
     /// matching `CpuGraph::from_base` and `SbGraph::from_base` in
-    /// quip-miner-cpu, which both skip `u == v` outright.
+    /// quip-solver-cpu, which both skip `u == v` outright.
     #[test]
     fn csr_drops_self_loops() {
         let g = CsrGraph::from_base(&IsingGraph::new(

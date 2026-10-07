@@ -151,14 +151,16 @@ Do not add the feature to `BackendIdentity.features` by hand.
 
 # Migrating to quip-solver-core 0.0.1
 
-This note is for maintainers of `quip-miner-cpu` and `quip-miner-cuda`, and
+This note is for maintainers of `quip-solver-cpu` and `quip-solver-cuda`, and
 for C and C++ solver authors building with `libquip_solver_c`. Two public
 Rust types and one C entry point change in this release. A build that still
 names the old types fails.
 
 ## Dependency
 
-The crate moved. Change the git source and the package name.
+The crate was renamed from `quip-miner-core` and is published on crates.io.
+The `quip-protocol` repository it came from no longer exists. Replace the git
+dependency with the crates.io release.
 
 Before:
 
@@ -171,10 +173,8 @@ After:
 
 ```toml
 [dependencies]
-quip-solver-core = { git = "https://gitlab.com/quip.network/quip-solver-core.git", tag = "<tag>" }
+quip-solver-core = "0.0.1"
 ```
-
-Replace `<tag>` with the tag chosen at publication.
 
 ## `Sampler::sample` error type
 
