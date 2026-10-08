@@ -1802,6 +1802,9 @@ mod tests {
             native_topology_hash: None,
             encodings: vec![quip_proto::v1::CoefficientEncoding::I32 as i32],
             generators: vec![],
+            max_degree: None,
+            max_local_field_milli: None,
+            exact_resolution_milli: None,
         }
     }
 

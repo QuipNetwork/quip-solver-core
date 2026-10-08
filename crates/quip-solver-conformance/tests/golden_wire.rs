@@ -94,6 +94,9 @@ fn hello() -> Hello {
             stream_width: 4,
             encodings: vec![CoefficientEncoding::I32 as i32],
             generators: vec![GeneratorAlgorithm::Blake3Chacha8V1 as i32],
+            max_degree: None,
+            max_local_field_milli: None,
+            exact_resolution_milli: None,
         }),
     }
 }
@@ -228,6 +231,9 @@ fn capabilities() -> Capabilities {
         protocol_version: 2,
         stream_width: 4,
         native_topology_hash: Some(vec![0xAB, 0xCD]),
+        max_degree: None,
+        max_local_field_milli: None,
+        exact_resolution_milli: None,
     }
 }
 

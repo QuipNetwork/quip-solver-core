@@ -279,6 +279,14 @@ message Capabilities {
   repeated GeneratorAlgorithm generators = 11;
   Backend backend = 12;
   Algorithm algorithm = 13;
+  // Most edges incident on one node. Unset makes no claim; 0 is unbounded.
+  optional uint32 max_degree = 14;
+  // Largest local field max_i(|h_i| + sum_j |J_ij|), in milli. Unset makes no
+  // claim; 0 is unbounded.
+  optional uint32 max_local_field_milli = 15;
+  // Step, in milli, at which coefficients are represented exactly. Unset or 0
+  // makes no claim.
+  optional uint32 exact_resolution_milli = 16;
 }
 
 message IsingProblemGenerator {

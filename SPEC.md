@@ -57,7 +57,8 @@ These codes apply to all four modes. They are the same values that
 | Code | Name | Meaning |
 |---|---|---|
 | 0 | Clean | Clean exit. |
-| 64 | ConfigInvalid | Missing or invalid command-line flags or config. Examples: no `--quip-coordinator`, a bad Welcome. |
+| 64 | ConfigInvalid | Missing or invalid command-line flags or config. Examples: no `--quip-coordinator`, a bad Welcome, a malformed `--solve` problem. |
+| 65 | Capacity | The `--solve` model exceeds what this solver solves. The same model may succeed on another solver. |
 | 69 | EnvIncompatible | The host cannot run this solver. `--check` failed. |
 | 70 | InternalFatal | Unexpected internal failure. |
 | 77 | TokenRejected | `QUIP_SESSION_TOKEN` is missing, empty, or rejected. |
@@ -137,6 +138,8 @@ The decoder returns `MALFORMED` for these inputs:
 - A fractional milli value.
 - A value outside the `i32` milli range.
 
+An edge from a node to itself is also `MALFORMED`.
+
 Send a narrow encoding only when every value converts exactly and the solver advertises that encoding.
 Otherwise send `I32` at scale 1000.
 
@@ -185,6 +188,25 @@ After its last result, a completed lease sends one `LeaseDone` with a one-credit
 Empty reads send no result and do not change the lowest energy.
 `best_energy_milli` is the lowest energy observed, or `i64::MAX` if no reads finish.
 The stop rules in section 5 bound this completion sequence.
+
+### Model limits
+
+`Capabilities` fields 14 to 16 state which models a solver solves correctly, beyond `max_nodes` and `max_edges`.
+Each is measured in milli units on the model as received.
+An unset field makes no claim.
+
+| Field | Meaning |
+|---|---|
+| `max_degree`, 14 | Most edges incident on one node. `0` is unbounded. |
+| `max_local_field_milli`, 15 | Largest local field, the maximum over nodes of the node's absolute bias plus the absolute values of its couplings. `0` is unbounded. |
+| `exact_resolution_milli`, 16 | The step at which coefficients are represented exactly. `0` makes no claim. |
+
+A solver rejects a plain job beyond `max_degree` or `max_local_field_milli` with `TOO_LARGE`.
+These limits do not apply to leases.
+
+A solver that lists the `exact-coefficients` feature refuses, rather than quantizes, a coefficient it does not represent exactly.
+That covers a coefficient off `exact_resolution_milli`.
+A solver without the feature may quantize and must still report exact energies.
 
 ### Warm starts
 
@@ -270,6 +292,15 @@ It retains the milli arrays and replaces reported energies only when that check 
 Generated problems use the same conversion check.
 The JSON driver applies it to wire-representable inputs and preserves its existing handling of other JSON values.
 Use `quip_protocol::scoring::energy_from_milli` to score stored milli integers.
+
+`BackendIdentity.limits` is a `ModelLimits`, and the session advertises and enforces it.
+`ModelLimits::UNSTATED` makes no claim.
+A solver that lists `exact-coefficients` gets every job refused whose conversion to `C` is not exact.
+
+`SampleParams.schedule` is a `BetaSchedule`, `Geometric` by default.
+Session jobs are always `Geometric`.
+`BetaSchedule::build` builds either ladder.
+A solver whose ladder honours `Linear` lists `linear-schedule` in `BackendIdentity.features`.
 
 `BackendIdentity.backend` is `quip_proto::v1::Backend`.
 `BackendIdentity.algorithm` is `quip_proto::v1::Algorithm`.
@@ -483,6 +514,8 @@ The fields are:
 - `generators`
 - `nativeTopologyHash`. Omit it when unset. The value is standard base64
   because protobuf JSON maps `bytes` that way.
+- `maxDegree`, `maxLocalFieldMilli`, and `exactResolutionMilli`. Omit each
+  when unset. A set `0` is printed.
 
 `backend` and `algorithm` keep names such as `"cpu"`, `"sa"`, and `"dwave-qpu"`.
 Job kinds, encodings, and generators use their protobuf enum names.

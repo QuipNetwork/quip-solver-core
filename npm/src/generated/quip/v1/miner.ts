@@ -710,6 +710,22 @@ export interface Capabilities {
   generators: GeneratorAlgorithm[];
   backend: Backend;
   algorithm: Algorithm;
+  /** Most edges incident on one node. Unset makes no claim; 0 is unbounded. */
+  maxDegree?:
+    | number
+    | undefined;
+  /**
+   * Largest local field max_i(|h_i| + sum_j |J_ij|), in milli. Unset makes no
+   * claim; 0 is unbounded.
+   */
+  maxLocalFieldMilli?:
+    | number
+    | undefined;
+  /**
+   * Step, in milli, at which coefficients are represented exactly. Unset or 0
+   * makes no claim.
+   */
+  exactResolutionMilli?: number | undefined;
 }
 
 export interface IsingProblemGenerator {
@@ -3751,6 +3767,9 @@ function createBaseCapabilities(): Capabilities {
     generators: [],
     backend: 0,
     algorithm: 0,
+    maxDegree: undefined,
+    maxLocalFieldMilli: undefined,
+    exactResolutionMilli: undefined,
   };
 }
 
@@ -3794,6 +3813,15 @@ export const Capabilities: MessageFns<Capabilities> = {
     }
     if (message.algorithm !== 0) {
       writer.uint32(104).int32(message.algorithm);
+    }
+    if (message.maxDegree !== undefined) {
+      writer.uint32(112).uint32(message.maxDegree);
+    }
+    if (message.maxLocalFieldMilli !== undefined) {
+      writer.uint32(120).uint32(message.maxLocalFieldMilli);
+    }
+    if (message.exactResolutionMilli !== undefined) {
+      writer.uint32(128).uint32(message.exactResolutionMilli);
     }
     return writer;
   },
@@ -3923,6 +3951,30 @@ export const Capabilities: MessageFns<Capabilities> = {
           message.algorithm = reader.int32() as any;
           continue;
         }
+        case 14: {
+          if (tag !== 112) {
+            break;
+          }
+
+          message.maxDegree = reader.uint32();
+          continue;
+        }
+        case 15: {
+          if (tag !== 120) {
+            break;
+          }
+
+          message.maxLocalFieldMilli = reader.uint32();
+          continue;
+        }
+        case 16: {
+          if (tag !== 128) {
+            break;
+          }
+
+          message.exactResolutionMilli = reader.uint32();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -3973,6 +4025,21 @@ export const Capabilities: MessageFns<Capabilities> = {
         : [],
       backend: isSet(object.backend) ? backendFromJSON(object.backend) : 0,
       algorithm: isSet(object.algorithm) ? algorithmFromJSON(object.algorithm) : 0,
+      maxDegree: isSet(object.maxDegree)
+        ? globalThis.Number(object.maxDegree)
+        : isSet(object.max_degree)
+        ? globalThis.Number(object.max_degree)
+        : undefined,
+      maxLocalFieldMilli: isSet(object.maxLocalFieldMilli)
+        ? globalThis.Number(object.maxLocalFieldMilli)
+        : isSet(object.max_local_field_milli)
+        ? globalThis.Number(object.max_local_field_milli)
+        : undefined,
+      exactResolutionMilli: isSet(object.exactResolutionMilli)
+        ? globalThis.Number(object.exactResolutionMilli)
+        : isSet(object.exact_resolution_milli)
+        ? globalThis.Number(object.exact_resolution_milli)
+        : undefined,
     };
   },
 
@@ -4011,6 +4078,15 @@ export const Capabilities: MessageFns<Capabilities> = {
     if (message.algorithm !== 0) {
       obj.algorithm = algorithmToJSON(message.algorithm);
     }
+    if (message.maxDegree !== undefined) {
+      obj.maxDegree = Math.round(message.maxDegree);
+    }
+    if (message.maxLocalFieldMilli !== undefined) {
+      obj.maxLocalFieldMilli = Math.round(message.maxLocalFieldMilli);
+    }
+    if (message.exactResolutionMilli !== undefined) {
+      obj.exactResolutionMilli = Math.round(message.exactResolutionMilli);
+    }
     return obj;
   },
 
@@ -4030,6 +4106,9 @@ export const Capabilities: MessageFns<Capabilities> = {
     message.generators = object.generators?.map((e) => e) || [];
     message.backend = object.backend ?? 0;
     message.algorithm = object.algorithm ?? 0;
+    message.maxDegree = object.maxDegree ?? undefined;
+    message.maxLocalFieldMilli = object.maxLocalFieldMilli ?? undefined;
+    message.exactResolutionMilli = object.exactResolutionMilli ?? undefined;
     return message;
   },
 };

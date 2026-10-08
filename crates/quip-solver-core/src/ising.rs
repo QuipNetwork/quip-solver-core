@@ -16,6 +16,45 @@ pub enum Algorithm {
     Gibbs,
 }
 
+/// Shape of the beta ladder between the hot and cold ends.
+///
+/// Every binary builds its ladder host-side, so the kind only takes effect in
+/// a binary that reads it. A binary that does lists
+/// [`LINEAR_SCHEDULE_FEATURE`](crate::LINEAR_SCHEDULE_FEATURE); `--solve`
+/// refuses [`Linear`](Self::Linear) for one that does not, so no kernel
+/// silently stays geometric. Session jobs carry no schedule kind and are always
+/// [`Geometric`](Self::Geometric).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BetaSchedule {
+    /// Log-spaced rungs, [`geometric_beta_schedule`](crate::beta::geometric_beta_schedule).
+    /// The mining default.
+    #[default]
+    Geometric,
+    /// Evenly spaced rungs, [`linear_beta_schedule`](crate::beta::linear_beta_schedule).
+    Linear,
+}
+
+impl BetaSchedule {
+    /// Build the ladder of this kind: `num_betas` rungs from `hot` to `cold`.
+    #[must_use]
+    pub fn build(self, hot: f64, cold: f64, num_betas: usize) -> Vec<f64> {
+        match self {
+            Self::Geometric => crate::beta::geometric_beta_schedule(hot, cold, num_betas),
+            Self::Linear => crate::beta::linear_beta_schedule(hot, cold, num_betas),
+        }
+    }
+
+    /// The `--solve` JSON name: `"geometric"` or `"linear"`.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Geometric => "geometric",
+            Self::Linear => "linear",
+        }
+    }
+}
+
 /// Per-job sampling knobs.
 #[derive(Clone, Debug)]
 pub struct SampleParams {
@@ -27,6 +66,8 @@ pub struct SampleParams {
     pub sweeps_per_beta: usize,
     /// Optional `(hot_beta, cold_beta)`. `None` → auto from biases.
     pub beta_range: Option<(f64, f64)>,
+    /// Shape of the ladder between the ends of `beta_range`.
+    pub schedule: BetaSchedule,
     /// PRNG seed for this job.
     pub seed: u64,
 }
@@ -38,6 +79,7 @@ impl Default for SampleParams {
             num_sweeps: 64,
             sweeps_per_beta: 1,
             beta_range: None,
+            schedule: BetaSchedule::Geometric,
             seed: 0,
         }
     }
@@ -170,7 +212,25 @@ pub(crate) const GOLDEN_GRAPHS: [(&str, usize); 9] = [
 
 #[cfg(test)]
 mod tests {
-    use super::IsingGraph;
+    use super::{BetaSchedule, IsingGraph, SampleParams};
+
+    #[test]
+    fn the_default_schedule_is_geometric() {
+        assert_eq!(SampleParams::default().schedule, BetaSchedule::Geometric);
+    }
+
+    #[test]
+    fn each_schedule_builds_its_own_ladder() {
+        assert_eq!(
+            BetaSchedule::Geometric.build(0.1, 10.0, 4),
+            crate::beta::geometric_beta_schedule(0.1, 10.0, 4)
+        );
+        assert_eq!(
+            BetaSchedule::Linear.build(0.1, 10.0, 4),
+            crate::beta::linear_beta_schedule(0.1, 10.0, 4)
+        );
+    }
+
     #[test]
     fn num_nodes_counts_biases() {
         let graph = IsingGraph::new(

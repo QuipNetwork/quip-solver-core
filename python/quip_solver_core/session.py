@@ -65,6 +65,7 @@ class BadWelcome(Exception):
 # Sysexits-style process exit codes (also carried on Fatal.exit_code).
 EXIT_CLEAN = 0
 EXIT_CONFIG_INVALID = 64
+EXIT_CAPACITY = 65
 EXIT_ENV_INCOMPATIBLE = 69
 EXIT_INTERNAL_FATAL = 70
 EXIT_TOKEN_REJECTED = 77
