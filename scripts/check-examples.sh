@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Builds the four sample solvers and runs the conformance gate on each.
+# Builds the four sample solvers and runs both conformance gates on each.
 #
-# SPEC section 6 defines conformance as a green quip-solver-drive run, so this
-# is the same check a solver author runs against their own binary. Each example
+# SPEC section 6 defines conformance as a green quip-solver-drive run, in
+# session mode and with --solve, so this is the same check a solver author runs
+# against their own binary. Each example
 # consumes a published artifact, which makes this a test of the releases as
 # much as a test of the examples.
 #
@@ -28,12 +29,12 @@ echo "==> building the conformance driver"
 cargo build -p quip-solver-conformance --bin quip-solver-drive --release
 DRIVE="$REPO_ROOT/target/release/quip-solver-drive"
 
-# Runs the gate and reports the language, so a failure names itself rather than
-# leaving the reader to match a socket path back to an example.
+# Runs both gates and reports the language, so a failure names itself rather
+# than leaving the reader to match a socket path back to an example.
 drive() {
     local lang="$1" bin="$2"
     echo "==> conformance: $lang"
-    if "$DRIVE" "$bin" "unix://$SOCKET_DIR/$lang.sock"; then
+    if "$DRIVE" "$bin" "unix://$SOCKET_DIR/$lang.sock" && "$DRIVE" --solve "$bin"; then
         echo "    $lang CONFORMANT"
     else
         echo "    $lang FAILED" >&2

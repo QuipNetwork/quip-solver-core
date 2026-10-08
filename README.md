@@ -78,11 +78,13 @@ Python, and TypeScript each consume the published artifact and pass
 
 ## Conformance
 
-A solver is conformant when `quip-solver-drive` reports a conformant session.
+A solver is conformant when `quip-solver-drive` reports a conformant session
+and a conformant `--solve` run.
 
 ```sh
 cargo build -p quip-solver-conformance --bin quip-solver-drive --release
 ./target/release/quip-solver-drive <solver-binary> unix:///tmp/quip-check.sock
+./target/release/quip-solver-drive --solve <solver-binary>
 ```
 
 Exit code 0 means conformant. The driver spawns any executable, so this works

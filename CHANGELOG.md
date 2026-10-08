@@ -27,6 +27,13 @@ follow the `quip-solver-*` repository rename.
   its coefficient type would round or saturate refused as capacity, instead
   of quantized.
 - `ExitCode::Capacity`, exit code 65, in Rust, Python, and TypeScript.
+- SPEC section 2 specifies `--solve`: every input and output field, the exit
+  codes, and the rejects.
+- `quip-solver-drive --solve <solver-binary>` and
+  `quip_solver_conformance::solve::drive_solve`: the `--solve` conformance
+  gate. Base cases apply to every solver; the `linear-schedule`,
+  `exact-coefficients`, and model-limit cases run when a solver advertises
+  them. CI runs it on all four sample solvers.
 
 ### Changed
 
@@ -36,6 +43,9 @@ follow the `quip-solver-*` repository rename.
   caps, or for `SampleError::Capacity`. It exited 64 for the read cap, ignored
   the node and edge caps, and exited 70 for `SampleError::Capacity`.
 - `driver::solve` takes the solver's `BackendIdentity`.
+- The Python and TypeScript samples reject unknown, missing, and malformed
+  `--solve` keys and self-loops, and write `timing` and `sampler` on each
+  solution.
 - Session log lines start with `[quip-solver-{backend}]` instead of
   `[quip-miner-{backend}]`, and the fatal and logger-setup error lines
   name `quip-solver-{backend}`. The solver repositories are renamed from
