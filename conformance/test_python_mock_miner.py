@@ -269,3 +269,48 @@ def test_rejects_milli_overflow(stored):
     ising.scale = 1
     with pytest.raises(ValueError):
         mock_miner.decode_problem(ising, {})
+
+
+def _solve_problem(**overrides):
+    problem = {
+        "h": [1.0, -1.0],
+        "j": [1.0],
+        "edges": [[0, 1]],
+        "num_reads": 2,
+        "num_sweeps": 8,
+        "sweeps_per_beta": 1,
+        "beta_range": None,
+        "seed": 7,
+    }
+    problem.update(overrides)
+    return problem
+
+
+def test_solve_problem_parses_and_defaults_to_geometric():
+    parsed = mock_miner.parse_solve_problem(_solve_problem())
+    assert parsed["edges"] == [(0, 1)]
+    assert parsed["beta_schedule_type"] == "geometric"
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"edges": [[1, 1]]},
+        {"num_sweep": 1},
+        {"num_reads": 0},
+        {"sweeps_per_beta": 0},
+        {"seed": -1},
+        {"beta_schedule_type": "cosine"},
+        {"beta_schedule_type": "linear"},
+    ],
+)
+def test_solve_problem_rejects_malformed_input(overrides):
+    with pytest.raises(ValueError):
+        mock_miner.parse_solve_problem(_solve_problem(**overrides))
+
+
+def test_solve_problem_requires_every_key():
+    problem = _solve_problem()
+    del problem["seed"]
+    with pytest.raises(ValueError, match="seed"):
+        mock_miner.parse_solve_problem(problem)

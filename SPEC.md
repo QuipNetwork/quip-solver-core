@@ -28,6 +28,62 @@ on stdout, then exits.
 
 `XQSA` and IsingMark use `--solve`.
 
+The input is one JSON object. Every key except `beta_schedule_type` is required.
+A solver rejects any other key.
+
+| Key | Type | Meaning |
+|---|---|---|
+| `h` | array of numbers | Linear biases in units, one per node. |
+| `j` | array of numbers | Couplings in units, one per edge. |
+| `edges` | array of `[u, v]` pairs | Undirected edges. Each endpoint indexes `h`. |
+| `num_reads` | integer, at least 1 | Reads to return. |
+| `num_sweeps` | integer | Sweeps per read. |
+| `sweeps_per_beta` | integer, at least 1 | Sweeps at each beta rung. |
+| `beta_range` | `null` or `[hot, cold]` | Beta at the two ends of the ladder. `null` lets the solver choose. |
+| `beta_schedule_type` | `"geometric"` or `"linear"` | Optional. Absent means `"geometric"`. |
+| `seed` | integer from 0 to 2^64 − 1 | Random seed. The same seed gives the same samples. |
+
+The output is one JSON array with one object per read, and a trailing newline.
+
+| Key | Type | Meaning |
+|---|---|---|
+| `spins` | array of -1 and +1 | One spin per node. |
+| `energy_milli` | integer | Exact energy of `spins` under the input model, in milli units. |
+| `timing` | object | `sample_us`, the time inside the sampler, and `total_us`, the whole solve. Both are integers in microseconds. |
+| `sampler` | object | `backend` and `algorithm` as `--capabilities` names them, then `num_reads`, `num_sweeps`, `sweeps_per_beta`, `beta_range`, `beta_schedule_type`, and `seed` as the solve used them. |
+
+`timing` and `sampler` are the same for every read of one solve.
+
+A solver exits with these codes:
+
+| Code | When |
+|---|---|
+| 0 | It wrote the solutions. |
+| 64 | The input is malformed. |
+| 65 | The model exceeds what this solver solves. |
+| 69 | The device does not open. |
+| 70 | The sampler failed. |
+
+The input is malformed, exit 64, when any of these holds:
+
+- It is not JSON, or not an object.
+- A required key is missing, or an unknown key is present.
+- A value has the wrong type, or `num_reads` or `sweeps_per_beta` is 0.
+- `j` and `edges` differ in length.
+- An endpoint is outside `h`.
+- An edge joins a node to itself.
+- `beta_schedule_type` is not `"geometric"` or `"linear"`.
+- `beta_schedule_type` is `"linear"` and the solver does not list `linear-schedule`.
+
+The model exceeds the solver, exit 65, when any of these holds:
+
+- It has more nodes or edges than `maxNodes` or `maxEdges`, where `0` is no limit.
+- `num_reads` exceeds the solver's read limit.
+- It exceeds `maxDegree` or `maxLocalFieldMilli`.
+- The solver lists `exact-coefficients` and a coefficient is not exactly representable.
+
+A refused problem writes nothing on stdout.
+
 ### `--check`
 
 This mode opens the device and exits. Exit 0 means the device is runnable.
@@ -441,10 +497,11 @@ A zero deadline means no deadline.
 
 ## 6. Conformance
 
-A solver is conformant when both of these hold:
+A solver is conformant when all of these hold:
 
 - `quip-solver-drive <solver-binary> unix://<socket>` reports a conformant
   session.
+- `quip-solver-drive --solve <solver-binary>` reports no failed case.
 - The adaptive parameters of the solver match the `golden_adapt.json` cases.
 
 The driver spawns any executable. The driver speaks the proto over the
@@ -457,15 +514,34 @@ must also return the planted ground-state energy of a 4096-spin ring when
 that ground state is its seed. A cold anneal of the same sweep budget leaves
 domain walls in the ring and does not reach that energy.
 
+The `--solve` gate reads `--capabilities`, then runs one problem per case.
+Every solver must pass the base cases:
+
+- An eight-node ring solves, with the output fields that section 2 lists and energies that score correctly.
+- The same seed gives the same samples.
+- Each malformed input in section 2 exits 64 and writes nothing.
+
+Other cases run only when the solver advertises the behaviour:
+
+| Advertised | Case |
+|---|---|
+| `linear-schedule` | A linear schedule solves. Without the feature, it exits 64. |
+| `maxDegree` | A star at the limit solves. One more leaf exits 65. |
+| `maxLocalFieldMilli` | A local field at the limit solves. One step more exits 65. |
+| `exact-coefficients` and `exactResolutionMilli` | A coefficient on the step solves. One off the step exits 65. |
+
 A Rust solver repository may use this convenience form:
 
 ```rust
 use quip_solver_conformance::driver::drive_miner;
+use quip_solver_conformance::solve::drive_solve;
 
 #[tokio::test]
 async fn solver_is_conformant() {
     let report = drive_miner(bin, "unix:///tmp/s.sock").await;
     assert!(report.is_conformant());
+    let report = drive_solve(bin).await;
+    assert!(report.is_conformant(), "{}", report.summary());
 }
 ```
 
@@ -561,7 +637,7 @@ These pieces exist now:
 - The proto.
 - The `quip-solver-core` wheel: protocol primitives, scoring, wire encoding, and
   exit codes.
-- `quip-solver-drive` as the conformance gate for a solver in any language.
+- `quip-solver-drive` as the conformance gate for a solver in any language, in session mode and with `--solve`.
 - C and C++ through a C binary interface with a registered callback. `quip_solver_run`
   carries the session loop and calls the sampler callback the solver
   registers. The artifact is `libquip_solver_c` plus `quip_solver.h`, attached

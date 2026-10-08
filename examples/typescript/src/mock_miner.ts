@@ -218,6 +218,9 @@ export function decodeProblem(
     if (pu >= h.length || pv >= h.length) {
       throw new MalformedProblem("edge references a node outside h");
     }
+    if (pu === pv) {
+      throw new MalformedProblem(`edge (${pu}, ${pv}) is a self-loop`);
+    }
     edges.push(pu, pv);
   }
   return { h, j, edges };
@@ -528,54 +531,148 @@ async function runSession(endpoint: string, minerId: string): Promise<number> {
   }
 }
 
+/** Every `--solve` key but `beta_schedule_type` is required (SPEC section 2). */
+const SOLVE_KEYS = [
+  "h",
+  "j",
+  "edges",
+  "num_reads",
+  "num_sweeps",
+  "sweeps_per_beta",
+  "beta_range",
+  "seed",
+] as const;
+const OPTIONAL_SOLVE_KEYS = ["beta_schedule_type"] as const;
+
+interface SolveProblem {
+  h: number[];
+  j: number[];
+  edges: number[];
+  numReads: number;
+  numSweeps: number;
+  sweepsPerBeta: number;
+  betaRange: [number, number] | null;
+  seed: number;
+}
+
+function solveInt(rec: Record<string, unknown>, key: string, minimum: number): number {
+  const value = rec[key];
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < minimum) {
+    throw new Error(`${key} must be an integer of at least ${minimum}`);
+  }
+  return value;
+}
+
+function numbers(rec: Record<string, unknown>, key: string): number[] {
+  const value = rec[key];
+  if (!Array.isArray(value) || !value.every((x) => typeof x === "number")) {
+    throw new Error(`${key} must be an array of numbers`);
+  }
+  return value as number[];
+}
+
+/** Validates one `--solve` problem. Throws when it is malformed. */
+export function parseSolveProblem(parsed: unknown): SolveProblem {
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("problem JSON must be an object");
+  }
+  const rec = parsed as Record<string, unknown>;
+  const known = new Set<string>([...SOLVE_KEYS, ...OPTIONAL_SOLVE_KEYS]);
+  for (const key of SOLVE_KEYS) {
+    if (!(key in rec)) throw new Error(`missing key ${key}`);
+  }
+  for (const key of Object.keys(rec)) {
+    if (!known.has(key)) throw new Error(`unknown key ${key}`);
+  }
+  const schedule = rec.beta_schedule_type ?? "geometric";
+  if (schedule !== "geometric" && schedule !== "linear") {
+    throw new Error(`unknown beta_schedule_type ${JSON.stringify(schedule)}`);
+  }
+  if (schedule === "linear") {
+    // This sampler has no ladder, so it does not list linear-schedule.
+    throw new Error("beta_schedule_type linear needs a solver that lists linear-schedule");
+  }
+  const h = numbers(rec, "h");
+  const j = numbers(rec, "j");
+  if (!Array.isArray(rec.edges)) throw new Error("edges must be an array");
+  const edges: number[] = [];
+  for (const pair of rec.edges) {
+    if (!Array.isArray(pair) || pair.length !== 2) {
+      throw new Error("each edge must be a [u, v] pair");
+    }
+    const [u, v] = pair as unknown[];
+    if (!Number.isSafeInteger(u) || !Number.isSafeInteger(v)) {
+      throw new Error("edge endpoints must be integers");
+    }
+    const nu = u as number;
+    const nv = v as number;
+    if (nu < 0 || nv < 0 || nu >= h.length || nv >= h.length) {
+      throw new Error("edge references a node outside h");
+    }
+    if (nu === nv) throw new Error(`edge (${nu}, ${nv}) is a self-loop`);
+    edges.push(nu, nv);
+  }
+  if (j.length * 2 !== edges.length) {
+    throw new Error(`${edges.length / 2} edges but ${j.length} couplings`);
+  }
+  const range = rec.beta_range;
+  if (
+    range !== null &&
+    !(Array.isArray(range) && range.length === 2 && range.every((x) => typeof x === "number"))
+  ) {
+    throw new Error("beta_range must be null or [hot, cold]");
+  }
+  return {
+    h,
+    j,
+    edges,
+    numReads: solveInt(rec, "num_reads", 1),
+    numSweeps: solveInt(rec, "num_sweeps", 0),
+    sweepsPerBeta: solveInt(rec, "sweeps_per_beta", 1),
+    betaRange: range as [number, number] | null,
+    seed: solveInt(rec, "seed", 0),
+  };
+}
+
 function runSolve(): Promise<number> {
   return new Promise((resolve) => {
+    const started = process.hrtime.bigint();
     const chunks: Buffer[] = [];
     process.stdin.on("data", (c) => chunks.push(c));
     process.stdin.on("end", () => {
-      let h: number[];
-      let j: number[];
-      let edges: number[];
-      let numReads: number;
+      let problem: SolveProblem;
       try {
-        const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-        if (parsed === null || typeof parsed !== "object") {
-          throw new Error("problem JSON must be an object");
-        }
-        const rec = parsed as Record<string, unknown>;
-        if (!Array.isArray(rec.h) || !Array.isArray(rec.j) || !Array.isArray(rec.edges)) {
-          throw new Error("problem JSON must contain h, j, and edges arrays");
-        }
-        if (typeof rec.num_reads !== "number") {
-          throw new Error("problem JSON must contain numeric num_reads");
-        }
-        h = rec.h as number[];
-        j = rec.j as number[];
-        numReads = rec.num_reads;
-        edges = [];
-        for (const pair of rec.edges) {
-          if (!Array.isArray(pair) || pair.length !== 2) {
-            throw new Error("each edge must be a [u, v] pair");
-          }
-          const u = pair[0];
-          const v = pair[1];
-          if (typeof u !== "number" || typeof v !== "number") {
-            throw new Error("edge endpoints must be numbers");
-          }
-          edges.push(u, v);
-        }
+        problem = parseSolveProblem(JSON.parse(Buffer.concat(chunks).toString("utf8")));
       } catch (e) {
         process.stderr.write(`error: malformed problem JSON on stdin: ${e}\n`);
         resolve(ExitCode.CONFIG_INVALID);
         return;
       }
       try {
-        const solutions = sample(h, j, edges, numReads);
+        const sampleStarted = process.hrtime.bigint();
+        const solutions = sample(problem.h, problem.j, problem.edges, problem.numReads);
+        const finished = process.hrtime.bigint();
+        const timing = {
+          sample_us: Number((finished - sampleStarted) / 1000n),
+          total_us: Number((finished - started) / 1000n),
+        };
+        const sampler = {
+          backend: BACKEND_NAMES[Backend.BACKEND_MOCK],
+          algorithm: ALGORITHM_NAMES[Algorithm.ALGORITHM_SA],
+          num_reads: problem.numReads,
+          num_sweeps: problem.numSweeps,
+          sweeps_per_beta: problem.sweepsPerBeta,
+          beta_range: problem.betaRange,
+          beta_schedule_type: "geometric",
+          seed: problem.seed,
+        };
         process.stdout.write(
           `${JSON.stringify(
             solutions.map((s) => ({
               spins: Array.from(s.spins),
               energy_milli: Number(s.energy),
+              timing,
+              sampler,
             })),
           )}\n`,
         );
