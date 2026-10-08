@@ -346,6 +346,17 @@ pub struct Capabilities {
     pub backend: i32,
     #[prost(enumeration = "Algorithm", tag = "13")]
     pub algorithm: i32,
+    /// Most edges incident on one node. Unset makes no claim; 0 is unbounded.
+    #[prost(uint32, optional, tag = "14")]
+    pub max_degree: ::core::option::Option<u32>,
+    /// Largest local field max_i(|h_i| + sum_j |J_ij|), in milli. Unset makes no
+    /// claim; 0 is unbounded.
+    #[prost(uint32, optional, tag = "15")]
+    pub max_local_field_milli: ::core::option::Option<u32>,
+    /// Step, in milli, at which coefficients are represented exactly. Unset or 0
+    /// makes no claim.
+    #[prost(uint32, optional, tag = "16")]
+    pub exact_resolution_milli: ::core::option::Option<u32>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct IsingProblemGenerator {

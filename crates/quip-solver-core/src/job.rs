@@ -247,8 +247,8 @@ fn resolve_edges(
 }
 
 /// The shape invariant every Ising problem must satisfy, whichever entry point
-/// it arrived by: exactly one coupling per edge, and every edge endpoint inside
-/// `h`.
+/// it arrived by: exactly one coupling per edge, every edge endpoint inside
+/// `h`, and no edge from a node to itself.
 ///
 /// This is a memory-safety boundary, not a tidiness check. `CSampler::sample`
 /// (quip-solver-c) hands the C callback `num_edges = j.len()` alongside an
@@ -261,7 +261,7 @@ fn resolve_edges(
 /// `Vec`, i.e. a dangling pointer.
 ///
 /// Both callers reject on any error; the message exists so driver mode can tell
-/// its caller which of the two invariants failed.
+/// its caller which invariant failed.
 pub(crate) fn validate_shape(
     h_len: usize,
     j_len: usize,
@@ -278,6 +278,13 @@ pub(crate) fn validate_shape(
             return Err(format!(
                 "edge ({u}, {v}) references a node outside h (h has {h_len} entries)"
             ));
+        }
+        // A coupling of a spin to itself is a constant, s_u·s_u = 1, not an
+        // interaction. Samplers read an edge as two distinct endpoints, and a
+        // CSR build lists the node as its own neighbour, so the device and the
+        // consensus scorer would disagree about the energy.
+        if u == v {
+            return Err(format!("edge ({u}, {v}) is a self-loop"));
         }
     }
     Ok(())
@@ -332,6 +339,45 @@ fn parse_ising<C: Coefficient>(
         graph,
         exact_energy,
     })
+}
+
+/// Check a parsed plain job against the identity's [`ModelLimits`], and, for a
+/// solver that lists `exact-coefficients`, refuse one its coefficient type did
+/// not convert exactly.
+///
+/// The limits read the model as received, so a lossy conversion is checked on
+/// the original milli values rather than on the rounded or saturated ones.
+///
+/// [`ModelLimits`]: crate::ModelLimits
+fn check_limits<C: Coefficient>(
+    id: &BackendIdentity,
+    graph: &IsingGraph<C>,
+    exact_energy: Option<&ExactEnergy>,
+) -> Result<(), String> {
+    let exact_only = id
+        .features
+        .contains(&crate::session::EXACT_COEFFICIENTS_FEATURE);
+    if exact_only && exact_energy.is_some() {
+        return Err("a coefficient is not exactly representable by this solver".into());
+    }
+    if id.limits == crate::limits::ModelLimits::UNSTATED {
+        return Ok(());
+    }
+    let (h, j) = exact_energy.map_or_else(
+        || {
+            // An exact conversion: units times 1000 is the wire milli value,
+            // up to float rounding in the multiply.
+            let milli = |values: &[C]| -> Vec<f64> {
+                values
+                    .iter()
+                    .map(|v| (v.to_unit() * 1000.0).round())
+                    .collect()
+            };
+            (milli(&graph.h), milli(&graph.j))
+        },
+        ExactEnergy::milli,
+    );
+    id.limits.check(&h, &j, &graph.edges, exact_only)
 }
 
 /// Validate the warm-start fields (`IsingProblem` 9 to 12) against a job of
@@ -431,6 +477,12 @@ impl ExactEnergy {
         Self { h, j, edges }
     }
 
+    /// The original coefficients in milli, for the model-limit check.
+    fn milli(&self) -> (Vec<f64>, Vec<f64>) {
+        let widen = |values: &[i32]| values.iter().map(|&v| f64::from(v)).collect();
+        (widen(&self.h), widen(&self.j))
+    }
+
     pub(crate) fn rescore(&self, reads: &mut [crate::SamplerResult]) {
         for read in reads {
             read.energy_milli = quip_protocol::scoring::energy_from_milli(
@@ -513,6 +565,10 @@ pub(crate) fn prepare_job<S: Sampler<C>, C: Coefficient>(
         Ok(parsed) => parsed,
         Err(reason) => return Prepared::Reject(reject(job_id, reason)),
     };
+    if let Err(detail) = check_limits(id, &graph, exact_energy.as_ref()) {
+        tracing::debug!("rejecting job as too large: {detail}");
+        return Prepared::Reject(reject(job_id, RejectReason::TooLarge));
+    }
 
     // adapt runs only when a target is set (uses the parsed problem's node/edge
     // counts and the topology's allowed_h).
@@ -703,6 +759,7 @@ mod tests {
             max_edges: 1_000_000,
             features: &[],
             adapt: TEST_ADAPT,
+            limits: crate::limits::ModelLimits::UNSTATED,
         }
     }
 
@@ -770,6 +827,120 @@ mod tests {
         ising.encoding = quip_proto::v1::CoefficientEncoding::I32 as i32;
         ising.scale = 1000;
         assert!(parse_ising::<f64>(&ising, 100, 100, None).is_ok());
+    }
+
+    /// The reject reason `prepare_job` answers `job` with, or `None` when it
+    /// accepts the job.
+    fn reject_reason_for<C: Coefficient, S: Sampler<C>>(
+        job: Job,
+        sampler: &S,
+        id: &BackendIdentity,
+    ) -> Option<i32> {
+        match prepare_job::<S, C>(job, sampler, id, 64, None, None, None) {
+            Prepared::Reject(message) => match message.msg {
+                Some(miner_msg::Msg::Reject(reject)) => Some(reject.reason),
+                _ => panic!("expected a Reject message"),
+            },
+            Prepared::Sample { .. } => None,
+        }
+    }
+
+    #[test]
+    fn a_self_loop_is_malformed() {
+        let mut job = edges_job(1);
+        if let Some(ising) = job.ising.as_mut() {
+            ising.graph = Some(Graph::Edges(EdgeList {
+                u: vec![1],
+                v: vec![1],
+            }));
+        }
+        assert_eq!(
+            reject_reason_for(job, &StubSampler, &identity("sa")),
+            Some(RejectReason::Malformed as i32)
+        );
+    }
+
+    /// `edges_job` has one edge and biases of one unit, so each node has
+    /// degree 1 and a local field of 2000 milli.
+    #[test]
+    fn model_limits_reject_a_plain_job_as_too_large() {
+        let with = |limits| BackendIdentity {
+            limits,
+            ..identity("sa")
+        };
+        let unlimited = crate::limits::ModelLimits::UNSTATED;
+        let at_limits = crate::limits::ModelLimits {
+            max_degree: Some(1),
+            max_local_field_milli: Some(2000),
+            exact_resolution_milli: Some(1000),
+        };
+        assert_eq!(
+            reject_reason_for(edges_job(1), &StubSampler, &with(at_limits)),
+            None
+        );
+        for over in [
+            crate::limits::ModelLimits {
+                max_local_field_milli: Some(1999),
+                ..unlimited
+            },
+            crate::limits::ModelLimits {
+                max_degree: Some(1),
+                ..unlimited
+            },
+        ] {
+            let mut job = edges_job(1);
+            if over.max_degree.is_some() {
+                // A second edge on node 0 lifts its degree to 2.
+                if let Some(ising) = job.ising.as_mut() {
+                    ising.graph = Some(Graph::Edges(EdgeList {
+                        u: vec![0, 0],
+                        v: vec![1, 1],
+                    }));
+                    ising.j = encode_i32_le(&[0, 0]);
+                }
+            }
+            assert_eq!(
+                reject_reason_for(job, &StubSampler, &with(over)),
+                Some(RejectReason::TooLarge as i32),
+                "{over:?}"
+            );
+        }
+    }
+
+    struct NarrowStub;
+    impl Sampler<crate::coefficient::Fixed<i8, 1>> for NarrowStub {
+        fn sample(
+            &self,
+            _graph: &IsingGraph<crate::coefficient::Fixed<i8, 1>>,
+            _params: &SampleParams,
+        ) -> Result<Vec<SamplerResult>, crate::SampleError> {
+            Ok(vec![])
+        }
+    }
+
+    /// Refuse-not-quantize in session mode: an int8 solver that lists
+    /// `exact-coefficients` refuses a half-unit bias rather than rounding it.
+    #[test]
+    fn an_exact_solver_rejects_a_lossy_conversion_as_too_large() {
+        let mut job = edges_job(1);
+        if let Some(ising) = job.ising.as_mut() {
+            ising.h = encode_i32_le(&[500, 1000]);
+        }
+        let lossy = identity("sa");
+        assert_eq!(reject_reason_for(job.clone(), &NarrowStub, &lossy), None);
+        let exact = BackendIdentity {
+            features: &[crate::session::EXACT_COEFFICIENTS_FEATURE],
+            ..identity("sa")
+        };
+        assert_eq!(
+            reject_reason_for(job, &NarrowStub, &exact),
+            Some(RejectReason::TooLarge as i32)
+        );
+        assert_eq!(
+            reject_reason_for(edges_job(2), &NarrowStub, &exact),
+            None,
+            "an exactly representable job still runs"
+        );
     }
 
     #[test]

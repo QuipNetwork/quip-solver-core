@@ -73,6 +73,7 @@ test("malformed wire payloads are rejected", () => {
 test("exit codes match the Python bindings", () => {
   assert.equal(consensus.ExitCode.CLEAN, 0);
   assert.equal(consensus.ExitCode.CONFIG_INVALID, 64);
+  assert.equal(consensus.ExitCode.CAPACITY, 65);
   assert.equal(consensus.ExitCode.ENV_INCOMPATIBLE, 69);
   assert.equal(consensus.ExitCode.INTERNAL_FATAL, 70);
   assert.equal(consensus.ExitCode.TOKEN_REJECTED, 77);

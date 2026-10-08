@@ -175,6 +175,7 @@ fn _core(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     let exit_code = PyModule::new(py, "ExitCode")?;
     exit_code.add("CLEAN", 0u8)?;
     exit_code.add("CONFIG_INVALID", 64u8)?;
+    exit_code.add("CAPACITY", 65u8)?;
     exit_code.add("ENV_INCOMPATIBLE", 69u8)?;
     exit_code.add("INTERNAL_FATAL", 70u8)?;
     exit_code.add("TOKEN_REJECTED", 77u8)?;
