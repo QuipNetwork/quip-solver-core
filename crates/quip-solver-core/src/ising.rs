@@ -24,7 +24,7 @@ pub enum Algorithm {
 /// refuses [`Linear`](Self::Linear) for one that does not, so no kernel
 /// silently stays geometric. Session jobs carry no schedule kind and are always
 /// [`Geometric`](Self::Geometric).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum BetaSchedule {
     /// Log-spaced rungs, [`geometric_beta_schedule`](crate::beta::geometric_beta_schedule).
@@ -213,6 +213,18 @@ pub(crate) const GOLDEN_GRAPHS: [(&str, usize); 9] = [
 #[cfg(test)]
 mod tests {
     use super::{BetaSchedule, IsingGraph, SampleParams};
+
+    /// The serde names are the `--solve` names, so a backend can carry the
+    /// kind across its own process boundary in the same spelling.
+    #[test]
+    fn serde_round_trips_the_solve_names() {
+        for kind in [BetaSchedule::Geometric, BetaSchedule::Linear] {
+            let json = serde_json::to_string(&kind).expect("serialize");
+            assert_eq!(json, format!("\"{}\"", kind.name()));
+            let back: BetaSchedule = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(back, kind);
+        }
+    }
 
     #[test]
     fn the_default_schedule_is_geometric() {
