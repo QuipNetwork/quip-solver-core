@@ -522,7 +522,7 @@ wheel:linux-aarch64:
 # The macOS wheel cannot be cross-compiled from Linux: PyO3 needs the Apple
 # linker and SDK. Runs on the group's Apple Silicon shell runners, where
 # `image:` does not apply and a container-flavoured before_script would fail,
-# so the job carries its own (same pattern as quip-miner-dwave's macOS build).
+# so the job carries its own (same pattern as quip-solver-dwave's macOS build).
 wheel:macos-arm64:
   stage: validate
   tags: [macos, arm64]
@@ -544,7 +544,7 @@ wheel:macos-arm64:
     # the runner user's non-interactive PATH at all. uv fetches a
     # python-build-standalone interpreter into $HOME instead, so prefix
     # ownership stops mattering and a new macos+arm64 host needs no preparation.
-    # quip-miner-dwave made this same move in !35 after three tags died on it.
+    # quip-solver-dwave made this same move in !35 after three tags died on it.
     #
     # Always install, never "install only if missing": that guard exists for
     # brew's shared prefix, and skipping here would leave whatever uv the host

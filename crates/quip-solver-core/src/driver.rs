@@ -2,7 +2,7 @@
 //!
 //! A one-shot caller hands a problem in and reads solutions out. There is no
 //! session, no coordinator, and no credits. The JSON shape matches what
-//! `quip-miner-exec` already sends to an external solver, so the two are duals
+//! `quip-solver-exec` already sends to an external solver, so the two are duals
 //! and the schema stays single.
 
 use crate::coefficient::Coefficient;
