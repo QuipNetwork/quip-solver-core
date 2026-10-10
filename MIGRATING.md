@@ -151,7 +151,7 @@ Do not add the feature to `BackendIdentity.features` by hand.
 
 # Migrating to quip-solver-core 0.0.1
 
-This note is for maintainers of `quip-miner-cpu` and `quip-miner-cuda`, and
+This note is for maintainers of `quip-solver-cpu` and `quip-solver-cuda`, and
 for C and C++ solver authors building with `libquip_solver_c`. Two public
 Rust types and one C entry point change in this release. A build that still
 names the old types fails.

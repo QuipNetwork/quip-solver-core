@@ -519,7 +519,7 @@ where the two answers can differ.
 
 The normative wire contract is `proto/quip/v1/miner.proto`. Section 2 states the session-mode command line.
 
-`quip-miner-dwave` is the working example of a solver built this way today.
+`quip-solver-dwave` is the working example of a solver built this way today.
 
 ### Now
 
