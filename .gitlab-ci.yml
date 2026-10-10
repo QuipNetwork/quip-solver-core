@@ -245,6 +245,8 @@ wasm:
 # the source tree, so these test what a consumer actually receives rather than
 # what this repository happens to have on disk.
 #
+# Each job runs both gates: the session walk and the --solve gate.
+#
 # All four run on every pipeline, and the publish jobs need them, so a
 # regression in a shipped artifact stops the release rather than reaching a
 # registry. This is the reason the samples exist.
@@ -283,6 +285,7 @@ smoke:rust:
     - tail -8 examples/rust/Cargo.toml
     - (cd examples/rust && cargo build --release)
     - ./quip-solver-drive examples/rust/target/release/mock_miner unix:///tmp/rust.sock
+    - ./quip-solver-drive --solve examples/rust/target/release/mock_miner
 
 # Compiles against the released tarball's header and library only. The repo's
 # target/ is never on the include or link path, so a header that does not match
@@ -298,6 +301,7 @@ smoke:cpp:
     - g++ -std=c++17 -O2 -Wall -Wextra -I/opt/clib/include examples/cpp/mock_miner.cpp
       -o /tmp/mock_miner_cpp -L/opt/clib -Wl,-rpath,/opt/clib -lquip_solver_c -lpthread -ldl -lm
     - ./quip-solver-drive /tmp/mock_miner_cpp unix:///tmp/cpp.sock
+    - ./quip-solver-drive --solve /tmp/mock_miner_cpp
 
 # Installs the built wheel into a fresh virtual environment. The example
 # imports quip_solver_core from site-packages, not from python/ in this tree.
@@ -311,6 +315,7 @@ smoke:python:
     - printf '#!/bin/sh\nexec /opt/venv/bin/python %s/examples/python/mock_miner.py "$@"\n' "$PWD" > /tmp/py_miner
     - chmod +x /tmp/py_miner
     - ./quip-solver-drive /tmp/py_miner unix:///tmp/python.sock
+    - ./quip-solver-drive --solve /tmp/py_miner
 
 # Installs the packed tarball into a clean project. The example resolves
 # @quip.network/quip-solver-core from node_modules, not from npm/ in this tree.
@@ -333,6 +338,7 @@ smoke:typescript:
     - chmod +x /tmp/ts_miner
     - cd "$CI_PROJECT_DIR"
     - ./quip-solver-drive /tmp/ts_miner unix:///tmp/typescript.sock
+    - ./quip-solver-drive --solve /tmp/ts_miner
 
 # ---------------------------------------------------------------------------
 # Release pipeline.

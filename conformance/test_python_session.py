@@ -112,6 +112,7 @@ def test_identity_names_match_the_rust_map():
 def test_session_exit_codes_match_core():
     assert session.EXIT_CLEAN == ExitCode.CLEAN == 0
     assert session.EXIT_CONFIG_INVALID == ExitCode.CONFIG_INVALID == 64
+    assert session.EXIT_CAPACITY == ExitCode.CAPACITY == 65
     assert session.EXIT_ENV_INCOMPATIBLE == ExitCode.ENV_INCOMPATIBLE == 69
     assert session.EXIT_INTERNAL_FATAL == ExitCode.INTERNAL_FATAL == 70
     assert session.EXIT_TOKEN_REJECTED == ExitCode.TOKEN_REJECTED == 77

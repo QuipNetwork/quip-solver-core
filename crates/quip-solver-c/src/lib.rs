@@ -638,6 +638,7 @@ pub unsafe extern "C" fn quip_solver_run(
             reads_solution_max_factor: id.reads_solution_max_factor,
             reads_solution_floor_factor: id.reads_solution_floor_factor,
         },
+        limits: quip_solver_core::ModelLimits::UNSTATED,
     };
 
     let exit = run_code(identity, &cli.common, || {

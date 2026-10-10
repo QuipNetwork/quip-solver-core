@@ -167,3 +167,34 @@ fn unopenable_sampler_session_exits_env_incompatible() {
         out.status.code()
     );
 }
+
+/// A model beyond the backend's read cap is capacity, exit 65: the caller can
+/// route it to another solver, unlike malformed input (64) or a device fault
+/// (70).
+#[test]
+fn a_capacity_refusal_exits_capacity() {
+    let mut child = Command::new(example_bin("mock_sampler_capped"))
+        .arg("--solve")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn --solve");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(
+            br#"{"h":[1.0,-1.0],"j":[1.0],"edges":[[0,1]],"num_reads":1,
+                 "num_sweeps":1,"sweeps_per_beta":1,"beta_range":null,"seed":1}"#,
+        )
+        .expect("write problem");
+    let out = child.wait_with_output().expect("wait");
+
+    assert_eq!(
+        out.status.code(),
+        Some(65),
+        "a capacity refusal must exit 65"
+    );
+    assert!(out.stdout.is_empty(), "a refused model writes no solutions");
+}

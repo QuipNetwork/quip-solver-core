@@ -39,6 +39,10 @@ pub enum ExitCode {
     Clean = 0,
     /// Missing/invalid CLI or config (e.g. no `--quip-coordinator`, bad Welcome).
     ConfigInvalid = 64,
+    /// The model exceeds what this solver solves: its advertised limits, or a
+    /// device bound. `--solve` only; the same model may succeed on another
+    /// solver.
+    Capacity = 65,
     /// Host/env cannot run this miner (`--check` failed).
     EnvIncompatible = 69,
     /// Unexpected internal failure.
@@ -277,6 +281,7 @@ mod tests {
             ExitCode::ConfigInvalid
         );
         assert_eq!(ExitCode::ConfigInvalid.as_i32(), 64);
+        assert_eq!(ExitCode::Capacity.as_i32(), 65);
         assert_eq!(ExitCode::EnvIncompatible.as_i32(), 69);
         assert_eq!(ExitCode::InternalFatal.as_i32(), 70);
         assert_eq!(ExitCode::TokenRejected.as_i32(), 77);

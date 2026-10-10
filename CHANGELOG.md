@@ -5,10 +5,47 @@ This file documents changes to the Quip solver contract.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## 0.0.3
+
+`--solve` additions for callers that solve arbitrary models, and log names that
+follow the `quip-solver-*` repository rename.
+[MIGRATING.md](MIGRATING.md) lists the solver API changes.
+
+### Added
+
+- `linear_beta_schedule`, and `BetaSchedule` on `SampleParams.schedule`.
+  `--solve` takes an optional `beta_schedule_type` of `"geometric"` or
+  `"linear"`. A solver lists the `linear-schedule` feature when its ladder
+  honours it; `--solve` refuses `"linear"` for one that does not.
+- Every `--solve` solution carries `timing` and `sampler` objects beside
+  `spins` and `energy_milli`.
+- `Capabilities.max_degree`, `max_local_field_milli`, and
+  `exact_resolution_milli`, fields 14 to 16, from `BackendIdentity.limits`.
+  The SDK refuses a model beyond them: `TOO_LARGE` for a plain job, and
+  exit 65 for `--solve`.
+- The `exact-coefficients` feature. A solver that lists it gets every model
+  its coefficient type would round or saturate refused as capacity, instead
+  of quantized.
+- `ExitCode::Capacity`, exit code 65, in Rust, Python, and TypeScript.
+- SPEC section 2 specifies `--solve`: every input and output field, the exit
+  codes, and the rejects.
+- `quip-solver-drive --solve <solver-binary>` and
+  `quip_solver_conformance::solve::drive_solve`: the `--solve` conformance
+  gate. Base cases apply to every solver; the `linear-schedule`,
+  `exact-coefficients`, and model-limit cases run when a solver advertises
+  them. CI runs it on all four sample solvers.
 
 ### Changed
 
+- An edge from a node to itself is `MALFORMED` in session mode and exit 64 in
+  `--solve`.
+- `--solve` exits 65 for a model beyond the solver's read, node, or edge
+  caps, or for `SampleError::Capacity`. It exited 64 for the read cap, ignored
+  the node and edge caps, and exited 70 for `SampleError::Capacity`.
+- `driver::solve` takes the solver's `BackendIdentity`.
+- The Python and TypeScript samples reject unknown, missing, and malformed
+  `--solve` keys and self-loops, and write `timing` and `sampler` on each
+  solution.
 - Session log lines start with `[quip-solver-{backend}]` instead of
   `[quip-miner-{backend}]`, and the fatal and logger-setup error lines
   name `quip-solver-{backend}`. The solver repositories are renamed from

@@ -1,4 +1,4 @@
-//! Geometric beta (inverse-temperature) ladder for annealing.
+//! Geometric and linear beta (inverse-temperature) ladders for annealing.
 //!
 //! Port of neal / `shared/beta_schedule._default_ising_beta_range` and the
 //! geometric schedule used by the CPU miner and Python GPU samplers.
@@ -115,6 +115,31 @@ pub fn geometric_beta_schedule(hot: f64, cold: f64, num_betas: usize) -> Vec<f64
         .collect()
 }
 
+/// Linear beta ladder with `num_betas` evenly spaced points from hot → cold,
+/// in f64.
+///
+/// The same endpoints and length rules as [`geometric_beta_schedule`]: an
+/// empty ladder for `0`, and `[cold]` for `1`.
+#[must_use]
+pub fn linear_beta_schedule(hot: f64, cold: f64, num_betas: usize) -> Vec<f64> {
+    if num_betas == 0 {
+        return Vec::new();
+    }
+    if num_betas == 1 {
+        return vec![cold];
+    }
+    (0..num_betas)
+        .map(|i| {
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "schedule length and index are small; t is an interpolation parameter"
+            )]
+            let t = i as f64 / (num_betas - 1) as f64;
+            hot + t * (cold - hot)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -177,6 +202,46 @@ mod tests {
             for w in s.windows(2) {
                 assert!(w[0] < w[1]);
             }
+        }
+    }
+
+    #[test]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "schedule length asserted to 5; indices are in range"
+    )]
+    fn linear_schedule_is_evenly_spaced_from_hot_to_cold() {
+        let s = linear_beta_schedule(0.5, 4.5, 5);
+        assert_eq!(s.len(), 5);
+        assert!((s[0] - 0.5).abs() < 1e-12);
+        assert!((s[4] - 4.5).abs() < 1e-12);
+        for (i, w) in s.windows(2).enumerate() {
+            assert!((w[1] - w[0] - 1.0).abs() < 1e-12, "step {i} is not 1.0");
+        }
+    }
+
+    #[test]
+    fn linear_schedule_length_rules_match_geometric() {
+        for n in [0, 1, 2, 7] {
+            assert_eq!(
+                linear_beta_schedule(0.1, 10.0, n).len(),
+                geometric_beta_schedule(0.1, 10.0, n).len()
+            );
+        }
+        assert_eq!(linear_beta_schedule(0.1, 10.0, 1), vec![10.0]);
+    }
+
+    #[test]
+    fn linear_and_geometric_share_endpoints_but_not_interior() {
+        let lin = linear_beta_schedule(0.1, 10.0, 3);
+        let geo = geometric_beta_schedule(0.1, 10.0, 3);
+        #[expect(clippy::indexing_slicing, reason = "both ladders have 3 rungs")]
+        {
+            assert!((lin[0] - geo[0]).abs() < 1e-12);
+            assert!((lin[2] - geo[2]).abs() < 1e-9);
+            // Midpoints: arithmetic 5.05 against geometric 1.0.
+            assert!((lin[1] - 5.05).abs() < 1e-12);
+            assert!((geo[1] - 1.0).abs() < 1e-9);
         }
     }
 

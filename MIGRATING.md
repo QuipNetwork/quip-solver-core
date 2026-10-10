@@ -1,3 +1,36 @@
+# Migrating to quip-solver-core 0.0.3
+
+## Identity limits
+
+`BackendIdentity` has a new `limits` field.
+Set it to `ModelLimits::UNSTATED` to keep the 0.0.2 behaviour, or state the limits your sampler solves correctly.
+
+```rust
+BackendIdentity {
+    // ...
+    limits: quip_solver_core::ModelLimits {
+        max_degree: Some(20),
+        max_local_field_milli: Some(63_000),
+        exact_resolution_milli: Some(1000),
+    },
+}
+```
+
+The session rejects a plain job beyond them with `TOO_LARGE`, and `--solve` exits 65.
+Leases are not checked.
+
+## Schedule kind
+
+`SampleParams` has a new `schedule` field.
+A literal that lists every field needs `schedule: BetaSchedule::Geometric`, or `..Default::default()`.
+Build the ladder with `params.schedule.build(hot, cold, num_betas)` and list `LINEAR_SCHEDULE_FEATURE` in `BackendIdentity.features`.
+A backend that keys a cache or a batch on the ladder also keys it on the schedule kind.
+
+## Driver
+
+`driver::solve(sampler, input)` is now `driver::solve(sampler, &identity, input)`.
+`SolveError` has a new `Capacity` variant, and `SolveError::exit_code` gives its exit code.
+
 # Migrating to quip-solver-core 0.0.2
 
 Update the coordinator and solver together.
@@ -158,7 +191,9 @@ names the old types fails.
 
 ## Dependency
 
-The crate moved. Change the git source and the package name.
+The crate was renamed from `quip-miner-core` and is published on crates.io.
+The `quip-protocol` repository it came from no longer exists. Replace the git
+dependency with the crates.io release.
 
 Before:
 
@@ -171,10 +206,8 @@ After:
 
 ```toml
 [dependencies]
-quip-solver-core = { git = "https://gitlab.com/quip.network/quip-solver-core.git", tag = "<tag>" }
+quip-solver-core = "0.0.1"
 ```
-
-Replace `<tag>` with the tag chosen at publication.
 
 ## `Sampler::sample` error type
 

@@ -11,7 +11,7 @@ plumbing around that sampler, not the sampler itself.
 
 ## Conformance status
 
-Every solver below passes `quip-solver-drive`, which is the definition of
+Every solver below passes both `quip-solver-drive` gates, which is the definition of
 conformance in SPEC.md section 6.
 
 CI runs each one against the built release artifact in a clean container, not
@@ -60,10 +60,12 @@ Then point it at any solver binary. Exit code 0 means conformant.
 
 ```sh
 ./target/release/quip-solver-drive <solver-binary> unix:///tmp/quip-check.sock
+./target/release/quip-solver-drive --solve <solver-binary>
 ```
 
-The driver spawns the binary and speaks the proto over the socket. It scores
-the session and accepts an executable in any language.
+The first form spawns the binary and speaks the proto over the socket. It
+scores the session. The second runs the binary once per `--solve` case and
+grades its exit codes and output. Both accept an executable in any language.
 
 ## Build each example
 

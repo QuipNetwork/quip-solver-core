@@ -66,6 +66,7 @@ fn main() -> ExitCode {
                 reads_solution_max_factor: 8,
                 reads_solution_floor_factor: 0,
             },
+            limits: quip_solver_core::ModelLimits::UNSTATED,
         },
         &cli.common,
         || Ok(IgnoringSampler),

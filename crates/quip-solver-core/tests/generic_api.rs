@@ -1,9 +1,33 @@
 //! Public graph literals, trait defaults, entry-point inference, and warm streams.
+use quip_solver_core::adapt::AdaptBounds;
 use quip_solver_core::coefficient::{Fixed, Milli};
+use quip_solver_core::quip_proto::v1::{Algorithm, Backend};
 use quip_solver_core::{
-    run, run_code, BackendIdentity, CancelToken, CommonArgs, IsingGraph, OpenError, SampleError,
-    SampleParams, Sampler, SamplerResult, StreamJob, StreamOutcome, StreamResult,
+    run, run_code, BackendIdentity, CancelToken, CommonArgs, IsingGraph, ModelLimits, OpenError,
+    SampleError, SampleParams, Sampler, SamplerResult, StreamJob, StreamOutcome, StreamResult,
 };
+
+/// A solver identity with no caps, no limits and no optional features, for
+/// tests that vary one thing at a time.
+fn identity() -> BackendIdentity {
+    BackendIdentity {
+        backend: Backend::Mock,
+        algorithm: Algorithm::Sa,
+        max_nodes: 0,
+        max_edges: 0,
+        features: &[],
+        adapt: AdaptBounds {
+            min_sweeps: 1,
+            max_sweeps: 1,
+            min_reads: 1,
+            max_reads: 1,
+            reads_solution_min_factor: 1,
+            reads_solution_max_factor: 1,
+            reads_solution_floor_factor: 0,
+        },
+        limits: ModelLimits::UNSTATED,
+    }
+}
 
 struct DefaultSampler;
 impl Sampler for DefaultSampler {
@@ -78,7 +102,7 @@ fn default_graph_and_json_keep_sub_milli_values() -> Result<(), Box<dyn std::err
     let bytes = br#"{"h":[0.0004],"j":[],"edges":[],"num_reads":1,
         "num_sweeps":1,"sweeps_per_beta":1,"beta_range":null,"seed":0}"#;
     assert_eq!(
-        quip_solver_core::driver::solve(&DefaultSampler, bytes)?,
+        quip_solver_core::driver::solve(&DefaultSampler, &identity(), bytes)?,
         b"[]"
     );
     let milli = IsingGraph::<Milli> {
@@ -100,7 +124,7 @@ fn explicit_sampler_turbofish_compiles_with_inferred_coefficient(
     let bytes = br#"{"h":[0.0004],"j":[],"edges":[],"num_reads":1,
         "num_sweeps":1,"sweeps_per_beta":1,"beta_range":null,"seed":0}"#;
     assert_eq!(
-        quip_solver_core::driver::solve::<DefaultSampler, _>(&DefaultSampler, bytes)?,
+        quip_solver_core::driver::solve::<DefaultSampler, _>(&DefaultSampler, &identity(), bytes)?,
         b"[]"
     );
     Ok(())
