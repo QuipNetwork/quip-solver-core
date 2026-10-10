@@ -5,6 +5,15 @@ This file documents changes to the Quip solver contract.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Changed
+
+- Session log lines start with `[quip-solver-{backend}]` instead of
+  `[quip-miner-{backend}]`, and the fatal and logger-setup error lines
+  name `quip-solver-{backend}`. The solver repositories are renamed from
+  `quip-miner-*` to `quip-solver-*`.
+
 ## 0.0.2
 
 Protocol version 2, salt leases, selectable coefficient types, warm starts,
