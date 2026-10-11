@@ -597,4 +597,38 @@ mod exact_tests {
         }
         assert!(solve(&Narrow, &exact_id(), &problem("[-128,127,0]")).is_ok());
     }
+
+    struct Wide;
+    impl Sampler<crate::coefficient::Milli> for Wide {
+        #[expect(
+            clippy::panic_in_result_fn,
+            reason = "test sampler asserts the whole milli value reaches the graph"
+        )]
+        fn sample(
+            &self,
+            graph: &IsingGraph<crate::coefficient::Milli>,
+            _: &SampleParams,
+        ) -> Result<Vec<SamplerResult>, SampleError> {
+            assert_eq!(graph.h, vec![Fixed(536_870_910)]);
+            Ok(vec![SamplerResult {
+                spins: vec![1; graph.num_nodes()],
+                energy_milli: 0,
+            }])
+        }
+    }
+
+    /// `536870.91 * 1000.0` is `536870910.00000006` in f64, but the value is a
+    /// whole number of milli and sits on a step of 1.
+    #[test]
+    fn an_exact_solver_accepts_whole_milli_that_multiplies_inexactly() {
+        let id = crate::BackendIdentity {
+            limits: crate::ModelLimits {
+                exact_resolution_milli: Some(1),
+                ..crate::ModelLimits::UNSTATED
+            },
+            ..exact_id()
+        };
+        let result = solve(&Wide, &id, &problem("[536870.91]"));
+        assert!(result.is_ok(), "whole milli on the step: {result:?}");
+    }
 }

@@ -185,6 +185,8 @@ Their unit value is `stored / scale`.
 Float encodings `F16`, `F32`, and `F64` require scale zero and store unit values.
 
 Each coefficient needs an exact `i32` milli value.
+A float value has one when the value is the nearest `f64` to a whole number of milli.
+`536870.91` is 536,870,910 milli, and `0.0005` is a fractional milli value.
 The decoder returns `MALFORMED` for these inputs:
 
 - An unknown or unspecified encoding.
