@@ -5,6 +5,17 @@ This file documents changes to the Quip solver contract.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.0.4-rc1
+
+A fix for whole-milli float coefficients. The solver API does not change.
+
+### Fixed
+
+- `--solve` and the float wire encodings accept a value that is the nearest
+  `f64` to a whole number of milli, such as `536870.91`, even when the value
+  times 1000 is not an integer in `f64`. Before, the SDK kept the fraction,
+  and a solver that lists `exact-coefficients` refused the model as capacity.
+
 ## 0.0.3
 
 `--solve` additions for callers that solve arbitrary models, and log names that

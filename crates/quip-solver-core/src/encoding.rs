@@ -67,14 +67,19 @@ fn integer_milli(value: i128, scale: u32) -> Result<i32, RejectReason> {
     i32::try_from(product / scale).map_err(|_| RejectReason::Malformed)
 }
 
+/// The whole milli value whose nearest `f64` in units is `value`. The multiply
+/// can land off the integer (`536870.91 * 1000.0` is `536870910.00000006`),
+/// so round it and accept only when dividing back recovers `value` exactly.
+/// IEEE division is correctly rounded, so sub-milli inputs such as `0.0005`
+/// still fail.
 #[expect(
     clippy::float_cmp,
-    reason = "wire milli values must be whole numbers exactly"
+    reason = "the milli value must round-trip to the input exactly"
 )]
 pub(crate) fn float_milli(value: f64) -> Result<i32, RejectReason> {
-    let milli = value * 1000.0;
+    let milli = (value * 1000.0).round();
     if !milli.is_finite()
-        || milli.round() != milli
+        || milli / 1000.0 != value
         || milli < f64::from(i32::MIN)
         || milli > f64::from(i32::MAX)
     {
@@ -260,6 +265,19 @@ mod tests {
         0,
         2_147_483.648_f64.to_le_bytes().to_vec()
     );
+
+    #[test]
+    fn float_milli_rounds_whole_milli() {
+        // 536870.91 * 1000.0 is 536870910.00000006 in f64.
+        assert_eq!(float_milli(536_870.91), Ok(536_870_910));
+        assert_eq!(float_milli(536_870.909), Ok(536_870_909));
+        assert_eq!(float_milli(-536_870.91), Ok(-536_870_910));
+        assert_eq!(float_milli(0.0005), Err(RejectReason::Malformed));
+        assert_eq!(
+            float_milli(f64::from(0.1_f32)),
+            Err(RejectReason::Malformed)
+        );
+    }
 
     #[test]
     fn production_f16_is_exact() {
