@@ -206,6 +206,12 @@ Its field number is 3. The schema reserves the old `spins_bytes` name and field 
 `energy_milli` remains field 2.
 Plain and mempool jobs keep their credits, rejects, provenance, and warm-start behavior.
 
+`IsingProblem.family` is tag 17.
+The SC-4 proto change adds this field. `miner.proto` does not have it yet.
+A solver that lists the revision in `accepted_families` validates the binding and may use its structure.
+Any other solver ignores the field and solves the plain model.
+See [Explicit family jobs](docs/problem-families.md#explicit-family-jobs).
+
 ### Generated jobs
 
 `ISING_GENERATE` is job kind 3.
@@ -214,6 +220,14 @@ Use `GENERATOR_ALGORITHM_BLAKE3_CHACHA8_V1`.
 `last_proof_block_hash`, `miner_account`, and `base_salt` each contain 32 bytes.
 `salt_count` must be positive, and `salt_start + salt_count` must fit in `u64`.
 Invalid fields produce `MALFORMED` before any draw.
+
+The legacy algorithm stays unchanged, and its leases must not carry `family`.
+The SC-4 proto change adds `GENERATOR_ALGORITHM_FAMILY_CHACHA8_V1`. `miner.proto` does not have it yet.
+Its leases carry a `FamilyDescriptor` and a `topology_order_digest`.
+A coordinator sends them only after the solver negotiates the family.
+A lease the solver cannot accept for its family, revision, parameters, or topology produces `FAMILY_UNSUPPORTED`.
+The normative rules are in [docs/problem-families.md](docs/problem-families.md).
+See [Wire extension](docs/problem-families.md#wire-extension) and [Lease admission](docs/problem-families.md#lease-admission).
 
 Salt index `i` replaces bytes 0 to 7 of `base_salt` with `(salt_start + i).to_le_bytes()`.
 Bytes 8 to 31 stay unchanged.
@@ -265,6 +279,17 @@ These limits do not apply to leases.
 A solver that lists the `exact-coefficients` feature refuses, rather than quantizes, a coefficient it does not represent exactly.
 That covers a coefficient off `exact_resolution_milli`.
 A solver without the feature may quantize and must still report exact energies.
+
+### Family support
+
+A solver declares family support at one of three tiers for each family revision.
+A generic solver lists no family and solves a problem that has a family tag as a plain model.
+An accepted-family solver lists the revision in `accepted_families`.
+A generated-family solver lists it in `generated_families`.
+`solver_id` names the solver across releases.
+The SC-4 proto change adds `Capabilities` fields 17 to 19: `solver_id`, `generated_families`, and `accepted_families`.
+A pin on `solver_id` never bypasses these compatibility checks.
+See [Capabilities](docs/problem-families.md#capabilities) and [Dispatch and pins](docs/problem-families.md#dispatch-and-pins).
 
 ### Warm starts
 
@@ -569,6 +594,11 @@ A change to any of these is a minor version:
 - A message, field, or remote procedure call added to the proto.
 - A defaulted method added to the `Sampler` trait.
 - A golden vector case added.
+- A new family revision. Its golden vector case is the added case.
+
+Never change the output of an existing family revision. Publish a new revision instead.
+The session version and the family revision are separate.
+The chain runtime version is also separate from both.
 
 The contract is close to frozen by design. A solver repository that pins a
 tag and never moves it keeps working.
@@ -594,6 +624,7 @@ The fields are:
   because protobuf JSON maps `bytes` that way.
 - `maxDegree`, `maxLocalFieldMilli`, and `exactResolutionMilli`. Omit each
   when unset. A set `0` is printed.
+- `solverId`, `generatedFamilies`, and `acceptedFamilies`. Omit each when empty.
 
 `backend` and `algorithm` keep names such as `"cpu"`, `"sa"`, and `"dwave-qpu"`.
 Job kinds, encodings, and generators use their protobuf enum names.
