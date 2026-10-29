@@ -86,6 +86,24 @@ Each case changes one input of the preceding valid descriptor.
 | Revision zero | `revision = 0` | 4 `RevisionZero` |
 | Length 4097 | the valid 19 bytes, then 4078 bytes `00` | 7 `ParamsMalformed` |
 
+### Size bounds
+
+This section does not define a construction for `example/uniform-field`.
+The size bounds below are an illustrative contract fragment, not a complete contract.
+They assume a construction that makes `n_layers` copies of the topology `T`.
+Each node then gets one edge to its own copy in the next layer.
+With `L = n_layers`, the FAM-38 size bounds are:
+
+```text
+N(p, T) = L * n_nodes(T)
+E(p, T) = L * n_edges(T) + (L - 1) * n_nodes(T)
+D(p, T) = max_degree(T) + min(L - 1, 2)
+```
+
+A node in a middle layer has its topology edges plus one edge to each neighbor layer, so `D` adds at most 2.
+For `n_layers = 2` on a topology with 100 nodes, 150 edges, and at most 4 edges on one node, the bounds are `N = 200`, `E = 400`, and `D = 5`.
+A solver that advertises `max_degree = 4` fails these bounds with code 13, `BoundsExceeded`, at admission (FAM-47).
+
 ## Identity
 
 **FAM-01.** A `family_id` must be an ASCII string `<namespace>/<name>`.
@@ -228,6 +246,11 @@ Every verifier must reject a `Result` for a `NoInstance` salt.
 An overflow never wraps.
 An overflow fails with code 13, `BoundsExceeded`.
 During generation, code 13 applies to one salt, with the same handling as code 14 in FAM-26 and FAM-52.
+During generation, code 13 has only two causes.
+One is an overflow.
+The other is an instance beyond a FAM-37 bound or a bound that the revision declares.
+Every party applies the same causes, so every verifier can decide them.
+The limits of one solver never cause code 13 during generation.
 Every verifier must reject a `Result` for that salt.
 
 **FAM-28.** These inputs must not affect output:
@@ -310,8 +333,10 @@ The FAM-34 layout faults are validation failures.
 The metadata total counts the whole metadata region.
 That region is the `u16 n_sections` field plus all section headers and payloads.
 A family revision may declare tighter bounds.
-An instance that would exceed the bounds or the advertised limits fails with code 13, `BoundsExceeded`.
-If generation finds the excess, the miner skips that salt as FAM-27 states.
+At admission, a lease fails with code 13, `BoundsExceeded`, if `N(p, T)` or `E(p, T)` (FAM-38) exceeds the `n_nodes` or `n_edges` bound of this table or of the revision.
+At admission, code 13 also applies if a size bound exceeds an advertised limit (FAM-47).
+During generation, an instance that would exceed a bound of this table or of the revision fails with code 13.
+The miner then skips that salt as FAM-27 states.
 
 ## Family contracts
 
@@ -330,7 +355,33 @@ If generation finds the excess, the miner skips that salt as FAM-27 states.
 | Metadata | Each kind the revision emits, with its payload layout. |
 | Constraint class | `soft` or `hard`. A `hard` contract also lists its feasibility constraints. |
 | Bounds | Any bounds tighter than the instance bounds. The declared bounds must make arithmetic overflow impossible. |
+| Size bounds | The formulas `N(p, T)`, `E(p, T)`, and `D(p, T)` that this rule defines. |
 | Max retries | The fixed try limit of each retried step, or none. |
+
+The size bounds are three integer upper-bound functions.
+Each function takes the parameter values `p` and only these statistics of the base topology `T`:
+
+- `n_nodes(T)`, the number of nodes.
+- `n_edges(T)`, the number of edges.
+- `max_degree(T)`, the most edges incident on one node, counted over the edges of `T` in registration order. A topology has no self-loops.
+
+| Function | Upper bound on |
+|---|---|
+| `N(p, T)` | The number of instance nodes. |
+| `E(p, T)` | The number of instance edges. |
+| `D(p, T)` | The most edges incident on one instance node (max connectivity). |
+
+The functions use integer arithmetic only.
+The solver checks each operation, and an overflow gives code 13, `BoundsExceeded`, at admission.
+An evaluation draws no random word and runs in constant time or in time linear in the size of `T`.
+Each bound must hold for every nonce.
+If `N(p, T)` is at least 1, `D(p, T)` must be at most `N(p, T) - 1`.
+Admission compares `N(p, T)` and `E(p, T)` with the FAM-37 bounds and the revision bounds (FAM-37).
+SC-3 exposes the three functions as one function, `size_bounds(params, topology) -> { nodes, edges, degree }`.
+That name is guidance for SC-3, and the size bounds never go on the wire.
+
+An instance with more nodes than `N(p, T)`, more edges than `E(p, T)`, or a node with more incident edges than `D(p, T)` is a generator defect.
+The revision fails SC-7 conformance, and every verifier must reject a `Result` for that salt.
 
 **FAM-39.** Each contract must declare one constraint class, `soft` or `hard`.
 A `soft` family keeps every source penalty as an energy term.
@@ -364,7 +415,7 @@ The right column gives the wire mapping.
 | 10 | `ParamsRestricted` | params valid but outside this solver's advertised restriction | `FAMILY_UNSUPPORTED` |
 | 11 | `TopologyOrderMismatch` | sent `topology_order_digest` differs from the cached topology | `TOPOLOGY_MISMATCH` |
 | 12 | `TopologyIncompatible` | family cannot build on this topology | `FAMILY_UNSUPPORTED` |
-| 13 | `BoundsExceeded` | instance would exceed bounds or advertised limits | `TOO_LARGE` at admission. During generation, no reject, and the miner skips the salt. |
+| 13 | `BoundsExceeded` | at admission, a size bound exceeds a FAM-37 bound, a revision bound, or an advertised limit, or its evaluation overflows. During generation, an overflow, or an instance beyond a FAM-37 bound or a revision bound. | `TOO_LARGE` at admission. During generation, no reject, and the miner skips the salt. |
 | 14 | `NoInstance` | deterministic retry exhaustion for one salt | no reject, and the miner skips the salt |
 | 15 | `InstanceDigestMismatch` | explicit job: sent `instance_digest` differs | `MALFORMED` |
 | 16 | `MetadataInvalid` | metadata fails validation against the instance | `MALFORMED` |
@@ -374,8 +425,8 @@ Within each phase, the lowest failing code wins.
 
 | Phase | Codes | When |
 |---|---|---|
-| Admission | 1 to 12, and 13 when declared bounds or advertised limits decide it | Before any draw. |
-| Generation | 13 from overflow or size during generation, and 14 | During generation. Each skips one salt, and the lease continues. |
+| Admission | 1 to 12, and 13 from the size bounds (FAM-38, FAM-47) | Before any draw. |
+| Generation | 13 from an overflow or from a FAM-37 bound or a revision bound, and 14 | During generation. Each skips one salt, and the lease continues. |
 | Explicit-job validation | 7 to 10, 13 for `offset_milli`, 15, and 16 | With no draw, in the FAM-65 order. |
 
 ## Wire extension
@@ -548,6 +599,20 @@ The first failure wins, and no step draws a random word.
 3. Codes 1 to 10, in ascending order.
 4. The `topology_hash` check that exists today. A hash that differs from the cached `Topology.hash` gives `TOPOLOGY_MISMATCH`.
 5. Codes 11, 12, and the admission part of code 13, in ascending order.
+
+The advertised limits of a family lease are exactly `max_nodes`, `max_edges`, and `max_degree`, `Capabilities` fields 4, 5, and 14.
+They have the meanings in [Model limits](../SPEC.md#model-limits).
+An unset field makes no claim, and a `max_degree` of `0` sets no bound.
+`max_local_field_milli` and `exact_resolution_milli` do not apply to leases.
+
+The admission part of code 13 applies if any of these conditions is true:
+
+- The evaluation of a size bound (FAM-38) overflows.
+- `N(p, T)` or `E(p, T)` exceeds a FAM-37 bound or a revision bound.
+- `N(p, T)` exceeds `max_nodes`, `E(p, T)` exceeds `max_edges`, or `D(p, T)` exceeds `max_degree`, for each field that makes a claim.
+
+The solver decides these conditions from the parameters, the cached topology, and its own `Capabilities`, before any draw.
+The same `Capabilities` snapshot always gives the same result.
 
 Generation then starts.
 Generation can give code 13 or code 14 only.
@@ -793,7 +858,7 @@ Legacy leases and plain jobs continue to go to that session.
 **FAM-74.** An operator configuration may pin a job to one `solver_id`.
 The coordinator selects in two steps.
 
-1. Filter all sessions by compatibility: family tier, `params_digests`, kind, limits, and topology. The topology check uses the cached `Topology` and `native_topology_hash`.
+1. Filter all sessions by compatibility: family tier, `params_digests`, kind, limits, and topology. The topology check uses the cached `Topology` and `native_topology_hash`. For a family lease, the limits check evaluates `size_bounds` and compares the result with the advertised limits of the session (FAM-47) before the coordinator sends the lease.
 2. Narrow the result to the sessions with the pinned `solver_id`.
 
 A pin never skips a compatibility check.
@@ -807,7 +872,7 @@ These reasons are coordinator-side and do not go on the wire.
 |---|---|
 | `PinUnknownSolver` | No session has the pinned `solver_id`. |
 | `PinFamilyUnsupported` | A session has the pinned `solver_id`, but none lists the revision at the needed tier or passes `params_digests`. |
-| `PinLimitsExceeded` | A pinned session lists the revision, but the instance exceeds that session's limits. |
+| `PinLimitsExceeded` | A pinned session lists the revision, but the job exceeds that session's limits. For a family lease, a size bound exceeds an advertised limit (FAM-47). |
 
 If more than one reason applies, the first row that applies wins.
 
@@ -891,8 +956,8 @@ SC-2 and SC-7 create these cases and checks.
 | FAM-34 | `SC-2:metadata-kind-and-section-length-faults` |
 | FAM-35 | `SC-2:metadata-change-changes-instance-digest` |
 | FAM-36 | `SC-2:metadata-invalid-against-instance` |
-| FAM-37 | `SC-2:instance-bounds-exceeded-salt-skipped` |
-| FAM-38 | `SC-7:contract-has-every-item` |
+| FAM-37 | `SC-2:instance-bounds-exceeded-salt-skipped`, `SC-2:size-bounds-over-instance-bounds-at-admission` |
+| FAM-38 | SC-2+SC-7: `SC-2:size-bounds-example-family`, `SC-7:contract-has-every-item`, `SC-7:instance-within-declared-size-bounds` |
 | FAM-39 | `SC-7:contract-declares-constraint-class` |
 | FAM-40 | `SC-7:soft-defect-counter-diagnostic-only` |
 | FAM-41 | `SC-7:adapted-families-hard-separate-ids` |
@@ -901,7 +966,7 @@ SC-2 and SC-7 create these cases and checks.
 | FAM-44 | `SC-7:proto-existing-tags-unchanged` |
 | FAM-45 | `SC-7:protocol-version-stays-2-with-families` |
 | FAM-46 | `SC-2:extension-field-wrong-length-codes` |
-| FAM-47 | `SC-2:lease-admission-order-with-field-checks` |
+| FAM-47 | SC-2+SC-7: `SC-2:lease-admission-order-with-field-checks`, `SC-7:lease-admission-degree-bound-too-large` |
 | FAM-48 | SC-2+SC-7: `SC-2:legacy-lease-with-family-rejected`, `SC-7:coordinator-never-sets-family-on-legacy-lease` |
 | FAM-49 | `SC-2:family-lease-without-descriptor-rejected` |
 | FAM-50 | `SC-2:topology-order-mismatch-same-hash` |
@@ -928,8 +993,8 @@ SC-2 and SC-7 create these cases and checks.
 | FAM-71 | `SC-7:dispatch-follows-latest-capabilities` |
 | FAM-72 | `SC-7:dispatch-family-lease-needs-generated-entry` |
 | FAM-73 | `SC-7:family-job-reject-keeps-session-work` |
-| FAM-74 | `SC-7:pin-filters-compatibility-and-topology-first` |
-| FAM-75 | `SC-7:pin-failure-reasons-no-fallback` |
+| FAM-74 | `SC-7:pin-filters-compatibility-and-topology-first`, `SC-7:dispatch-checks-size-bounds-against-limits` |
+| FAM-75 | `SC-7:pin-failure-reasons-no-fallback`, `SC-7:pin-limits-exceeded-size-bounds` |
 | FAM-76 | `SC-7:research-family-never-in-pow-lease` |
 | FAM-77 | `SC-7:adapted-families-research-status` |
 | FAM-78 | `SC-7:archived-revision-explicit-jobs-only` |

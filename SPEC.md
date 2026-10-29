@@ -278,7 +278,8 @@ An unset field makes no claim.
 | `exact_resolution_milli`, 16 | The step at which coefficients are represented exactly. `0` makes no claim. |
 
 A solver rejects a plain job beyond `max_degree` or `max_local_field_milli` with `TOO_LARGE`.
-These limits do not apply to leases.
+These limits do not apply to legacy leases.
+A family lease checks `max_nodes`, `max_edges`, and `max_degree` against the declared size bounds of the revision, as [Family contracts](docs/problem-families.md#family-contracts) states.
 
 A solver that lists the `exact-coefficients` feature refuses, rather than quantizes, a coefficient it does not represent exactly.
 That covers a coefficient off `exact_resolution_milli`.
