@@ -225,7 +225,8 @@ The salt counts in `salts_done`, and the miner sends no `Result` for it.
 Every verifier must reject a `Result` for a `NoInstance` salt.
 
 **FAM-27.** Generator arithmetic uses only integers and checks every operation for overflow.
-An overflow is a generator error and never wraps.
+An overflow never wraps.
+An overflow fails with code 13, `BoundsExceeded`.
 
 **FAM-28.** These inputs must not affect output:
 
@@ -247,7 +248,7 @@ An overflow is a generator error and never wraps.
 | format | `u8` | `0x01` |
 | `descriptor_digest` | 32 bytes | From the digest table. |
 | `topology_order_digest` | 32 bytes | From the digest table. |
-| `nonce` | 32 bytes | The salt nonce. |
+| `nonce` | 32 bytes | The salt nonce. An archived instance, with an empty nonce, has 32 zero bytes here. |
 | `n_nodes` | `u32` | The number of nodes. |
 | node ids | `u32` each | Native node ids in output order. |
 | `n_edges` | `u32` | The number of edges. |
@@ -294,8 +295,11 @@ Metadata that fails validation gives code 16, `MetadataInvalid`.
 | `n_nodes` | 2^24 |
 | `n_edges` | 2^26 |
 | each `\|h\|` and `\|J\|` | 2^30 milli |
+| each `\|offset\|` | 2^56 milli |
 | metadata total | 2^26 bytes |
 
+The metadata total counts the whole metadata region.
+That region is the `u16 n_sections` field plus all section headers and payloads.
 A family revision may declare tighter bounds.
 An instance that would exceed the bounds or the advertised limits fails with code 13, `BoundsExceeded`.
 
@@ -315,7 +319,7 @@ An instance that would exceed the bounds or the advertised limits fails with cod
 | Offset | How the construction computes `offset`. |
 | Metadata | Each kind the revision emits, with its payload layout. |
 | Constraint class | `soft` or `hard`. A `hard` contract also lists its feasibility constraints. |
-| Bounds | Any bounds tighter than the instance bounds. |
+| Bounds | Any bounds tighter than the instance bounds. The declared bounds must make arithmetic overflow impossible. |
 | Max retries | The fixed try limit of each retried step, or none. |
 
 **FAM-39.** Each contract must declare one constraint class, `soft` or `hard`.
@@ -354,8 +358,14 @@ The right column gives the wire mapping.
 | 15 | `InstanceDigestMismatch` | explicit job: sent `instance_digest` differs | `MALFORMED` |
 | 16 | `MetadataInvalid` | metadata fails validation against the instance | `MALFORMED` |
 
-**FAM-43.** Admission checks run in ascending code order, and the first failure wins.
-Every check runs before any draw.
+**FAM-43.** This table gives the phase of each code.
+Within each phase, the lowest failing code wins.
+
+| Phase | Codes | When |
+|---|---|---|
+| Admission | 1 to 12, and 13 when declared bounds or advertised limits decide it | Before any draw. |
+| Generation | 13 from overflow or size during generation, and 14 | During generation. |
+| Explicit-job validation | 15 and 16 | With no draw. |
 
 ## Traceability
 
