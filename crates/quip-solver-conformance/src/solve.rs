@@ -3,9 +3,10 @@
 //!
 //! The gate first reads `--capabilities`, then sends one problem per case on
 //! stdin. Base cases apply to every solver. A case for optional behaviour runs
-//! only when the solver advertises it: `linear-schedule` and
-//! `exact-coefficients` in `features`, and the model limits in
-//! `maxDegree`, `maxLocalFieldMilli` and `exactResolutionMilli`. A solver that
+//! only when the solver advertises it: `linear-schedule`,
+//! `exact-coefficients`, `anneal-time` and `embed` in `features`, and the
+//! model limits in `maxDegree`, `maxLocalFieldMilli` and
+//! `exactResolutionMilli`. A solver that
 //! advertises nothing optional skips those cases rather than failing them.
 
 use quip_protocol::scoring::energy_milli;
@@ -34,6 +35,24 @@ pub const LINEAR_SCHEDULE_FEATURE: &str = "linear-schedule";
 /// Feature string for the refuse-not-quantize policy. Mirrors
 /// `quip_solver_core::EXACT_COEFFICIENTS_FEATURE`.
 pub const EXACT_COEFFICIENTS_FEATURE: &str = "exact-coefficients";
+
+/// Feature string for a solver that accepts `anneal_time_us`, a quantum
+/// annealer's anneal time per read.
+pub const ANNEAL_TIME_FEATURE: &str = "anneal-time";
+
+/// Feature string for a solver that accepts `--embed` and embeds a model onto
+/// its working graph.
+pub const EMBED_FEATURE: &str = "embed";
+
+/// Anneal time the `anneal-time` case sends, in microseconds. A quantum
+/// annealer's usual default, so any device in service accepts it.
+const ANNEAL_TIME_US: u64 = 20;
+
+/// Nodes in the complete graph the `embed` case sends. Its degree, 23, is
+/// above the native degree of every annealer in service (Pegasus 15,
+/// Zephyr 20), so it is off every working graph and still small enough to
+/// embed quickly.
+const EMBED_NODES: usize = 24;
 
 /// Seed of the base problem. Above `u32::MAX`, so it reaches the high half of
 /// the seed, and below 2^53, so a JavaScript solver reads it exactly.
@@ -241,6 +260,7 @@ struct Problem {
     edges: Vec<(usize, usize)>,
     num_reads: usize,
     schedule: Option<&'static str>,
+    anneal_time_us: Option<u64>,
 }
 
 impl Problem {
@@ -251,6 +271,7 @@ impl Problem {
             edges,
             num_reads: 4,
             schedule: None,
+            anneal_time_us: None,
         }
     }
 
@@ -269,8 +290,13 @@ impl Problem {
             "beta_range": null,
             "seed": BASE_SEED,
         });
-        if let (Some(schedule), Some(object)) = (self.schedule, v.as_object_mut()) {
-            let _ = object.insert("beta_schedule_type".into(), json!(schedule));
+        if let Some(object) = v.as_object_mut() {
+            if let Some(schedule) = self.schedule {
+                let _ = object.insert("beta_schedule_type".into(), json!(schedule));
+            }
+            if let Some(anneal) = self.anneal_time_us {
+                let _ = object.insert("anneal_time_us".into(), json!(anneal));
+            }
         }
         v
     }
@@ -330,6 +356,14 @@ fn star(leaves: usize, coupling: f64) -> Problem {
     )
 }
 
+/// The complete graph on `nodes` nodes, every coupling `coupling` milli.
+fn complete(nodes: usize, coupling: f64) -> Problem {
+    let edges: Vec<(usize, usize)> = (0..nodes)
+        .flat_map(|u| (u + 1..nodes).map(move |v| (u, v)))
+        .collect();
+    Problem::new(vec![0.0; nodes], vec![coupling; edges.len()], edges)
+}
+
 /// Two nodes and one coupling: bias `h0` on node 0, coupling `coupling`.
 fn pair(h0: f64, coupling: f64) -> Problem {
     Problem::new(vec![h0, 0.0], vec![coupling], vec![(0, 1)])
@@ -359,9 +393,10 @@ impl Run {
     }
 }
 
-async fn run(bin_path: &str, flag: &str, stdin: &[u8]) -> Result<Run, String> {
+async fn run(bin_path: &str, args: &[&str], stdin: &[u8]) -> Result<Run, String> {
+    let flags = args.join(" ");
     let mut child = Command::new(bin_path)
-        .arg(flag)
+        .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -376,7 +411,7 @@ async fn run(bin_path: &str, flag: &str, stdin: &[u8]) -> Result<Run, String> {
     }
     let output = tokio::time::timeout(RUN_TIMEOUT, child.wait_with_output())
         .await
-        .map_err(|_| format!("{flag} did not exit within {RUN_TIMEOUT:?}"))?
+        .map_err(|_| format!("{flags} did not exit within {RUN_TIMEOUT:?}"))?
         .map_err(|e| format!("cannot wait for {bin_path}: {e}"))?;
     Ok(Run {
         code: output.status.code(),
@@ -389,7 +424,14 @@ async fn run(bin_path: &str, flag: &str, stdin: &[u8]) -> Result<Run, String> {
 /// against the problem and the advertised identity.
 type Reads = Vec<(Vec<i8>, i64)>;
 
-fn check_solutions(adv: &Advertised, problem: &Problem, run: &Run) -> Result<Reads, String> {
+/// `embedded` is whether the run had `--embed`, so every read must carry an
+/// `embedding` object.
+fn check_solutions(
+    adv: &Advertised,
+    problem: &Problem,
+    run: &Run,
+    embedded: bool,
+) -> Result<Reads, String> {
     if run.code != Some(0) {
         return Err(format!(
             "exited {:?}, expected 0; stderr: {}",
@@ -409,7 +451,7 @@ fn check_solutions(adv: &Advertised, problem: &Problem, run: &Run) -> Result<Rea
     }
     let h = Problem::units(&problem.h_milli);
     let j = Problem::units(&problem.j_milli);
-    let expected_sampler = json!({
+    let mut expected_sampler = json!({
         "backend": adv.backend,
         "algorithm": adv.algorithm,
         "num_reads": problem.num_reads,
@@ -419,6 +461,10 @@ fn check_solutions(adv: &Advertised, problem: &Problem, run: &Run) -> Result<Rea
         "beta_schedule_type": problem.schedule.unwrap_or("geometric"),
         "seed": BASE_SEED,
     });
+    if let (Some(anneal), Some(object)) = (problem.anneal_time_us, expected_sampler.as_object_mut())
+    {
+        let _ = object.insert("anneal_time_us".into(), json!(anneal));
+    }
     let mut graded = Vec::with_capacity(reads.len());
     for (index, read) in reads.iter().enumerate() {
         let spins: Vec<i8> = read
@@ -469,9 +515,39 @@ fn check_solutions(adv: &Advertised, problem: &Problem, run: &Run) -> Result<Rea
                 read.get("sampler").unwrap_or(&Value::Null)
             ));
         }
+        if embedded {
+            check_embedding(index, read)?;
+        }
         graded.push((spins, reported));
     }
     Ok(graded)
+}
+
+/// The `embedding` object of read `index` under `--embed`.
+fn check_embedding(index: usize, read: &Value) -> Result<(), String> {
+    let embedding = read
+        .get("embedding")
+        .ok_or_else(|| format!("solution {index} has no embedding under --embed"))?;
+    if embedding.get("embedded") != Some(&Value::Bool(true)) {
+        return Err(format!("solution {index} embedding.embedded is not true"));
+    }
+    match embedding
+        .get("chain_break_fraction")
+        .and_then(Value::as_f64)
+    {
+        Some(fraction) if (0.0..=1.0).contains(&fraction) => {}
+        _ => {
+            return Err(format!(
+                "solution {index} embedding.chain_break_fraction is not a number from 0 to 1"
+            ))
+        }
+    }
+    match embedding.get("max_chain_length").and_then(Value::as_u64) {
+        Some(length) if length >= 1 => Ok(()),
+        _ => Err(format!(
+            "solution {index} embedding.max_chain_length is not an integer of at least 1"
+        )),
+    }
 }
 
 fn check_refused(run: &Run, code: i32) -> Result<(), String> {
@@ -490,13 +566,13 @@ fn check_refused(run: &Run, code: i32) -> Result<(), String> {
 
 /// Solve `problem` and require valid solutions.
 async fn expect_solved(bin: &str, adv: &Advertised, problem: &Problem) -> Result<Reads, String> {
-    let run = run(bin, "--solve", &problem.bytes()).await?;
-    check_solutions(adv, problem, &run)
+    let run = run(bin, &["--solve"], &problem.bytes()).await?;
+    check_solutions(adv, problem, &run, false)
 }
 
 /// Send `input` and require exit `code` with nothing on stdout.
 async fn expect_refused(bin: &str, input: &[u8], code: i32) -> Result<(), String> {
-    let run = run(bin, "--solve", input).await?;
+    let run = run(bin, &["--solve"], input).await?;
     check_refused(&run, code)
 }
 
@@ -512,14 +588,16 @@ fn edited(base: &Problem, edit: impl FnOnce(&mut serde_json::Map<String, Value>)
 /// Run the `--solve` gate against `bin_path`.
 pub async fn drive_solve(bin_path: &str) -> SolveReport {
     let mut report = SolveReport::default();
-    let adv = match run(bin_path, "--capabilities", b"").await.and_then(|run| {
-        if run.code != Some(0) {
-            return Err(format!("--capabilities exited {:?}", run.code));
-        }
-        let json: Value = serde_json::from_slice(&run.stdout)
-            .map_err(|e| format!("--capabilities is not JSON: {e}"))?;
-        Advertised::parse(&json)
-    }) {
+    let adv = match run(bin_path, &["--capabilities"], b"")
+        .await
+        .and_then(|run| {
+            if run.code != Some(0) {
+                return Err(format!("--capabilities exited {:?}", run.code));
+            }
+            let json: Value = serde_json::from_slice(&run.stdout)
+                .map_err(|e| format!("--capabilities is not JSON: {e}"))?;
+            Advertised::parse(&json)
+        }) {
         Ok(adv) => {
             report.push("capabilities", CaseOutcome::Passed);
             adv
@@ -546,6 +624,8 @@ pub async fn drive_solve(bin_path: &str) -> SolveReport {
     degree_cases(bin_path, &adv, &mut report).await;
     field_cases(bin_path, &adv, &mut report).await;
     resolution_cases(bin_path, &adv, &mut report).await;
+    anneal_time_case(bin_path, &adv, &base, &mut report).await;
+    embed_case(bin_path, &adv, &mut report).await;
     report
 }
 
@@ -763,6 +843,70 @@ async fn resolution_cases(bin: &str, adv: &Advertised, report: &mut SolveReport)
     report.grade(NAMES.1, outside);
 }
 
+async fn anneal_time_case(bin: &str, adv: &Advertised, base: &Problem, report: &mut SolveReport) {
+    let timed = Problem {
+        anneal_time_us: Some(ANNEAL_TIME_US),
+        ..base.clone()
+    };
+    let result = if adv.lists(ANNEAL_TIME_FEATURE) {
+        match expect_solved(bin, adv, &timed).await {
+            Ok(_) => {
+                let zero = Problem {
+                    anneal_time_us: Some(0),
+                    ..base.clone()
+                };
+                expect_refused(bin, &zero.bytes(), EXIT_CONFIG_INVALID)
+                    .await
+                    .map_err(|why| format!("an anneal time of 0: {why}"))
+            }
+            Err(why) => Err(why),
+        }
+    } else {
+        // A solver without the feature has no anneal to time, so the key is
+        // one it does not know.
+        expect_refused(bin, &timed.bytes(), EXIT_CONFIG_INVALID).await
+    };
+    report.grade("anneal-time", result);
+}
+
+async fn embed_case(bin: &str, adv: &Advertised, report: &mut SolveReport) {
+    if !adv.lists(EMBED_FEATURE) {
+        report.push(
+            "embed",
+            CaseOutcome::Skipped("embed is not listed".to_owned()),
+        );
+        return;
+    }
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "the unit is at most an advertised u32 step"
+    )]
+    let unit = adv.unit() as f64;
+    let model = complete(EMBED_NODES, unit);
+    if let Some(why) = model.excess(adv) {
+        report.push(
+            "embed",
+            CaseOutcome::Skipped(format!(
+                "a complete graph on {EMBED_NODES} nodes is outside the advertised limits: {why}"
+            )),
+        );
+        return;
+    }
+    let embedded = match run(bin, &["--solve", "--embed"], &model.bytes()).await {
+        Ok(run) => check_solutions(adv, &model, &run, true)
+            .map(|_| ())
+            .map_err(|why| format!("under --embed: {why}")),
+        Err(why) => Err(why),
+    };
+    let result = match embedded {
+        Ok(()) => expect_refused(bin, &model.bytes(), EXIT_CAPACITY)
+            .await
+            .map_err(|why| format!("without --embed: {why}")),
+        Err(why) => Err(why),
+    };
+    report.grade("embed", result);
+}
+
 fn skip_pair(report: &mut SolveReport, names: (&'static str, &'static str), why: &str) {
     report.push(names.0, CaseOutcome::Skipped(why.to_owned()));
     report.push(names.1, CaseOutcome::Skipped(why.to_owned()));
@@ -883,28 +1027,102 @@ mod tests {
         };
         // All +1: h0 + J = 2 units.
         let good = json!([solution(&[1, 1], 2000, "geometric")]);
-        assert!(check_solutions(&adv(), &p, &ok_run(&good)).is_ok());
+        assert!(check_solutions(&adv(), &p, &ok_run(&good), false).is_ok());
 
         let wrong_energy = json!([solution(&[1, 1], 0, "geometric")]);
-        let err = check_solutions(&adv(), &p, &ok_run(&wrong_energy)).expect_err("energy");
+        let err = check_solutions(&adv(), &p, &ok_run(&wrong_energy), false).expect_err("energy");
         assert!(err.contains("score 2000"), "{err}");
 
         let wrong_schedule = json!([solution(&[1, 1], 2000, "linear")]);
-        let err = check_solutions(&adv(), &p, &ok_run(&wrong_schedule)).expect_err("schedule");
+        let err =
+            check_solutions(&adv(), &p, &ok_run(&wrong_schedule), false).expect_err("schedule");
         assert!(err.contains("sampler"), "{err}");
 
         let bad_spin = json!([solution(&[1, 0], 1000, "geometric")]);
-        assert!(check_solutions(&adv(), &p, &ok_run(&bad_spin)).is_err());
+        assert!(check_solutions(&adv(), &p, &ok_run(&bad_spin), false).is_err());
 
         let too_many = json!([
             solution(&[1, 1], 2000, "geometric"),
             solution(&[1, 1], 2000, "geometric")
         ]);
-        assert!(check_solutions(&adv(), &p, &ok_run(&too_many)).is_err());
+        assert!(check_solutions(&adv(), &p, &ok_run(&too_many), false).is_err());
 
         let mut no_meta = solution(&[1, 1], 2000, "geometric");
         let _ = no_meta.as_object_mut().map(|o| o.remove("timing"));
-        assert!(check_solutions(&adv(), &p, &ok_run(&json!([no_meta]))).is_err());
+        assert!(check_solutions(&adv(), &p, &ok_run(&json!([no_meta])), false).is_err());
+    }
+
+    #[test]
+    fn an_anneal_time_is_sent_and_must_come_back_in_the_sampler_echo() {
+        let p = Problem {
+            num_reads: 1,
+            anneal_time_us: Some(ANNEAL_TIME_US),
+            ..pair(1000.0, 1000.0)
+        };
+        assert_eq!(p.to_json().get("anneal_time_us"), Some(&json!(20)));
+        assert!(pair(0.0, 0.0).to_json().get("anneal_time_us").is_none());
+
+        let mut echoed = solution(&[1, 1], 2000, "geometric");
+        if let Some(sampler) = echoed.get_mut("sampler").and_then(Value::as_object_mut) {
+            let _ = sampler.insert("anneal_time_us".into(), json!(ANNEAL_TIME_US));
+        }
+        assert!(check_solutions(&adv(), &p, &ok_run(&json!([echoed])), false).is_ok());
+
+        let dropped = json!([solution(&[1, 1], 2000, "geometric")]);
+        let err = check_solutions(&adv(), &p, &ok_run(&dropped), false).expect_err("no echo");
+        assert!(err.contains("anneal_time_us"), "{err}");
+    }
+
+    #[test]
+    fn an_embedded_read_needs_a_well_formed_embedding_object() {
+        let p = Problem {
+            num_reads: 1,
+            ..pair(1000.0, 1000.0)
+        };
+        let with = |embedding: Value| {
+            let mut read = solution(&[1, 1], 2000, "geometric");
+            if let Some(object) = read.as_object_mut() {
+                let _ = object.insert("embedding".into(), embedding);
+            }
+            ok_run(&json!([read]))
+        };
+        let good =
+            with(json!({"embedded": true, "chain_break_fraction": 0.25, "max_chain_length": 3}));
+        assert!(check_solutions(&adv(), &p, &good, true).is_ok());
+
+        let plain = ok_run(&json!([solution(&[1, 1], 2000, "geometric")]));
+        assert!(
+            check_solutions(&adv(), &p, &plain, false).is_ok(),
+            "a read without --embed needs no embedding"
+        );
+        let err = check_solutions(&adv(), &p, &plain, true).expect_err("missing");
+        assert!(err.contains("no embedding"), "{err}");
+
+        for (bad, field) in [
+            (
+                json!({"embedded": false, "chain_break_fraction": 0.0, "max_chain_length": 1}),
+                "embedded",
+            ),
+            (
+                json!({"embedded": true, "chain_break_fraction": 1.5, "max_chain_length": 1}),
+                "chain_break_fraction",
+            ),
+            (
+                json!({"embedded": true, "chain_break_fraction": 0.0, "max_chain_length": 0}),
+                "max_chain_length",
+            ),
+        ] {
+            let err = check_solutions(&adv(), &p, &with(bad), true).expect_err(field);
+            assert!(err.contains(field), "{err}");
+        }
+    }
+
+    #[test]
+    fn the_embed_model_is_complete_and_above_every_native_degree() {
+        let model = complete(EMBED_NODES, 1000.0);
+        assert_eq!(model.edges.len(), EMBED_NODES * (EMBED_NODES - 1) / 2);
+        assert_eq!(model.degree_and_field().0, 23);
+        assert!(model.edges.iter().all(|&(u, v)| u < v));
     }
 
     #[test]

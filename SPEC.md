@@ -28,8 +28,8 @@ on stdout, then exits.
 
 `XQSA` and IsingMark use `--solve`.
 
-The input is one JSON object. Every key except `beta_schedule_type` is required.
-A solver rejects any other key.
+The input is one JSON object. Every key except `beta_schedule_type` and
+`anneal_time_us` is required. A solver rejects any other key.
 
 | Key | Type | Meaning |
 |---|---|---|
@@ -42,6 +42,11 @@ A solver rejects any other key.
 | `beta_range` | `null` or `[hot, cold]` | Beta at the two ends of the ladder. `null` lets the solver choose. |
 | `beta_schedule_type` | `"geometric"` or `"linear"` | Optional. Absent means `"geometric"`. |
 | `seed` | integer from 0 to 2^64 − 1 | Random seed. The same seed gives the same samples. |
+| `anneal_time_us` | integer, at least 1 | Optional. Anneal time of each read in microseconds, for a quantum annealer. Only a solver that lists `anneal-time` accepts it. |
+
+A quantum annealer has no sweeps, beta ladder, or seed. It still requires
+`num_sweeps`, `sweeps_per_beta`, `beta_range`, and `seed`, and echoes them in
+`sampler`, so one input shape reaches every solver.
 
 The output is one JSON array with one object per read, and a trailing newline.
 
@@ -50,9 +55,16 @@ The output is one JSON array with one object per read, and a trailing newline.
 | `spins` | array of -1 and +1 | One spin per node. |
 | `energy_milli` | integer | Exact energy of `spins` under the input model, in milli units. |
 | `timing` | object | `sample_us`, the time inside the sampler, and `total_us`, the whole solve. Both are integers in microseconds. |
-| `sampler` | object | `backend` and `algorithm` as `--capabilities` names them, then `num_reads`, `num_sweeps`, `sweeps_per_beta`, `beta_range`, `beta_schedule_type`, and `seed` as the solve used them. |
+| `sampler` | object | `backend` and `algorithm` as `--capabilities` names them, then `num_reads`, `num_sweeps`, `sweeps_per_beta`, `beta_range`, `beta_schedule_type`, and `seed` as the solve used them, and `anneal_time_us` when the input carried it. |
+| `embedding` | object | Only under `--embed`. `embedded` is `true`, `chain_break_fraction` is the fraction of chains broken in this read, from 0 to 1, and `max_chain_length` is the longest chain in the embedding, an integer of at least 1. |
 
 `timing` and `sampler` are the same for every read of one solve.
+
+A solver that lists `embed` accepts the `--embed` flag beside `--solve`.
+Without it, the solver samples the model on its working graph as given, and
+a node or edge off that graph exceeds the solver. With it, the solver embeds
+the model onto its working graph, samples, and returns one spin per logical
+node. A model the embedder cannot place exceeds the solver too.
 
 A solver exits with these codes:
 
@@ -74,6 +86,7 @@ The input is malformed, exit 64, when any of these holds:
 - An edge joins a node to itself.
 - `beta_schedule_type` is not `"geometric"` or `"linear"`.
 - `beta_schedule_type` is `"linear"` and the solver does not list `linear-schedule`.
+- `anneal_time_us` is present and the solver does not list `anneal-time`, or it is 0.
 
 The model exceeds the solver, exit 65, when any of these holds:
 
@@ -81,6 +94,8 @@ The model exceeds the solver, exit 65, when any of these holds:
 - `num_reads` exceeds the solver's read limit.
 - It exceeds `maxDegree` or `maxLocalFieldMilli`.
 - The solver lists `exact-coefficients` and a coefficient is not exactly representable.
+- A node or edge is off the solver's working graph and `--embed` is not set.
+- `--embed` is set and the embedder cannot place the model.
 
 A refused problem writes nothing on stdout.
 
@@ -561,6 +576,11 @@ Other cases run only when the solver advertises the behaviour:
 | `maxDegree` | A star at the limit solves. One more leaf exits 65. |
 | `maxLocalFieldMilli` | A local field at the limit solves. One step more exits 65. |
 | `exact-coefficients` and `exactResolutionMilli` | A coefficient on the step solves. One off the step exits 65. |
+| `anneal-time` | The ring with an anneal time solves and echoes it. An anneal time of 0 exits 64. Without the feature, any anneal time exits 64. |
+| `embed` | A complete graph on 24 nodes solves under `--embed`, with an `embedding` object on every read. Without `--embed`, it exits 65. |
+
+No quantum annealer in service has a native degree of 23, so the complete
+graph on 24 nodes is off every working graph.
 
 A Rust solver repository may use this convenience form:
 

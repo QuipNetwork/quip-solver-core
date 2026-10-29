@@ -5,6 +5,24 @@ This file documents changes to the Quip solver contract.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+`--solve` keys for quantum annealers. Existing solvers need no change: a
+solver that lists neither feature refuses the new key, as it already does.
+
+### Added
+
+- SPEC section 2: an optional `anneal_time_us` key for a solver that lists
+  `anneal-time`, echoed in `sampler`. A solver without the feature exits 64
+  on it, and an anneal time of 0 exits 64.
+- SPEC section 2: an `--embed` flag for a solver that lists `embed`. Under it
+  the solver embeds the model onto its working graph and adds an `embedding`
+  object to every read. Without it, a model off the working graph exits 65.
+- The `--solve` gate's `anneal-time` and `embed` cases, with
+  `ANNEAL_TIME_FEATURE` and `EMBED_FEATURE` in
+  `quip_solver_conformance::solve`. The `anneal-time` case runs against every
+  solver; the `embed` case runs only when the solver lists `embed`.
+
 ## 0.0.4-rc1
 
 A fix for whole-milli float coefficients. The solver API does not change.

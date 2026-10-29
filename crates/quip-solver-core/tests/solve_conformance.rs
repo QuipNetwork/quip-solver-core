@@ -39,6 +39,7 @@ async fn a_plain_solver_passes_the_base_cases() {
         "self-loop",
         "unknown-key",
         "linear-schedule",
+        "anneal-time",
     ] {
         assert_eq!(
             report.outcome(name),
@@ -47,10 +48,13 @@ async fn a_plain_solver_passes_the_base_cases() {
             report.summary()
         );
     }
-    assert!(matches!(
-        report.outcome("degree-limit-inside"),
-        Some(CaseOutcome::Skipped(_))
-    ));
+    for name in ["degree-limit-inside", "embed"] {
+        assert!(
+            matches!(report.outcome(name), Some(CaseOutcome::Skipped(_))),
+            "{name}\n{}",
+            report.summary()
+        );
+    }
 }
 
 /// Every optional case runs and passes against a solver that advertises all
