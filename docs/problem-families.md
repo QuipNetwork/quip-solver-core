@@ -365,7 +365,7 @@ Within each phase, the lowest failing code wins.
 |---|---|---|
 | Admission | 1 to 12, and 13 when declared bounds or advertised limits decide it | Before any draw. |
 | Generation | 13 from overflow or size during generation, and 14 | During generation. |
-| Explicit-job validation | 15 and 16 | With no draw. |
+| Explicit-job validation | 3, 4, 7 to 10, 13 for `offset_milli`, 15, and 16 | With no draw, in the FAM-65 order. |
 
 ## Wire extension
 
@@ -626,7 +626,15 @@ An empty `solver_id` means that the session is not a pin target.
 
 The coordinator must treat an entry that breaks a rule as a claim of nothing.
 
-**FAM-62.** A solver that lists a revision with a non-empty `params_digests` rejects a lease for any other parameter set of that revision with code 10, `ParamsRestricted`.
+**FAM-62.** For a lease, the solver decides codes 5, 6, and 10 from its `generated_families`.
+
+| Lease condition | Code |
+|---|---|
+| No `generated_families` entry has the `family_id`. | 5, `FamilyUnsupported` |
+| An entry has the `family_id`, but no entry lists the revision. | 6, `RevisionUnsupported` |
+| The entry for the revision has a non-empty `params_digests` without the lease `params_digest`. | 10, `ParamsRestricted` |
+
+For an explicit job, code 10 uses the `accepted_families` entry instead (FAM-65).
 
 **FAM-63.** `--capabilities` prints the new fields with these JSON names.
 
@@ -677,7 +685,17 @@ Each value must decode exactly to the canonical milli coefficient.
 `FamilyBinding.offset_milli` carries the offset, because the plain model has no field for it.
 `Solution.energy_milli` for an explicit job is the plain-model energy, without `offset`.
 
-**FAM-65.** An accepted-family solver must validate `FamilyBinding.family` with codes 3 to 10, as for a lease.
+**FAM-65.** An accepted-family solver must check an explicit job in this order.
+The first failure wins.
+This is the FAM-43 rule that the lowest failing code wins, applied across all four steps.
+
+1. Descriptor checks on `FamilyBinding.family`: codes 3, 4, 7, 8, 9, and 10, in ascending order. Code 10 uses the `params_digests` of the matching `accepted_families` entry.
+2. Code 13, `BoundsExceeded`, for an `offset_milli` outside the FAM-37 bound.
+3. Code 15, `InstanceDigestMismatch`: first the field lengths in FAM-46, then the digest comparison in FAM-68.
+4. Code 16, `MetadataInvalid` (FAM-67).
+
+Codes 5 and 6 never occur for an explicit job.
+A solver that does not list the revision in `accepted_families` is a generic solver for it and solves the plain model (FAM-69).
 
 **FAM-66.** `FamilyBinding.nonce` must be empty or 32 bytes.
 The coordinator must send an empty `nonce` only for a revision with status `archived`.
@@ -704,7 +722,6 @@ An accepted-family solver must rebuild the canonical instance bytes (FAM-30) fro
 
 The solver computes the digest of the rebuilt bytes and compares it with `instance_digest` before it uses any family structure.
 A mismatch gives code 15, `InstanceDigestMismatch`.
-An `offset_milli` outside the FAM-37 bound gives code 13, `BoundsExceeded`.
 The coordinator also does this check before it sends an explicit job.
 It loads an archived instance only from an archive whose instance bytes match `instance_digest`.
 
@@ -716,6 +733,7 @@ It must not reject the job only for the `family` field.
 **FAM-70.** A coordinator may send an `IsingProblem` with `family` set to an accepted-family solver for that revision or to a generic solver.
 A generic solver solves it as a plain model (FAM-69).
 The coordinator must expect use of the family structure only from an accepted-family solver for that revision.
+The coordinator must send the job to a session that lists the revision in `accepted_families` only if the `params_digest` of the binding passes the `params_digests` of that entry.
 
 **FAM-71.** A coordinator reads eligibility from the latest `Capabilities` of each session.
 A `Capabilities` update changes eligibility for every later dispatch at once.
@@ -787,7 +805,7 @@ Each row gives a case with its outcome and code.
 | Invalid pin, incompatible solver: the pinned session does not list the revision | The job fails. No other solver gets it. | `PinFamilyUnsupported` |
 | Old-production replay: a historical lease without `family` | The legacy generator gives the same problem, bit for bit. | none |
 | Old v2 consumer offered a family lease | A coordinator does not send it, because the consumer lists no `generated_families`. If the consumer gets one, it rejects it before any draw. | wire `MALFORMED` |
-| Archived family offered as a lease | A coordinator does not send it, because no solver lists an archived revision in `generated_families`. If a solver gets one, it rejects it. | 5 `FamilyUnsupported` or 6 `RevisionUnsupported`, wire `FAMILY_UNSUPPORTED` |
+| Archived family offered as a lease | A coordinator does not send it, because no solver lists an archived revision in `generated_families`. If a solver gets one, it checks `generated_families` (FAM-62). | 5 `FamilyUnsupported` if no `generated_families` entry has the `family_id`, else 6 `RevisionUnsupported`. Wire `FAMILY_UNSUPPORTED`. |
 
 ## Traceability
 
@@ -858,15 +876,15 @@ SC-2 and SC-7 create these cases and checks.
 | FAM-59 | `SC-7:archived-revision-not-generated` |
 | FAM-60 | `SC-2:solver-id-grammar-and-length` |
 | FAM-61 | `SC-2:family-support-entry-validity` |
-| FAM-62 | `SC-2:params-restricted-digest-not-advertised` |
+| FAM-62 | `SC-2:lease-codes-5-6-10-from-generated-families` |
 | FAM-63 | `SC-7:capabilities-json-family-fields` |
 | FAM-64 | `SC-2:explicit-job-plain-model-canonical-order` |
-| FAM-65 | `SC-2:explicit-job-descriptor-checks` |
+| FAM-65 | `SC-2:explicit-job-validation-order` |
 | FAM-66 | `SC-2:explicit-job-nonce-length-and-archived-empty` |
 | FAM-67 | `SC-2:explicit-job-metadata-invalid` |
 | FAM-68 | SC-2+SC-7: `SC-2:explicit-job-rebuild-instance-digest`, `SC-7:accepted-solver-checks-instance-digest-before-structure` |
 | FAM-69 | `SC-7:generic-solver-ignores-family-binding` |
-| FAM-70 | `SC-7:dispatch-binding-to-accepted-or-generic` |
+| FAM-70 | `SC-7:dispatch-binding-passes-accepted-params-digests` |
 | FAM-71 | `SC-7:dispatch-follows-latest-capabilities` |
 | FAM-72 | `SC-7:dispatch-family-lease-needs-generated-entry` |
 | FAM-73 | `SC-7:family-reject-keeps-session-work` |
