@@ -225,7 +225,10 @@ The legacy algorithm stays unchanged, and its leases must not carry `family`.
 The SC-4 proto change adds `GENERATOR_ALGORITHM_FAMILY_CHACHA8_V1`. `miner.proto` does not have it yet.
 Its leases carry a `FamilyDescriptor` and a `topology_order_digest`.
 A coordinator sends them only after the solver negotiates the family.
-A lease the solver cannot accept for its family, revision, parameters, or topology produces `FAMILY_UNSUPPORTED`.
+`FAMILY_UNSUPPORTED` covers an unsupported family or revision.
+It also covers valid parameters outside the solver's advertised restriction, and a topology the family cannot build on.
+The other family codes keep their `MALFORMED`, `TOPOLOGY_MISMATCH`, or `TOO_LARGE` mapping.
+See [Stable codes](docs/problem-families.md#stable-codes).
 The normative rules are in [docs/problem-families.md](docs/problem-families.md).
 See [Wire extension](docs/problem-families.md#wire-extension) and [Lease admission](docs/problem-families.md#lease-admission).
 
