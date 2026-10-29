@@ -394,9 +394,12 @@ message IsingProblemGenerator { ... tags 1..7 unchanged ...
 }
 message FamilyBinding {                         // new: explicit family job
   FamilyDescriptor family = 1;
-  bytes nonce = 2;             // 32 bytes; empty for an archived instance
-  bytes instance_digest = 3;   // 32 bytes
-  bytes metadata = 4;          // the metadata sections, canonical bytes
+  bytes nonce = 2;                  // 32 bytes; empty for an archived instance
+  bytes instance_digest = 3;        // 32 bytes
+  bytes metadata = 4;               // the metadata sections, canonical bytes
+  bytes topology_order_digest = 5;  // 32 bytes
+  repeated uint32 node_ids = 6;     // native node ids in instance output order
+  int64 offset_milli = 7;           // the instance offset
 }
 message IsingProblem { ... existing tags unchanged ...
   FamilyBinding family = 17;
@@ -449,6 +452,9 @@ This table lists every value and tag of the changed enums and messages.
 | `FamilyBinding` | `nonce` | 2 | new |
 | `FamilyBinding` | `instance_digest` | 3 | new |
 | `FamilyBinding` | `metadata` | 4 | new |
+| `FamilyBinding` | `topology_order_digest` | 5 | new |
+| `FamilyBinding` | `node_ids` | 6 | new |
+| `FamilyBinding` | `offset_milli` | 7 | new |
 | `IsingProblem` | `topology_hash` | 1 | unchanged |
 | `IsingProblem` | `edges` | 2 | unchanged |
 | `IsingProblem` | `h_milli_le32` | 3 | reserved |
@@ -509,6 +515,8 @@ A wrong length fails with the code of the check that reads the field:
 | `IsingProblemGenerator.topology_order_digest` | code 1, `DescriptorMissing` |
 | `FamilyBinding.nonce` with a length other than 0 or 32 | code 15, `InstanceDigestMismatch` |
 | `FamilyBinding.instance_digest` | code 15, `InstanceDigestMismatch` |
+| `FamilyBinding.topology_order_digest` | code 15, `InstanceDigestMismatch` |
+| `FamilyBinding.node_ids`, with a count other than the node count of the plain model | code 15, `InstanceDigestMismatch` |
 
 ## Lease admission
 
@@ -657,11 +665,17 @@ The fields in [the `--capabilities` mapping](../SPEC.md#8-the---capabilities-map
 An explicit family job is a `Job` of kind `ISING_SAMPLE` whose `IsingProblem.family` holds a `FamilyBinding`.
 
 **FAM-64.** An `IsingProblem` with `family` set must use the `edges` graph form.
-`EdgeList` holds the canonical edges as dense positions, in canonical order.
-`h` holds one field per node in node output order.
-`j` holds one coupling per edge in canonical edge order.
+The plain model must match the canonical instance as this table shows.
+
+| `IsingProblem` field | Content |
+|---|---|
+| `edges` | The canonical edges as dense positions, in canonical order. |
+| `h` | One field per node, in node output order. |
+| `j` | One coupling per edge, in canonical edge order. |
+
 Each value must decode exactly to the canonical milli coefficient.
-The plain model has no `offset`, so `Solution.energy_milli` for an explicit job excludes `offset`.
+`FamilyBinding.offset_milli` carries the offset, because the plain model has no field for it.
+`Solution.energy_milli` for an explicit job is the plain-model energy, without `offset`.
 
 **FAM-65.** An accepted-family solver must validate `FamilyBinding.family` with codes 3 to 10, as for a lease.
 
@@ -674,10 +688,25 @@ Before the solver uses metadata, it must validate the metadata against the plain
 A failure gives code 16, `MetadataInvalid`.
 
 **FAM-68.** `instance_digest` is the FAM-18 digest of the canonical instance bytes.
-A party that holds or regenerates the canonical instance bytes must recompute the digest and compare.
+An accepted-family solver must rebuild the canonical instance bytes (FAM-30) from these sources.
+
+| Instance field | Source |
+|---|---|
+| format | `0x01` |
+| `descriptor_digest` | Computed from `FamilyBinding.family` (FAM-18). |
+| `topology_order_digest` | `FamilyBinding.topology_order_digest` |
+| `nonce` | `FamilyBinding.nonce`, or 32 zero bytes for an empty `nonce` |
+| `n_nodes` and node ids | `FamilyBinding.node_ids`, in instance output order |
+| `n_edges` and edges | `IsingProblem.edges` |
+| `h` and `J` | `IsingProblem.h` and `IsingProblem.j`, decoded to milli |
+| `offset` | `FamilyBinding.offset_milli` |
+| `n_sections` and sections | `FamilyBinding.metadata` |
+
+The solver computes the digest of the rebuilt bytes and compares it with `instance_digest` before it uses any family structure.
 A mismatch gives code 15, `InstanceDigestMismatch`.
-The coordinator does this check before it sends an explicit job, and it loads an archived instance only from an archive whose instance bytes match.
-A solver that cannot rebuild the canonical instance bytes must not use `instance_digest` as proof of the instance content.
+An `offset_milli` outside the FAM-37 bound gives code 13, `BoundsExceeded`.
+The coordinator also does this check before it sends an explicit job.
+It loads an archived instance only from an archive whose instance bytes match `instance_digest`.
 
 **FAM-69.** A generic solver must solve an `IsingProblem` with `family` set as a plain model.
 It must not reject the job only for the `family` field.
@@ -835,7 +864,7 @@ SC-2 and SC-7 create these cases and checks.
 | FAM-65 | `SC-2:explicit-job-descriptor-checks` |
 | FAM-66 | `SC-2:explicit-job-nonce-length-and-archived-empty` |
 | FAM-67 | `SC-2:explicit-job-metadata-invalid` |
-| FAM-68 | `SC-2:explicit-job-instance-digest-mismatch` |
+| FAM-68 | SC-2+SC-7: `SC-2:explicit-job-rebuild-instance-digest`, `SC-7:accepted-solver-checks-instance-digest-before-structure` |
 | FAM-69 | `SC-7:generic-solver-ignores-family-binding` |
 | FAM-70 | `SC-7:dispatch-binding-to-accepted-or-generic` |
 | FAM-71 | `SC-7:dispatch-follows-latest-capabilities` |
