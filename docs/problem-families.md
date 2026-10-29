@@ -6,7 +6,7 @@ The golden vectors (SC-2), the generator crate (SC-3), the protobuf extension (S
 The legacy draw, `GENERATOR_ALGORITHM_BLAKE3_CHACHA8_V1`, does not change.
 A lease or proof without a family descriptor uses only the legacy contract in [the solver contract](../SPEC.md).
 
-Sections Identity through Stable codes are normative.
+Sections Identity through Family status and the chain are normative.
 Each normative rule has a stable ID, `FAM-NN`, for the traceability table.
 The Terms and Examples sections are informative.
 
@@ -367,9 +367,484 @@ Within each phase, the lowest failing code wins.
 | Generation | 13 from overflow or size during generation, and 14 | During generation. |
 | Explicit-job validation | 15 and 16 | With no draw. |
 
+## Wire extension
+
+The family extension adds enum values, messages, and tags to `proto/quip/v1/miner.proto`.
+SC-4 makes this change.
+This block is the normative text for SC-4.
+
+```proto
+enum GeneratorAlgorithm {
+  GENERATOR_ALGORITHM_UNSPECIFIED = 0;
+  GENERATOR_ALGORITHM_BLAKE3_CHACHA8_V1 = 1;   // unchanged
+  GENERATOR_ALGORITHM_FAMILY_CHACHA8_V1 = 2;   // new: family lease
+}
+enum RejectReason { ... existing 0..9 unchanged ...
+  FAMILY_UNSUPPORTED = 10;                     // new
+}
+message FamilyDescriptor {                      // new
+  string family_id = 1;
+  uint32 revision = 2;
+  bytes  params = 3;          // canonical parameter bytes
+  bytes  params_digest = 4;   // 32 bytes
+}
+message IsingProblemGenerator { ... tags 1..7 unchanged ...
+  FamilyDescriptor family = 8;           // required iff algorithm == FAMILY_CHACHA8_V1
+  bytes topology_order_digest = 9;       // 32 bytes, required iff family is set
+}
+message FamilyBinding {                         // new: explicit family job
+  FamilyDescriptor family = 1;
+  bytes nonce = 2;             // 32 bytes; empty for an archived instance
+  bytes instance_digest = 3;   // 32 bytes
+  bytes metadata = 4;          // the metadata sections, canonical bytes
+}
+message IsingProblem { ... existing tags unchanged ...
+  FamilyBinding family = 17;
+}
+message FamilySupport {                         // new
+  string family_id = 1;
+  repeated uint32 revisions = 2;        // exact revisions
+  repeated bytes params_digests = 3;    // empty = every valid parameter set
+}
+message Capabilities { ... tags 3..16 unchanged ...
+  string solver_id = 17;
+  repeated FamilySupport generated_families = 18;
+  repeated FamilySupport accepted_families = 19;
+}
+```
+
+This table lists every value and tag of the changed enums and messages.
+`unchanged` rows match `proto/quip/v1/miner.proto` today.
+
+| Message | Field | Tag | Status |
+|---|---|---|---|
+| `GeneratorAlgorithm` | `GENERATOR_ALGORITHM_UNSPECIFIED` | 0 | unchanged |
+| `GeneratorAlgorithm` | `GENERATOR_ALGORITHM_BLAKE3_CHACHA8_V1` | 1 | unchanged |
+| `GeneratorAlgorithm` | `GENERATOR_ALGORITHM_FAMILY_CHACHA8_V1` | 2 | new |
+| `RejectReason` | `REJECT_REASON_UNSPECIFIED` | 0 | unchanged |
+| `RejectReason` | `UNSUPPORTED_KIND` | 1 | unchanged |
+| `RejectReason` | `TOO_LARGE` | 2 | unchanged |
+| `RejectReason` | `EXPIRED` | 3 | unchanged |
+| `RejectReason` | `OVERLOADED` | 4 | unchanged |
+| `RejectReason` | `SHUTTING_DOWN` | 5 | unchanged |
+| `RejectReason` | `MALFORMED` | 6 | unchanged |
+| `RejectReason` | `TOPOLOGY_MISMATCH` | 7 | unchanged |
+| `RejectReason` | `TOPOLOGY_MISSING` | 8 | unchanged |
+| `RejectReason` | `TARGET_MISSING` | 9 | unchanged |
+| `RejectReason` | `FAMILY_UNSUPPORTED` | 10 | new |
+| `FamilyDescriptor` | `family_id` | 1 | new |
+| `FamilyDescriptor` | `revision` | 2 | new |
+| `FamilyDescriptor` | `params` | 3 | new |
+| `FamilyDescriptor` | `params_digest` | 4 | new |
+| `IsingProblemGenerator` | `algorithm` | 1 | unchanged |
+| `IsingProblemGenerator` | `topology_hash` | 2 | unchanged |
+| `IsingProblemGenerator` | `last_proof_block_hash` | 3 | unchanged |
+| `IsingProblemGenerator` | `miner_account` | 4 | unchanged |
+| `IsingProblemGenerator` | `base_salt` | 5 | unchanged |
+| `IsingProblemGenerator` | `salt_start` | 6 | unchanged |
+| `IsingProblemGenerator` | `salt_count` | 7 | unchanged |
+| `IsingProblemGenerator` | `family` | 8 | new |
+| `IsingProblemGenerator` | `topology_order_digest` | 9 | new |
+| `FamilyBinding` | `family` | 1 | new |
+| `FamilyBinding` | `nonce` | 2 | new |
+| `FamilyBinding` | `instance_digest` | 3 | new |
+| `FamilyBinding` | `metadata` | 4 | new |
+| `IsingProblem` | `topology_hash` | 1 | unchanged |
+| `IsingProblem` | `edges` | 2 | unchanged |
+| `IsingProblem` | `h_milli_le32` | 3 | reserved |
+| `IsingProblem` | `j_milli_le32` | 4 | reserved |
+| `IsingProblem` | `num_reads` | 5 | unchanged |
+| `IsingProblem` | `gates` | 6 | reserved |
+| `IsingProblem` | `num_sweeps` | 7 | unchanged |
+| `IsingProblem` | `anneal_time_us` | 8 | unchanged |
+| `IsingProblem` | `initial_spins` | 9 | unchanged |
+| `IsingProblem` | `start_beta_milli` | 10 | unchanged |
+| `IsingProblem` | `reversal_s_milli` | 11 | unchanged |
+| `IsingProblem` | `reversal_pause_us` | 12 | unchanged |
+| `IsingProblem` | `encoding` | 13 | unchanged |
+| `IsingProblem` | `scale` | 14 | unchanged |
+| `IsingProblem` | `h` | 15 | unchanged |
+| `IsingProblem` | `j` | 16 | unchanged |
+| `IsingProblem` | `family` | 17 | new |
+| `FamilySupport` | `family_id` | 1 | new |
+| `FamilySupport` | `revisions` | 2 | new |
+| `FamilySupport` | `params_digests` | 3 | new |
+| `Capabilities` | none (former `backend` string) | 1 | reserved |
+| `Capabilities` | none (former `algorithm` string) | 2 | reserved |
+| `Capabilities` | `supported_kinds` | 3 | unchanged |
+| `Capabilities` | `max_nodes` | 4 | unchanged |
+| `Capabilities` | `max_edges` | 5 | unchanged |
+| `Capabilities` | `features` | 6 | unchanged |
+| `Capabilities` | `protocol_version` | 7 | unchanged |
+| `Capabilities` | `stream_width` | 8 | unchanged |
+| `Capabilities` | `native_topology_hash` | 9 | unchanged |
+| `Capabilities` | `encodings` | 10 | unchanged |
+| `Capabilities` | `generators` | 11 | unchanged |
+| `Capabilities` | `backend` | 12 | unchanged |
+| `Capabilities` | `algorithm` | 13 | unchanged |
+| `Capabilities` | `max_degree` | 14 | unchanged |
+| `Capabilities` | `max_local_field_milli` | 15 | unchanged |
+| `Capabilities` | `exact_resolution_milli` | 16 | unchanged |
+| `Capabilities` | `solver_id` | 17 | new |
+| `Capabilities` | `generated_families` | 18 | new |
+| `Capabilities` | `accepted_families` | 19 | new |
+
+**FAM-44.** The extension adds enum values and tags only.
+Existing tags and enum values must keep their numbers and meanings.
+Reserved numbers and names must stay reserved.
+The package stays `quip.v1`.
+
+**FAM-45.** The session `protocol_version` stays 2 in `Welcome` and `Capabilities`.
+A family revision, the session protocol version, and the chain runtime version are separate numbers.
+A new family revision must not change the session protocol version.
+A change to the session protocol version or the chain runtime version must not change any family revision.
+
+**FAM-46.** Each digest field in this extension holds 32 bytes.
+`FamilyBinding.nonce` holds 32 bytes, or no bytes for an archived instance.
+A wrong length fails with the code of the check that reads the field:
+
+| Field | Wrong length gives |
+|---|---|
+| `FamilyDescriptor.params_digest` | code 8, `ParamsDigestMismatch` |
+| `IsingProblemGenerator.topology_order_digest` | code 1, `DescriptorMissing` |
+| `FamilyBinding.nonce` with a length other than 0 or 32 | code 15, `InstanceDigestMismatch` |
+| `FamilyBinding.instance_digest` | code 15, `InstanceDigestMismatch` |
+
+## Lease admission
+
+A family lease is a `Job` of kind `ISING_GENERATE` whose `generator.algorithm` is `GENERATOR_ALGORITHM_FAMILY_CHACHA8_V1`.
+FAM-43 sets the phase and order of the family codes.
+This section places those codes among the session checks that exist today.
+
+**FAM-47.** A solver must run lease admission in this order.
+The first failure wins, and no step draws a random word.
+
+1. The session checks that run before `LeaseSpec::from_proto` today keep their place: `EXPIRED`, `TOPOLOGY_MISSING`, then `TARGET_MISSING`.
+2. Codes 1 to 10, in ascending order.
+3. The `topology_hash` check that exists today. A hash that differs from the cached `Topology.hash` gives `TOPOLOGY_MISMATCH`.
+4. Codes 11, 12, and the admission part of code 13, in ascending order.
+
+Generation then starts.
+Generation can give code 13 or code 14 only.
+
+**FAM-48.** A lease with `GENERATOR_ALGORITHM_BLAKE3_CHACHA8_V1` must not set `family` or a non-empty `topology_order_digest`.
+If it sets either field, the lease fails with code 2, `DescriptorUnexpected`.
+
+**FAM-49.** A lease with `GENERATOR_ALGORITHM_FAMILY_CHACHA8_V1` must set `family` and a 32-byte `topology_order_digest`.
+A lease without `family` fails with code 1, `DescriptorMissing`.
+A `topology_order_digest` of another length also gives code 1.
+
+**FAM-50.** The solver computes `topology_order_digest` from the nodes and edges of the cached `Topology` in registration order.
+If the sent digest differs, the lease fails with code 11, `TopologyOrderMismatch`, and the wire reason `TOPOLOGY_MISMATCH`.
+An equal `Topology.hash` does not replace this check.
+The coordinator answers `TOPOLOGY_MISMATCH` the way it does today: it sends the `Topology` again.
+
+**FAM-51.** A family lease derives each salt and nonce with the legacy rules in FAM-20.
+`Result.salt` and `Result.nonce` carry them as for a legacy lease.
+
+**FAM-52.** A `NoInstance` salt (FAM-26) does not end the lease.
+The miner continues with the next salt.
+`LeaseDone.salts_done` counts the skipped salt.
+`LeaseDone.best_energy_milli` ignores it.
+
+**FAM-53.** The `Result` message does not change.
+It carries no descriptor and no instance bytes.
+The coordinator checks the reported salt and nonce with the legacy rules.
+It must then regenerate the instance from that nonce and the descriptor and topology that it sent in the lease.
+The regenerated instance is authoritative.
+The coordinator computes the energy of each `Solution` on that instance, `offset` included, and checks every feasibility constraint of a `hard` family.
+The coordinator must not use family data that a miner sends in place of its own copy.
+For a family lease, `Solution.energy_milli` is the FAM-33 energy, `offset` included.
+
+## Old consumers
+
+A v2 consumer that predates this document cannot generate a family instance.
+It fails safe for three reasons.
+
+First, it rejects any generator value other than 1 with `MALFORMED` before any draw.
+`LeaseSpec::from_proto` returns `LeaseError::UnknownGenerator` for any algorithm other than 1 (`crates/quip-protocol/src/lease.rs:296`).
+The session maps that error to `MALFORMED` (`crates/quip-solver-core/src/lease.rs:296`).
+The test at `crates/quip-protocol/tests/proto_lease.rs:113` checks the rejection.
+
+Second, a coordinator never sends a family lease to a session that did not ask for it in `generated_families` (FAM-72).
+An old consumer sends no `generated_families`, so it gets no family lease.
+
+Third, an old solver that gets an `IsingProblem` with `family` set ignores tag 17 as an unknown field.
+It solves the plain model.
+That is the generic tier (FAM-56).
+Acceptance stays with the coordinator (FAM-55), so the plain solve is safe.
+
+**FAM-54.** A solver must reject a lease whose `GeneratorAlgorithm` value it does not know with `MALFORMED`, before any draw.
+A solver that follows this document knows value 2.
+Such a solver that lists no family in `generated_families` rejects a family lease with code 5, `FamilyUnsupported`.
+
+**FAM-55.** When a solver solves an `IsingProblem` with `family` set as a plain model, the coordinator must decide acceptance.
+The coordinator adds `offset` to `Solution.energy_milli` and checks every feasibility constraint of a `hard` family.
+
+## Capabilities
+
+**FAM-56.** A solver declares family support at one of three tiers.
+
+| Tier | `Capabilities` content | The solver |
+|---|---|---|
+| Generic explicit Ising | `ISING_SAMPLE` in `supported_kinds`, plus the existing limits. No family. | Solves an `IsingProblem` with `family` set as a plain model. The coordinator decides acceptance. |
+| Accepted family | `(family_id, revision)` in `accepted_families`. | Validates the `FamilyBinding` (FAM-65 to FAM-68) and may use its structure. |
+| Generated family | `(family_id, revision)` in `generated_families`. | Expands family leases itself or through the default session path. |
+
+A tier applies per `(family_id, revision)`.
+A solver that does not list a revision in `accepted_families` is a generic solver for that revision.
+
+**FAM-57.** A solver must list a revision in `generated_families` only after that revision passes SC-7 conformance on that solver.
+
+**FAM-58.** A solver must list `GENERATOR_ALGORITHM_FAMILY_CHACHA8_V1` in `generators` if and only if `generated_families` is not empty.
+
+**FAM-59.** A revision with status `archived` may appear in `accepted_families`.
+It must not appear in `generated_families`.
+Its instances arrive only as explicit jobs from hash-checked archives, with an empty `nonce`.
+
+**FAM-60.** `solver_id` is ASCII.
+It must match `[a-z][a-z0-9-]*(/[a-z0-9][a-z0-9.-]*)*` and be 3 to 64 bytes long.
+It must stay the same across releases of the same solver, as in `quip-miner-cpu/otsuka`.
+An empty `solver_id` means that the session is not a pin target.
+`solver_id` is separate from `backend` and `algorithm`.
+
+**FAM-61.** Each `FamilySupport` entry must meet these rules.
+
+- `family_id` follows FAM-01 and FAM-02 and does not use the `example` namespace.
+- `revisions` lists at least one revision, each at least 1. Each revision is an exact match (FAM-07).
+- Each entry in `params_digests` is 32 bytes.
+- An empty `params_digests` claims every valid parameter set of each listed revision.
+- A non-empty `params_digests` claims only the parameter sets with those digests.
+
+The coordinator must treat an entry that breaks a rule as a claim of nothing.
+
+**FAM-62.** A solver that lists a revision with a non-empty `params_digests` rejects a lease for any other parameter set of that revision with code 10, `ParamsRestricted`.
+
+**FAM-63.** `--capabilities` prints the new fields with these JSON names.
+
+| Field | JSON name |
+|---|---|
+| `solver_id` | `solverId` |
+| `generated_families` | `generatedFamilies` |
+| `accepted_families` | `acceptedFamilies` |
+
+Each `FamilySupport` is an object with the keys `familyId`, `revisions`, and `paramsDigests`.
+Each digest is standard base64, as protobuf JSON maps `bytes`.
+The output omits an empty list and an empty `solverId`.
+This is a sample output:
+
+```json
+{
+  "solverId": "quip-miner-cpu/otsuka",
+  "generators": [
+    "GENERATOR_ALGORITHM_BLAKE3_CHACHA8_V1",
+    "GENERATOR_ALGORITHM_FAMILY_CHACHA8_V1"
+  ],
+  "generatedFamilies": [
+    {"familyId": "quip/twisted-ice-dimer", "revisions": [1]}
+  ],
+  "acceptedFamilies": [
+    {"familyId": "quip/twisted-ice-dimer", "revisions": [1]}
+  ]
+}
+```
+
+The example shows only the new fields and `generators`.
+The fields in [the `--capabilities` mapping](../SPEC.md#8-the---capabilities-mapping) do not change.
+
+## Explicit family jobs
+
+An explicit family job is a `Job` of kind `ISING_SAMPLE` whose `IsingProblem.family` holds a `FamilyBinding`.
+
+**FAM-64.** An `IsingProblem` with `family` set must use the `edges` graph form.
+`EdgeList` holds the canonical edges as dense positions, in canonical order.
+`h` holds one field per node in node output order.
+`j` holds one coupling per edge in canonical edge order.
+Each value must decode exactly to the canonical milli coefficient.
+The plain model has no `offset`, so `Solution.energy_milli` for an explicit job excludes `offset`.
+
+**FAM-65.** An accepted-family solver must validate `FamilyBinding.family` with codes 3 to 10, as for a lease.
+
+**FAM-66.** `FamilyBinding.nonce` must be empty or 32 bytes.
+The coordinator must send an empty `nonce` only for a revision with status `archived`.
+In the canonical instance bytes, an empty `nonce` is 32 zero bytes (FAM-30).
+
+**FAM-67.** `FamilyBinding.metadata` holds the metadata region of the canonical instance bytes: `u16 n_sections`, then the sections.
+Before the solver uses metadata, it must validate the metadata against the plain model (FAM-36).
+A failure gives code 16, `MetadataInvalid`.
+
+**FAM-68.** `instance_digest` is the FAM-18 digest of the canonical instance bytes.
+A party that holds or regenerates the canonical instance bytes must recompute the digest and compare.
+A mismatch gives code 15, `InstanceDigestMismatch`.
+The coordinator does this check before it sends an explicit job, and it loads an archived instance only from an archive whose instance bytes match.
+A solver that cannot rebuild the canonical instance bytes must not use `instance_digest` as proof of the instance content.
+
+**FAM-69.** A generic solver must solve an `IsingProblem` with `family` set as a plain model.
+It must not reject the job only for the `family` field.
+
+## Dispatch and pins
+
+**FAM-70.** A coordinator may send an `IsingProblem` with `family` set to an accepted-family solver for that revision or to a generic solver.
+A generic solver solves it as a plain model (FAM-69).
+The coordinator must expect use of the family structure only from an accepted-family solver for that revision.
+
+**FAM-71.** A coordinator reads eligibility from the latest `Capabilities` of each session.
+A `Capabilities` update changes eligibility for every later dispatch at once.
+
+**FAM-72.** A coordinator must send a family lease only to a session that meets both conditions.
+
+- Its latest `Capabilities` lists the exact `(family_id, revision)` in `generated_families`.
+- The lease `params_digest` passes the `params_digests` restriction of that entry.
+
+If no session qualifies, the coordinator does not send the lease.
+It must not fall back to the legacy generator.
+
+**FAM-73.** A family rejection must not stop Ising work that does not use that family.
+The coordinator keeps the session after `FAMILY_UNSUPPORTED` or after a `MALFORMED` from a family code.
+Legacy leases and plain jobs continue to go to that session.
+
+**FAM-74.** An operator configuration may pin a job to one `solver_id`.
+The coordinator selects in two steps.
+
+1. Filter all sessions by compatibility: family tier, `params_digests`, kind, and limits.
+2. Narrow the result to the sessions with the pinned `solver_id`.
+
+A pin never skips a compatibility check.
+A session with an empty `solver_id` never matches a pin.
+
+**FAM-75.** If no session passes both steps, the job fails with an explicit pin failure reason.
+The coordinator must not fall back to another solver.
+These reasons are coordinator-side and do not go on the wire.
+
+| Reason | Condition |
+|---|---|
+| `PinUnknownSolver` | No session has the pinned `solver_id`. |
+| `PinFamilyUnsupported` | A session has the pinned `solver_id`, but none lists the revision at the needed tier or passes `params_digests`. |
+| `PinLimitsExceeded` | A pinned session lists the revision, but the instance exceeds that session's limits. |
+
+If more than one reason applies, the first row that applies wins.
+
+## Family status and the chain
+
+**FAM-76.** A family revision with status `research` may appear in explicit jobs and in non-PoW work such as offline campaigns and test leases.
+It must not appear in a PoW lease, that is a job with `Provenance.is_pow` set.
+Every new family has status `research` until the chain authorizes it.
+
+**FAM-77.** The adapted P-static, D-static, and F-static families have status `research`.
+
+**FAM-78.** A revision with status `archived` must appear only in explicit jobs.
+A coordinator must not send it in a lease.
+
+**FAM-79.** For a PoW lease, the coordinator must take the descriptor from chain challenge state (VAL-2), never from a miner.
+A proof cannot name its own descriptor.
+Until VAL-2 is complete, every family has status `research` or `archived`.
+Every PoW lease today uses the legacy generator.
+
+**FAM-80.** A lease or proof without `family` uses only the legacy contract.
+Replay of a historical legacy `(nonce, topology)` must give the same problem, bit for bit.
+No family revision reinterprets a legacy proof.
+
+## Scenarios
+
+Each row gives a case with its outcome and code.
+
+| Scenario | Outcome | Code |
+|---|---|---|
+| Absent descriptor: a lease with `GENERATOR_ALGORITHM_FAMILY_CHACHA8_V1` and no `family` | The solver rejects the lease before any draw. | 1 `DescriptorMissing`, wire `MALFORMED` |
+| Unsupported revision: a lease for a known `family_id` with a revision that the solver does not list | The solver rejects the lease. A coordinator that follows FAM-72 never sends it. | 6 `RevisionUnsupported`, wire `FAMILY_UNSUPPORTED` |
+| Parameter digest mismatch: `params_digest` differs from the digest of `params` | The solver rejects the lease. | 8 `ParamsDigestMismatch`, wire `MALFORMED` |
+| Topology order change: same node and edge sets, different registration order | `Topology.hash` checks can pass, but `topology_order_digest` differs. The solver rejects the lease, and the coordinator sends the `Topology` again. | 11 `TopologyOrderMismatch`, wire `TOPOLOGY_MISMATCH` |
+| Invalid pin, unknown solver: no session has the pinned `solver_id` | The job fails. No other solver gets it. | `PinUnknownSolver` |
+| Invalid pin, incompatible solver: the pinned session does not list the revision | The job fails. No other solver gets it. | `PinFamilyUnsupported` |
+| Old-production replay: a historical lease without `family` | The legacy generator gives the same problem, bit for bit. | none |
+| Old v2 consumer offered a family lease | A coordinator does not send it, because the consumer lists no `generated_families`. If the consumer gets one, it rejects it before any draw. | wire `MALFORMED` |
+| Archived family offered as a lease | A coordinator does not send it, because no solver lists an archived revision in `generated_families`. If a solver gets one, it rejects it. | 5 `FamilyUnsupported` or 6 `RevisionUnsupported`, wire `FAMILY_UNSUPPORTED` |
+
 ## Traceability
 
-Task 2 completes this table.
+Each `FAM-NN` rule maps to at least one SC-2 vector case or SC-7 conformance check.
+SC-2 and SC-7 create these cases and checks.
+`SC-2+SC-7` marks a rule with both kinds of evidence.
 
 | Requirement | Evidence |
 |---|---|
+| FAM-01 | `SC-2:family-id-grammar-namespace-and-name` |
+| FAM-02 | `SC-2:family-id-length-3-and-64-and-65` |
+| FAM-03 | `SC-2:family-id-case-differs-unsupported` |
+| FAM-04 | `SC-7:quip-namespace-registry-only` |
+| FAM-05 | `SC-2:family-id-example-namespace-rejected` |
+| FAM-06 | `SC-2:revision-zero-rejected` |
+| FAM-07 | SC-2+SC-7: `SC-2:revision-neighbor-unsupported`, `SC-7:capabilities-exact-revisions-only` |
+| FAM-08 | `SC-7:revision-vectors-frozen` |
+| FAM-09 | `SC-7:status-change-keeps-descriptor-digest` |
+| FAM-10 | `SC-2:params-format-byte-and-field-layout` |
+| FAM-11 | `SC-2:params-tag-out-of-order-duplicate-unknown-missing` |
+| FAM-12 | `SC-2:params-length-4096-and-4097` |
+| FAM-13 | `SC-2:params-type-width-bool-ascii` |
+| FAM-14 | `SC-7:schema-has-no-float-type` |
+| FAM-15 | `SC-7:schema-lists-tag-name-type-scale-bounds` |
+| FAM-16 | `SC-2:params-layout-fault-wins-over-bounds` |
+| FAM-17 | `SC-7:schema-holds-generator-inputs-only` |
+| FAM-18 | `SC-2:digest-derive-key-contexts` |
+| FAM-19 | `SC-2:topology-order-digest-reordered-edges` |
+| FAM-20 | `SC-2:family-lease-legacy-nonce-derivation` |
+| FAM-21 | `SC-2:substream-seed-and-first-words` |
+| FAM-22 | SC-2+SC-7: `SC-2:substream-label-length-limits`, `SC-7:contract-lists-substream-labels` |
+| FAM-23 | `SC-2:uniform-rejection-redraw-and-n-one` |
+| FAM-24 | `SC-2:shuffle-fisher-yates-order` |
+| FAM-25 | `SC-7:contract-states-max-retries` |
+| FAM-26 | SC-2+SC-7: `SC-2:no-instance-salt-skipped`, `SC-7:verifier-rejects-no-instance-result` |
+| FAM-27 | `SC-2:generation-overflow-bounds-exceeded` |
+| FAM-28 | `SC-7:generator-output-independent-of-host` |
+| FAM-29 | `SC-2:coefficients-in-milli` |
+| FAM-30 | `SC-2:instance-bytes-layout-and-archived-zero-nonce` |
+| FAM-31 | `SC-2:node-output-order-default-filtered` |
+| FAM-32 | `SC-2:instance-edges-sorted-no-duplicate-no-self-loop` |
+| FAM-33 | `SC-2:instance-energy-with-offset` |
+| FAM-34 | `SC-2:metadata-kinds-ascending-once` |
+| FAM-35 | `SC-2:metadata-change-changes-instance-digest` |
+| FAM-36 | `SC-2:metadata-invalid-against-instance` |
+| FAM-37 | `SC-2:instance-bounds-and-metadata-region-limit` |
+| FAM-38 | `SC-7:contract-has-every-item` |
+| FAM-39 | `SC-7:contract-declares-constraint-class` |
+| FAM-40 | `SC-7:soft-defect-counter-diagnostic-only` |
+| FAM-41 | `SC-7:adapted-families-hard-original-soft` |
+| FAM-42 | `SC-2:stable-code-values-and-wire-mapping` |
+| FAM-43 | `SC-2:code-phase-lowest-code-wins` |
+| FAM-44 | `SC-7:proto-existing-tags-unchanged` |
+| FAM-45 | `SC-7:protocol-version-stays-2-with-families` |
+| FAM-46 | `SC-2:extension-field-wrong-length-codes` |
+| FAM-47 | `SC-2:lease-admission-order-with-session-checks` |
+| FAM-48 | `SC-2:legacy-lease-with-family-rejected` |
+| FAM-49 | `SC-2:family-lease-without-descriptor-rejected` |
+| FAM-50 | `SC-2:topology-order-mismatch-same-hash` |
+| FAM-51 | `SC-2:family-lease-result-salt-and-nonce` |
+| FAM-52 | `SC-2:no-instance-lease-continues-salts-done` |
+| FAM-53 | `SC-7:coordinator-regenerates-family-result` |
+| FAM-54 | SC-2+SC-7: `SC-2:unknown-generator-value-malformed`, `SC-7:no-generated-families-rejects-family-lease` |
+| FAM-55 | `SC-7:coordinator-accepts-plain-model-solve-with-offset` |
+| FAM-56 | `SC-7:capability-tier-per-revision` |
+| FAM-57 | `SC-7:generated-family-passes-conformance` |
+| FAM-58 | `SC-7:generators-lists-family-algorithm-iff-generated` |
+| FAM-59 | `SC-7:archived-revision-not-generated` |
+| FAM-60 | `SC-2:solver-id-grammar-and-length` |
+| FAM-61 | `SC-2:family-support-entry-validity` |
+| FAM-62 | `SC-2:params-restricted-digest-not-advertised` |
+| FAM-63 | `SC-7:capabilities-json-family-fields` |
+| FAM-64 | `SC-2:explicit-job-plain-model-canonical-order` |
+| FAM-65 | `SC-2:explicit-job-descriptor-checks` |
+| FAM-66 | `SC-2:explicit-job-nonce-length-and-archived-empty` |
+| FAM-67 | `SC-2:explicit-job-metadata-invalid` |
+| FAM-68 | `SC-2:explicit-job-instance-digest-mismatch` |
+| FAM-69 | `SC-7:generic-solver-ignores-family-binding` |
+| FAM-70 | `SC-7:dispatch-binding-to-accepted-or-generic` |
+| FAM-71 | `SC-7:dispatch-follows-latest-capabilities` |
+| FAM-72 | `SC-7:dispatch-family-lease-needs-generated-entry` |
+| FAM-73 | `SC-7:family-reject-keeps-session-work` |
+| FAM-74 | `SC-7:pin-filters-compatibility-first` |
+| FAM-75 | `SC-7:pin-failure-reasons-no-fallback` |
+| FAM-76 | `SC-7:research-family-never-in-pow-lease` |
+| FAM-77 | `SC-7:adapted-families-research-status` |
+| FAM-78 | `SC-7:archived-revision-explicit-jobs-only` |
+| FAM-79 | `SC-7:pow-descriptor-from-chain-state` |
+| FAM-80 | `SC-2:legacy-replay-bit-for-bit` |
