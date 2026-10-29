@@ -583,8 +583,12 @@ async fn a_deadline_reports_a_lease_while_its_salt_is_still_running() {
     assert!(matches!(s.recv().await, miner_msg::Msg::LeaseDone(d) if d.salts_done == 0));
     s.refund().await;
     release(&mut held).await;
+    // The lane's NEXT salt was handed over behind the held one; let it finish.
+    // It belongs to a reported lease, so it adds no Result, summary, or refund.
+    let releases = s.release_remaining();
     s.ack().await;
     s.finish().await;
+    releases.abort();
 }
 
 #[tokio::test]
@@ -1098,9 +1102,12 @@ async fn width_two_leases_keep_permits_order_and_single_refunds() {
         lease.job_id = id.to_vec();
         s.send(coord_msg::Msg::Job(lease)).await;
     }
-    let (mut first, _) = s.identified_sample().await;
-    let (mut second, _) = s.identified_sample().await;
-    // Both permits are held. A plain job must still reach the sampler.
+    // Two permits per lane: all four salts reach the width-two device.
+    let mut held = Vec::new();
+    for _ in 0..4 {
+        held.push(s.identified_sample().await.0);
+    }
+    // Every permit is held. A plain job must still reach the sampler.
     s.send(coord_msg::Msg::Job(wire::Job {
         job_id: b"plain".to_vec(),
         kind: wire::JobKind::IsingSample as i32,
@@ -1123,12 +1130,12 @@ async fn width_two_leases_keep_permits_order_and_single_refunds() {
     release(&mut plain).await;
     assert!(matches!(s.recv().await, miner_msg::Msg::Result(r) if r.job_id == b"plain"));
     s.refund().await;
-    // Complete the second salt first, keeping the first permit occupied.
-    release(&mut second).await;
+    // Complete the salts in reverse hand-over order.
     let mut winners = std::collections::HashMap::<Vec<u8>, usize>::new();
     let mut completed = std::collections::HashSet::new();
     let mut refunds = 1;
-    for next in 0..4 {
+    for mut salt in held.into_iter().rev() {
+        release(&mut salt).await;
         let miner_msg::Msg::Result(r) = s.recv().await else {
             panic!("winner must precede completion")
         };
@@ -1141,13 +1148,6 @@ async fn width_two_leases_keep_permits_order_and_single_refunds() {
             assert!(completed.insert(r.job_id));
             s.refund().await;
             refunds += 1;
-        }
-        if next < 2 {
-            // Read the worker's frame before dropping the temporary socket.
-            // Otherwise release can race its write and cause a broken pipe.
-            release(&mut s.identified_sample().await.0).await;
-        } else if next == 2 {
-            release(&mut first).await;
         }
     }
     assert_eq!(completed.len(), 2);
