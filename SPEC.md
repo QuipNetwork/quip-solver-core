@@ -206,6 +206,12 @@ Its field number is 3. The schema reserves the old `spins_bytes` name and field 
 `energy_milli` remains field 2.
 Plain and mempool jobs keep their credits, rejects, provenance, and warm-start behavior.
 
+`IsingProblem.family` is tag 17.
+The SC-4 proto change adds this field. `miner.proto` does not have it yet.
+A solver that lists the revision in `accepted_families` validates the binding and may use its structure.
+Any other solver ignores the field and solves the plain model.
+See [Explicit family jobs](docs/problem-families.md#explicit-family-jobs).
+
 ### Generated jobs
 
 `ISING_GENERATE` is job kind 3.
@@ -247,6 +253,18 @@ Empty reads send no result and do not change the lowest energy.
 `best_energy_milli` is the lowest energy observed, or `i64::MAX` if no reads finish.
 The stop rules in section 5 bound this completion sequence.
 
+The legacy algorithm stays unchanged, and its leases must not carry `family`.
+The SC-4 proto change adds `GENERATOR_ALGORITHM_FAMILY_CHACHA8_V1`. `miner.proto` does not have it yet.
+Its leases carry a `FamilyDescriptor` and a `topology_order_digest`.
+A coordinator sends them only after the solver negotiates the family.
+`FAMILY_UNSUPPORTED` covers an unsupported family or revision.
+It also covers valid parameters outside the solver's advertised restriction, and a topology the family cannot build on.
+A family lease result packs `Solution.spins` in instance node output order, `ceil(n_nodes / 8)` bytes for the instance node count.
+The other family codes keep their `MALFORMED`, `TOPOLOGY_MISMATCH`, or `TOO_LARGE` mapping.
+See [Stable codes](docs/problem-families.md#stable-codes).
+The normative rules are in [docs/problem-families.md](docs/problem-families.md).
+See [Wire extension](docs/problem-families.md#wire-extension) and [Lease admission](docs/problem-families.md#lease-admission).
+
 ### Model limits
 
 `Capabilities` fields 14 to 16 state which models a solver solves correctly, beyond `max_nodes` and `max_edges`.
@@ -260,11 +278,23 @@ An unset field makes no claim.
 | `exact_resolution_milli`, 16 | The step at which coefficients are represented exactly. `0` makes no claim. |
 
 A solver rejects a plain job beyond `max_degree` or `max_local_field_milli` with `TOO_LARGE`.
-These limits do not apply to leases.
+These limits do not apply to legacy leases, and only `max_degree` applies to family leases.
+A family lease checks `max_nodes`, `max_edges`, and `max_degree` against the declared size bounds of the revision, as [Family contracts](docs/problem-families.md#family-contracts) states.
 
 A solver that lists the `exact-coefficients` feature refuses, rather than quantizes, a coefficient it does not represent exactly.
 That covers a coefficient off `exact_resolution_milli`.
 A solver without the feature may quantize and must still report exact energies.
+
+### Family support
+
+A solver declares family support at one of three tiers for each family revision.
+A generic solver does not list that revision and solves a problem that has a family tag as a plain model.
+An accepted-family solver lists the revision in `accepted_families`.
+A generated-family solver lists it in `generated_families`.
+`solver_id` names the solver across releases.
+The SC-4 proto change adds `Capabilities` fields 17 to 19: `solver_id`, `generated_families`, and `accepted_families`.
+A pin on `solver_id` never bypasses these compatibility checks.
+See [Capabilities](docs/problem-families.md#capabilities) and [Dispatch and pins](docs/problem-families.md#dispatch-and-pins).
 
 ### Warm starts
 
@@ -569,6 +599,11 @@ A change to any of these is a minor version:
 - A message, field, or remote procedure call added to the proto.
 - A defaulted method added to the `Sampler` trait.
 - A golden vector case added.
+- A new family revision. Its golden vector case is the added case.
+
+Never change the output of an existing family revision. Publish a new revision instead.
+The session version and the family revision are separate.
+The chain runtime version is also separate from both.
 
 The contract is close to frozen by design. A solver repository that pins a
 tag and never moves it keeps working.
@@ -594,6 +629,7 @@ The fields are:
   because protobuf JSON maps `bytes` that way.
 - `maxDegree`, `maxLocalFieldMilli`, and `exactResolutionMilli`. Omit each
   when unset. A set `0` is printed.
+- `solverId`, `generatedFamilies`, and `acceptedFamilies`. Omit each when empty.
 
 `backend` and `algorithm` keep names such as `"cpu"`, `"sa"`, and `"dwave-qpu"`.
 Job kinds, encodings, and generators use their protobuf enum names.

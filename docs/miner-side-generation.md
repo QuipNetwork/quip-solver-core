@@ -10,6 +10,9 @@ The coordinator redraws each reported salt from the lease and drops a `Result` t
 A device draw that differs from the reference wastes work and produces no valid result.
 Compare it with the reference before you connect it to a coordinator.
 
+This guide covers the legacy draw, `GENERATOR_ALGORITHM_BLAKE3_CHACHA8_V1`.
+A family lease uses generator value 2, `GENERATOR_ALGORITHM_FAMILY_CHACHA8_V1`, and follows [the problem family contract](problem-families.md).
+
 ## The default path
 
 Use these functions unless your hardware has a faster way:
@@ -67,8 +70,37 @@ std::thread::scope(|s| {
 
 Each call returns `Err(DrawError::EmptyAllowedValues)` when its output range is not empty and its table is empty.
 
+## Family leases
+
+The draw in the rest of this guide does not apply to a family lease.
+A family lease uses different random streams, described in [Random streams](problem-families.md#random-streams).
+The wire fields for generator value 2 and `generated_families` are future additions (SC-4 and SC-6).
+The current code does not support them.
+
+When the wire fields exist, a miner may use an optimized family generator only under these conditions:
+
+- The claimed `(family_id, revision)` must pass SC-7 conformance (future) on the actual code that generates the instance.
+  The default session path and a device path are separate code, and each must pass.
+- The miner must list the revision in `generated_families` only after it passes.
+  [Capabilities](problem-families.md#capabilities) gives the rule.
+- The coordinator and validator regenerate the instance from the lease.
+  Their instance is authoritative, and a different device instance gives no valid result.
+
+A family stream differs from the legacy stream in two ways that affect a device draw:
+
+- A family stream seed is not the nonce.
+  It derives from the nonce, the descriptor digest, the topology order digest, and a substream label, as [Digests](problem-families.md#digests) shows.
+  A call to `draw_into` with the raw nonce does not reproduce a family stream.
+- A family draw uses `uniform` rejection, not the legacy `% len`.
+  A device draw must reproduce the rejection and `shuffle` exactly, including the words that rejection discards.
+  [Random streams](problem-families.md#random-streams) defines both.
+
+Lease admission checks the family fields before generation starts.
+See [Lease admission](problem-families.md#lease-admission).
+
 ## Draw on the GPU
 
+This section covers the legacy draw only.
 A device draw removes the host draw and the copy of each problem to the device.
 The device keeps the topology and the converted allowed tables for the whole lease.
 For each salt, the host sends only the 32-byte nonce.
