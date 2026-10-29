@@ -221,17 +221,6 @@ Use `GENERATOR_ALGORITHM_BLAKE3_CHACHA8_V1`.
 `salt_count` must be positive, and `salt_start + salt_count` must fit in `u64`.
 Invalid fields produce `MALFORMED` before any draw.
 
-The legacy algorithm stays unchanged, and its leases must not carry `family`.
-The SC-4 proto change adds `GENERATOR_ALGORITHM_FAMILY_CHACHA8_V1`. `miner.proto` does not have it yet.
-Its leases carry a `FamilyDescriptor` and a `topology_order_digest`.
-A coordinator sends them only after the solver negotiates the family.
-`FAMILY_UNSUPPORTED` covers an unsupported family or revision.
-It also covers valid parameters outside the solver's advertised restriction, and a topology the family cannot build on.
-The other family codes keep their `MALFORMED`, `TOPOLOGY_MISMATCH`, or `TOO_LARGE` mapping.
-See [Stable codes](docs/problem-families.md#stable-codes).
-The normative rules are in [docs/problem-families.md](docs/problem-families.md).
-See [Wire extension](docs/problem-families.md#wire-extension) and [Lease admission](docs/problem-families.md#lease-admission).
-
 Salt index `i` replaces bytes 0 to 7 of `base_salt` with `(salt_start + i).to_le_bytes()`.
 Bytes 8 to 31 stay unchanged.
 The nonce is `BLAKE3(last_proof_block_hash || miner_account || salt)`.
@@ -264,6 +253,18 @@ Empty reads send no result and do not change the lowest energy.
 `best_energy_milli` is the lowest energy observed, or `i64::MAX` if no reads finish.
 The stop rules in section 5 bound this completion sequence.
 
+The legacy algorithm stays unchanged, and its leases must not carry `family`.
+The SC-4 proto change adds `GENERATOR_ALGORITHM_FAMILY_CHACHA8_V1`. `miner.proto` does not have it yet.
+Its leases carry a `FamilyDescriptor` and a `topology_order_digest`.
+A coordinator sends them only after the solver negotiates the family.
+`FAMILY_UNSUPPORTED` covers an unsupported family or revision.
+It also covers valid parameters outside the solver's advertised restriction, and a topology the family cannot build on.
+A family lease result packs `Solution.spins` in instance node output order, `ceil(n_nodes / 8)` bytes for the instance node count.
+The other family codes keep their `MALFORMED`, `TOPOLOGY_MISMATCH`, or `TOO_LARGE` mapping.
+See [Stable codes](docs/problem-families.md#stable-codes).
+The normative rules are in [docs/problem-families.md](docs/problem-families.md).
+See [Wire extension](docs/problem-families.md#wire-extension) and [Lease admission](docs/problem-families.md#lease-admission).
+
 ### Model limits
 
 `Capabilities` fields 14 to 16 state which models a solver solves correctly, beyond `max_nodes` and `max_edges`.
@@ -286,7 +287,7 @@ A solver without the feature may quantize and must still report exact energies.
 ### Family support
 
 A solver declares family support at one of three tiers for each family revision.
-A generic solver lists no family and solves a problem that has a family tag as a plain model.
+A generic solver does not list that revision and solves a problem that has a family tag as a plain model.
 An accepted-family solver lists the revision in `accepted_families`.
 A generated-family solver lists it in `generated_families`.
 `solver_id` names the solver across releases.
