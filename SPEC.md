@@ -28,6 +28,77 @@ on stdout, then exits.
 
 `XQSA` and IsingMark use `--solve`.
 
+The input is one JSON object. Every key except `beta_schedule_type` and
+`anneal_time_us` is required. A solver rejects any other key.
+
+| Key | Type | Meaning |
+|---|---|---|
+| `h` | array of numbers | Linear biases in units, one per node. |
+| `j` | array of numbers | Couplings in units, one per edge. |
+| `edges` | array of `[u, v]` pairs | Undirected edges. Each endpoint indexes `h`. |
+| `num_reads` | integer, at least 1 | Reads to return. |
+| `num_sweeps` | integer | Sweeps per read. |
+| `sweeps_per_beta` | integer, at least 1 | Sweeps at each beta rung. |
+| `beta_range` | `null` or `[hot, cold]` | Beta at the two ends of the ladder. `null` lets the solver choose. |
+| `beta_schedule_type` | `"geometric"` or `"linear"` | Optional. Absent means `"geometric"`. |
+| `seed` | integer from 0 to 2^64 − 1 | Random seed. The same seed gives the same samples. |
+| `anneal_time_us` | integer, at least 1 | Optional. Anneal time of each read in microseconds, for a quantum annealer. Only a solver that lists `anneal-time` accepts it. |
+
+A quantum annealer has no sweeps, beta ladder, or seed. It still requires
+`num_sweeps`, `sweeps_per_beta`, `beta_range`, and `seed`, and echoes them in
+`sampler`, so one input shape reaches every solver.
+
+The output is one JSON array with one object per read, and a trailing newline.
+
+| Key | Type | Meaning |
+|---|---|---|
+| `spins` | array of -1 and +1 | One spin per node. |
+| `energy_milli` | integer | Exact energy of `spins` under the input model, in milli units. |
+| `timing` | object | `sample_us`, the time inside the sampler, and `total_us`, the whole solve. Both are integers in microseconds. |
+| `sampler` | object | `backend` and `algorithm` as `--capabilities` names them, then `num_reads`, `num_sweeps`, `sweeps_per_beta`, `beta_range`, `beta_schedule_type`, and `seed` as the solve used them, and `anneal_time_us` when the input carried it. |
+| `embedding` | object | Only under `--embed`. `embedded` is `true`, `chain_break_fraction` is the fraction of chains broken in this read, from 0 to 1, and `max_chain_length` is the longest chain in the embedding, an integer of at least 1. |
+
+`timing` and `sampler` are the same for every read of one solve.
+
+A solver that lists `embed` accepts the `--embed` flag beside `--solve`.
+Without it, the solver samples the model on its working graph as given, and
+a node or edge off that graph exceeds the solver. With it, the solver embeds
+the model onto its working graph, samples, and returns one spin per logical
+node. A model the embedder cannot place exceeds the solver too.
+
+A solver exits with these codes:
+
+| Code | When |
+|---|---|
+| 0 | It wrote the solutions. |
+| 64 | The input is malformed. |
+| 65 | The model exceeds what this solver solves. |
+| 69 | The device does not open. |
+| 70 | The sampler failed. |
+
+The input is malformed, exit 64, when any of these holds:
+
+- It is not JSON, or not an object.
+- A required key is missing, or an unknown key is present.
+- A value has the wrong type, or `num_reads` or `sweeps_per_beta` is 0.
+- `j` and `edges` differ in length.
+- An endpoint is outside `h`.
+- An edge joins a node to itself.
+- `beta_schedule_type` is not `"geometric"` or `"linear"`.
+- `beta_schedule_type` is `"linear"` and the solver does not list `linear-schedule`.
+- `anneal_time_us` is present and the solver does not list `anneal-time`, or it is 0.
+
+The model exceeds the solver, exit 65, when any of these holds:
+
+- It has more nodes or edges than `maxNodes` or `maxEdges`, where `0` is no limit.
+- `num_reads` exceeds the solver's read limit.
+- It exceeds `maxDegree` or `maxLocalFieldMilli`.
+- The solver lists `exact-coefficients` and a coefficient is not exactly representable.
+- A node or edge is off the solver's working graph and `--embed` is not set.
+- `--embed` is set and the embedder cannot place the model.
+
+A refused problem writes nothing on stdout.
+
 ### `--check`
 
 This mode opens the device and exits. Exit 0 means the device is runnable.
@@ -57,7 +128,8 @@ These codes apply to all four modes. They are the same values that
 | Code | Name | Meaning |
 |---|---|---|
 | 0 | Clean | Clean exit. |
-| 64 | ConfigInvalid | Missing or invalid command-line flags or config. Examples: no `--quip-coordinator`, a bad Welcome. |
+| 64 | ConfigInvalid | Missing or invalid command-line flags or config. Examples: no `--quip-coordinator`, a bad Welcome, a malformed `--solve` problem. |
+| 65 | Capacity | The `--solve` model exceeds what this solver solves. The same model may succeed on another solver. |
 | 69 | EnvIncompatible | The host cannot run this solver. `--check` failed. |
 | 70 | InternalFatal | Unexpected internal failure. |
 | 77 | TokenRejected | `QUIP_SESSION_TOKEN` is missing, empty, or rejected. |
@@ -128,6 +200,8 @@ Their unit value is `stored / scale`.
 Float encodings `F16`, `F32`, and `F64` require scale zero and store unit values.
 
 Each coefficient needs an exact `i32` milli value.
+A float value has one when the value is the nearest `f64` to a whole number of milli.
+`536870.91` is 536,870,910 milli, and `0.0005` is a fractional milli value.
 The decoder returns `MALFORMED` for these inputs:
 
 - An unknown or unspecified encoding.
@@ -137,6 +211,8 @@ The decoder returns `MALFORMED` for these inputs:
 - A fractional milli value.
 - A value outside the `i32` milli range.
 
+An edge from a node to itself is also `MALFORMED`.
+
 Send a narrow encoding only when every value converts exactly and the solver advertises that encoding.
 Otherwise send `I32` at scale 1000.
 
@@ -144,6 +220,12 @@ Otherwise send `I32` at scale 1000.
 Its field number is 3. The schema reserves the old `spins_bytes` name and field 1.
 `energy_milli` remains field 2.
 Plain and mempool jobs keep their credits, rejects, provenance, and warm-start behavior.
+
+`IsingProblem.family` is tag 17.
+The SC-4 proto change adds this field. `miner.proto` does not have it yet.
+A solver that lists the revision in `accepted_families` validates the binding and may use its structure.
+Any other solver ignores the field and solves the plain model.
+See [Explicit family jobs](docs/problem-families.md#explicit-family-jobs).
 
 ### Generated jobs
 
@@ -185,6 +267,49 @@ After its last result, a completed lease sends one `LeaseDone` with a one-credit
 Empty reads send no result and do not change the lowest energy.
 `best_energy_milli` is the lowest energy observed, or `i64::MAX` if no reads finish.
 The stop rules in section 5 bound this completion sequence.
+
+The legacy algorithm stays unchanged, and its leases must not carry `family`.
+The SC-4 proto change adds `GENERATOR_ALGORITHM_FAMILY_CHACHA8_V1`. `miner.proto` does not have it yet.
+Its leases carry a `FamilyDescriptor` and a `topology_order_digest`.
+A coordinator sends them only after the solver negotiates the family.
+`FAMILY_UNSUPPORTED` covers an unsupported family or revision.
+It also covers valid parameters outside the solver's advertised restriction, and a topology the family cannot build on.
+A family lease result packs `Solution.spins` in instance node output order, `ceil(n_nodes / 8)` bytes for the instance node count.
+The other family codes keep their `MALFORMED`, `TOPOLOGY_MISMATCH`, or `TOO_LARGE` mapping.
+See [Stable codes](docs/problem-families.md#stable-codes).
+The normative rules are in [docs/problem-families.md](docs/problem-families.md).
+See [Wire extension](docs/problem-families.md#wire-extension) and [Lease admission](docs/problem-families.md#lease-admission).
+
+### Model limits
+
+`Capabilities` fields 14 to 16 state which models a solver solves correctly, beyond `max_nodes` and `max_edges`.
+Each is measured in milli units on the model as received.
+An unset field makes no claim.
+
+| Field | Meaning |
+|---|---|
+| `max_degree`, 14 | Most edges incident on one node. `0` is unbounded. |
+| `max_local_field_milli`, 15 | Largest local field, the maximum over nodes of the node's absolute bias plus the absolute values of its couplings. `0` is unbounded. |
+| `exact_resolution_milli`, 16 | The step at which coefficients are represented exactly. `0` makes no claim. |
+
+A solver rejects a plain job beyond `max_degree` or `max_local_field_milli` with `TOO_LARGE`.
+These limits do not apply to legacy leases, and only `max_degree` applies to family leases.
+A family lease checks `max_nodes`, `max_edges`, and `max_degree` against the declared size bounds of the revision, as [Family contracts](docs/problem-families.md#family-contracts) states.
+
+A solver that lists the `exact-coefficients` feature refuses, rather than quantizes, a coefficient it does not represent exactly.
+That covers a coefficient off `exact_resolution_milli`.
+A solver without the feature may quantize and must still report exact energies.
+
+### Family support
+
+A solver declares family support at one of three tiers for each family revision.
+A generic solver does not list that revision and solves a problem that has a family tag as a plain model.
+An accepted-family solver lists the revision in `accepted_families`.
+A generated-family solver lists it in `generated_families`.
+`solver_id` names the solver across releases.
+The SC-4 proto change adds `Capabilities` fields 17 to 19: `solver_id`, `generated_families`, and `accepted_families`.
+A pin on `solver_id` never bypasses these compatibility checks.
+See [Capabilities](docs/problem-families.md#capabilities) and [Dispatch and pins](docs/problem-families.md#dispatch-and-pins).
 
 ### Warm starts
 
@@ -270,6 +395,15 @@ It retains the milli arrays and replaces reported energies only when that check 
 Generated problems use the same conversion check.
 The JSON driver applies it to wire-representable inputs and preserves its existing handling of other JSON values.
 Use `quip_protocol::scoring::energy_from_milli` to score stored milli integers.
+
+`BackendIdentity.limits` is a `ModelLimits`, and the session advertises and enforces it.
+`ModelLimits::UNSTATED` makes no claim.
+A solver that lists `exact-coefficients` gets every job refused whose conversion to `C` is not exact.
+
+`SampleParams.schedule` is a `BetaSchedule`, `Geometric` by default.
+Session jobs are always `Geometric`.
+`BetaSchedule::build` builds either ladder.
+A solver whose ladder honours `Linear` lists `linear-schedule` in `BackendIdentity.features`.
 
 `BackendIdentity.backend` is `quip_proto::v1::Backend`.
 `BackendIdentity.algorithm` is `quip_proto::v1::Algorithm`.
@@ -410,10 +544,11 @@ A zero deadline means no deadline.
 
 ## 6. Conformance
 
-A solver is conformant when both of these hold:
+A solver is conformant when all of these hold:
 
 - `quip-solver-drive <solver-binary> unix://<socket>` reports a conformant
   session.
+- `quip-solver-drive --solve <solver-binary>` reports no failed case.
 - The adaptive parameters of the solver match the `golden_adapt.json` cases.
 
 The driver spawns any executable. The driver speaks the proto over the
@@ -426,15 +561,39 @@ must also return the planted ground-state energy of a 4096-spin ring when
 that ground state is its seed. A cold anneal of the same sweep budget leaves
 domain walls in the ring and does not reach that energy.
 
+The `--solve` gate reads `--capabilities`, then runs one problem per case.
+Every solver must pass the base cases:
+
+- An eight-node ring solves, with the output fields that section 2 lists and energies that score correctly.
+- The same seed gives the same samples.
+- Each malformed input in section 2 exits 64 and writes nothing.
+
+Other cases run only when the solver advertises the behaviour:
+
+| Advertised | Case |
+|---|---|
+| `linear-schedule` | A linear schedule solves. Without the feature, it exits 64. |
+| `maxDegree` | A star at the limit solves. One more leaf exits 65. |
+| `maxLocalFieldMilli` | A local field at the limit solves. One step more exits 65. |
+| `exact-coefficients` and `exactResolutionMilli` | A coefficient on the step solves. One off the step exits 65. |
+| `anneal-time` | The ring with an anneal time solves and echoes it. An anneal time of 0 exits 64. Without the feature, any anneal time exits 64. |
+| `embed` | A complete graph on 24 nodes solves under `--embed`, with an `embedding` object on every read. Without `--embed`, it exits 65. |
+
+No quantum annealer in service has a native degree of 23, so the complete
+graph on 24 nodes is off every working graph.
+
 A Rust solver repository may use this convenience form:
 
 ```rust
 use quip_solver_conformance::driver::drive_miner;
+use quip_solver_conformance::solve::drive_solve;
 
 #[tokio::test]
 async fn solver_is_conformant() {
     let report = drive_miner(bin, "unix:///tmp/s.sock").await;
     assert!(report.is_conformant());
+    let report = drive_solve(bin).await;
+    assert!(report.is_conformant(), "{}", report.summary());
 }
 ```
 
@@ -460,6 +619,11 @@ A change to any of these is a minor version:
 - A message, field, or remote procedure call added to the proto.
 - A defaulted method added to the `Sampler` trait.
 - A golden vector case added.
+- A new family revision. Its golden vector case is the added case.
+
+Never change the output of an existing family revision. Publish a new revision instead.
+The session version and the family revision are separate.
+The chain runtime version is also separate from both.
 
 The contract is close to frozen by design. A solver repository that pins a
 tag and never moves it keeps working.
@@ -483,6 +647,9 @@ The fields are:
 - `generators`
 - `nativeTopologyHash`. Omit it when unset. The value is standard base64
   because protobuf JSON maps `bytes` that way.
+- `maxDegree`, `maxLocalFieldMilli`, and `exactResolutionMilli`. Omit each
+  when unset. A set `0` is printed.
+- `solverId`, `generatedFamilies`, and `acceptedFamilies`. Omit each when empty.
 
 `backend` and `algorithm` keep names such as `"cpu"`, `"sa"`, and `"dwave-qpu"`.
 Job kinds, encodings, and generators use their protobuf enum names.
@@ -519,7 +686,7 @@ where the two answers can differ.
 
 The normative wire contract is `proto/quip/v1/miner.proto`. Section 2 states the session-mode command line.
 
-`quip-miner-dwave` is the working example of a solver built this way today.
+`quip-solver-dwave` is the working example of a solver built this way today.
 
 ### Now
 
@@ -528,7 +695,7 @@ These pieces exist now:
 - The proto.
 - The `quip-solver-core` wheel: protocol primitives, scoring, wire encoding, and
   exit codes.
-- `quip-solver-drive` as the conformance gate for a solver in any language.
+- `quip-solver-drive` as the conformance gate for a solver in any language, in session mode and with `--solve`.
 - C and C++ through a C binary interface with a registered callback. `quip_solver_run`
   carries the session loop and calls the sampler callback the solver
   registers. The artifact is `libquip_solver_c` plus `quip_solver.h`, attached

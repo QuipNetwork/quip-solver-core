@@ -143,6 +143,13 @@ impl ExitCode {
         64
     }
 
+    /// The model exceeds what this solver solves (`--solve` only).
+    #[wasm_bindgen(getter = CAPACITY)]
+    #[must_use]
+    pub fn capacity() -> u8 {
+        65
+    }
+
     /// The host environment cannot run this solver.
     #[wasm_bindgen(getter = ENV_INCOMPATIBLE)]
     #[must_use]

@@ -19,16 +19,21 @@ pub mod error;
 pub mod ising;
 mod job;
 mod lease;
+pub mod limits;
 pub mod logging;
 mod session;
 
 pub use cli::CommonArgs;
 pub use csr::CsrGraph;
 pub use error::SampleError;
-pub use ising::{Algorithm, IsingGraph, SampleParams, SamplerResult, WarmStart};
+pub use ising::{Algorithm, BetaSchedule, IsingGraph, SampleParams, SamplerResult, WarmStart};
 pub use lease::{Lease, LeaseSink, LeaseStopped};
+pub use limits::ModelLimits;
 pub use quip_protocol::lease::TopologyView;
-pub use session::{capabilities, run, run_code, BackendIdentity, OpenError, INITIAL_SPINS_FEATURE};
+pub use session::{
+    capabilities, run, run_code, BackendIdentity, OpenError, EXACT_COEFFICIENTS_FEATURE,
+    INITIAL_SPINS_FEATURE, LINEAR_SCHEDULE_FEATURE,
+};
 
 /// The generated protobuf and tonic stubs for the wire contract.
 ///

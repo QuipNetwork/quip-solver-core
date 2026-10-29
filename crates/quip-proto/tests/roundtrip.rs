@@ -18,6 +18,9 @@ fn hello_roundtrips_through_prost() {
             stream_width: 4,
             encodings: vec![quip_proto::v1::CoefficientEncoding::I32 as i32],
             generators: vec![],
+            max_degree: None,
+            max_local_field_milli: None,
+            exact_resolution_milli: None,
         }),
     };
     let msg = MinerMsg {
@@ -48,7 +51,33 @@ fn capabilities_roundtrips() {
         protocol_version: 2,
         stream_width: 8,
         native_topology_hash: None,
+        max_degree: Some(20),
+        max_local_field_milli: Some(63_000),
+        exact_resolution_milli: Some(1000),
     };
     let bytes = c.encode_to_vec();
     assert_eq!(Capabilities::decode(&bytes[..]).expect("decode"), c);
+}
+
+/// Optional model limits keep their presence across the wire: an explicit `0`
+/// (unbounded) is distinct from an unset field (no claim).
+#[test]
+fn model_limits_keep_presence() {
+    use prost::Message as _;
+    use quip_proto::v1::Capabilities;
+
+    let unbounded = Capabilities {
+        max_degree: Some(0),
+        max_local_field_milli: Some(0),
+        ..Default::default()
+    };
+    let decoded = Capabilities::decode(&unbounded.encode_to_vec()[..]).expect("decode");
+    assert_eq!(decoded.max_degree, Some(0));
+    assert_eq!(decoded.max_local_field_milli, Some(0));
+    assert_eq!(decoded.exact_resolution_milli, None);
+
+    let unset = Capabilities::default();
+    assert!(unset.encode_to_vec().is_empty());
+    let decoded = Capabilities::decode(&[][..]).expect("decode");
+    assert_eq!(decoded.max_degree, None);
 }

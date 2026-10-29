@@ -125,6 +125,8 @@ def validate_ising(
     for a, b in edges:
         if a < 0 or b < 0 or a >= n or b >= n:
             raise ValueError("edge references a node outside h")
+        if a == b:
+            raise ValueError(f"edge ({a}, {b}) is a self-loop")
 
 
 def decode_problem(ising, topologies: dict[bytes, Topology]):
@@ -419,21 +421,106 @@ async def run_session(endpoint: str, miner_id: str) -> int:
     return ExitCode.INTERNAL_FATAL
 
 
+# Every --solve key but beta_schedule_type is required, and no other key is
+# accepted (SPEC section 2).
+SOLVE_KEYS = frozenset(
+    {
+        "h",
+        "j",
+        "edges",
+        "num_reads",
+        "num_sweeps",
+        "sweeps_per_beta",
+        "beta_range",
+        "seed",
+    }
+)
+OPTIONAL_SOLVE_KEYS = frozenset({"beta_schedule_type"})
+
+
+def solve_int(problem: dict, key: str, minimum: int, maximum: int = 2**64 - 1) -> int:
+    """A ``--solve`` integer field within ``[minimum, maximum]``."""
+    value = problem[key]
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{key} must be an integer")
+    if not minimum <= value <= maximum:
+        raise ValueError(f"{key} must be between {minimum} and {maximum}")
+    return value
+
+
+def parse_solve_problem(problem: object) -> dict:
+    """Validate one ``--solve`` problem.
+
+    Raises ``ValueError`` or ``TypeError`` when the problem is malformed.
+    """
+    if not isinstance(problem, dict):
+        raise TypeError("problem JSON must be an object")
+    missing = SOLVE_KEYS - problem.keys()
+    if missing:
+        raise ValueError(f"missing keys: {sorted(missing)}")
+    unknown = problem.keys() - SOLVE_KEYS - OPTIONAL_SOLVE_KEYS
+    if unknown:
+        raise ValueError(f"unknown keys: {sorted(unknown)}")
+    schedule = problem.get("beta_schedule_type", "geometric")
+    if schedule not in ("geometric", "linear"):
+        raise ValueError(f"unknown beta_schedule_type {schedule!r}")
+    if schedule == "linear":
+        # This sampler has no ladder, so it does not list linear-schedule.
+        raise ValueError(
+            "beta_schedule_type 'linear' needs a solver that lists linear-schedule"
+        )
+    edges = [tuple(e) for e in problem["edges"]]
+    if any(len(e) != 2 for e in edges):
+        raise ValueError("each edge must be a [u, v] pair")
+    validate_ising(problem["h"], problem["j"], edges)
+    return {
+        "h": problem["h"],
+        "j": problem["j"],
+        "edges": edges,
+        "num_reads": solve_int(problem, "num_reads", 1),
+        "num_sweeps": solve_int(problem, "num_sweeps", 0),
+        "sweeps_per_beta": solve_int(problem, "sweeps_per_beta", 1),
+        "beta_range": problem["beta_range"],
+        "beta_schedule_type": schedule,
+        "seed": solve_int(problem, "seed", 0),
+    }
+
+
 def run_solve() -> int:
     """Read one problem as JSON on stdin and write solutions on stdout."""
+    started = time.monotonic_ns()
     try:
-        problem = json.load(sys.stdin)
-        h = problem["h"]
-        j = problem["j"]
-        edges = [tuple(e) for e in problem["edges"]]
-        num_reads = problem["num_reads"]
-        validate_ising(h, j, edges)
+        problem = parse_solve_problem(json.load(sys.stdin))
     except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
         print(f"error: malformed problem JSON on stdin: {e}", file=sys.stderr)
         return ExitCode.CONFIG_INVALID
 
-    solutions = sample(h, j, edges, num_reads)
-    json.dump([{"spins": s, "energy_milli": e} for s, e in solutions], sys.stdout)
+    sample_started = time.monotonic_ns()
+    solutions = sample(
+        problem["h"], problem["j"], problem["edges"], problem["num_reads"]
+    )
+    finished = time.monotonic_ns()
+    timing = {
+        "sample_us": (finished - sample_started) // 1000,
+        "total_us": (finished - started) // 1000,
+    }
+    sampler = {
+        "backend": session.BACKEND_NAMES[miner_pb2.BACKEND_MOCK],
+        "algorithm": session.ALGORITHM_NAMES[miner_pb2.ALGORITHM_SA],
+        "num_reads": problem["num_reads"],
+        "num_sweeps": problem["num_sweeps"],
+        "sweeps_per_beta": problem["sweeps_per_beta"],
+        "beta_range": problem["beta_range"],
+        "beta_schedule_type": problem["beta_schedule_type"],
+        "seed": problem["seed"],
+    }
+    json.dump(
+        [
+            {"spins": s, "energy_milli": e, "timing": timing, "sampler": sampler}
+            for s, e in solutions
+        ],
+        sys.stdout,
+    )
     sys.stdout.write("\n")
     return ExitCode.CLEAN
 

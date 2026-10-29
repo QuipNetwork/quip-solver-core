@@ -5,6 +5,81 @@ This file documents changes to the Quip solver contract.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+`--solve` keys for quantum annealers. Existing solvers need no change: a
+solver that lists neither feature refuses the new key, as it already does.
+
+### Added
+
+- SPEC section 2: an optional `anneal_time_us` key for a solver that lists
+  `anneal-time`, echoed in `sampler`. A solver without the feature exits 64
+  on it, and an anneal time of 0 exits 64.
+- SPEC section 2: an `--embed` flag for a solver that lists `embed`. Under it
+  the solver embeds the model onto its working graph and adds an `embedding`
+  object to every read. Without it, a model off the working graph exits 65.
+- The `--solve` gate's `anneal-time` and `embed` cases, with
+  `ANNEAL_TIME_FEATURE` and `EMBED_FEATURE` in
+  `quip_solver_conformance::solve`. The `anneal-time` case runs against every
+  solver; the `embed` case runs only when the solver lists `embed`.
+
+## 0.0.4-rc1
+
+A fix for whole-milli float coefficients. The solver API does not change.
+
+### Fixed
+
+- `--solve` and the float wire encodings accept a value that is the nearest
+  `f64` to a whole number of milli, such as `536870.91`, even when the value
+  times 1000 is not an integer in `f64`. Before, the SDK kept the fraction,
+  and a solver that lists `exact-coefficients` refused the model as capacity.
+
+## 0.0.3
+
+`--solve` additions for callers that solve arbitrary models, and log names that
+follow the `quip-solver-*` repository rename.
+[MIGRATING.md](MIGRATING.md) lists the solver API changes.
+
+### Added
+
+- `linear_beta_schedule`, and `BetaSchedule` on `SampleParams.schedule`.
+  `--solve` takes an optional `beta_schedule_type` of `"geometric"` or
+  `"linear"`. A solver lists the `linear-schedule` feature when its ladder
+  honours it; `--solve` refuses `"linear"` for one that does not.
+- Every `--solve` solution carries `timing` and `sampler` objects beside
+  `spins` and `energy_milli`.
+- `Capabilities.max_degree`, `max_local_field_milli`, and
+  `exact_resolution_milli`, fields 14 to 16, from `BackendIdentity.limits`.
+  The SDK refuses a model beyond them: `TOO_LARGE` for a plain job, and
+  exit 65 for `--solve`.
+- The `exact-coefficients` feature. A solver that lists it gets every model
+  its coefficient type would round or saturate refused as capacity, instead
+  of quantized.
+- `ExitCode::Capacity`, exit code 65, in Rust, Python, and TypeScript.
+- SPEC section 2 specifies `--solve`: every input and output field, the exit
+  codes, and the rejects.
+- `quip-solver-drive --solve <solver-binary>` and
+  `quip_solver_conformance::solve::drive_solve`: the `--solve` conformance
+  gate. Base cases apply to every solver; the `linear-schedule`,
+  `exact-coefficients`, and model-limit cases run when a solver advertises
+  them. CI runs it on all four sample solvers.
+
+### Changed
+
+- An edge from a node to itself is `MALFORMED` in session mode and exit 64 in
+  `--solve`.
+- `--solve` exits 65 for a model beyond the solver's read, node, or edge
+  caps, or for `SampleError::Capacity`. It exited 64 for the read cap, ignored
+  the node and edge caps, and exited 70 for `SampleError::Capacity`.
+- `driver::solve` takes the solver's `BackendIdentity`.
+- The Python and TypeScript samples reject unknown, missing, and malformed
+  `--solve` keys and self-loops, and write `timing` and `sampler` on each
+  solution.
+- Session log lines start with `[quip-solver-{backend}]` instead of
+  `[quip-miner-{backend}]`, and the fatal and logger-setup error lines
+  name `quip-solver-{backend}`. The solver repositories are renamed from
+  `quip-miner-*` to `quip-solver-*`.
+
 ## 0.0.2
 
 Protocol version 2, salt leases, selectable coefficient types, warm starts,

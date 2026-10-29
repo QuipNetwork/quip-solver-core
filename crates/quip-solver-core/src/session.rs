@@ -53,6 +53,11 @@ pub struct BackendIdentity {
     pub features: &'static [&'static str],
     /// Sampling-parameter envelope used by `adapt::adapt_params`.
     pub adapt: crate::adapt::AdaptBounds,
+    /// Which models this backend solves, beyond `max_nodes` and `max_edges`.
+    /// Advertised in `Capabilities` and enforced on every plain job and every
+    /// `--solve` problem. [`ModelLimits::UNSTATED`](crate::ModelLimits::UNSTATED)
+    /// makes no claim.
+    pub limits: crate::limits::ModelLimits,
 }
 
 /// Failure to open a device / build a sampler, surfaced as `EnvIncompatible`.
@@ -140,13 +145,16 @@ pub fn capabilities(id: &BackendIdentity, stream_width: u32) -> Capabilities {
         native_topology_hash: None,
         encodings: vec![CoefficientEncoding::I32 as i32],
         generators: vec![GeneratorAlgorithm::Blake3Chacha8V1 as i32],
+        max_degree: id.limits.max_degree,
+        max_local_field_milli: id.limits.max_local_field_milli,
+        exact_resolution_milli: id.limits.exact_resolution_milli,
     }
 }
 
 /// Protobuf JSON view of [`Capabilities`]. Field order matches the message.
 ///
-/// `native_topology_hash` is omitted when unset, which is the protobuf JSON
-/// mapping. When set,
+/// `native_topology_hash` and the three optional model limits are omitted when
+/// unset, which is the protobuf JSON mapping. When set,
 /// protobuf JSON maps `bytes` to a standard-base64 string, not a number array.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -163,6 +171,12 @@ struct CapabilitiesJson<'a> {
     generators: Vec<&'static str>,
     backend: &'static str,
     algorithm: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_degree: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_local_field_milli: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    exact_resolution_milli: Option<u32>,
 }
 
 /// The `Capabilities` this solver advertises, from the one place both answers
@@ -196,6 +210,18 @@ fn advertised_capabilities<S: Sampler<C>, C: Coefficient>(id: &BackendIdentity) 
 
 /// Feature string for a solver that uses `IsingProblem.initial_spins`.
 pub const INITIAL_SPINS_FEATURE: &str = "initial-spins";
+
+/// Feature string for a solver whose ladder honours
+/// [`BetaSchedule::Linear`](crate::BetaSchedule::Linear). A binary lists it in
+/// `BackendIdentity.features`; `--solve` refuses a linear schedule otherwise.
+pub const LINEAR_SCHEDULE_FEATURE: &str = "linear-schedule";
+
+/// Feature string for the refuse-not-quantize policy. A binary that lists it
+/// gets every model refused, as capacity, that it would not represent exactly:
+/// a coefficient off its advertised exact resolution, or one its coefficient
+/// type would round or saturate. A binary that does not list it keeps
+/// quantizing, and the SDK rescores the energies.
+pub const EXACT_COEFFICIENTS_FEATURE: &str = "exact-coefficients";
 
 /// The features `Hello` and `Capabilities` carry: the identity's own list, plus
 /// [`INITIAL_SPINS_FEATURE`] when [`Sampler::accepts_warm_start`] is true.
@@ -295,6 +321,9 @@ fn capabilities_json_from(c: &Capabilities) -> String {
             .native_topology_hash
             .as_deref()
             .map(|h| STANDARD.encode(h)),
+        max_degree: c.max_degree,
+        max_local_field_milli: c.max_local_field_milli,
+        exact_resolution_milli: c.exact_resolution_milli,
     };
     #[expect(
         clippy::expect_used,
@@ -487,7 +516,7 @@ fn log_progress(
     let (reads, sweeps) = pending.map_or((0, 0), |p| (p.num_reads, p.num_sweeps));
     let requirement = format_requirement(pending);
     tracing::info!(
-        "[quip-miner-{backend}] progress: {jobs_done} jobs | {rate:.1} jobs/s | reads={reads} sweeps={sweeps} | best={best} | {requirement}"
+        "[quip-solver-{backend}] progress: {jobs_done} jobs | {rate:.1} jobs/s | reads={reads} sweeps={sweeps} | best={best} | {requirement}"
     );
 }
 
@@ -540,18 +569,18 @@ fn log_attempt(backend: &str, sr: &StreamResult, pending: Option<&PendingJob>) {
                 None => samples.len(),
             };
             tracing::info!(
-                "[quip-miner-{backend}] attempt {job}: energy {}, valid {valid}/{} \
+                "[quip-solver-{backend}] attempt {job}: energy {}, valid {valid}/{} \
                  | {wall} wall, {device} device",
                 best.map_or_else(|| "n/a".to_owned(), |e| energy_units(e).to_string()),
                 samples.len(),
             );
         }
         StreamOutcome::Completed(Err(err)) => {
-            tracing::warn!("[quip-miner-{backend}] attempt {job}: rejected {err} | {wall} wall",);
+            tracing::warn!("[quip-solver-{backend}] attempt {job}: rejected {err} | {wall} wall",);
         }
         // Expected on every reseed, so this is not a degraded condition.
         StreamOutcome::Cancelled => {
-            tracing::debug!("[quip-miner-{backend}] attempt {job}: cancelled after {wall}");
+            tracing::debug!("[quip-solver-{backend}] attempt {job}: cancelled after {wall}");
         }
     }
 }
@@ -813,7 +842,7 @@ async fn outbound_writer<C: Coefficient>(
                     StreamOutcome::Completed(Ok(_)) if stopped =>
                     {
                         tracing::debug!(
-                            "[quip-miner-{backend}] dropping a late Result for cancelled job {}",
+                            "[quip-solver-{backend}] dropping a late Result for cancelled job {}",
                             short_job_id(&sr.job_id),
                         );
                         StreamResult { outcome: StreamOutcome::Cancelled, ..sr }
@@ -1010,7 +1039,7 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
     // Prefetch a full extra batch beyond the active set: the backend keeps each
     // stream lane's NEXT slot pre-loaded so a completed slot rotates into a
     // ready one with no idle gap while it is downloaded and refilled (the
-    // 3-slot pipeline in quip-miner-cuda). Without this look-ahead the lane
+    // 3-slot pipeline in quip-solver-cuda). Without this look-ahead the lane
     // stalls every cycle waiting for the next job to arrive over the wire.
     let prefetch = width.saturating_mul(2);
     let cap = prefetch.max(8);
@@ -1749,7 +1778,7 @@ fn map_err_to_exit(err: Box<dyn std::error::Error>, backend: &str) -> ExitCode {
     if msg.contains("unexpected protocol version") {
         return ExitCode::ConfigInvalid;
     }
-    tracing::error!("quip-miner-{backend} fatal: {err}");
+    tracing::error!("quip-solver-{backend} fatal: {err}");
     ExitCode::InternalFatal
 }
 
@@ -1777,7 +1806,7 @@ pub fn run_code<S: Sampler<C>, C: Coefficient>(
             reason = "the subscriber failed to install, so tracing would discard this"
         )]
         {
-            eprintln!("quip-miner-{backend}: {e}");
+            eprintln!("quip-solver-{backend}: {e}");
         }
         return ExitCode::ConfigInvalid;
     }
@@ -1798,20 +1827,13 @@ pub fn run_code<S: Sampler<C>, C: Coefficient>(
             tracing::error!("[quip-solver-{}] cannot read stdin: {e}", backend);
             return ExitCode::ConfigInvalid;
         }
-        if serde_json::from_slice::<crate::driver::ProblemJson>(&input).is_err() {
-            tracing::error!("[quip-solver-{}] malformed problem JSON on stdin", backend);
-            return ExitCode::ConfigInvalid;
-        }
-        return match crate::driver::solve(&sampler, &input) {
+        return match crate::driver::solve(&sampler, &id, &input) {
             Ok(mut bytes) => {
                 // `println!` supplied this before the broken-pipe fix. A CLI
                 // that emits a JSON document should end it with a newline.
                 bytes.push(b'\n');
                 write_and_map(&mut std::io::stdout(), &bytes)
             }
-            // The stdin pre-parse above already rejects malformed JSON with
-            // ConfigInvalid, so Malformed is unreachable here in practice;
-            // this still maps it correctly for a direct caller of `solve`.
             Err(crate::driver::SolveError::Malformed(detail)) => {
                 tracing::error!(
                     "[quip-solver-{}] malformed problem JSON on stdin: {detail}",
@@ -1819,9 +1841,9 @@ pub fn run_code<S: Sampler<C>, C: Coefficient>(
                 );
                 ExitCode::ConfigInvalid
             }
-            Err(e @ crate::driver::SolveError::Sample(_)) => {
+            Err(e) => {
                 tracing::error!("[quip-solver-{}] solve failed: {e}", backend);
-                ExitCode::InternalFatal
+                e.exit_code()
             }
         };
     }
@@ -2575,6 +2597,7 @@ mod tests {
                 reads_solution_max_factor: 1,
                 reads_solution_floor_factor: 0,
             },
+            limits: crate::limits::ModelLimits::UNSTATED,
         }
     }
 
@@ -2632,11 +2655,44 @@ mod tests {
                 reads_solution_max_factor: 1,
                 reads_solution_floor_factor: 0,
             },
+            limits: crate::limits::ModelLimits::UNSTATED,
         };
         let json = capabilities_json_from(&capabilities(&id, 1));
         let v: serde_json::Value =
             serde_json::from_str(&json).expect("quoted feature must produce valid JSON");
         assert_eq!(v.get("features"), Some(&serde_json::json!(["has\"quote"])));
+    }
+
+    /// Unset limits are omitted, as protobuf JSON omits an unset optional
+    /// field; set ones keep their value, `0` included, because `0` (unbounded)
+    /// and absent (no claim) mean different things.
+    #[test]
+    fn model_limits_reach_capabilities_and_its_json() {
+        let unset = capabilities_json_from(&capabilities(&test_identity(), 1));
+        let v: serde_json::Value = serde_json::from_str(&unset).expect("JSON");
+        for key in ["maxDegree", "maxLocalFieldMilli", "exactResolutionMilli"] {
+            assert!(v.get(key).is_none(), "{key} must be omitted when unset");
+        }
+
+        let id = BackendIdentity {
+            limits: crate::limits::ModelLimits {
+                max_degree: Some(20),
+                max_local_field_milli: Some(0),
+                exact_resolution_milli: Some(1000),
+            },
+            ..test_identity()
+        };
+        let c = capabilities(&id, 1);
+        assert_eq!(c.max_degree, Some(20));
+        assert_eq!(c.max_local_field_milli, Some(0));
+        assert_eq!(c.exact_resolution_milli, Some(1000));
+        let v: serde_json::Value = serde_json::from_str(&capabilities_json_from(&c)).expect("JSON");
+        assert_eq!(v.get("maxDegree"), Some(&serde_json::json!(20)));
+        assert_eq!(v.get("maxLocalFieldMilli"), Some(&serde_json::json!(0)));
+        assert_eq!(
+            v.get("exactResolutionMilli"),
+            Some(&serde_json::json!(1000))
+        );
     }
 
     #[test]
@@ -3030,6 +3086,7 @@ mod tests {
                 reads_solution_max_factor: 1,
                 reads_solution_floor_factor: 0,
             },
+            limits: crate::limits::ModelLimits::UNSTATED,
         };
         assert!(
             advertised_features::<WrongNarrow, Fixed<i8, 1>>(&id).contains(&INITIAL_SPINS_FEATURE)

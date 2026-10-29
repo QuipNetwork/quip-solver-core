@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { CoefficientEncoding, IsingProblem, consensus } from "@quip.network/quip-solver-core";
-import { decodeProblem } from "./mock_miner.js";
+import { decodeProblem, parseSolveProblem } from "./mock_miner.js";
 
 function problem(scale: number, value: number): IsingProblem {
   return IsingProblem.fromPartial({
@@ -24,4 +24,41 @@ test("rejects non-dividing scales, zero scales, and milli overflow", () => {
   for (const [scale, stored] of [[3, 1], [0, 1], [1, 2147484], [1, -2147484]] as const) {
     assert.throws(() => decodeProblem(problem(scale, stored), new Map()));
   }
+});
+
+test("rejects a self-loop in a session job", () => {
+  const selfLoop = IsingProblem.fromPartial({
+    encoding: CoefficientEncoding.COEFFICIENT_ENCODING_I32, scale: 1000,
+    h: consensus.encodeI32Le(Int32Array.from([1000, -1000])),
+    j: consensus.encodeI32Le(Int32Array.from([1000])),
+    edges: { u: [1], v: [1] },
+  });
+  assert.throws(() => decodeProblem(selfLoop, new Map()), /self-loop/);
+});
+
+function solveProblem(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    h: [1, -1], j: [1], edges: [[0, 1]], num_reads: 2, num_sweeps: 8,
+    sweeps_per_beta: 1, beta_range: null, seed: 7, ...overrides,
+  };
+}
+
+test("parses a --solve problem", () => {
+  const parsed = parseSolveProblem(solveProblem());
+  assert.deepEqual(parsed.edges, [0, 1]);
+  assert.equal(parsed.numReads, 2);
+  assert.equal(parsed.seed, 7);
+});
+
+test("rejects malformed --solve problems", () => {
+  for (const overrides of [
+    { edges: [[1, 1]] }, { num_sweep: 1 }, { num_reads: 0 }, { sweeps_per_beta: 0 },
+    { seed: -1 }, { beta_schedule_type: "cosine" }, { beta_schedule_type: "linear" },
+    { j: [1, 1] },
+  ]) {
+    assert.throws(() => parseSolveProblem(solveProblem(overrides)), JSON.stringify(overrides));
+  }
+  const missing = solveProblem();
+  delete missing.seed;
+  assert.throws(() => parseSolveProblem(missing), /seed/);
 });
