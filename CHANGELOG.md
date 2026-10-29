@@ -5,10 +5,12 @@ This file documents changes to the Quip solver contract.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## 0.0.4-rc2
 
-`--solve` keys for quantum annealers. Existing solvers need no change: a
-solver that lists neither feature refuses the new key, as it already does.
+`--solve` keys for quantum annealers, faster lease mining on lane-paired
+backends, and a draft contract for problem families. Existing solvers need no
+change: a solver that lists neither new feature refuses the new key, as it
+already does.
 
 ### Added
 
@@ -22,6 +24,19 @@ solver that lists neither feature refuses the new key, as it already does.
   `ANNEAL_TIME_FEATURE` and `EMBED_FEATURE` in
   `quip_solver_conformance::solve`. The `anneal-time` case runs against every
   solver; the `embed` case runs only when the solver lists `embed`.
+- `docs/problem-families.md`: the contract for problem families. It covers
+  family identity, canonical parameter bytes, digests, the family random
+  stream, size bounds, stable rejection codes, and the planned wire fields.
+  `SPEC.md` and `docs/miner-side-generation.md` refer to it. No code supports
+  it yet, and the `.proto` files do not change.
+
+### Fixed
+
+- A session now keeps up to twice the stream width of lease salts in flight,
+  the same look-ahead as plain jobs. Before, it kept only the stream width, so
+  a backend that loads an ACTIVE and a NEXT job on each lane left half of its
+  lanes idle during a lease. On an RTX 2070 with quip-cuda-msa, a 432-salt
+  lease went from 4.66 to 7.88 salts/s.
 
 ## 0.0.4-rc1
 
