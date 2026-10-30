@@ -226,8 +226,27 @@ fn encode<S: ByteSink>(parts: &InstanceParts, sink: &mut S) {
     sink.put(&parts.metadata);
 }
 
+/// The instance digest (FAM-18) of parts, streamed without allocation.
+fn digest_of(parts: &InstanceParts) -> [u8; 32] {
+    let mut hasher = BufferedHasher::new("quip family instance v1");
+    encode(parts, &mut hasher);
+    hasher.finish()
+}
+
 impl Instance {
-    /// Validate the parts. The first failure wins, in the FAM-65 order.
+    /// Validate the parts. The first failure wins, in the FAM-65 order
+    /// (steps 2 to 4):
+    ///
+    /// 1. Code 13: the bounds.
+    /// 2. Code 15: the `h` and `j` lengths, the edge positions, `u < v`, and
+    ///    the ascending edge order.
+    /// 3. Code 15: when `expected_digest` is `Some`, a comparison with the
+    ///    instance digest of `parts` as given.
+    /// 4. Code 16: the metadata layout.
+    /// 5. Code 13: the canonical length overflows.
+    ///
+    /// `None` skips the digest comparison. Use it for a generated or archived
+    /// instance that has no sent digest.
     ///
     /// # Errors
     ///
@@ -235,12 +254,14 @@ impl Instance {
     ///   metadata size is above `limits`, or the canonical length overflows.
     /// - [`Code::InstanceDigestMismatch`] (15): `h` or `j` has the wrong
     ///   length, an edge position is at or past the node count, an edge has
-    ///   `u >= v`, or the edges are not strictly ascending.
+    ///   `u >= v`, the edges are not strictly ascending, or the digest of
+    ///   `parts` differs from `expected_digest`.
     /// - [`Code::MetadataInvalid`] (16): the metadata layout is faulty.
     pub fn new(
         parts: InstanceParts,
         limits: &InstanceLimits,
         contract_kinds: &[u16],
+        expected_digest: Option<&[u8; 32]>,
     ) -> Result<Self, Code> {
         let over = Code::BoundsExceeded;
         if exceeds(parts.node_ids.len(), limits.nodes)
@@ -268,6 +289,9 @@ impl Instance {
                 .windows(2)
                 .any(|w| matches!(w, [a, b] if a >= b))
         {
+            return Err(mismatch);
+        }
+        if expected_digest.is_some_and(|sent| *sent != digest_of(&parts)) {
             return Err(mismatch);
         }
         validate_metadata(&parts.metadata, contract_kinds)?;
@@ -355,8 +379,6 @@ impl Instance {
     /// canonical bytes, streamed without allocation.
     #[must_use]
     pub fn digest(&self) -> [u8; 32] {
-        let mut hasher = BufferedHasher::new("quip family instance v1");
-        encode(&self.parts, &mut hasher);
-        hasher.finish()
+        digest_of(&self.parts)
     }
 }

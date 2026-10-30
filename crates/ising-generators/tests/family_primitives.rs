@@ -368,6 +368,17 @@ fn context_of(name: &str) -> Result<IdContext, String> {
     }
 }
 
+macro_rules! expect_eq {
+    ($got:expr, $want:expr $(,)?) => {{
+        let (got, want) = (&$got, &$want);
+        if got == want {
+            Ok(())
+        } else {
+            Err(format!("got {got:?}, want {want:?}"))
+        }
+    }};
+}
+
 fn code_of<T>(result: &Result<T, Code>) -> Option<u8> {
     result.as_ref().err().map(|c| c.value())
 }
@@ -725,8 +736,14 @@ fn instance_vectors() -> Result<(), String> {
     for case in cases {
         let name = str_field(case, "name")?;
         let kinds = kinds_of(case, "metadata_kinds")?;
-        let instance = Instance::new(instance_parts(case)?, &InstanceLimits::FAM_37, &kinds)
-            .map_err(|c| format!("{name}: code {c}"))?;
+        let sent = hex32(str_field(case, "instance_digest")?)?;
+        let instance = Instance::new(
+            instance_parts(case)?,
+            &InstanceLimits::FAM_37,
+            &kinds,
+            Some(&sent),
+        )
+        .map_err(|c| format!("{name}: code {c}"))?;
         let want = hex(str_field(case, "canonical_hex")?)?;
         let bytes = instance
             .canonical_bytes()
@@ -737,7 +754,7 @@ fn instance_vectors() -> Result<(), String> {
         if instance.canonical_len() != want.len() {
             return Err(format!("{name}: canonical_len differs"));
         }
-        if instance.digest() != hex32(str_field(case, "instance_digest")?)? {
+        if instance.digest() != sent {
             return Err(format!("{name}: digest differs"));
         }
     }
@@ -762,7 +779,7 @@ fn instance_defect_vectors() -> Result<(), String> {
         let mut parts = instance_parts(base)?;
         parts.edges = edges_of(defect)?;
         let kinds = kinds_of(base, "metadata_kinds")?;
-        let got = Instance::new(parts, &InstanceLimits::FAM_37, &kinds);
+        let got = Instance::new(parts, &InstanceLimits::FAM_37, &kinds, None);
         if code_of(&got) != Some(15) || expected(defect)? != Some(15) {
             return Err(format!("{name}: got {:?}", code_of(&got)));
         }
@@ -800,7 +817,7 @@ fn instance_bound_vectors() -> Result<(), String> {
             "offset" => one_node_parts(0, 0, i64_of(case.get("value").ok_or("no value")?)?),
             other => return Err(format!("{name}: quantity {other}")),
         };
-        let got = Instance::new(parts, &InstanceLimits::FAM_37, &[]);
+        let got = Instance::new(parts, &InstanceLimits::FAM_37, &[], None);
         if code_of(&got) != expected(case)? {
             return Err(format!("{name}: got {:?}", code_of(&got)));
         }
@@ -836,7 +853,7 @@ fn bounds_beat_edges_beat_metadata() {
     parts.j = vec![0, 0];
     parts.metadata = vec![1, 0, 6, 0, 0, 0, 0, 0];
     let limits = InstanceLimits::FAM_37;
-    let code = |p: &InstanceParts| code_of(&Instance::new(p.clone(), &limits, &[1, 2, 3]));
+    let code = |p: &InstanceParts| code_of(&Instance::new(p.clone(), &limits, &[1, 2, 3], None));
     assert_eq!(code(&parts), Some(13));
     parts.offset_milli = 0;
     assert_eq!(code(&parts), Some(15));
@@ -849,7 +866,7 @@ fn length_mismatch_is_code_15() {
     let mut parts = one_node_parts(0, 0, 0);
     parts.h = vec![0];
     assert_eq!(
-        code_of(&Instance::new(parts, &InstanceLimits::FAM_37, &[])),
+        code_of(&Instance::new(parts, &InstanceLimits::FAM_37, &[], None)),
         Some(15)
     );
 }
@@ -859,12 +876,17 @@ fn edge_position_beats_edge_order() {
     let mut parts = one_node_parts(0, 0, 0);
     parts.edges = vec![(1, 0)];
     assert_eq!(
-        code_of(&Instance::new(parts.clone(), &InstanceLimits::FAM_37, &[])),
+        code_of(&Instance::new(
+            parts.clone(),
+            &InstanceLimits::FAM_37,
+            &[],
+            None
+        )),
         Some(15)
     );
     parts.edges = vec![(0, 2)];
     assert_eq!(
-        code_of(&Instance::new(parts, &InstanceLimits::FAM_37, &[])),
+        code_of(&Instance::new(parts, &InstanceLimits::FAM_37, &[], None)),
         Some(15)
     );
 }
@@ -876,7 +898,7 @@ fn tighter_limits_apply() {
     parts.node_ids = vec![0, 1, 2, 3, 4];
     parts.h = vec![0; 5];
     assert_eq!(
-        tight.and_then(|l| code_of(&Instance::new(parts, &l, &[])).into()),
+        tight.and_then(|l| code_of(&Instance::new(parts, &l, &[], None)).into()),
         Some(Some(13))
     );
     assert!(InstanceLimits::new(16_777_217, 1, 1, 1, 1).is_none());
@@ -893,6 +915,75 @@ fn tighter_limits_apply() {
             67_108_864
         ),
         Some(InstanceLimits::FAM_37)
+    );
+}
+
+/// The digest of `parts` as given, computed without `Instance`: the canonical
+/// bytes of a twin with the empty-sections region, with the metadata swapped.
+fn digest_over(parts: &InstanceParts) -> Result<[u8; 32], String> {
+    let mut twin = parts.clone();
+    twin.metadata = vec![0, 0];
+    let twin = Instance::new(twin, &InstanceLimits::FAM_37, &[], None)
+        .map_err(|c| format!("twin: code {c}"))?;
+    let mut bytes = twin.canonical_bytes().map_err(|e| e.to_string())?;
+    bytes.truncate(bytes.len() - 2);
+    bytes.extend_from_slice(&parts.metadata);
+    let mut hasher = blake3::Hasher::new_derive_key("quip family instance v1");
+    let _ = hasher.update(&bytes);
+    Ok(*hasher.finalize().as_bytes())
+}
+
+fn new_with_digest(
+    parts: &InstanceParts,
+    kinds: &[u16],
+    digest: &[u8; 32],
+) -> Result<Instance, Code> {
+    Instance::new(parts.clone(), &InstanceLimits::FAM_37, kinds, Some(digest))
+}
+
+#[test]
+fn digest_mismatch_beats_metadata() -> Result<(), String> {
+    let mut parts = one_node_parts(0, 0, 0);
+    parts.metadata = vec![1, 0, 6, 0, 0, 0, 0, 0];
+    let kinds = [1, 2, 3];
+    let right = digest_over(&parts)?;
+    let wrong = [0xEE; 32];
+    expect_eq!(code_of(&new_with_digest(&parts, &kinds, &wrong)), Some(15))?;
+    expect_eq!(code_of(&new_with_digest(&parts, &kinds, &right)), Some(16))?;
+    // A kind the contract does not list gives the same order.
+    parts.metadata = vec![1, 0, 2, 0, 0, 0, 0, 0];
+    let right = digest_over(&parts)?;
+    expect_eq!(code_of(&new_with_digest(&parts, &[1], &wrong)), Some(15))?;
+    expect_eq!(code_of(&new_with_digest(&parts, &[1], &right)), Some(16))?;
+    // Valid metadata and the right digest is Ok, and the digest matches.
+    let ok = new_with_digest(&parts, &[1, 2], &right).map_err(|c| c.to_string())?;
+    expect_eq!(ok.digest(), right)?;
+    expect_eq!(code_of(&new_with_digest(&parts, &[1, 2], &wrong)), Some(15))?;
+    Ok(())
+}
+
+#[test]
+fn edge_fault_beats_digest_mismatch() {
+    // Both faults are code 15, so the code cannot show which check ran first.
+    // The test still runs the edge step and the digest step on the same
+    // input, and `digest_mismatch_beats_metadata` pins the later steps.
+    let mut parts = one_node_parts(0, 0, 0);
+    parts.node_ids = vec![0, 1, 2];
+    parts.h = vec![0; 3];
+    parts.edges = vec![(1, 2), (0, 1)];
+    parts.j = vec![0, 0];
+    assert_eq!(
+        new_with_digest(&parts, &[], &[0xEE; 32]),
+        Err(Code::InstanceDigestMismatch)
+    );
+}
+
+#[test]
+fn bounds_beat_digest_mismatch() {
+    let parts = one_node_parts(0, 0, 72_057_594_037_927_937);
+    assert_eq!(
+        code_of(&new_with_digest(&parts, &[], &[0xEE; 32])),
+        Some(13)
     );
 }
 
@@ -1290,16 +1381,29 @@ fn instance_checks_allocate_nothing() {
     let mut bad_metadata = one_node_parts(0, 0, 0);
     bad_metadata.metadata = vec![1, 0, 9, 0, 0, 0, 0, 0];
     let region = [0_u8, 0];
+    let wrong_digest_parts = one_node_parts(0, 0, 0);
+    let wrong = [0xEE; 32];
 
-    let (instance, allocs) = measure(|| Instance::new(ok, &limits, &[]));
+    let (instance, allocs) = measure(|| Instance::new(ok, &limits, &[], None));
     assert_eq!(allocs, NONE);
     assert!(instance.is_ok());
 
     for (parts, code) in [(over_bound, 13), (bad_length, 15), (bad_metadata, 16)] {
-        let (got, allocs) = measure(|| code_of(&Instance::new(parts, &limits, &[])));
+        let (got, allocs) = measure(|| code_of(&Instance::new(parts, &limits, &[], None)));
         assert_eq!(got, Some(code));
         assert_eq!(allocs, NONE);
     }
+
+    let (got, allocs) = measure(|| {
+        code_of(&Instance::new(
+            wrong_digest_parts,
+            &limits,
+            &[],
+            Some(&wrong),
+        ))
+    });
+    assert_eq!(got, Some(15));
+    assert_eq!(allocs, NONE);
 
     let (got, allocs) = measure(|| code_of(&validate_metadata(&region, &[])));
     assert_eq!(got, None);
@@ -1313,7 +1417,7 @@ fn instance_checks_allocate_nothing() {
 
 #[test]
 fn canonical_bytes_allocate_exactly_once() -> Result<(), String> {
-    let instance = Instance::new(one_node_parts(5, -7, 9), &InstanceLimits::FAM_37, &[])
+    let instance = Instance::new(one_node_parts(5, -7, 9), &InstanceLimits::FAM_37, &[], None)
         .map_err(|c| c.to_string())?;
     let (bytes, allocs) = measure(|| instance.canonical_bytes());
     let bytes = bytes.map_err(|e| e.to_string())?;
