@@ -2,6 +2,7 @@
 
 use core::num::NonZeroU32;
 
+use ising_generators::legacy::derive_nonce;
 use ising_generators::rng::{uniform, ChaCha8Rng};
 use ising_generators::Code;
 use serde_json::Value;
@@ -140,6 +141,50 @@ fn uniform_of_one_reads_one_word() -> Result<(), String> {
     let _ = b.next_u32();
     if a.next_u32() != b.next_u32() {
         return Err("uniform(1) did not read exactly one word".into());
+    }
+    Ok(())
+}
+
+#[test]
+fn lease_vector_nonces() -> Result<(), String> {
+    let doc = core()?;
+    let mut checked = 0usize;
+    for case in section(&doc, "leases")? {
+        if case.get("admitted").and_then(Value::as_bool) != Some(true) {
+            continue;
+        }
+        let field = |key: &str| {
+            case.get(key)
+                .and_then(Value::as_str)
+                .ok_or_else(|| format!("lease case without {key}"))
+        };
+        let last = hex32(field("last_proof_block_hash")?)?;
+        let miner = hex32(field("miner_account")?)?;
+        let salts = case
+            .get("salts")
+            .and_then(Value::as_array)
+            .ok_or("lease case without salts")?;
+        for entry in salts {
+            let salt = hex32(
+                entry
+                    .get("salt")
+                    .and_then(Value::as_str)
+                    .ok_or("salt entry without salt")?,
+            )?;
+            let want = hex32(
+                entry
+                    .get("nonce")
+                    .and_then(Value::as_str)
+                    .ok_or("salt entry without nonce")?,
+            )?;
+            if derive_nonce(last, miner, salt) != want {
+                return Err(format!("lease {}: nonce differs", field("name")?));
+            }
+            checked += 1;
+        }
+    }
+    if checked == 0 {
+        return Err("no admitted lease salts checked".into());
     }
     Ok(())
 }

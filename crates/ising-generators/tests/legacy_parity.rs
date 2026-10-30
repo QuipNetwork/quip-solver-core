@@ -1,5 +1,6 @@
 //! The scalar `ChaCha8` stream checked against the legacy golden vectors.
 
+use ising_generators::legacy::{derive_nonce, NonceDeriver};
 use ising_generators::rng::{key_words, ChaCha8Rng, SIGMA};
 use serde_json::Value;
 
@@ -7,7 +8,6 @@ fn golden() -> Result<Value, String> {
     serde_json::from_str(quip_solver_conformance::GOLDEN_VECTORS).map_err(|e| e.to_string())
 }
 
-#[expect(dead_code, reason = "parsed here for later tasks in this file")]
 fn golden_lease() -> Result<Value, String> {
     serde_json::from_str(quip_solver_conformance::GOLDEN_LEASE).map_err(|e| e.to_string())
 }
@@ -86,6 +86,73 @@ fn sigma_is_expand_32_byte_k() -> Result<(), String> {
     let bytes: Vec<u8> = SIGMA.iter().flat_map(|w| w.to_le_bytes()).collect();
     if bytes != b"expand 32-byte k" {
         return Err(format!("unexpected sigma bytes {bytes:?}"));
+    }
+    Ok(())
+}
+
+fn str_field<'a>(case: &'a Value, key: &str) -> Result<&'a str, String> {
+    case.get(key)
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("missing string field {key}"))
+}
+
+#[test]
+fn derive_nonce_matches_golden() -> Result<(), String> {
+    let doc = golden()?;
+    let cases = doc
+        .get("derive_nonce")
+        .and_then(Value::as_array)
+        .ok_or("missing derive_nonce array")?;
+    if cases.is_empty() {
+        return Err("no derive_nonce cases".into());
+    }
+    for (i, case) in cases.iter().enumerate() {
+        let last = hex32(str_field(case, "last_proof_hex")?)?;
+        let miner = hex32(str_field(case, "miner_hex")?)?;
+        let salt = hex32(str_field(case, "salt_hex")?)?;
+        let want = hex32(str_field(case, "nonce_hex")?)?;
+        if derive_nonce(last, miner, salt) != want {
+            return Err(format!("case {i}: derive_nonce differs"));
+        }
+        if NonceDeriver::new(last, miner).derive(salt) != want {
+            return Err(format!("case {i}: NonceDeriver differs"));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn lease_nonces_match_golden_lease() -> Result<(), String> {
+    let doc = golden_lease()?;
+    let cases = doc
+        .get("cases")
+        .and_then(Value::as_array)
+        .ok_or("missing cases array")?;
+    if cases.is_empty() {
+        return Err("no lease cases".into());
+    }
+    for case in cases {
+        let name = str_field(case, "name")?;
+        let last = hex32(str_field(case, "last_proof_block_hash")?)?;
+        let miner = hex32(str_field(case, "miner_account")?)?;
+        let salts = case
+            .get("salts")
+            .and_then(Value::as_array)
+            .ok_or("missing salts array")?;
+        if salts.is_empty() {
+            return Err(format!("{name}: no salts"));
+        }
+        let deriver = NonceDeriver::new(last, miner);
+        for entry in salts {
+            let salt = hex32(str_field(entry, "salt")?)?;
+            let want = hex32(str_field(entry, "nonce")?)?;
+            if derive_nonce(last, miner, salt) != want {
+                return Err(format!("{name}: derive_nonce differs"));
+            }
+            if deriver.derive(salt) != want {
+                return Err(format!("{name}: NonceDeriver differs"));
+            }
+        }
     }
     Ok(())
 }
