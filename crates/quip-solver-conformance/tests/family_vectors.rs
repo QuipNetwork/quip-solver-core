@@ -2,6 +2,8 @@
 
 #[path = "family_vectors/codec.rs"]
 mod codec;
+#[path = "family_vectors/decisions.rs"]
+mod decisions;
 #[path = "family_vectors/digests.rs"]
 mod digests;
 #[path = "family_vectors/instance.rs"]
@@ -965,6 +967,351 @@ fn mutate(doc: &Value, pointer: &str, value: Value) -> Value {
     copy
 }
 
+fn opt_u64_decimal(case: &Value, key: &str) -> Result<Option<u64>, String> {
+    match case.get(key) {
+        Some(Value::Null) => Ok(None),
+        Some(_) => u64_decimal(case, key).map(Some),
+        None => Err(format!("{}: missing {key}", case_name(case))),
+    }
+}
+
+fn usize_field(case: &Value, key: &str) -> Result<usize, String> {
+    usize::try_from(u32_field(case, key)?).map_err(|e| e.to_string())
+}
+
+fn string_list(value: &Value, what: &str) -> Result<Vec<String>, String> {
+    value
+        .as_array()
+        .ok_or_else(|| format!("{what} is not an array"))?
+        .iter()
+        .map(|v| {
+            v.as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| format!("{what} has a non-string item"))
+        })
+        .collect()
+}
+
+fn section_of_strings(doc: &Value, name: &str) -> Result<Vec<String>, String> {
+    let items = string_list(doc.get(name).ok_or("missing order")?, name)?;
+    if items.is_empty() {
+        return Err(format!("section {name} is empty"));
+    }
+    Ok(items)
+}
+
+fn check_codes(doc: &Value) -> Result<(), String> {
+    let rows = section(doc, "codes")?;
+    if rows.len() != decisions::CODES.len() {
+        return Err(format!("codes has {} rows", rows.len()));
+    }
+    let wire = quip_solver_conformance::golden_wire();
+    let mut numbers: std::collections::BTreeMap<String, i64> = wire
+        .enums
+        .get("RejectReason")
+        .ok_or("golden_wire has no RejectReason")?
+        .iter()
+        .map(|(k, v)| (k.clone(), i64::from(*v)))
+        .collect();
+    match numbers.get("FAMILY_UNSUPPORTED") {
+        Some(10) | None => {}
+        Some(other) => return Err(format!("golden FAMILY_UNSUPPORTED is {other}, expected 10")),
+    }
+    *numbers.entry("FAMILY_UNSUPPORTED".to_owned()).or_insert(10) = 10;
+    if numbers.iter().filter(|(_, v)| **v == 10).count() != 1 {
+        return Err("number 10 is not used by exactly FAMILY_UNSUPPORTED".to_owned());
+    }
+    for (row, want) in rows.iter().zip(&decisions::CODES) {
+        let phases = string_list(row.get("phases").ok_or("no phases")?, "phases")?;
+        let want_phases: Vec<String> = want.phases.iter().map(|p| (*p).to_owned()).collect();
+        let opt = |key: &str| -> Result<Option<String>, String> {
+            match row.get(key) {
+                Some(Value::Null) => Ok(None),
+                Some(v) => v
+                    .as_str()
+                    .map(|s| Some(s.to_owned()))
+                    .ok_or_else(|| format!("{key} is not a string")),
+                None => Err(format!("missing {key}")),
+            }
+        };
+        let code = u32_field(row, "code")?;
+        if code != u32::from(want.code) {
+            return Err(format!("code row {}: fixture says {code}", want.code));
+        }
+        let ctx = |what: &str| format!("code {}: {what}", want.code);
+        compare(row, &ctx("name"), &str_field(row, "name")?, &want.name)?;
+        compare(row, &ctx("phases"), &phases, &want_phases)?;
+        compare(
+            row,
+            &ctx("wire_admission"),
+            &opt("wire_admission")?,
+            &want.wire_admission.map(str::to_owned),
+        )?;
+        compare(
+            row,
+            &ctx("wire_generation"),
+            &opt("wire_generation")?,
+            &None,
+        )?;
+        compare(
+            row,
+            &ctx("wire_explicit_job"),
+            &opt("wire_explicit_job")?,
+            &want.wire_explicit_job.map(str::to_owned),
+        )?;
+        for name in [want.wire_admission, want.wire_explicit_job]
+            .into_iter()
+            .flatten()
+        {
+            if !numbers.contains_key(name) {
+                return Err(format!("code {}: wire name {name} is unknown", want.code));
+            }
+        }
+    }
+    let fixture: std::collections::BTreeMap<String, i64> = section(doc, "wire_reasons")?
+        .iter()
+        .map(|r| {
+            let value = r
+                .get("value")
+                .and_then(Value::as_i64)
+                .ok_or("wire reason has no value")?;
+            Ok((str_field(r, "reason")?.to_owned(), value))
+        })
+        .collect::<Result<_, String>>()?;
+    if fixture != numbers {
+        return Err(format!(
+            "wire_reasons {fixture:?} differs from enum {numbers:?}"
+        ));
+    }
+    Ok(())
+}
+
+fn check_orders(doc: &Value) -> Result<(), String> {
+    let want = |order: &[&str]| order.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+    let admission = section_of_strings(doc, "lease_admission_order")?;
+    if admission != want(&decisions::LEASE_ADMISSION_ORDER) {
+        return Err(format!("lease_admission_order is {admission:?}"));
+    }
+    let explicit = section_of_strings(doc, "explicit_job_order")?;
+    if explicit != want(&decisions::EXPLICIT_JOB_ORDER) {
+        return Err(format!("explicit_job_order is {explicit:?}"));
+    }
+    Ok(())
+}
+
+fn check_order_cases(
+    doc: &Value,
+    name: &str,
+    order: &[&str],
+    explicit_job: bool,
+) -> Result<(), String> {
+    for case in section(doc, name)? {
+        let faults = string_list(case.get("faults").ok_or("no faults")?, "faults")?;
+        let step = order
+            .get(decisions::winner(order, &faults)?)
+            .ok_or("winner out of range")?;
+        compare(case, "step", step, &str_field(case, "expected_step")?)?;
+        let (code, wire) = decisions::step_outcome(step, explicit_job);
+        compare(case, "code", &code, &expected_code(case)?)?;
+        let want_wire = match case.get("expected_wire") {
+            Some(Value::Null) => None,
+            Some(v) => Some(v.as_str().ok_or("expected_wire is not a string")?),
+            None => return Err(format!("{}: no expected_wire", case_name(case))),
+        };
+        compare(case, "wire", &wire, &want_wire)?;
+    }
+    Ok(())
+}
+
+fn check_lease_admission(doc: &Value) -> Result<(), String> {
+    check_order_cases(
+        doc,
+        "lease_admission",
+        &decisions::LEASE_ADMISSION_ORDER,
+        false,
+    )
+}
+
+fn check_explicit_job(doc: &Value) -> Result<(), String> {
+    check_order_cases(doc, "explicit_job", &decisions::EXPLICIT_JOB_ORDER, true)
+}
+
+fn check_field_lengths(doc: &Value) -> Result<(), String> {
+    for case in section(doc, "field_lengths")? {
+        let plain = match case.get("plain_node_count") {
+            Some(Value::Null) => None,
+            Some(_) => Some(usize_field(case, "plain_node_count")?),
+            None => return Err(format!("{}: no plain_node_count", case_name(case))),
+        };
+        let code = decisions::field_length_code(
+            str_field(case, "field")?,
+            usize_field(case, "length")?,
+            plain,
+        )?;
+        compare(case, "code", &code, &expected_code(case)?)?;
+    }
+    Ok(())
+}
+
+fn entries_of<'a>(case: &'a Value, key: &str) -> Result<&'a [Value], String> {
+    case.get(key)
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .ok_or_else(|| format!("{}: {key} is not an array", case_name(case)))
+}
+
+fn check_family_support(doc: &Value) -> Result<(), String> {
+    for case in section(doc, "family_support")? {
+        let got = decisions::entry_claims(entries_of(case, "entries")?)?;
+        let want = case
+            .get("entry_claims")
+            .and_then(Value::as_array)
+            .ok_or("no entry_claims")?
+            .iter()
+            .map(|v| v.as_bool().ok_or("entry_claims item is not a bool"))
+            .collect::<Result<Vec<_>, _>>()?;
+        compare(case, "entry_claims", &got, &want)?;
+    }
+    Ok(())
+}
+
+fn check_lease_codes(doc: &Value) -> Result<(), String> {
+    for case in section(doc, "lease_codes")? {
+        let digest = codec::hex32(str_field(case, "params_digest")?)?;
+        let got = decisions::lease_code(
+            entries_of(case, "generated_families")?,
+            str_field(case, "family_id")?,
+            u32_field(case, "revision")?,
+            &digest,
+        )?;
+        compare(case, "code", &got, &expected_code(case)?)?;
+    }
+    Ok(())
+}
+
+fn check_size_bounds(doc: &Value) -> Result<(), String> {
+    for case in section(doc, "size_bounds")? {
+        let bounds = decisions::example_size_bounds(
+            u64::from(u32_field(case, "n_layers")?),
+            u64_decimal(case, "n_nodes")?,
+            u64_decimal(case, "n_edges")?,
+            u64_decimal(case, "max_degree")?,
+        );
+        let want = (
+            u64_decimal(case, "nodes")?,
+            u64_decimal(case, "edges")?,
+            u64_decimal(case, "degree")?,
+        );
+        compare(case, "bounds", &bounds, &Some(want))?;
+        let code = decisions::size_bound_code(
+            bounds,
+            opt_u64_decimal(case, "limit_max_nodes")?,
+            opt_u64_decimal(case, "limit_max_edges")?,
+            opt_u64_decimal(case, "limit_max_degree")?,
+        );
+        compare(case, "code", &code, &expected_code(case)?)?;
+    }
+    Ok(())
+}
+
+/// `SC-2:legacy-replay-bit-for-bit` has its case in legacy.json. Task 11 adds
+/// that file and removes this exemption.
+const EVIDENCE_IN_LEGACY_FILE: &str = "legacy-replay-bit-for-bit";
+/// Number of `SC-2:` ids in the spec Traceability table.
+const EVIDENCE_ID_COUNT: usize = 51;
+
+fn check_evidence(doc: &Value) -> Result<(), String> {
+    let evidence = doc.get("evidence").ok_or("no evidence section")?;
+    let ids_of = |key: &str| -> Result<Vec<String>, String> {
+        let items = evidence
+            .get(key)
+            .and_then(Value::as_array)
+            .ok_or_else(|| format!("evidence.{key} is not an array"))?;
+        items
+            .iter()
+            .map(|item| {
+                let id = if key == "provided" {
+                    Some(item)
+                } else {
+                    item.get("id")
+                };
+                id.and_then(Value::as_str)
+                    .map(str::to_owned)
+                    .ok_or_else(|| format!("evidence.{key} item has no id"))
+            })
+            .collect()
+    };
+    let provided = ids_of("provided")?;
+    let partial = ids_of("partial")?;
+    let deferred = ids_of("deferred")?;
+    let all: std::collections::BTreeSet<&String> =
+        provided.iter().chain(&partial).chain(&deferred).collect();
+    if all.len() != provided.len() + partial.len() + deferred.len() {
+        return Err("evidence lists overlap or repeat an id".to_owned());
+    }
+    if all.len() != EVIDENCE_ID_COUNT {
+        return Err(format!(
+            "{} evidence ids, expected {EVIDENCE_ID_COUNT}",
+            all.len()
+        ));
+    }
+    let mut cited = std::collections::BTreeSet::new();
+    for (key, cases) in doc.as_object().ok_or("document is not an object")? {
+        if key == "evidence" {
+            continue;
+        }
+        let Some(cases) = cases.as_array() else {
+            continue;
+        };
+        for case in cases {
+            for id in case
+                .get("evidence")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                let id = id.as_str().ok_or("evidence item is not a string")?;
+                cited.extend([id.strip_prefix("SC-2:").unwrap_or(id).to_owned()]);
+            }
+        }
+    }
+    for id in provided.iter().chain(&partial) {
+        if id != EVIDENCE_IN_LEGACY_FILE && !cited.contains(id) {
+            return Err(format!("evidence id {id} has no case"));
+        }
+    }
+    Ok(())
+}
+
+fn check_core(doc: &Value) -> Result<(), String> {
+    validate(&schema()?, doc)?;
+    check_names_unique(doc)?;
+    check_family_ids(doc)?;
+    check_revisions(doc)?;
+    check_solver_ids(doc)?;
+    check_params(doc)?;
+    check_descriptors(doc)?;
+    check_topologies(doc)?;
+    check_labels(doc)?;
+    check_streams(doc)?;
+    check_uniform(doc)?;
+    check_shuffle(doc)?;
+    check_leases(doc)?;
+    check_instances(doc)?;
+    check_instance_defects(doc)?;
+    check_instance_bounds(doc)?;
+    check_metadata(doc)?;
+    check_codes(doc)?;
+    check_orders(doc)?;
+    check_lease_admission(doc)?;
+    check_explicit_job(doc)?;
+    check_field_lengths(doc)?;
+    check_family_support(doc)?;
+    check_lease_codes(doc)?;
+    check_size_bounds(doc)?;
+    check_evidence(doc)
+}
+
 #[test]
 fn core_fixture_matches_schema() -> Result<(), String> {
     validate(&schema()?, &core()?)?;
@@ -1475,4 +1822,144 @@ fn changed_metadata_byte_fails() -> Result<(), String> {
         .ok_or("no metadata_hex")?;
     let broken = mutate(&doc, &pointer, json!(flip_last_hex_digit(good)));
     expect_err(&check_instances(&broken), "a changed metadata byte")
+}
+
+#[test]
+fn code_table_matches_spec_and_wire() -> Result<(), String> {
+    check_codes(&core()?)
+}
+
+#[test]
+fn step_orders_match_spec() -> Result<(), String> {
+    check_orders(&core()?)
+}
+
+#[test]
+fn lease_admission_cases_recompute() -> Result<(), String> {
+    check_lease_admission(&core()?)
+}
+
+#[test]
+fn explicit_job_cases_recompute() -> Result<(), String> {
+    check_explicit_job(&core()?)
+}
+
+#[test]
+fn field_length_cases_recompute() -> Result<(), String> {
+    check_field_lengths(&core()?)
+}
+
+#[test]
+fn family_support_cases_recompute() -> Result<(), String> {
+    check_family_support(&core()?)
+}
+
+#[test]
+fn lease_code_cases_recompute() -> Result<(), String> {
+    check_lease_codes(&core()?)
+}
+
+#[test]
+fn size_bound_cases_recompute() -> Result<(), String> {
+    let doc = core()?;
+    check_size_bounds(&doc)?;
+    let example = find_named(&doc, "size_bounds", "spec-example-no-limits")?;
+    compare(
+        example,
+        "spec example",
+        &decisions::example_size_bounds(2, 100, 150, 4),
+        &Some((200, 400, 5)),
+    )?;
+    let max_degree_4 = find_named(&doc, "size_bounds", "spec-example-max-degree-4")?;
+    compare(
+        max_degree_4,
+        "code",
+        &expected_code(max_degree_4)?,
+        &Some(13),
+    )
+}
+
+#[test]
+fn every_provided_evidence_id_has_a_case() -> Result<(), String> {
+    check_evidence(&core()?)
+}
+
+#[test]
+fn whole_core_fixture_passes() -> Result<(), String> {
+    check_core(&core()?)
+}
+
+#[test]
+fn swapped_admission_order_fails() -> Result<(), String> {
+    let doc = swap_pointers(
+        &core()?,
+        "/lease_admission_order/0",
+        "/lease_admission_order/1",
+    )?;
+    expect_err(&check_orders(&doc), "a swapped admission order")
+}
+
+#[test]
+fn changed_code_row_fails() -> Result<(), String> {
+    let doc = mutate(&core()?, "/codes/12/wire_admission", json!("MALFORMED"));
+    expect_err(&check_codes(&doc), "a changed wire mapping")
+}
+
+#[test]
+fn changed_wire_reason_number_fails() -> Result<(), String> {
+    let doc = mutate(&core()?, "/wire_reasons/2/value", json!(3));
+    expect_err(&check_codes(&doc), "a changed wire number")
+}
+
+#[test]
+fn changed_expected_step_fails() -> Result<(), String> {
+    let doc = mutate(
+        &core()?,
+        "/lease_admission/0/expected_step",
+        json!("code:1"),
+    );
+    expect_err(&check_lease_admission(&doc), "a changed expected step")
+}
+
+#[test]
+fn changed_support_claim_fails() -> Result<(), String> {
+    let index = find_index(&core()?, "family_support", "duplicate-family-id")?;
+    let pointer = format!("/family_support/{index}/entry_claims/0");
+    let doc = mutate(&core()?, &pointer, json!(true));
+    expect_err(&check_family_support(&doc), "a changed claim")
+}
+
+#[test]
+fn zero_limit_is_no_claim() {
+    let bounds = decisions::example_size_bounds(2, 100, 150, 4);
+    assert_eq!(
+        decisions::size_bound_code(bounds, Some(0), Some(0), Some(0)),
+        None
+    );
+    assert_eq!(
+        decisions::size_bound_code(bounds, None, None, Some(4)),
+        Some(13)
+    );
+}
+
+#[test]
+fn size_bound_overflow_is_code_thirteen() {
+    assert_eq!(decisions::example_size_bounds(u64::MAX, 2, 0, 0), None);
+    assert_eq!(decisions::size_bound_code(None, None, None, None), Some(13));
+}
+
+#[test]
+fn unlisted_evidence_id_fails() -> Result<(), String> {
+    let doc = mutate(&core()?, "/evidence/provided/0", json!("no-such-case"));
+    expect_err(&check_evidence(&doc), "an id with no case")
+}
+
+#[test]
+fn unknown_field_length_field_is_an_error() {
+    assert!(decisions::field_length_code("Nope.field", 1, None).is_err());
+}
+
+#[test]
+fn unknown_fault_is_an_error() {
+    assert!(decisions::winner(&decisions::EXPLICIT_JOB_ORDER, &["code:1".to_owned()]).is_err());
 }
