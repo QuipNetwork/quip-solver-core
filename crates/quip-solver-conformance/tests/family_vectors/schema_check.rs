@@ -162,6 +162,7 @@ fn type_matches(name: &str, value: &Value) -> bool {
         "object" => value.is_object(),
         "array" => value.is_array(),
         "string" => value.is_string(),
+        // `1.0` is rejected on purpose: fixtures write integers only.
         "integer" => value.is_i64() || value.is_u64(),
         "boolean" => value.is_boolean(),
         "null" => value.is_null(),
@@ -249,20 +250,24 @@ fn is_decimal(text: &str, signed: bool) -> bool {
 }
 
 fn check_number(map: &Map<String, Value>, value: &Value, at: &str) -> Check {
-    let Some(n) = value.as_i64() else {
-        return Ok(());
-    };
+    // Fail closed: a number that is neither i64 nor u64 (a float) cannot be
+    // compared exactly, so it must not skip the bounds.
+    let n = value
+        .as_i64()
+        .map(i128::from)
+        .or_else(|| value.as_u64().map(i128::from))
+        .ok_or_else(|| format!("{at}: number is not an exact integer"))?;
     if map
         .get("minimum")
         .and_then(Value::as_i64)
-        .is_some_and(|m| n < m)
+        .is_some_and(|m| n < i128::from(m))
     {
         return fail(at, "number is below the minimum");
     }
     if map
         .get("maximum")
         .and_then(Value::as_i64)
-        .is_some_and(|m| n > m)
+        .is_some_and(|m| n > i128::from(m))
     {
         return fail(at, "number is above the maximum");
     }

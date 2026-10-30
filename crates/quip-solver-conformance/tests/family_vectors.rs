@@ -79,7 +79,7 @@ fn schema_revision_two_is_rejected() -> Result<(), String> {
 #[test]
 fn missing_schema_revision_is_rejected() -> Result<(), String> {
     let doc = without(minimal_doc(), "schema_revision");
-    rejected_at(validate(&schema()?, &doc), "schema_revision")
+    rejected_at(validate(&schema()?, &doc), "/schema_revision")
 }
 
 #[test]
@@ -180,4 +180,60 @@ fn negative_decimal_is_rejected_for_u64s() -> Result<(), String> {
 #[test]
 fn unsupported_keyword_in_schema_is_rejected() {
     assert!(check_keywords(&json!({"type": "string", "format": "x"})).is_err());
+}
+
+#[test]
+fn unsupported_keyword_nested_in_schema_is_rejected() {
+    let in_properties = json!({"properties": {"a": {"format": "x"}}});
+    let in_items = json!({"items": {"uniqueItems": true}});
+    let in_defs = json!({"$defs": {"a": {"oneOf": []}}});
+    assert!(check_keywords(&in_properties).is_err());
+    assert!(check_keywords(&in_items).is_err());
+    assert!(check_keywords(&in_defs).is_err());
+}
+
+#[test]
+fn instance_defect_expected_code_must_be_fifteen() -> Result<(), String> {
+    let valid = json!({
+        "name": "d", "evidence": [], "instance": "i", "edges": [[1, 0]],
+        "rule": "FAM-32", "expected_code": 15
+    });
+    validate_def(&schema()?, "instance_defect_case", &valid)?;
+    for bad in [json!(14), json!(null)] {
+        let case = with(valid.clone(), "expected_code", bad);
+        rejected_at(
+            validate_def(&schema()?, "instance_defect_case", &case),
+            "/expected_code",
+        )?;
+    }
+    Ok(())
+}
+
+#[test]
+fn nested_enum_mismatch_is_rejected() -> Result<(), String> {
+    let case = json!({"name": "f", "evidence": [], "family_id_hex": "ab", "context": "other", "expected_code": null});
+    rejected_at(
+        validate_def(&schema()?, "family_id_case", &case),
+        "/context",
+    )
+}
+
+#[test]
+fn unresolved_ref_is_rejected() {
+    let dangling = json!({"$defs": {}, "properties": {"a": {"$ref": "#/$defs/missing"}}});
+    assert!(check_keywords(&dangling).is_err());
+    assert!(validate(&dangling, &json!({"a": 1})).is_err());
+}
+
+#[test]
+fn integer_above_i64_max_breaks_maximum() {
+    let bounded = json!({"type": "integer", "maximum": 5});
+    assert!(validate(&bounded, &json!(5)).is_ok());
+    assert!(validate(&bounded, &json!(u64::MAX)).is_err());
+}
+
+#[test]
+fn float_does_not_skip_bounds() {
+    assert!(validate(&json!({"maximum": 5}), &json!(1.5)).is_err());
+    assert!(validate(&json!({"type": "integer"}), &json!(1.0)).is_err());
 }
