@@ -13,6 +13,16 @@ from family_oracle.digests import (
     lease_salts,
     params_digest,
 )
+from family_oracle.params import (
+    ALL_TYPES,
+    UNIFORM_FIELD,
+    decode_params,
+    encode_params,
+    family_id_code,
+    label_valid,
+    revision_code,
+    solver_id_class,
+)
 
 VECTORS = (
     Path(__file__).resolve().parent.parent / "crates/quip-solver-conformance/vectors"
@@ -132,3 +142,115 @@ def test_descriptor_material_matches_spec_layout():
 def test_derive_key_differs_from_plain_hash():
     m = b"material"
     assert derive_key("quip family params v1", m) != blake3.blake3(m).digest()
+
+
+def test_spec_example_params_hex():
+    data = encode_params(UNIFORM_FIELD, {"n_layers": 2, "field_milli": -1500})
+    assert data.hex() == SPEC_PARAMS.hex()
+    assert decode_params(UNIFORM_FIELD, data) == (
+        None,
+        {"n_layers": 2, "field_milli": -1500},
+    )
+
+
+def test_spec_negative_cases():
+    cases = [
+        ("010200 04000000 24faffff0100 02000000 0200", 7),
+        ("010100 02000000 02000100 02000000 02000200 04000000 24faffff", 7),
+        (SPEC_PARAMS.hex() + "0300 01000000 00", 7),
+        ("010100 02000000 0200", 7),
+        ("010100 04000000 020000000200 04000000 24faffff", 7),
+        ("010100 02000000 02000200 04000000 5ff0ffff", 9),
+        ("020100 02000000 02000200 04000000 24faffff", 7),
+        (SPEC_PARAMS.hex() + "00" * 4078, 7),
+    ]
+    for text, code in cases:
+        data = bytes.fromhex(text.replace(" ", ""))
+        assert decode_params(UNIFORM_FIELD, data) == (code, None), text
+    assert len(bytes.fromhex(cases[-1][0])) == 4097
+    assert family_id_code(b"Quip/X", "lease") == 3
+    assert revision_code(0) == 4
+    assert revision_code(1) is None
+
+
+def _all_types_values(a_bytes: bytes, a_ascii: bytes) -> dict:
+    return {
+        "a_u8": 0,
+        "a_u16": 0,
+        "a_u32": 0,
+        "a_u64": 1,
+        "a_i32": 0,
+        "a_i64": 0,
+        "a_bool": True,
+        "a_bytes": a_bytes,
+        "a_ascii": a_ascii,
+    }
+
+
+def test_all_types_length_boundary():
+    data = encode_params(ALL_TYPES, _all_types_values(b"\x00" * 4013, b""))
+    assert len(data) == 4096
+    code, values = decode_params(ALL_TYPES, data)
+    assert code is None
+    assert values == _all_types_values(b"\x00" * 4013, b"")
+    data = encode_params(ALL_TYPES, _all_types_values(b"\x00" * 4014, b""))
+    assert decode_params(ALL_TYPES, data) == (7, None)
+
+
+def test_layout_fault_wins_over_bounds():
+    bad = encode_params(ALL_TYPES, _all_types_values(b"", b"a" * 64 + b"\x7f"))
+    assert decode_params(ALL_TYPES, bad) == (7, None)
+    long_ok = encode_params(ALL_TYPES, _all_types_values(b"", b"a" * 65))
+    assert decode_params(ALL_TYPES, long_ok) == (9, None)
+    # a_u64 = 0 is out of bounds (1..), but a bad bool byte is a layout fault.
+    values = _all_types_values(b"", b"")
+    values["a_u64"] = 0
+    assert decode_params(ALL_TYPES, encode_params(ALL_TYPES, values)) == (9, None)
+    values["a_bool"] = 2
+    assert decode_params(ALL_TYPES, encode_params(ALL_TYPES, values)) == (7, None)
+
+
+def test_family_id_grammar():
+    for ok in [b"a/b", b"quip/" + b"a" * 59, b"quip.sub/x"]:
+        assert family_id_code(ok, "lease") is None, ok
+    assert family_id_code(b"quip/" + b"a" * 60, "lease") == 3
+    bad = [
+        b"quip./x",
+        b"quip/x.y",
+        b"quip/1x",
+        b"quip/x/y",
+        b"-quip/x",
+        b"ab",
+        b"quip/\xc3\xa9",
+    ]
+    for item in bad:
+        assert family_id_code(item, "lease") == 3, item
+    assert family_id_code(b"example/uniform-field", "lease") == 3
+    assert family_id_code(b"example/uniform-field", "direct") is None
+
+
+def test_solver_id_grammar():
+    for ok in [b"quip-miner-cpu/otsuka", b"abc", b"a" * 64, b"abc/1.2-x"]:
+        assert solver_id_class(ok) == "valid", ok
+    bad = [
+        b"ab",
+        b"a" * 65,
+        b"Quip-miner",
+        b"1abc",
+        b"abc/",
+        b"abc//d",
+        b"abc/.x",
+        b"abc_d",
+        b"abc\xc3\xa9",
+    ]
+    for item in bad:
+        assert solver_id_class(item) == "invalid", item
+    assert solver_id_class(b"") == "empty"
+
+
+def test_label_limits():
+    assert label_valid(b"a")
+    assert label_valid(b"a" * 32)
+    assert not label_valid(b"")
+    assert not label_valid(b"a" * 33)
+    assert not label_valid(b"fiel\x80")
