@@ -5,7 +5,7 @@ This file documents changes to the Quip solver contract.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## 0.0.4-rc2
+## 0.0.4
 
 `--solve` keys for quantum annealers, faster lease mining on lane-paired
 backends, and a draft contract for problem families. Existing solvers need no

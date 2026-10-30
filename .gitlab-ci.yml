@@ -57,6 +57,11 @@ variables:
   # publishes no per-version digest for install.sh.
   UV_VERSION: "0.12.10"
 
+include:
+  - project: quip.network/ci-templates
+    ref: v1.0.0
+    file: templates/dependency-gate.yml
+
 # ---------------------------------------------------------------------------
 # Shared setup fragments.
 #
@@ -256,6 +261,8 @@ wasm:
   stage: smoke
   tags: [linux, amd64]
   needs:
+    - job: dependency-gate
+      optional: true
     - job: release:validate
       artifacts: true
   timeout: 30m
@@ -405,7 +412,7 @@ release:tag-guard:
   tags: [linux, amd64]
   rules:
     - if: $CI_COMMIT_TAG && $CI_COMMIT_TAG !~ /^v\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?$/
-  needs: []
+  needs: [{job: dependency-gate, optional: true}]
   dependencies: []
   script:
     - echo "Tag '$CI_COMMIT_TAG' does not match v<major>.<minor>.<patch>[-<prerelease>], so no release job runs."
@@ -431,6 +438,8 @@ release:validate:
   # running, or had already failed.
   #
   needs:
+    - job: dependency-gate
+      optional: true
     - job: rust
     - job: wasm
     - job: conformance
@@ -505,7 +514,7 @@ wheel:linux-aarch64:
   stage: validate
   image: rust:1.97.1
   tags: [arm64, docker]
-  needs: []
+  needs: [{job: dependency-gate, optional: true}]
   timeout: 30m
   variables:
     # Use the image's toolchain as shipped. Without this, rust-toolchain.toml
@@ -537,7 +546,7 @@ wheel:linux-aarch64:
 wheel:macos-arm64:
   stage: validate
   tags: [macos, arm64]
-  needs: []
+  needs: [{job: dependency-gate, optional: true}]
   timeout: 30m
   variables:
     # --no-modify-path below: CARGO_HOME sits inside the build directory, so
@@ -589,6 +598,8 @@ release:crates:
   # irreversible publish, so it must not run until the reversible ones have
   # succeeded.
   needs:
+    - job: dependency-gate
+      optional: true
     - job: release:validate
       artifacts: true
     - job: smoke:rust
@@ -635,6 +646,8 @@ release:pypi:
   <<: *on-release-tag
   # Waits for npm, the one registry whose publish can still be undone.
   needs:
+    - job: dependency-gate
+      optional: true
     - job: release:validate
       artifacts: true
     - job: wheel:linux-aarch64
@@ -706,6 +719,8 @@ release:npm:
   tags: [linux, amd64]
   <<: *on-release-tag
   needs:
+    - job: dependency-gate
+      optional: true
     - job: release:validate
       artifacts: true
     - job: smoke:rust
@@ -823,6 +838,8 @@ release:clib:
   tags: [linux, amd64]
   <<: *on-release-tag
   needs:
+    - job: dependency-gate
+      optional: true
     - job: release:validate
       artifacts: true
     - job: smoke:rust
@@ -850,6 +867,8 @@ release:notes:
   tags: [linux, amd64]
   <<: *on-release-tag
   needs:
+    - job: dependency-gate
+      optional: true
     - job: release:crates
     - job: release:pypi
     - job: release:npm
