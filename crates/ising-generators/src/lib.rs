@@ -18,6 +18,8 @@
 )]
 extern crate alloc;
 
+mod digest;
+
 pub mod descriptor;
 pub mod instance;
 pub mod legacy;

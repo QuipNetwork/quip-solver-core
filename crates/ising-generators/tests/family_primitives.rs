@@ -3,11 +3,11 @@
 use core::num::NonZeroU32;
 
 use ising_generators::descriptor::{
-    check_family_id, params_digest, FieldSpec, IdContext, Params, Value as ParamValue, ValueType,
-    MAX_PARAMS_LEN,
+    check_family_id, params_digest, topology_order_digest, Descriptor, FieldSpec, IdContext,
+    Params, Value as ParamValue, ValueType, MAX_PARAMS_LEN,
 };
 use ising_generators::legacy::derive_nonce;
-use ising_generators::rng::{uniform, ChaCha8Rng};
+use ising_generators::rng::{stream_seed, uniform, ChaCha8Rng};
 use ising_generators::Code;
 use serde_json::Value;
 
@@ -509,6 +509,148 @@ fn params_longer_than_4096_bytes_fail_before_parsing() -> Result<(), String> {
     bytes.resize(MAX_PARAMS_LEN + 1, 0);
     if code_of(&Params::parse(UNIFORM_FIELD, &bytes)) != Some(7) {
         return Err("4097 bytes must give 7".into());
+    }
+    Ok(())
+}
+
+fn str_field<'a>(case: &'a Value, key: &str) -> Result<&'a str, String> {
+    case.get(key)
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("missing string {key}"))
+}
+
+fn u32_of(v: &Value) -> Result<u32, String> {
+    v.as_u64()
+        .and_then(|n| u32::try_from(n).ok())
+        .ok_or_else(|| format!("not a u32: {v}"))
+}
+
+#[test]
+fn descriptor_vectors() -> Result<(), String> {
+    let doc = core()?;
+    for case in section(&doc, "descriptors")? {
+        let name = str_field(case, "name")?;
+        let id = str_field(case, "family_id")?;
+        let revision = u32_of(case.get("revision").ok_or("no revision")?)?;
+        let params = hex(str_field(case, "params_hex")?)?;
+        let d = Descriptor::new(id.as_bytes(), revision, &params, IdContext::Direct)
+            .map_err(|c| format!("{name}: new gave {c}"))?;
+        if d.family_id() != id || d.revision() != revision || d.params() != params.as_slice() {
+            return Err(format!("{name}: accessors differ"));
+        }
+        if d.params_digest() != hex32(str_field(case, "params_digest")?)? {
+            return Err(format!("{name}: params digest differs"));
+        }
+        if d.digest() != hex32(str_field(case, "descriptor_digest")?)? {
+            return Err(format!("{name}: descriptor digest differs"));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn descriptor_new_order() -> Result<(), String> {
+    let uppercase = Descriptor::new(b"Quip/X", 0, &[], IdContext::Direct);
+    if code_of(&uppercase) != Some(3) {
+        return Err(format!("uppercase id gave {:?}", code_of(&uppercase)));
+    }
+    let zero = Descriptor::new(b"quip/x", 0, &[], IdContext::Direct);
+    if code_of(&zero) != Some(4) {
+        return Err(format!("revision zero gave {:?}", code_of(&zero)));
+    }
+    Ok(())
+}
+
+fn edges_of(case: &Value) -> Result<Vec<(u32, u32)>, String> {
+    section(case, "edges")?
+        .iter()
+        .map(|e| {
+            let pair = e.as_array().ok_or("edge not an array")?;
+            match pair.as_slice() {
+                [u, v] => Ok((u32_of(u)?, u32_of(v)?)),
+                _ => Err("edge not a pair".to_string()),
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn topology_vectors() -> Result<(), String> {
+    let doc = core()?;
+    let mut sparse = Vec::new();
+    for case in section(&doc, "topologies")? {
+        let name = str_field(case, "name")?;
+        let nodes = section(case, "nodes")?
+            .iter()
+            .map(u32_of)
+            .collect::<Result<Vec<_>, _>>()?;
+        let edges = edges_of(case)?;
+        let got = topology_order_digest(&nodes, &edges).ok_or_else(|| format!("{name}: None"))?;
+        if got != hex32(str_field(case, "order_digest")?)? {
+            return Err(format!("{name}: digest differs"));
+        }
+        if name.starts_with("sparse") {
+            sparse.push(got);
+        }
+    }
+    if sparse.len() != 4 {
+        return Err(format!("expected 4 sparse cases, found {}", sparse.len()));
+    }
+    for (i, a) in sparse.iter().enumerate() {
+        if sparse.iter().skip(i + 1).any(|b| a == b) {
+            return Err("two sparse digests are equal".into());
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn label_vectors() -> Result<(), String> {
+    let doc = core()?;
+    for case in section(&doc, "labels")? {
+        let name = str_field(case, "name")?;
+        let label = hex(str_field(case, "label_hex")?)?;
+        let valid = case
+            .get("valid")
+            .and_then(Value::as_bool)
+            .ok_or("no valid flag")?;
+        if stream_seed(&[0; 32], &[0; 32], &[0; 32], &label).is_ok() != valid {
+            return Err(format!("{name}: validity differs from {valid}"));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn stream_vectors() -> Result<(), String> {
+    let doc = core()?;
+    for case in section(&doc, "streams")? {
+        let name = str_field(case, "name")?;
+        let seed = stream_seed(
+            &hex32(str_field(case, "nonce")?)?,
+            &hex32(str_field(case, "descriptor_digest")?)?,
+            &hex32(str_field(case, "topology_order_digest")?)?,
+            &hex(str_field(case, "label_hex")?)?,
+        )
+        .map_err(|e| format!("{name}: {e}"))?;
+        if seed != hex32(str_field(case, "seed")?)? {
+            return Err(format!("{name}: seed differs"));
+        }
+        for checkpoint in section(case, "checkpoints")? {
+            let start = checkpoint
+                .get("start")
+                .and_then(Value::as_u64)
+                .ok_or("no start")?;
+            let mut rng = ChaCha8Rng::from_seed(seed);
+            for _ in 0..start {
+                let _skipped = rng.next_u32();
+            }
+            for (i, want) in section(checkpoint, "words")?.iter().enumerate() {
+                if u64::from(rng.next_u32()) != want.as_u64().ok_or("word not a number")? {
+                    return Err(format!("{name}: word {i} after {start} differs"));
+                }
+            }
+        }
     }
     Ok(())
 }

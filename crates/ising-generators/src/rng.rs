@@ -1,6 +1,9 @@
 //! `ChaCha8` keystream and substream seeding.
 
+use core::fmt;
 use core::num::NonZeroU32;
+
+use crate::digest::BufferedHasher;
 
 /// The `ChaCha` constants, the ASCII bytes of `expand 32-byte k` as LE words.
 pub const SIGMA: [u32; 4] = [0x6170_7865, 0x3320_646e, 0x7962_2d32, 0x6b20_6574];
@@ -130,4 +133,47 @@ pub fn uniform(rng: &mut ChaCha8Rng, n: NonZeroU32) -> u32 {
             return (x % n) as u32;
         }
     }
+}
+
+/// The longest substream label in bytes.
+pub const MAX_LABEL_LEN: usize = 32;
+
+/// A substream label outside 1 to [`MAX_LABEL_LEN`] bytes, or with a byte
+/// above `0x7F`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InvalidLabel;
+
+impl fmt::Display for InvalidLabel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("substream label must be 1 to 32 ASCII bytes")
+    }
+}
+
+impl core::error::Error for InvalidLabel {}
+
+/// The seed of one substream (FAM-22): BLAKE3 in key-derivation mode with the
+/// context `quip family stream v1` over the nonce, the descriptor digest, the
+/// topology order digest, `u8 len(label)`, and the label.
+///
+/// # Errors
+///
+/// Returns [`InvalidLabel`] when the label is shorter than 1 byte, longer than
+/// [`MAX_LABEL_LEN`] bytes, or has a byte above `0x7F`.
+pub fn stream_seed(
+    nonce: &[u8; 32],
+    descriptor_digest: &[u8; 32],
+    topology_order_digest: &[u8; 32],
+    label: &[u8],
+) -> Result<[u8; 32], InvalidLabel> {
+    if label.is_empty() || label.len() > MAX_LABEL_LEN || !label.is_ascii() {
+        return Err(InvalidLabel);
+    }
+    let label_len = u8::try_from(label.len()).map_err(|_| InvalidLabel)?;
+    let mut hasher = BufferedHasher::new("quip family stream v1");
+    hasher.put(nonce);
+    hasher.put(descriptor_digest);
+    hasher.put(topology_order_digest);
+    hasher.put(&[label_len]);
+    hasher.put(label);
+    Ok(hasher.finish())
 }

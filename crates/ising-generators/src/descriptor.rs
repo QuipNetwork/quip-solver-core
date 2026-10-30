@@ -3,6 +3,7 @@
 //! This part holds the family id grammar (FAM-01, 02, 05) and the canonical
 //! parameter codec (FAM-10 to FAM-16). It does not allocate.
 
+use crate::digest::BufferedHasher;
 use crate::Code;
 
 /// The first byte of every canonical parameter encoding.
@@ -312,7 +313,109 @@ impl<'a> Params<'a> {
 /// context `quip family params v1` over the canonical parameter bytes.
 #[must_use]
 pub fn params_digest(params: &[u8]) -> [u8; 32] {
-    let mut hasher = blake3::Hasher::new_derive_key("quip family params v1");
-    let _updated = hasher.update(params);
-    *hasher.finalize().as_bytes()
+    let mut hasher = BufferedHasher::new("quip family params v1");
+    hasher.put(params);
+    hasher.finish()
+}
+
+/// A family descriptor: a family id, a revision, and canonical parameter
+/// bytes. It borrows its inputs, hashes nothing on creation, and does not
+/// check the parameter bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Descriptor<'a> {
+    family_id: &'a str,
+    revision: u32,
+    params: &'a [u8],
+}
+
+impl<'a> Descriptor<'a> {
+    /// Check the family id, then the revision, and keep the inputs.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Code::FamilyIdInvalid`] (3) when the id fails
+    /// [`check_family_id`] in `context`, then [`Code::RevisionZero`] (4) when
+    /// the revision is zero.
+    pub fn new(
+        family_id: &'a [u8],
+        revision: u32,
+        params: &'a [u8],
+        context: IdContext,
+    ) -> Result<Self, Code> {
+        check_family_id(family_id, context)?;
+        if revision == 0 {
+            return Err(Code::RevisionZero);
+        }
+        // `check_family_id` allows only ASCII bytes, so this cannot fail.
+        let family_id = core::str::from_utf8(family_id).map_err(|_| Code::FamilyIdInvalid)?;
+        Ok(Self {
+            family_id,
+            revision,
+            params,
+        })
+    }
+
+    /// The family id.
+    #[must_use]
+    pub const fn family_id(&self) -> &'a str {
+        self.family_id
+    }
+
+    /// The revision, never zero.
+    #[must_use]
+    pub const fn revision(&self) -> u32 {
+        self.revision
+    }
+
+    /// The canonical parameter bytes.
+    #[must_use]
+    pub const fn params(&self) -> &'a [u8] {
+        self.params
+    }
+
+    /// The digest of the parameter bytes, see [`params_digest`].
+    #[must_use]
+    pub fn params_digest(&self) -> [u8; 32] {
+        params_digest(self.params)
+    }
+
+    /// The descriptor digest (FAM-18): BLAKE3 in key-derivation mode with the
+    /// context `quip family descriptor v1` over `u8 len(family_id)`, the id,
+    /// `u32 LE revision`, and the parameter digest.
+    #[must_use]
+    pub fn digest(&self) -> [u8; 32] {
+        let id = self.family_id.as_bytes();
+        // The id is at most 64 bytes, so the length always fits in a byte.
+        let id_len = u8::try_from(id.len()).unwrap_or(u8::MAX);
+        let mut hasher = BufferedHasher::new("quip family descriptor v1");
+        hasher.put(&[id_len]);
+        hasher.put(id);
+        hasher.put(&self.revision.to_le_bytes());
+        hasher.put(&self.params_digest());
+        hasher.finish()
+    }
+}
+
+/// The topology order digest (FAM-19): BLAKE3 in key-derivation mode with the
+/// context `quip family topology order v1` over `u32 LE n_nodes`, each node id
+/// as `u32 LE`, `u32 LE n_edges`, and each edge as two `u32 LE` native ids.
+/// Nodes and edges are hashed in the order given, and an edge is not
+/// normalized.
+///
+/// Returns `None` when a count exceeds `u32::MAX`.
+#[must_use]
+pub fn topology_order_digest(nodes: &[u32], edges: &[(u32, u32)]) -> Option<[u8; 32]> {
+    let n_nodes = u32::try_from(nodes.len()).ok()?;
+    let n_edges = u32::try_from(edges.len()).ok()?;
+    let mut hasher = BufferedHasher::new("quip family topology order v1");
+    hasher.put(&n_nodes.to_le_bytes());
+    for node in nodes {
+        hasher.put(&node.to_le_bytes());
+    }
+    hasher.put(&n_edges.to_le_bytes());
+    for (u, v) in edges {
+        hasher.put(&u.to_le_bytes());
+        hasher.put(&v.to_le_bytes());
+    }
+    Some(hasher.finish())
 }
