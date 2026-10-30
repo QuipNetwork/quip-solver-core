@@ -10,15 +10,20 @@ mod schema_check;
 use schema_check::{check_keywords, validate, validate_def};
 use serde_json::{json, Value};
 
-fn core() -> Value {
-    serde_json::from_str(quip_solver_conformance::FAMILY_CORE).unwrap_or(Value::Null)
+fn core() -> Result<Value, String> {
+    serde_json::from_str(quip_solver_conformance::FAMILY_CORE).map_err(|e| e.to_string())
 }
 
 fn section<'a>(doc: &'a Value, name: &str) -> Result<&'a [Value], String> {
-    doc.get(name)
+    let cases = doc
+        .get(name)
         .and_then(Value::as_array)
         .map(Vec::as_slice)
-        .ok_or_else(|| format!("section {name} is missing or not an array"))
+        .ok_or_else(|| format!("section {name} is missing or not an array"))?;
+    if cases.is_empty() {
+        return Err(format!("section {name} is empty"));
+    }
+    Ok(cases)
 }
 
 fn str_field<'a>(case: &'a Value, key: &str) -> Result<&'a str, String> {
@@ -157,7 +162,7 @@ fn check_params(doc: &Value) -> Result<(), String> {
         let digest = case.get("params_digest").ok_or("no params_digest key")?;
         match (codec::decode_params(&schema, &bytes), want_code) {
             (Ok(decoded), None) => {
-                compare(case, "decoded values", &decoded, values)?;
+                compare(case, "values decoded from params_hex", &decoded, values)?;
                 compare(
                     case,
                     "re-encoded bytes",
@@ -174,13 +179,13 @@ fn check_params(doc: &Value) -> Result<(), String> {
             }
             (Ok(_), Some(want)) => {
                 return Err(format!(
-                    "{}: decoded, fixture says code {want}",
+                    "{}: params_hex decoded, fixture says code {want}",
                     case_name(case)
                 ))
             }
             (Err(code), None) => {
                 return Err(format!(
-                    "{}: code {code}, fixture says valid",
+                    "{}: params_hex gives code {code}, fixture says valid",
                     case_name(case)
                 ))
             }
@@ -468,8 +473,8 @@ fn mutate(doc: &Value, pointer: &str, value: Value) -> Value {
 
 #[test]
 fn core_fixture_matches_schema() -> Result<(), String> {
-    validate(&schema()?, &core())?;
-    match core().get("provenance").and_then(Value::as_str) {
+    validate(&schema()?, &core()?)?;
+    match core()?.get("provenance").and_then(Value::as_str) {
         Some("specified") => Ok(()),
         other => Err(format!("provenance is {other:?}, expected specified")),
     }
@@ -477,12 +482,12 @@ fn core_fixture_matches_schema() -> Result<(), String> {
 
 #[test]
 fn core_case_names_are_unique() -> Result<(), String> {
-    check_names_unique(&core())
+    check_names_unique(&core()?)
 }
 
 #[test]
 fn duplicate_case_name_is_detected() -> Result<(), String> {
-    let doc = core();
+    let doc = core()?;
     let first = doc
         .pointer("/revisions/0/name")
         .cloned()
@@ -496,27 +501,27 @@ fn duplicate_case_name_is_detected() -> Result<(), String> {
 
 #[test]
 fn family_id_cases_recompute() -> Result<(), String> {
-    check_family_ids(&core())
+    check_family_ids(&core()?)
 }
 
 #[test]
 fn revision_cases_recompute() -> Result<(), String> {
-    check_revisions(&core())
+    check_revisions(&core()?)
 }
 
 #[test]
 fn solver_id_cases_recompute() -> Result<(), String> {
-    check_solver_ids(&core())
+    check_solver_ids(&core()?)
 }
 
 #[test]
 fn params_cases_recompute() -> Result<(), String> {
-    check_params(&core())
+    check_params(&core()?)
 }
 
 #[test]
 fn descriptor_digests_recompute() -> Result<(), String> {
-    let doc = core();
+    let doc = core()?;
     check_descriptors(&doc)?;
     let spec = section(&doc, "descriptors")?
         .iter()
@@ -535,7 +540,7 @@ fn descriptor_digests_recompute() -> Result<(), String> {
 
 #[test]
 fn derive_key_is_not_a_plain_hash() -> Result<(), String> {
-    let doc = core();
+    let doc = core()?;
     let case = section(&doc, "descriptors")?
         .first()
         .ok_or("no descriptor case")?;
@@ -566,13 +571,13 @@ fn label_length_and_byte_limits() {
 
 #[test]
 fn core_schema_revision_two_fails() -> Result<(), String> {
-    let doc = mutate(&core(), "/schema_revision", json!(2));
+    let doc = mutate(&core()?, "/schema_revision", json!(2));
     rejected_at(validate(&schema()?, &doc), "/schema_revision")
 }
 
 #[test]
 fn wrong_descriptor_digest_fails() -> Result<(), String> {
-    let doc = core();
+    let doc = core()?;
     let good = doc
         .pointer("/descriptors/0/descriptor_digest")
         .and_then(Value::as_str)
@@ -580,14 +585,15 @@ fn wrong_descriptor_digest_fails() -> Result<(), String> {
     let flipped = flip_last_hex_digit(good);
     let broken = mutate(&doc, "/descriptors/0/descriptor_digest", json!(flipped));
     match check_descriptors(&broken) {
-        Err(_) => Ok(()),
+        Err(e) if e.contains("descriptor_digest") => Ok(()),
+        Err(e) => Err(format!("error does not name descriptor_digest: {e}")),
         Ok(()) => Err("a wrong descriptor digest was accepted".to_owned()),
     }
 }
 
 #[test]
 fn changed_params_byte_fails() -> Result<(), String> {
-    let doc = core();
+    let doc = core()?;
     let index = section(&doc, "params")?
         .iter()
         .position(|c| c.get("name").and_then(Value::as_str) == Some("spec-valid"))
@@ -599,14 +605,15 @@ fn changed_params_byte_fails() -> Result<(), String> {
         .ok_or("no params_hex")?;
     let broken = mutate(&doc, &pointer, json!(flip_last_hex_digit(good)));
     match check_params(&broken) {
-        Err(_) => Ok(()),
+        Err(e) if e.contains("params_hex") => Ok(()),
+        Err(e) => Err(format!("error does not name params_hex: {e}")),
         Ok(()) => Err("a changed params byte was accepted".to_owned()),
     }
 }
 
 #[test]
 fn unknown_params_schema_is_an_error() -> Result<(), String> {
-    let doc = mutate(&core(), "/params/0/revision", json!(99));
+    let doc = mutate(&core()?, "/params/0/revision", json!(99));
     match check_params(&doc) {
         Err(_) => Ok(()),
         Ok(()) => Err("a params case without a schema was accepted".to_owned()),
@@ -615,7 +622,7 @@ fn unknown_params_schema_is_an_error() -> Result<(), String> {
 
 #[test]
 fn params_values_must_match_decoded_values() -> Result<(), String> {
-    let doc = mutate(&core(), "/params/0/values/n_layers", json!("3"));
+    let doc = mutate(&core()?, "/params/0/values/n_layers", json!("3"));
     match check_params(&doc) {
         Err(_) => Ok(()),
         Ok(()) => Err("wrong values were accepted".to_owned()),
@@ -624,7 +631,7 @@ fn params_values_must_match_decoded_values() -> Result<(), String> {
 
 #[test]
 fn wrong_family_id_expected_code_fails() -> Result<(), String> {
-    let doc = mutate(&core(), "/family_ids/0/expected_code", json!(3));
+    let doc = mutate(&core()?, "/family_ids/0/expected_code", json!(3));
     match check_family_ids(&doc) {
         Err(_) => Ok(()),
         Ok(()) => Err("a wrong expected code was accepted".to_owned()),
@@ -633,7 +640,7 @@ fn wrong_family_id_expected_code_fails() -> Result<(), String> {
 
 #[test]
 fn layout_fault_wins_over_bounds_in_codec() -> Result<(), String> {
-    let doc = core();
+    let doc = core()?;
     let schemas = section(&doc, "schemas")?;
     let schema_json = schemas.first().ok_or("no schema")?;
     let parsed = codec::ParamSchema::from_json(schema_json)?;
@@ -650,4 +657,14 @@ fn flip_last_hex_digit(hex: &str) -> String {
     let last = text.pop();
     text.push(if last == Some('0') { '1' } else { '0' });
     text
+}
+
+#[test]
+fn empty_section_is_rejected() -> Result<(), String> {
+    let doc = mutate(&core()?, "/params", json!([]));
+    match check_params(&doc) {
+        Err(e) if e.contains("empty") => Ok(()),
+        Err(e) => Err(format!("unexpected error: {e}")),
+        Ok(()) => Err("an empty params section was accepted".to_owned()),
+    }
 }
