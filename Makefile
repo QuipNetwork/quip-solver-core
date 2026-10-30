@@ -9,6 +9,7 @@ help:
 	@echo "  check-npm-dist       build the wasm and TypeScript, then npm pack"
 	@echo "  check-clib           build the C library and pack the release tarball"
 	@echo "check-examples       conformance gate for all four sample solvers"
+	@echo "family-vectors       regenerate the family golden vectors (Python oracle)"
 	@echo "test                 fmt, clippy and the Rust test suite"
 	@echo "lint                 shell and Python linters"
 
@@ -110,6 +111,14 @@ TAG ?= dev
 .PHONY: check-examples
 check-examples:
 	bash scripts/check-examples.sh
+
+# Regenerates the family golden vectors from the Python oracle. It needs the
+# `blake3` package (the `dev` extra) and is never run by `cargo test`.
+PYTHON ?= python3
+
+.PHONY: family-vectors
+family-vectors:
+	cd conformance && $(PYTHON) -m family_oracle write
 
 # -- Test -------------------------------------------------------------------
 

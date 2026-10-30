@@ -111,6 +111,7 @@ The namespace must match `[a-z][a-z0-9-]*(\.[a-z][a-z0-9-]*)*`.
 The name must match `[a-z][a-z0-9-]*`.
 
 **FAM-02.** A `family_id` must be 3 to 64 bytes long.
+A `family_id` outside that length is code 3, `FamilyIdInvalid`.
 
 **FAM-03.** Parties must compare `family_id` values byte for byte.
 They must not fold case or normalize.
@@ -166,6 +167,8 @@ A non-integer quantity uses an integer with a stated scale, written in the schem
 
 **FAM-15.** Each family revision schema must list the tag, name, type, scale, and inclusive bounds of every field.
 Bounds apply to the stored integer.
+A `bool`, `bytes`, or `ascii` field has no scale.
+The bounds of a `bool` field are 0 to 1.
 For `bytes` and `ascii`, the bounds apply to the value length.
 
 **FAM-16.** A layout fault (format byte, order, length, type, unknown tag, or missing tag) fails with code 7, `ParamsMalformed`.
@@ -191,6 +194,7 @@ This table gives the context string and material of each digest.
 **FAM-19.** `Topology.hash` stays an opaque cache key and is not an order commitment.
 `topology_order_digest` is the order commitment.
 Two topologies with the same node and edge sets in a different order have different digests.
+The material uses each edge as registered, so the edge `(v, u)` and the edge `(u, v)` give different digests.
 
 ## Random streams
 
@@ -292,6 +296,9 @@ The default is base topology registration order, filtered to the nodes that the 
 Edges must appear in ascending `(u, v)` order.
 An instance must not contain a duplicate edge or a self-loop.
 
+On an explicit job, an edge list that breaks FAM-32, or an edge position at or past `n_nodes` (FAM-30), gives code 15, `InstanceDigestMismatch` (FAM-65).
+In a generator, such an instance is a generator defect.
+
 **FAM-33.** The energy of spins `s` is `offset + sum(h_i s_i) + sum(J_uv s_u s_v)`, an exact `i64` in milli.
 
 **FAM-34.** A metadata section is `u16 kind`, `u32 length`, then the payload.
@@ -304,6 +311,8 @@ These metadata faults give code 16, `MetadataInvalid`:
 - a kind that the family contract does not list
 - a kind that is not greater than the preceding kind
 - a section length that runs past the end of the metadata region
+- a metadata region shorter than the 2-byte `n_sections`
+- bytes after the last declared section
 
 | Kind | Name |
 |---|---|
@@ -373,6 +382,7 @@ Each function takes the parameter values `p` and only these statistics of the ba
 | `D(p, T)` | The most edges incident on one instance node (max connectivity). |
 
 The functions use integer arithmetic only.
+The evaluating party computes each formula in checked `u64` arithmetic over `u64` values of the topology statistics.
 The evaluating party checks each operation, and an overflow gives code 13, `BoundsExceeded`, at admission.
 An evaluation draws no random word and runs in constant time or in time linear in the size of `T`.
 Each bound must hold for every nonce.
@@ -406,7 +416,7 @@ The right column gives the wire mapping.
 |---|---|---|---|
 | 1 | `DescriptorMissing` | family generator algorithm without `family` | `MALFORMED` |
 | 2 | `DescriptorUnexpected` | legacy algorithm with `family` set | `MALFORMED` |
-| 3 | `FamilyIdInvalid` | `family_id` breaks the grammar or uses `example` | `MALFORMED` |
+| 3 | `FamilyIdInvalid` | `family_id` breaks the grammar or uses `example`, or its length is outside 3 to 64 bytes | `MALFORMED` |
 | 4 | `RevisionZero` | `revision == 0` | `MALFORMED` |
 | 5 | `FamilyUnsupported` | `family_id` not supported by this party | `FAMILY_UNSUPPORTED` |
 | 6 | `RevisionUnsupported` | known family, revision not supported | `FAMILY_UNSUPPORTED` |
@@ -416,9 +426,9 @@ The right column gives the wire mapping.
 | 10 | `ParamsRestricted` | params valid but outside this solver's advertised restriction | `FAMILY_UNSUPPORTED` |
 | 11 | `TopologyOrderMismatch` | sent `topology_order_digest` differs from the cached topology | `TOPOLOGY_MISMATCH` |
 | 12 | `TopologyIncompatible` | family cannot build on this topology | `FAMILY_UNSUPPORTED` |
-| 13 | `BoundsExceeded` | at admission, a size bound exceeds a FAM-37 bound, a Bounds item bound, or an advertised limit, or its evaluation overflows. During generation, an overflow, or an instance beyond a FAM-37 bound or a Bounds item bound. | `TOO_LARGE` at admission. During generation, no reject, and the miner skips the salt. |
+| 13 | `BoundsExceeded` | at admission, a size bound exceeds a FAM-37 bound, a Bounds item bound, or an advertised limit, or its evaluation overflows. During generation, an overflow, or an instance beyond a FAM-37 bound or a Bounds item bound. On an explicit job, an instance beyond a FAM-37 bound (FAM-65). | `TOO_LARGE` at admission and on an explicit job. During generation, no reject, and the miner skips the salt. |
 | 14 | `NoInstance` | deterministic retry exhaustion for one salt | no reject, and the miner skips the salt |
-| 15 | `InstanceDigestMismatch` | explicit job: sent `instance_digest` differs | `MALFORMED` |
+| 15 | `InstanceDigestMismatch` | explicit job: sent `instance_digest` differs, or the edge list breaks FAM-32 or an edge position is at or past `n_nodes` | `MALFORMED` |
 | 16 | `MetadataInvalid` | metadata fails validation against the instance | `MALFORMED` |
 
 **FAM-43.** This table gives the phase of each code.
@@ -428,7 +438,7 @@ Within each phase, the lowest failing code wins.
 |---|---|---|
 | Admission | 1 to 12, and 13 from the size bounds (FAM-38, FAM-47) | Before any draw. |
 | Generation | 13 from an overflow or from a FAM-37 bound or a Bounds item bound, and 14 | During generation. Each skips one salt, and the lease continues. |
-| Explicit-job validation | 7 to 10, 13 for `offset_milli`, 15, and 16 | With no draw, in the FAM-65 order. |
+| Explicit-job validation | 7 to 10, 13 for an instance beyond a FAM-37 bound, 15, and 16 | With no draw, in the FAM-65 order. |
 
 ## Wire extension
 
@@ -604,6 +614,7 @@ The first failure wins, and no step draws a random word.
 The advertised limits of a family lease are exactly `max_nodes`, `max_edges`, and `max_degree`, `Capabilities` fields 4, 5, and 14.
 They have the meanings in [Model limits](../SPEC.md#model-limits).
 An unset field makes no claim, and a `max_degree` of `0` sets no bound.
+A `max_nodes` of `0` and a `max_edges` of `0` make no claim, the same as `max_degree = 0`, because a proto3 unset field reads 0.
 `max_local_field_milli` and `exact_resolution_milli` do not apply to leases.
 
 The admission part of code 13 applies if any of these conditions is true:
@@ -655,6 +666,7 @@ For a family lease, `Solution.spins` is bit-packed in instance node output order
 Node `i` is bit `i % 8` of byte `i / 8`, and bit 1 is spin +1.
 An entry is exactly `ceil(n_nodes / 8)` bytes, where `n_nodes` is the node count of the instance, not of the topology.
 Padding bits are 0.
+A witness with a set padding bit is invalid, the same as a witness of the wrong length.
 The diversity check for `min_diversity_milli` uses these instance spins.
 
 ## Old consumers
@@ -733,6 +745,8 @@ The coordinator treats the family as unsupported by that solver for that list.
 | The entry for the revision has a non-empty `params_digests` without the lease `params_digest`. | 10, `ParamsRestricted` |
 
 For an explicit job, code 10 uses the `accepted_families` entry instead (FAM-65).
+The `generated_families` list of a solver must follow FAM-61.
+A solver must not advertise an invalid list.
 
 **FAM-63.** `--capabilities` prints the new fields with these JSON names.
 
@@ -796,8 +810,9 @@ The first failure wins.
 This is the FAM-43 rule that the lowest failing code wins, applied across all four steps.
 
 1. Descriptor checks on `FamilyBinding.family`: codes 7, 8, 9, and 10, in ascending order. Code 10 uses the `params_digests` of the matching `accepted_families` entry.
-2. Code 13, `BoundsExceeded`, for an `offset_milli` outside the FAM-37 bound.
-3. Code 15, `InstanceDigestMismatch`: first the field lengths in FAM-46, then the digest comparison in FAM-68.
+2. Code 13, `BoundsExceeded`, for an instance beyond a FAM-37 bound. This step checks every FAM-37 bound on the rebuilt instance.
+   That covers the node count, the edge count, each `|h|` and `|J|`, `|offset|`, and the metadata size.
+3. Code 15, `InstanceDigestMismatch`: first the field lengths in FAM-46. Then the edge faults of FAM-32 and FAM-30. Last, the digest comparison in FAM-68.
 4. Code 16, `MetadataInvalid` (FAM-67).
 
 Codes 5 and 6 never occur for an explicit job, for the same reason.

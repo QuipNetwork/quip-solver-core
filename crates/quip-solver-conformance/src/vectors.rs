@@ -149,3 +149,25 @@ fn parse_adapt() -> AdaptFile {
     )]
     serde_json::from_str(GOLDEN_ADAPT).expect("golden_adapt.json matches the case schema")
 }
+
+/// JSON Schema for the problem-family fixtures under `vectors/families/`
+/// (schema revision 1). It uses a small keyword subset that the integration
+/// tests check themselves.
+pub const FAMILY_SCHEMA: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/vectors/families/schema.json"
+));
+
+/// Specified family golden vectors: identity, parameters, descriptors, and the
+/// rest of the SC-2 set (schema revision 1, provenance `specified`).
+pub const FAMILY_CORE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/vectors/families/core.json"
+));
+
+/// References to the legacy production draw vectors, pinned by case hash
+/// (schema revision 1, provenance `legacy-production`).
+pub const FAMILY_LEGACY: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/vectors/families/legacy.json"
+));

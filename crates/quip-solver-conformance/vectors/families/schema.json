@@ -1,0 +1,1579 @@
+{
+  "$comment": "Name uniqueness within a section, parallel array lengths, and the nonce length of 0 or 64 hex characters are checked by the Rust tests, not by this schema.",
+  "$defs": {
+    "code_row": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "phases": {
+          "items": {
+            "enum": [
+              "admission",
+              "generation",
+              "explicit-job"
+            ]
+          },
+          "type": "array"
+        },
+        "wire_admission": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "wire_explicit_job": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "wire_generation": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "code",
+        "name",
+        "phases",
+        "wire_admission",
+        "wire_generation",
+        "wire_explicit_job"
+      ],
+      "type": "object"
+    },
+    "descriptor_case": {
+      "additionalProperties": false,
+      "properties": {
+        "descriptor_digest": {
+          "$ref": "#/$defs/hex32"
+        },
+        "evidence": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "family_id": {
+          "type": "string"
+        },
+        "material_hex": {
+          "$ref": "#/$defs/hex"
+        },
+        "name": {
+          "type": "string"
+        },
+        "params_digest": {
+          "$ref": "#/$defs/hex32"
+        },
+        "params_hex": {
+          "$ref": "#/$defs/hex"
+        },
+        "revision": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name",
+        "evidence",
+        "family_id",
+        "revision",
+        "params_hex",
+        "params_digest",
+        "material_hex",
+        "descriptor_digest"
+      ],
+      "type": "object"
+    },
+    "entry": {
+      "additionalProperties": false,
+      "properties": {
+        "family_id": {
+          "type": "string"
+        },
+        "params_digests": {
+          "items": {
+            "$ref": "#/$defs/hex"
+          },
+          "type": "array"
+        },
+        "revisions": {
+          "items": {
+            "type": "integer"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "family_id",
+        "revisions",
+        "params_digests"
+      ],
+      "type": "object"
+    },
+    "evidence": {
+      "additionalProperties": false,
+      "properties": {
+        "deferred": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "deferred_to": {
+                "type": "string"
+              },
+              "id": {
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "deferred_to",
+              "reason"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "partial": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "deferred_to": {
+                "type": "string"
+              },
+              "id": {
+                "type": "string"
+              },
+              "provided": {
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "provided",
+              "deferred_to",
+              "reason"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "provided": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "provided",
+        "partial",
+        "deferred"
+      ],
+      "type": "object"
+    },
+    "explicit_job_case": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "expected_code": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "expected_step": {
+          "type": "string"
+        },
+        "expected_wire": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "faults": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "evidence",
+        "faults",
+        "expected_step",
+        "expected_code",
+        "expected_wire"
+      ],
+      "type": "object"
+    },
+    "family_id_case": {
+      "additionalProperties": false,
+      "properties": {
+        "context": {
+          "enum": [
+            "lease",
+            "direct"
+          ]
+        },
+        "evidence": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "expected_code": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "family_id_hex": {
+          "$ref": "#/$defs/hex"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "evidence",
+        "family_id_hex",
+        "context",
+        "expected_code"
+      ],
+      "type": "object"
+    },
+    "family_support_case": {
+      "additionalProperties": false,
+      "properties": {
+        "entries": {
+          "items": {
+            "$ref": "#/$defs/entry"
+          },
+          "type": "array"
+        },
+        "entry_claims": {
+          "items": {
+            "type": "boolean"
+          },
+          "type": "array"
+        },
+        "evidence": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "evidence",
+        "entries",
+        "entry_claims"
+      ],
+      "type": "object"
+    },
+    "field_length_case": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "expected_code": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "field": {
+          "enum": [
+            "FamilyDescriptor.params_digest",
+            "IsingProblemGenerator.topology_order_digest",
+            "FamilyBinding.nonce",
+            "FamilyBinding.instance_digest",
+            "FamilyBinding.topology_order_digest",
+            "FamilyBinding.node_ids"
+          ]
+        },
+        "length": {
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "plain_node_count": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "evidence",
+        "field",
+        "length",
+        "plain_node_count",
+        "expected_code"
+      ],
+      "type": "object"
+    },
+    "hex": {
+      "contentEncoding": "base16",
+      "type": "string"
+    },
+    "hex32": {
+      "contentEncoding": "base16",
+      "maxLength": 64,
+      "minLength": 64,
+      "type": "string"
+    },
+    "i64s": {
+      "pattern": "^(0|-?[1-9][0-9]*)$",
+      "type": "string"
+    },
+    "instance_bound_case": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "expected_code": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "quantity": {
+          "enum": [
+            "h",
+            "j",
+            "offset"
+          ]
+        },
+        "value": {
+          "$ref": "#/$defs/i64s"
+        }
+      },
+      "required": [
+        "name",
+        "evidence",
+        "quantity",
+        "value",
+        "expected_code"
+      ],
+      "type": "object"
+    },
+    "instance_case": {
+      "additionalProperties": false,
+      "properties": {
+        "canonical_hex": {
+          "$ref": "#/$defs/hex"
+        },
+        "descriptor_digest": {
+          "$ref": "#/$defs/hex32"
+        },
+        "edges": {
+          "items": {
+            "items": {
+              "type": "integer"
+            },
+            "maxItems": 2,
+            "minItems": 2,
+            "type": "array"
+          },
+          "type": "array"
+        },
+        "evidence": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "family_id": {
+          "type": "string"
+        },
+        "h": {
+          "items": {
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "instance_digest": {
+          "$ref": "#/$defs/hex32"
+        },
+        "j": {
+          "items": {
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "metadata_hex": {
+          "$ref": "#/$defs/hex"
+        },
+        "metadata_kinds": {
+          "items": {
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        },
+        "node_ids": {
+          "items": {
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "node_order": {
+          "const": "default"
+        },
+        "nonce": {
+          "contentEncoding": "base16",
+          "maxLength": 64,
+          "type": "string"
+        },
+        "offset_milli": {
+          "$ref": "#/$defs/i64s"
+        },
+        "params_hex": {
+          "$ref": "#/$defs/hex"
+        },
+        "revision": {
+          "type": "integer"
+        },
+        "scale": {
+          "const": 1000
+        },
+        "topology": {
+          "type": "string"
+        },
+        "witnesses": {
+          "items": {
+            "$ref": "#/$defs/witness"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "name",
+        "evidence",
+        "family_id",
+        "revision",
+        "params_hex",
+        "descriptor_digest",
+        "topology",
+        "node_order",
+        "nonce",
+        "node_ids",
+        "edges",
+        "h",
+        "j",
+        "scale",
+        "offset_milli",
+        "metadata_hex",
+        "metadata_kinds",
+        "canonical_hex",
+        "instance_digest",
+        "witnesses"
+      ],
+      "type": "object"
+    },
+    "instance_defect_case": {
+      "additionalProperties": false,
+      "properties": {
+        "edges": {
+          "items": {
+            "items": {
+              "type": "integer"
+            },
+            "maxItems": 2,
+            "minItems": 2,
+            "type": "array"
+          },
+          "type": "array"
+        },
+        "evidence": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "expected_code": {
+          "const": 15
+        },
+        "instance": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "rule": {
+          "enum": [
+            "FAM-30",
+            "FAM-32"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "evidence",
+        "instance",
+        "edges",
+        "rule",
+        "expected_code"
+      ],
+      "type": "object"
+    },
+    "label_case": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "label_hex": {
+          "$ref": "#/$defs/hex"
+        },
+        "name": {
+          "type": "string"
+        },
+        "valid": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "evidence",
+        "label_hex",
+        "valid"
+      ],
+      "type": "object"
+    },
+    "lease_admission_case": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "expected_code": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "expected_step": {
+          "type": "string"
+        },
+        "expected_wire": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "faults": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "evidence",
+        "faults",
+        "expected_step",
+        "expected_code",
+        "expected_wire"
+      ],
+      "type": "object"
+    },
+    "lease_case": {
+      "additionalProperties": false,
+      "properties": {
+        "admitted": {
+          "type": "boolean"
+        },
+        "base_salt": {
+          "$ref": "#/$defs/hex32"
+        },
+        "evidence": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "last_proof_block_hash": {
+          "$ref": "#/$defs/hex32"
+        },
+        "miner_account": {
+          "$ref": "#/$defs/hex32"
+        },
+        "name": {
+          "type": "string"
+        },
+        "salt_count": {
+          "$ref": "#/$defs/u64s"
+        },
+        "salt_start": {
+          "$ref": "#/$defs/u64s"
+        },
+        "salts": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "index": {
+                "$ref": "#/$defs/u64s"
+              },
+              "nonce": {
+                "$ref": "#/$defs/hex32"
+              },
+              "salt": {
+                "$ref": "#/$defs/hex32"
+              }
+            },
+            "required": [
+              "index",
+              "salt",
+              "nonce"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "wire_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "evidence",
+        "last_proof_block_hash",
+        "miner_account",
+        "base_salt",
+        "salt_start",
+        "salt_count",
+        "admitted",
+        "wire_reason",
+        "salts"
+      ],
+      "type": "object"
+    },
+    "lease_code_case": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "expected_code": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "family_id": {
+          "type": "string"
+        },
+        "generated_families": {
+          "items": {
+            "$ref": "#/$defs/entry"
+          },
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        },
+        "params_digest": {
+          "$ref": "#/$defs/hex32"
+        },
+        "revision": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name",
+        "evidence",
+        "generated_families",
+        "family_id",
+        "revision",
+        "params_digest",
+        "expected_code"
+      ],
+      "type": "object"
+    },
+    "legacy_reference_case": {
+      "additionalProperties": false,
+      "properties": {
+        "case_blake3": {
+          "$ref": "#/$defs/hex32"
+        },
+        "evidence": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "file": {
+          "enum": [
+            "golden_vectors.json",
+            "golden_lease.json"
+          ]
+        },
+        "generator": {
+          "const": "GENERATOR_ALGORITHM_BLAKE3_CHACHA8_V1"
+        },
+        "index": {
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "section": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "evidence",
+        "file",
+        "section",
+        "index",
+        "case_blake3",
+        "generator"
+      ],
+      "type": "object"
+    },
+    "metadata_case": {
+      "additionalProperties": false,
+      "properties": {
+        "contract_kinds": {
+          "items": {
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "evidence": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "expected_code": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "metadata_hex": {
+          "$ref": "#/$defs/hex"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "evidence",
+        "metadata_hex",
+        "contract_kinds",
+        "expected_code"
+      ],
+      "type": "object"
+    },
+    "params_case": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "expected_code": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "family_id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "params_digest": {
+          "contentEncoding": "base16",
+          "maxLength": 64,
+          "minLength": 64,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "params_hex": {
+          "$ref": "#/$defs/hex"
+        },
+        "revision": {
+          "type": "integer"
+        },
+        "values": {
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "evidence",
+        "family_id",
+        "revision",
+        "params_hex",
+        "expected_code",
+        "values",
+        "params_digest"
+      ],
+      "type": "object"
+    },
+    "revision_case": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "expected_code": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name",
+        "evidence",
+        "revision",
+        "expected_code"
+      ],
+      "type": "object"
+    },
+    "schema_def": {
+      "additionalProperties": false,
+      "properties": {
+        "family_id": {
+          "type": "string"
+        },
+        "fields": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "max": {
+                "$ref": "#/$defs/i64s"
+              },
+              "min": {
+                "$ref": "#/$defs/i64s"
+              },
+              "name": {
+                "type": "string"
+              },
+              "scale": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "tag": {
+                "type": "integer"
+              },
+              "type": {
+                "enum": [
+                  "u8",
+                  "u16",
+                  "u32",
+                  "u64",
+                  "i32",
+                  "i64",
+                  "bool",
+                  "bytes",
+                  "ascii"
+                ]
+              }
+            },
+            "required": [
+              "tag",
+              "name",
+              "type",
+              "scale",
+              "min",
+              "max"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "revision": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "family_id",
+        "revision",
+        "fields"
+      ],
+      "type": "object"
+    },
+    "shuffle_case": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "length": {
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "permutation": {
+          "items": {
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "seed": {
+          "$ref": "#/$defs/hex32"
+        },
+        "words_used": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name",
+        "evidence",
+        "seed",
+        "length",
+        "permutation",
+        "words_used"
+      ],
+      "type": "object"
+    },
+    "size_bound_case": {
+      "additionalProperties": false,
+      "properties": {
+        "degree": {
+          "$ref": "#/$defs/u64s"
+        },
+        "edges": {
+          "$ref": "#/$defs/u64s"
+        },
+        "evidence": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "expected_code": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "limit_max_degree": {
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limit_max_edges": {
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limit_max_nodes": {
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "max_degree": {
+          "$ref": "#/$defs/u64s"
+        },
+        "n_edges": {
+          "$ref": "#/$defs/u64s"
+        },
+        "n_layers": {
+          "type": "integer"
+        },
+        "n_nodes": {
+          "$ref": "#/$defs/u64s"
+        },
+        "name": {
+          "type": "string"
+        },
+        "nodes": {
+          "$ref": "#/$defs/u64s"
+        }
+      },
+      "required": [
+        "name",
+        "evidence",
+        "n_layers",
+        "n_nodes",
+        "n_edges",
+        "max_degree",
+        "limit_max_nodes",
+        "limit_max_edges",
+        "limit_max_degree",
+        "nodes",
+        "edges",
+        "degree",
+        "expected_code"
+      ],
+      "type": "object"
+    },
+    "solver_id_case": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "expected": {
+          "enum": [
+            "valid",
+            "invalid",
+            "empty"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "solver_id_hex": {
+          "$ref": "#/$defs/hex"
+        }
+      },
+      "required": [
+        "name",
+        "evidence",
+        "solver_id_hex",
+        "expected"
+      ],
+      "type": "object"
+    },
+    "stream_case": {
+      "additionalProperties": false,
+      "properties": {
+        "checkpoints": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "start": {
+                "type": "integer"
+              },
+              "words": {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "start",
+              "words"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "descriptor_digest": {
+          "$ref": "#/$defs/hex32"
+        },
+        "evidence": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "label_hex": {
+          "$ref": "#/$defs/hex"
+        },
+        "name": {
+          "type": "string"
+        },
+        "nonce": {
+          "$ref": "#/$defs/hex32"
+        },
+        "seed": {
+          "$ref": "#/$defs/hex32"
+        },
+        "topology_order_digest": {
+          "$ref": "#/$defs/hex32"
+        }
+      },
+      "required": [
+        "name",
+        "evidence",
+        "nonce",
+        "descriptor_digest",
+        "topology_order_digest",
+        "label_hex",
+        "seed",
+        "checkpoints"
+      ],
+      "type": "object"
+    },
+    "topology_case": {
+      "additionalProperties": false,
+      "properties": {
+        "edges": {
+          "items": {
+            "items": {
+              "type": "integer"
+            },
+            "maxItems": 2,
+            "minItems": 2,
+            "type": "array"
+          },
+          "type": "array"
+        },
+        "evidence": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "material_hex": {
+          "$ref": "#/$defs/hex"
+        },
+        "name": {
+          "type": "string"
+        },
+        "nodes": {
+          "items": {
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "order_digest": {
+          "$ref": "#/$defs/hex32"
+        }
+      },
+      "required": [
+        "name",
+        "evidence",
+        "nodes",
+        "edges",
+        "material_hex",
+        "order_digest"
+      ],
+      "type": "object"
+    },
+    "u64s": {
+      "pattern": "^(0|[1-9][0-9]*)$",
+      "type": "string"
+    },
+    "uniform_case": {
+      "additionalProperties": false,
+      "properties": {
+        "calls": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "n": {
+                "type": "integer"
+              },
+              "result": {
+                "type": "integer"
+              },
+              "words_used": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "n",
+              "result",
+              "words_used"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "evidence": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        },
+        "seed": {
+          "$ref": "#/$defs/hex32"
+        }
+      },
+      "required": [
+        "name",
+        "evidence",
+        "seed",
+        "calls"
+      ],
+      "type": "object"
+    },
+    "wire_reason": {
+      "additionalProperties": false,
+      "properties": {
+        "reason": {
+          "type": "string"
+        },
+        "value": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "reason",
+        "value"
+      ],
+      "type": "object"
+    },
+    "witness": {
+      "additionalProperties": false,
+      "properties": {
+        "claimed_energy_milli": {
+          "$ref": "#/$defs/i64s"
+        },
+        "energy_milli": {
+          "pattern": "^(0|-?[1-9][0-9]*)$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "energy_milli_plain": {
+          "pattern": "^(0|-?[1-9][0-9]*)$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "reason": {
+          "enum": [
+            "wrong-length",
+            "padding-bit-set",
+            "energy-mismatch",
+            null
+          ]
+        },
+        "spins": {
+          "items": {
+            "type": "integer"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "spins_hex": {
+          "$ref": "#/$defs/hex"
+        },
+        "valid": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "spins",
+        "spins_hex",
+        "claimed_energy_milli",
+        "energy_milli",
+        "energy_milli_plain",
+        "valid",
+        "reason"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "quip-family-vectors-schema-1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "about": {
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "codes": {
+      "items": {
+        "$ref": "#/$defs/code_row"
+      },
+      "type": "array"
+    },
+    "descriptors": {
+      "items": {
+        "$ref": "#/$defs/descriptor_case"
+      },
+      "type": "array"
+    },
+    "evidence": {
+      "$ref": "#/$defs/evidence"
+    },
+    "explicit_job": {
+      "items": {
+        "$ref": "#/$defs/explicit_job_case"
+      },
+      "type": "array"
+    },
+    "explicit_job_order": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "family_ids": {
+      "items": {
+        "$ref": "#/$defs/family_id_case"
+      },
+      "type": "array"
+    },
+    "family_support": {
+      "items": {
+        "$ref": "#/$defs/family_support_case"
+      },
+      "type": "array"
+    },
+    "field_lengths": {
+      "items": {
+        "$ref": "#/$defs/field_length_case"
+      },
+      "type": "array"
+    },
+    "instance_bounds": {
+      "items": {
+        "$ref": "#/$defs/instance_bound_case"
+      },
+      "type": "array"
+    },
+    "instance_defects": {
+      "items": {
+        "$ref": "#/$defs/instance_defect_case"
+      },
+      "type": "array"
+    },
+    "instances": {
+      "items": {
+        "$ref": "#/$defs/instance_case"
+      },
+      "type": "array"
+    },
+    "labels": {
+      "items": {
+        "$ref": "#/$defs/label_case"
+      },
+      "type": "array"
+    },
+    "lease_admission": {
+      "items": {
+        "$ref": "#/$defs/lease_admission_case"
+      },
+      "type": "array"
+    },
+    "lease_admission_order": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "lease_codes": {
+      "items": {
+        "$ref": "#/$defs/lease_code_case"
+      },
+      "type": "array"
+    },
+    "leases": {
+      "items": {
+        "$ref": "#/$defs/lease_case"
+      },
+      "type": "array"
+    },
+    "legacy_references": {
+      "items": {
+        "$ref": "#/$defs/legacy_reference_case"
+      },
+      "type": "array"
+    },
+    "metadata": {
+      "items": {
+        "$ref": "#/$defs/metadata_case"
+      },
+      "type": "array"
+    },
+    "params": {
+      "items": {
+        "$ref": "#/$defs/params_case"
+      },
+      "type": "array"
+    },
+    "provenance": {
+      "enum": [
+        "specified",
+        "legacy-production",
+        "archived-research"
+      ]
+    },
+    "revisions": {
+      "items": {
+        "$ref": "#/$defs/revision_case"
+      },
+      "type": "array"
+    },
+    "schema_revision": {
+      "const": 1
+    },
+    "schemas": {
+      "items": {
+        "$ref": "#/$defs/schema_def"
+      },
+      "type": "array"
+    },
+    "shuffle": {
+      "items": {
+        "$ref": "#/$defs/shuffle_case"
+      },
+      "type": "array"
+    },
+    "size_bounds": {
+      "items": {
+        "$ref": "#/$defs/size_bound_case"
+      },
+      "type": "array"
+    },
+    "solver_ids": {
+      "items": {
+        "$ref": "#/$defs/solver_id_case"
+      },
+      "type": "array"
+    },
+    "sources": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "blake3": {
+            "$ref": "#/$defs/hex32"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "blake3"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "streams": {
+      "items": {
+        "$ref": "#/$defs/stream_case"
+      },
+      "type": "array"
+    },
+    "topologies": {
+      "items": {
+        "$ref": "#/$defs/topology_case"
+      },
+      "type": "array"
+    },
+    "uniform": {
+      "items": {
+        "$ref": "#/$defs/uniform_case"
+      },
+      "type": "array"
+    },
+    "wire_reasons": {
+      "items": {
+        "$ref": "#/$defs/wire_reason"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "schema_revision",
+    "provenance",
+    "about",
+    "sources"
+  ],
+  "title": "Quip problem family vector fixture, schema revision 1",
+  "type": "object"
+}

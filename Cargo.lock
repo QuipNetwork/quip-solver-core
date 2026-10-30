@@ -980,6 +980,7 @@ dependencies = [
 name = "quip-solver-conformance"
 version = "0.0.4-rc2"
 dependencies = [
+ "blake3",
  "hyper-util",
  "prost",
  "quip-proto",

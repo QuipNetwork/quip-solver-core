@@ -18,5 +18,6 @@ mod vectors;
 
 pub use vectors::{
     adapt_cases, adapt_params_cases, golden_wire, AdaptParamsCase, EnergyToDifficultyCase,
-    GoldenWire, GOLDEN_ADAPT, GOLDEN_LEASE, GOLDEN_TARGET, GOLDEN_VECTORS, GOLDEN_WIRE,
+    GoldenWire, FAMILY_CORE, FAMILY_LEGACY, FAMILY_SCHEMA, GOLDEN_ADAPT, GOLDEN_LEASE,
+    GOLDEN_TARGET, GOLDEN_VECTORS, GOLDEN_WIRE,
 };
