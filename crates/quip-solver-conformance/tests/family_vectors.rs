@@ -463,6 +463,234 @@ fn float_does_not_skip_bounds() {
 }
 
 /// Returns `doc` with the value at JSON pointer `pointer` replaced.
+fn u32_list(value: &Value, what: &str) -> Result<Vec<u32>, String> {
+    value
+        .as_array()
+        .ok_or_else(|| format!("{what} is not an array"))?
+        .iter()
+        .map(|v| {
+            v.as_u64()
+                .and_then(|n| u32::try_from(n).ok())
+                .ok_or_else(|| format!("{what} has a non-u32 entry"))
+        })
+        .collect()
+}
+
+fn u64_decimal(case: &Value, key: &str) -> Result<u64, String> {
+    str_field(case, key)?
+        .parse::<u64>()
+        .map_err(|e| format!("{}: {key}: {e}", case_name(case)))
+}
+
+type Topology = (Vec<u32>, Vec<(u32, u32)>);
+
+fn topology_inputs(case: &Value) -> Result<Topology, String> {
+    let nodes = u32_list(case.get("nodes").ok_or("no nodes")?, "nodes")?;
+    let edges = case
+        .get("edges")
+        .and_then(Value::as_array)
+        .ok_or("no edges")?
+        .iter()
+        .map(|e| {
+            let pair = u32_list(e, "edge")?;
+            match pair.as_slice() {
+                [u, v] => Ok((*u, *v)),
+                _ => Err("edge is not a pair".to_owned()),
+            }
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok((nodes, edges))
+}
+
+fn check_topologies(doc: &Value) -> Result<(), String> {
+    for case in section(doc, "topologies")? {
+        let (nodes, edges) = topology_inputs(case)?;
+        let material = digests::topology_order_material(&nodes, &edges);
+        compare(
+            case,
+            "material_hex",
+            &codec::hex_encode(&material),
+            &str_field(case, "material_hex")?.to_owned(),
+        )?;
+        compare(
+            case,
+            "order_digest",
+            &codec::hex_encode(&digests::topology_order_digest(&nodes, &edges)),
+            &str_field(case, "order_digest")?.to_owned(),
+        )?;
+    }
+    Ok(())
+}
+
+fn check_labels(doc: &Value) -> Result<(), String> {
+    for case in section(doc, "labels")? {
+        let label = codec::hex_decode(str_field(case, "label_hex")?)?;
+        let want = case
+            .get("valid")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| format!("{}: no valid flag", case_name(case)))?;
+        compare(case, "valid", &codec::label_valid(&label), &want)?;
+    }
+    Ok(())
+}
+
+fn check_streams(doc: &Value) -> Result<(), String> {
+    for case in section(doc, "streams")? {
+        let label = codec::hex_decode(str_field(case, "label_hex")?)?;
+        let seed = digests::stream_seed(
+            &codec::hex32(str_field(case, "nonce")?)?,
+            &codec::hex32(str_field(case, "descriptor_digest")?)?,
+            &codec::hex32(str_field(case, "topology_order_digest")?)?,
+            &label,
+        )?;
+        compare(
+            case,
+            "seed",
+            &codec::hex_encode(&seed),
+            &str_field(case, "seed")?.to_owned(),
+        )?;
+        let checkpoints = case
+            .get("checkpoints")
+            .and_then(Value::as_array)
+            .filter(|c| !c.is_empty())
+            .ok_or_else(|| format!("{}: no checkpoints", case_name(case)))?;
+        for checkpoint in checkpoints {
+            let start =
+                usize::try_from(u32_field(checkpoint, "start")?).map_err(|e| e.to_string())?;
+            let want = u32_list(checkpoint.get("words").ok_or("no words")?, "words")?;
+            let mut rng = digests::CountingRng::new(seed);
+            let got: Vec<u32> = (0..start + want.len()).map(|_| rng.next_u32()).collect();
+            let window = got.get(start..).ok_or("window out of range")?.to_vec();
+            compare(case, &format!("checkpoint {start}"), &window, &want)?;
+        }
+    }
+    Ok(())
+}
+
+fn check_uniform(doc: &Value) -> Result<(), String> {
+    for case in section(doc, "uniform")? {
+        let mut rng = digests::CountingRng::new(codec::hex32(str_field(case, "seed")?)?);
+        let calls = case
+            .get("calls")
+            .and_then(Value::as_array)
+            .filter(|c| !c.is_empty())
+            .ok_or_else(|| format!("{}: no calls", case_name(case)))?;
+        for call in calls {
+            let n = u32_field(call, "n")?;
+            compare(
+                case,
+                "result",
+                &digests::uniform(&mut rng, n)?,
+                &u32_field(call, "result")?,
+            )?;
+            compare(
+                case,
+                "words_used",
+                &rng.used,
+                &u64::from(u32_field(call, "words_used")?),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn check_shuffle(doc: &Value) -> Result<(), String> {
+    for case in section(doc, "shuffle")? {
+        let mut rng = digests::CountingRng::new(codec::hex32(str_field(case, "seed")?)?);
+        let length = u32_field(case, "length")?;
+        let mut items: Vec<u32> = (0..length).collect();
+        digests::shuffle(&mut rng, &mut items)?;
+        compare(
+            case,
+            "permutation",
+            &items,
+            &u32_list(
+                case.get("permutation").ok_or("no permutation")?,
+                "permutation",
+            )?,
+        )?;
+        compare(
+            case,
+            "words_used",
+            &rng.used,
+            &u64::from(u32_field(case, "words_used")?),
+        )?;
+    }
+    Ok(())
+}
+
+fn check_leases(doc: &Value) -> Result<(), String> {
+    use quip_protocol::lease::{Generator, LeaseSpec};
+    for case in section(doc, "leases")? {
+        let spec = LeaseSpec::new(
+            Generator::Blake3Chacha8V1,
+            codec::hex32(str_field(case, "last_proof_block_hash")?)?,
+            codec::hex32(str_field(case, "miner_account")?)?,
+            codec::hex32(str_field(case, "base_salt")?)?,
+            u64_decimal(case, "salt_start")?,
+            u64_decimal(case, "salt_count")?,
+        );
+        let admitted = case
+            .get("admitted")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| format!("{}: no admitted flag", case_name(case)))?;
+        compare(case, "admitted", &spec.is_ok(), &admitted)?;
+        let fixture_salts = case
+            .get("salts")
+            .and_then(Value::as_array)
+            .ok_or_else(|| format!("{}: no salts", case_name(case)))?;
+        let Ok(spec) = spec else {
+            compare(
+                case,
+                "wire_reason",
+                &case.get("wire_reason").and_then(Value::as_str),
+                &Some("MALFORMED"),
+            )?;
+            compare(case, "salt count", &fixture_salts.len(), &0)?;
+            continue;
+        };
+        compare(
+            case,
+            "wire_reason",
+            &case.get("wire_reason"),
+            &Some(&Value::Null),
+        )?;
+        compare(
+            case,
+            "salt count",
+            &u64::try_from(fixture_salts.len()).map_err(|e| e.to_string())?,
+            &spec.salt_count,
+        )?;
+        for (i, entry) in (0u64..).zip(fixture_salts) {
+            let salt = spec.salt(i).ok_or("salt index outside the lease")?;
+            let nonce = quip_protocol::derive::derive_nonce(
+                spec.last_proof_block_hash,
+                spec.miner_account,
+                salt,
+            );
+            compare(
+                case,
+                "index",
+                &u64_decimal(entry, "index")?,
+                &(spec.salt_start + i),
+            )?;
+            compare(
+                case,
+                "salt",
+                &codec::hex_encode(&salt),
+                &str_field(entry, "salt")?.to_owned(),
+            )?;
+            compare(
+                case,
+                "nonce",
+                &codec::hex_encode(&nonce),
+                &str_field(entry, "nonce")?.to_owned(),
+            )?;
+        }
+    }
+    Ok(())
+}
+
 fn mutate(doc: &Value, pointer: &str, value: Value) -> Value {
     let mut copy = doc.clone();
     if let Some(slot) = copy.pointer_mut(pointer) {
@@ -557,16 +785,6 @@ fn derive_key_is_not_a_plain_hash() -> Result<(), String> {
 #[test]
 fn digest_contexts_separate_empty_material() {
     assert_ne!(digests::params_digest(&[]), digests::instance_digest(&[]));
-}
-
-#[test]
-fn label_length_and_byte_limits() {
-    assert!(!codec::label_valid(&[]));
-    assert!(codec::label_valid(b"a"));
-    assert!(codec::label_valid(&[b'a'; 32]));
-    assert!(!codec::label_valid(&[b'a'; 33]));
-    assert!(!codec::label_valid(&[b'a', 0x80]));
-    assert!(codec::label_valid(&[0x00, 0x7F]));
 }
 
 #[test]
@@ -667,4 +885,158 @@ fn empty_section_is_rejected() -> Result<(), String> {
         Err(e) => Err(format!("unexpected error: {e}")),
         Ok(()) => Err("an empty params section was accepted".to_owned()),
     }
+}
+
+fn find_index(doc: &Value, section_name: &str, name: &str) -> Result<usize, String> {
+    section(doc, section_name)?
+        .iter()
+        .position(|c| c.get("name").and_then(Value::as_str) == Some(name))
+        .ok_or_else(|| format!("no {name} case in {section_name}"))
+}
+
+fn swap_pointers(doc: &Value, a: &str, b: &str) -> Result<Value, String> {
+    let first = doc.pointer(a).cloned().ok_or("missing first pointer")?;
+    let second = doc.pointer(b).cloned().ok_or("missing second pointer")?;
+    Ok(mutate(&mutate(doc, a, second), b, first))
+}
+
+fn expect_err(result: &Result<(), String>, what: &str) -> Result<(), String> {
+    if result.is_err() {
+        Ok(())
+    } else {
+        Err(format!("{what} was accepted"))
+    }
+}
+
+#[test]
+fn topology_order_digests_recompute() -> Result<(), String> {
+    check_topologies(&core()?)
+}
+
+#[test]
+fn topology_digests_are_pairwise_distinct() -> Result<(), String> {
+    let doc = core()?;
+    let names = [
+        "sparse",
+        "sparse-nodes-reordered",
+        "sparse-edges-reordered",
+        "sparse-edge-flipped",
+    ];
+    let mut digests = Vec::new();
+    for name in names {
+        let case = section(&doc, "topologies")?
+            .get(find_index(&doc, "topologies", name)?)
+            .ok_or("index")?;
+        let (nodes, edges) = topology_inputs(case)?;
+        digests.push(digests::topology_order_digest(&nodes, &edges));
+    }
+    for (i, a) in digests.iter().enumerate() {
+        for b in digests.iter().skip(i + 1) {
+            if a == b {
+                return Err("two topology variants share an order digest".to_owned());
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn label_cases_recompute() -> Result<(), String> {
+    check_labels(&core()?)
+}
+
+#[test]
+fn stream_checkpoints_recompute() -> Result<(), String> {
+    check_streams(&core()?)
+}
+
+#[test]
+fn uniform_cases_recompute() -> Result<(), String> {
+    check_uniform(&core()?)
+}
+
+#[test]
+fn uniform_redraw_case_redraws() -> Result<(), String> {
+    let doc = core()?;
+    let case = section(&doc, "uniform")?
+        .iter()
+        .find(|c| case_name(c).starts_with("redraw-then-small"))
+        .ok_or("no redraw-then-small case")?;
+    let used = case
+        .pointer("/calls/0/words_used")
+        .and_then(Value::as_u64)
+        .ok_or("no words_used")?;
+    if used >= 2 {
+        Ok(())
+    } else {
+        Err(format!("first call used {used} words, expected a redraw"))
+    }
+}
+
+#[test]
+fn shuffle_cases_recompute() -> Result<(), String> {
+    check_shuffle(&core()?)
+}
+
+#[test]
+fn lease_nonces_recompute() -> Result<(), String> {
+    check_leases(&core()?)
+}
+
+#[test]
+fn reordered_topology_nodes_fails() -> Result<(), String> {
+    let doc = core()?;
+    let i = find_index(&doc, "topologies", "sparse")?;
+    let broken = swap_pointers(
+        &doc,
+        &format!("/topologies/{i}/nodes/0"),
+        &format!("/topologies/{i}/nodes/1"),
+    )?;
+    expect_err(&check_topologies(&broken), "reordered topology nodes")
+}
+
+#[test]
+fn swapped_topology_edges_fails() -> Result<(), String> {
+    let doc = core()?;
+    let i = find_index(&doc, "topologies", "sparse")?;
+    let broken = swap_pointers(
+        &doc,
+        &format!("/topologies/{i}/edges/0"),
+        &format!("/topologies/{i}/edges/1"),
+    )?;
+    expect_err(&check_topologies(&broken), "swapped topology edges")
+}
+
+#[test]
+fn changed_checkpoint_word_fails() -> Result<(), String> {
+    let doc = core()?;
+    let i = find_index(&doc, "streams", "fields")?;
+    let pointer = format!("/streams/{i}/checkpoints/3/words/0");
+    let word = doc
+        .pointer(&pointer)
+        .and_then(Value::as_u64)
+        .ok_or("no checkpoint word")?;
+    let broken = mutate(&doc, &pointer, json!(word.wrapping_add(1)));
+    expect_err(&check_streams(&broken), "a changed checkpoint word")
+}
+
+#[test]
+fn bad_labels_and_zero_bounds_are_errors() {
+    let nonce = [0u8; 32];
+    assert!(digests::stream_seed(&nonce, &nonce, &nonce, &[]).is_err());
+    assert!(digests::stream_seed(&nonce, &nonce, &nonce, &[b'a'; 33]).is_err());
+    assert!(digests::stream_seed(&nonce, &nonce, &nonce, &[b'a'; 32]).is_ok());
+    let mut rng = digests::CountingRng::new(nonce);
+    assert!(digests::uniform(&mut rng, 0).is_err());
+    assert_eq!(rng.used, 0);
+}
+
+#[test]
+fn label_length_and_byte_limits() {
+    assert!(!codec::label_valid(&[]));
+    assert!(codec::label_valid(b"a"));
+    assert!(codec::label_valid(&[b'a'; 32]));
+    assert!(!codec::label_valid(&[b'a'; 33]));
+    assert!(!codec::label_valid(&[b'a', 0x80]));
+    assert!(codec::label_valid(&[0x00, 0x7F]));
 }
