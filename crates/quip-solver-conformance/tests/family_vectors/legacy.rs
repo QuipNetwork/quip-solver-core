@@ -101,19 +101,6 @@ fn field<'a>(case: &'a Value, key: &str) -> Result<&'a Value, String> {
         .ok_or_else(|| format!("{}: missing {key}", case_name(case)))
 }
 
-fn i32_values(case: &Value, key: &str) -> Result<Vec<i32>, String> {
-    field(case, key)?
-        .as_array()
-        .ok_or_else(|| format!("{}: {key} is not an array", case_name(case)))?
-        .iter()
-        .map(|v| {
-            v.as_i64()
-                .and_then(|n| i32::try_from(n).ok())
-                .ok_or_else(|| format!("{}: {key} has a non-i32 entry", case_name(case)))
-        })
-        .collect()
-}
-
 fn len_of(case: &Value, key: &str) -> Result<usize, String> {
     field(case, key)?
         .as_array()
@@ -164,12 +151,18 @@ fn replay_ising(label: &str, case: &Value) -> Result<(), String> {
         codec::hex32(str_field(case, "nonce_hex")?)?,
         len_of(case, "nodes")?,
         len_of(case, "edges")?,
-        &i32_values(case, "allowed_h_milli")?,
-        &i32_values(case, "allowed_j_milli")?,
+        &super::i32_list(case, "allowed_h_milli")?,
+        &super::i32_list(case, "allowed_j_milli")?,
     )
     .map_err(|e| format!("{label}: {e:?}"))?;
-    check(&format!("{label} h"), h == i32_values(case, "h_milli")?)?;
-    check(&format!("{label} j"), j == i32_values(case, "j_milli")?)
+    check(
+        &format!("{label} h"),
+        h == super::i32_list(case, "h_milli")?,
+    )?;
+    check(
+        &format!("{label} j"),
+        j == super::i32_list(case, "j_milli")?,
+    )
 }
 
 fn le_hash(values: &[i32]) -> String {
@@ -208,8 +201,8 @@ fn replay_lease(label: &str, case: &Value) -> Result<(), String> {
         edges: (0..n_edges)
             .map(|k| (k % n_nodes, (k + 1) % n_nodes))
             .collect(),
-        allowed_h_milli: i32_values(case, "allowed_h_milli")?,
-        allowed_j_milli: i32_values(case, "allowed_j_milli")?,
+        allowed_h_milli: super::i32_list(case, "allowed_h_milli")?,
+        allowed_j_milli: super::i32_list(case, "allowed_j_milli")?,
     };
     let salts = field(case, "salts")?
         .as_array()

@@ -203,13 +203,6 @@ pub(crate) struct ParamSchema {
     pub(crate) fields: Vec<ParamField>,
 }
 
-fn str_of<'a>(value: &'a Value, key: &str) -> Result<&'a str, String> {
-    value
-        .get(key)
-        .and_then(Value::as_str)
-        .ok_or_else(|| format!("missing string field {key}"))
-}
-
 impl ParamSchema {
     /// Parses one element of the fixture `schemas` section.
     pub(crate) fn from_json(value: &Value) -> Result<Self, String> {
@@ -225,14 +218,14 @@ impl ParamSchema {
                 .and_then(|t| u16::try_from(t).ok())
                 .ok_or("field tag is not a u16")?;
             let bound = |key: &str| {
-                str_of(field, key)?
+                super::str_field(field, key)?
                     .parse::<i128>()
                     .map_err(|e| format!("bound {key}: {e}"))
             };
             out.push(ParamField {
                 tag,
-                name: str_of(field, "name")?.to_owned(),
-                kind: ValueType::parse(str_of(field, "type")?)?,
+                name: super::str_field(field, "name")?.to_owned(),
+                kind: ValueType::parse(super::str_field(field, "type")?)?,
                 min: bound("min")?,
                 max: bound("max")?,
             });

@@ -1,4 +1,8 @@
-//! Family vector fixtures: schema checks now, recomputation tests in later tasks.
+//! Family golden vectors. Each check reads inputs from `core.json` or `legacy.json`,
+//! recomputes the outputs with Rust code, and compares them with the stored values.
+//! The checks cover parameters, digests, streams, leases, instances, decisions, size
+//! bounds, evidence, and the pinned legacy references. A fixture schema check and
+//! mutation tests show that each check rejects a changed fixture. Python is never run.
 
 #[path = "family_vectors/codec.rs"]
 mod codec;
@@ -496,19 +500,7 @@ type Topology = (Vec<u32>, Vec<(u32, u32)>);
 
 fn topology_inputs(case: &Value) -> Result<Topology, String> {
     let nodes = u32_list(case.get("nodes").ok_or("no nodes")?, "nodes")?;
-    let edges = case
-        .get("edges")
-        .and_then(Value::as_array)
-        .ok_or("no edges")?
-        .iter()
-        .map(|e| {
-            let pair = u32_list(e, "edge")?;
-            match pair.as_slice() {
-                [u, v] => Ok((*u, *v)),
-                _ => Err("edge is not a pair".to_owned()),
-            }
-        })
-        .collect::<Result<Vec<_>, String>>()?;
+    let edges = edge_list(case.get("edges").ok_or("no edges")?)?;
     Ok((nodes, edges))
 }
 
@@ -1314,7 +1306,8 @@ fn check_core(doc: &Value) -> Result<(), String> {
     check_field_lengths(doc)?;
     check_family_support(doc)?;
     check_lease_codes(doc)?;
-    check_size_bounds(doc)
+    check_size_bounds(doc)?;
+    check_evidence(doc, &[doc, &legacy_doc()?])
 }
 
 fn check_legacy(doc: &Value) -> Result<(), String> {
@@ -2001,6 +1994,91 @@ fn changed_legacy_hash_fails() -> Result<(), String> {
         json!("0".repeat(64)),
     );
     expect_err(&check_legacy(&doc), "a wrong case hash")
+}
+
+/// One schema row: tag, name, type, scale, min, max.
+type SchemaRow = (
+    u64,
+    &'static str,
+    &'static str,
+    Option<u64>,
+    &'static str,
+    &'static str,
+);
+
+const UNIFORM_FIELD_ROWS: [SchemaRow; 2] = [
+    (1, "n_layers", "u16", Some(1), "1", "16"),
+    (2, "field_milli", "i32", Some(1000), "-4000", "4000"),
+];
+
+const ALL_TYPES_ROWS: [SchemaRow; 9] = [
+    (1, "a_u8", "u8", Some(1), "0", "255"),
+    (2, "a_u16", "u16", Some(1), "0", "65535"),
+    (3, "a_u32", "u32", Some(1), "0", "4294967295"),
+    (4, "a_u64", "u64", Some(1), "1", "18446744073709551615"),
+    (5, "a_i32", "i32", Some(1000), "-2147483648", "2147483647"),
+    (
+        6,
+        "a_i64",
+        "i64",
+        Some(1),
+        "-72057594037927936",
+        "72057594037927936",
+    ),
+    (7, "a_bool", "bool", None, "0", "1"),
+    (8, "a_bytes", "bytes", None, "0", "4096"),
+    (9, "a_ascii", "ascii", None, "0", "64"),
+];
+
+fn check_schema_rows(doc: &Value, family: &str, rows: &[SchemaRow]) -> Result<(), String> {
+    let entry = section(doc, "schemas")?
+        .iter()
+        .find(|s| {
+            s.get("family_id").and_then(Value::as_str) == Some(family)
+                && s.get("revision").and_then(Value::as_u64) == Some(1)
+        })
+        .ok_or_else(|| format!("no schema for {family} rev 1"))?;
+    let fields = entry
+        .get("fields")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("{family}: no fields array"))?;
+    if fields.len() != rows.len() {
+        return Err(format!(
+            "{family}: {} fields, spec has {}",
+            fields.len(),
+            rows.len()
+        ));
+    }
+    for (field, (tag, name, kind, scale, min, max)) in fields.iter().zip(rows) {
+        let scale_value = scale.map_or(Value::Null, |s| json!(s));
+        let want = json!({
+            "tag": tag, "name": name, "type": kind,
+            "scale": scale_value, "min": min, "max": max,
+        });
+        for key in ["tag", "name", "type", "scale", "min", "max"] {
+            compare(
+                field,
+                &format!("{family} {key}"),
+                field.get(key).unwrap_or(&Value::Null),
+                want.get(key).unwrap_or(&Value::Null),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn schemas_match_spec() -> Result<(), String> {
+    let doc = core()?;
+    check_schema_rows(&doc, "example/uniform-field", &UNIFORM_FIELD_ROWS)?;
+    check_schema_rows(&doc, "example/all-types", &ALL_TYPES_ROWS)?;
+    let case = find_named(&doc, "params", "spec-valid")?;
+    compare(
+        case,
+        "spec literal params_hex",
+        &str_field(case, "params_hex")?,
+        &"01010002000000020002000400000024faffff",
+    )
 }
 
 #[test]

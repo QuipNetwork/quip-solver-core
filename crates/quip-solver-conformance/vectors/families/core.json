@@ -3190,6 +3190,23 @@
       "nodes": "200"
     },
     {
+      "degree": "5",
+      "edges": "400",
+      "evidence": [
+        "SC-2:size-bounds-example-family"
+      ],
+      "expected_code": null,
+      "limit_max_degree": "0",
+      "limit_max_edges": "0",
+      "limit_max_nodes": "0",
+      "max_degree": "4",
+      "n_edges": "150",
+      "n_layers": 2,
+      "n_nodes": "100",
+      "name": "spec-example-zero-limits",
+      "nodes": "200"
+    },
+    {
       "degree": "1",
       "edges": "8388608",
       "evidence": [
@@ -3399,7 +3416,7 @@
       "path": "conformance/family_oracle/__main__.py"
     },
     {
-      "blake3": "270000556c3a2b0bed73a7c7a680ecf90bc259ae2d190320662e47e8990ee2f8",
+      "blake3": "6378c5694d81981d906cd59e18893eec1a96344db04a8b5149f5bd6640008d67",
       "path": "conformance/family_oracle/build.py"
     },
     {

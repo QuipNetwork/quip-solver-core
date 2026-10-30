@@ -1076,6 +1076,7 @@ def _size_cases() -> list[dict]:
         ("spec-example-max-nodes-199", spec, 2, 100, 150, 4, (199, None, None)),
         ("spec-example-max-edges-399", spec, 2, 100, 150, 4, (None, 399, None)),
         ("spec-example-exact-limits", spec, 2, 100, 150, 4, (200, 400, 5)),
+        ("spec-example-zero-limits", spec, 2, 100, 150, 4, (0, 0, 0)),
         ("nodes-at-bound", adm, 2, 8388608, 0, 0, (None, None, None)),
         ("nodes-over-bound", adm, 2, 8388609, 0, 0, (None, None, None)),
         ("edges-at-bound", adm, 1, 2, 67108864, 1, (None, None, None)),
