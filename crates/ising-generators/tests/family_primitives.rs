@@ -10,7 +10,7 @@ use ising_generators::descriptor::{
     TopologyStats, Value as ParamValue, ValueType, MAX_PARAMS_LEN,
 };
 use ising_generators::instance::{validate_metadata, Instance, InstanceLimits, InstanceParts};
-use ising_generators::legacy::derive_nonce;
+use ising_generators::random::derive_nonce;
 use ising_generators::rng::{stream_seed, uniform, ChaCha8Rng};
 use ising_generators::Code;
 use serde_json::Value;

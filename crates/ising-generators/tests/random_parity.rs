@@ -1,6 +1,6 @@
-//! The scalar `ChaCha8` stream checked against the legacy golden vectors.
+//! The scalar `ChaCha8` stream checked against the golden vectors.
 
-use ising_generators::legacy::{derive_nonce, NonceDeriver};
+use ising_generators::random::{derive_nonce, NonceDeriver};
 use ising_generators::rng::{key_words, ChaCha8Rng, SIGMA};
 use quip_protocol::chacha8::{draw_into, draw_ising_milli};
 use quip_protocol::lease::{Generator, LeaseSpec, TopologyView};

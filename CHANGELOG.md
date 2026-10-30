@@ -14,13 +14,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     bounds, and descriptor admission.
   - `instance`: bounded canonical instances and metadata validation.
   - `rng`: the scalar `ChaCha8Rng`, `uniform`, and the family stream seeds.
-  - `legacy`: `derive_nonce` and `NonceDeriver` for the legacy stream.
+  - `random`: `derive_nonce` and `NonceDeriver` for the random generator.
 
 ### Changed
 
 - `ChaCha8Rng` moved from `quip_protocol::chacha8` to
   `ising_generators::rng`. `derive_nonce` and `NonceDeriver` moved from
-  `quip_protocol::derive` to `ising_generators::legacy`. The old paths do not
+  `quip_protocol::derive` to `ising_generators::random`. The old paths do not
   exist and have no re-export.
 - `quip_solver_core` re-exports `ising_generators`.
 - Draw output does not change. The golden vectors pin it.

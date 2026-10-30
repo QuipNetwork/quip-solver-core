@@ -6,7 +6,7 @@ use crate::{
     CancelToken, IsingGraph, SampleError, SampleParams, Sampler, SamplerResult, StreamJob,
     StreamOutcome, StreamResult,
 };
-use ising_generators::legacy::NonceDeriver;
+use ising_generators::random::NonceDeriver;
 use quip_proto::v1::{
     miner_msg, Job, JobRequest, LeaseDone, MinerMsg, RejectReason, SamplerMeta, Solution,
 };

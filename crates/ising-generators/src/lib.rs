@@ -6,7 +6,8 @@
 //!
 //! Modules:
 //! - [`rng`]: the `ChaCha8` stream and per-substream seeding.
-//! - [`legacy`]: the legacy nonce derivation.
+//! - [`random`]: nonce derivation for the random generator, which draws an
+//!   Ising model for a given topology.
 //! - [`descriptor`]: family ids, parameter schemas, descriptors, and admission.
 //! - [`instance`]: canonical instance bytes, limits, and metadata validation.
 
@@ -18,7 +19,7 @@ mod digest;
 
 pub mod descriptor;
 pub mod instance;
-pub mod legacy;
+pub mod random;
 pub mod rng;
 
 use core::fmt;
