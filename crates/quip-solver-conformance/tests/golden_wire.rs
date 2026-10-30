@@ -367,76 +367,88 @@ fn every_variant_the_fixture_pins_still_parses_from_its_name() {
     }
 }
 
-#[expect(
-    clippy::expect_used,
-    reason = "helpers for a test over a checked-in fixture; a malformed fixture must fail loudly"
-)]
-fn core_vectors() -> serde_json::Value {
-    serde_json::from_str(quip_solver_conformance::FAMILY_CORE).expect("core.json parses")
+fn core_vectors() -> Result<serde_json::Value, String> {
+    serde_json::from_str(quip_solver_conformance::FAMILY_CORE).map_err(|e| e.to_string())
 }
 
-#[expect(
-    clippy::panic,
-    reason = "helpers for a test over a checked-in fixture; a malformed fixture must fail loudly"
-)]
-fn cases<'a>(core: &'a serde_json::Value, section: &str) -> &'a [serde_json::Value] {
+fn cases<'a>(
+    core: &'a serde_json::Value,
+    section: &str,
+) -> Result<&'a [serde_json::Value], String> {
     core.get(section)
         .and_then(serde_json::Value::as_array)
-        .unwrap_or_else(|| panic!("section {section} is missing"))
+        .map(Vec::as_slice)
+        .ok_or_else(|| format!("section {section} is missing or not an array"))
 }
 
-#[expect(
-    clippy::expect_used,
-    reason = "helpers for a test over a checked-in fixture; a malformed fixture must fail loudly"
-)]
-fn support_entry(entry: &serde_json::Value) -> FamilySupport {
-    let revisions = entry["revisions"].as_array().expect("revisions");
-    let digests = entry["params_digests"].as_array().expect("params_digests");
-    FamilySupport {
-        family_id: entry["family_id"].as_str().expect("family_id").to_owned(),
-        revisions: revisions
-            .iter()
-            .map(|r| u32::try_from(r.as_u64().expect("revision")).expect("u32 revision"))
-            .collect(),
-        params_digests: digests
-            .iter()
-            .map(|d| from_hex(d.as_str().expect("digest hex")))
-            .collect(),
-    }
+fn str_field<'a>(case: &'a serde_json::Value, key: &str) -> Result<&'a str, String> {
+    case.get(key)
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| format!("missing string field {key}"))
 }
 
-#[expect(
-    clippy::expect_used,
-    reason = "helpers for a test over a checked-in fixture; a malformed fixture must fail loudly"
-)]
-fn assert_roundtrips(caps: &Capabilities, name: &str) {
-    let decoded = Capabilities::decode(&caps.encode_to_vec()[..]).expect("decode");
-    assert_eq!(&decoded, caps, "{name}");
+fn array_field<'a>(
+    case: &'a serde_json::Value,
+    key: &str,
+) -> Result<&'a [serde_json::Value], String> {
+    case.get(key)
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::as_slice)
+        .ok_or_else(|| format!("missing array field {key}"))
+}
+
+fn support_entry(entry: &serde_json::Value) -> Result<FamilySupport, String> {
+    let revisions = array_field(entry, "revisions")?
+        .iter()
+        .map(|r| {
+            r.as_u64()
+                .and_then(|n| u32::try_from(n).ok())
+                .ok_or_else(|| "revision is not a u32".to_owned())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let params_digests = array_field(entry, "params_digests")?
+        .iter()
+        .map(|d| {
+            d.as_str()
+                .map(from_hex)
+                .ok_or_else(|| "digest is not a hex string".to_owned())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(FamilySupport {
+        family_id: str_field(entry, "family_id")?.to_owned(),
+        revisions,
+        params_digests,
+    })
+}
+
+fn roundtrips(caps: &Capabilities) -> Result<bool, String> {
+    let decoded = Capabilities::decode(&caps.encode_to_vec()[..]).map_err(|e| e.to_string())?;
+    Ok(&decoded == caps)
 }
 
 #[test]
 fn family_wire_vectors_cross_the_wire() {
-    let core = core_vectors();
+    let core = core_vectors().unwrap();
 
-    for case in cases(&core, "solver_ids") {
-        let name = case["name"].as_str().expect("name");
-        let bytes = from_hex(case["solver_id_hex"].as_str().expect("solver_id_hex"));
+    for case in cases(&core, "solver_ids").unwrap() {
+        let name = str_field(case, "name").unwrap();
+        let bytes = from_hex(str_field(case, "solver_id_hex").unwrap());
         let solver_id = String::from_utf8(bytes).expect("every solver id vector is UTF-8");
         let caps = Capabilities {
             solver_id,
             ..Default::default()
         };
-        assert_roundtrips(&caps, name);
+        assert!(roundtrips(&caps).unwrap(), "{name}");
     }
 
-    for case in cases(&core, "family_support") {
-        let name = case["name"].as_str().expect("name");
-        let entries: Vec<FamilySupport> = case["entries"]
-            .as_array()
-            .expect("entries")
+    for case in cases(&core, "family_support").unwrap() {
+        let name = str_field(case, "name").unwrap();
+        let entries = array_field(case, "entries")
+            .unwrap()
             .iter()
             .map(support_entry)
-            .collect();
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
         let generated = Capabilities {
             generated_families: entries.clone(),
             ..Default::default()
@@ -445,18 +457,19 @@ fn family_wire_vectors_cross_the_wire() {
             accepted_families: entries,
             ..Default::default()
         };
-        assert_roundtrips(&generated, name);
-        assert_roundtrips(&accepted, name);
+        assert!(roundtrips(&generated).unwrap(), "{name}");
+        assert!(roundtrips(&accepted).unwrap(), "{name}");
     }
 
-    let rows = cases(&core, "wire_reasons");
+    let rows = cases(&core, "wire_reasons").unwrap();
     for row in rows {
-        let value = i32::try_from(row["value"].as_i64().expect("value")).expect("i32 value");
+        let value = row
+            .get("value")
+            .and_then(serde_json::Value::as_i64)
+            .and_then(|v| i32::try_from(v).ok())
+            .expect("value is an i32");
         let reason = RejectReason::try_from(value).expect("known reason");
-        assert_eq!(
-            reason.as_str_name(),
-            row["reason"].as_str().expect("reason")
-        );
+        assert_eq!(reason.as_str_name(), str_field(row, "reason").unwrap());
     }
     let variants = [
         RejectReason::Unspecified,
@@ -472,6 +485,9 @@ fn family_wire_vectors_cross_the_wire() {
         RejectReason::FamilyUnsupported,
     ];
     assert_eq!(rows.len(), variants.len());
+}
 
+#[test]
+fn protocol_version_stays_two() {
     assert_eq!(quip_protocol::session::PROTOCOL_VERSION, 2);
 }
