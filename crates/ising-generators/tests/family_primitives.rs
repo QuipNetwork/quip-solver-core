@@ -3,8 +3,9 @@
 use core::num::NonZeroU32;
 
 use ising_generators::descriptor::{
-    check_family_id, params_digest, topology_order_digest, Descriptor, FieldSpec, IdContext,
-    Params, Value as ParamValue, ValueType, MAX_PARAMS_LEN,
+    admit, check_family_id, check_size_bounds, params_digest, topology_order_digest,
+    AdvertisedLimits, Contract, Descriptor, FieldSpec, IdContext, Params, SizeBounds,
+    TopologyStats, Value as ParamValue, ValueType, MAX_PARAMS_LEN,
 };
 use ising_generators::instance::{validate_metadata, Instance, InstanceLimits, InstanceParts};
 use ising_generators::legacy::derive_nonce;
@@ -891,4 +892,215 @@ fn tighter_limits_apply() {
         ),
         Some(InstanceLimits::FAM_37)
     );
+}
+
+fn example_size_bounds(params: &Params<'_>, stats: &TopologyStats) -> Result<SizeBounds, Code> {
+    let Some(ParamValue::Unsigned(layers)) = params.get(1) else {
+        return Err(Code::ParamsMalformed);
+    };
+    let overflow = || Code::BoundsExceeded;
+    let nodes = layers.checked_mul(stats.n_nodes).ok_or_else(overflow)?;
+    let edges = layers
+        .checked_mul(stats.n_edges)
+        .and_then(|e| e.checked_add(layers.saturating_sub(1).checked_mul(stats.n_nodes)?))
+        .ok_or_else(overflow)?;
+    let degree = stats
+        .max_degree
+        .checked_add(layers.saturating_sub(1).min(2))
+        .ok_or_else(overflow)?;
+    Ok(SizeBounds {
+        nodes,
+        edges,
+        degree,
+    })
+}
+
+const VECTOR_CONTRACT: Contract = Contract {
+    family_id: "vectors/uniform-field",
+    revision: 1,
+    schema: UNIFORM_FIELD,
+    metadata_kinds: &[1, 3],
+    limits: InstanceLimits::FAM_37,
+    size_bounds: example_size_bounds,
+};
+
+/// Canonical `UNIFORM_FIELD` bytes for `layers` and `field_milli`.
+fn uniform_params(layers: u16, field_milli: i32) -> Vec<u8> {
+    let mut b = vec![0x01, 1, 0, 2, 0, 0, 0];
+    b.extend_from_slice(&layers.to_le_bytes());
+    b.extend_from_slice(&[2, 0, 4, 0, 0, 0]);
+    b.extend_from_slice(&field_milli.to_le_bytes());
+    b
+}
+
+fn num(case: &Value, key: &str) -> Result<u64, String> {
+    match case.get(key) {
+        Some(Value::Null) | None => Ok(0),
+        Some(Value::String(s)) => s.parse().map_err(|_| format!("bad number {key}: {s}")),
+        Some(v) => v.as_u64().ok_or_else(|| format!("bad number {key}: {v}")),
+    }
+}
+
+#[test]
+fn size_bound_vectors() -> Result<(), String> {
+    let doc = core()?;
+    for case in section(&doc, "size_bounds")? {
+        let name = str_field(case, "name")?;
+        let layers = u16::try_from(num(case, "n_layers")?).map_err(|e| e.to_string())?;
+        let bytes = uniform_params(layers, 0);
+        let params = Params::parse(UNIFORM_FIELD, &bytes).map_err(|c| format!("{name}: {c}"))?;
+        let stats = TopologyStats {
+            n_nodes: num(case, "n_nodes")?,
+            n_edges: num(case, "n_edges")?,
+            max_degree: num(case, "max_degree")?,
+        };
+        let got = example_size_bounds(&params, &stats).map_err(|c| format!("{name}: {c}"))?;
+        let want = SizeBounds {
+            nodes: num(case, "nodes")?,
+            edges: num(case, "edges")?,
+            degree: num(case, "degree")?,
+        };
+        if got != want {
+            return Err(format!("{name}: sizes {got:?} want {want:?}"));
+        }
+        let advertised = AdvertisedLimits {
+            max_nodes: num(case, "limit_max_nodes")?,
+            max_edges: num(case, "limit_max_edges")?,
+            max_degree: num(case, "limit_max_degree")?,
+        };
+        let code = code_of(&check_size_bounds(
+            &got,
+            &InstanceLimits::FAM_37,
+            &advertised,
+        ));
+        if code != expected(case)? {
+            return Err(format!("{name}: code {code:?}"));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn size_bound_overflow_is_code_13() -> Result<(), String> {
+    let bytes = uniform_params(16, 0);
+    let params = Params::parse(UNIFORM_FIELD, &bytes).map_err(|c| c.to_string())?;
+    let stats = TopologyStats {
+        n_nodes: u64::MAX,
+        n_edges: 0,
+        max_degree: 0,
+    };
+    if code_of(&example_size_bounds(&params, &stats)) != Some(13) {
+        return Err("overflow must give 13".into());
+    }
+    Ok(())
+}
+
+#[test]
+fn revision_vectors() -> Result<(), String> {
+    let doc = core()?;
+    for case in section(&doc, "revisions")? {
+        let name = str_field(case, "name")?;
+        let revision = u32_of(case.get("revision").ok_or("no revision")?)?;
+        let want = if expected(case)? == Some(4) { 4 } else { 5 };
+        let got = code_of(&admit(&[], b"quip/x", revision, &[], &[0; 32]));
+        if got != Some(want) {
+            return Err(format!("{name}: gave {got:?}, want {want}"));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn unknown_family_beats_params_length() {
+    let big = [0_u8; 4097];
+    let got = admit(&[VECTOR_CONTRACT], b"quip/routing", 1, &big, &[0; 32]);
+    assert_eq!(code_of(&got), Some(5));
+}
+
+#[test]
+fn unknown_revision_is_code_6() {
+    let got = admit(
+        &[VECTOR_CONTRACT],
+        b"vectors/uniform-field",
+        2,
+        &[],
+        &[0; 32],
+    );
+    assert_eq!(code_of(&got), Some(6));
+}
+
+#[test]
+fn example_namespace_is_code_3_in_a_lease() {
+    let got = admit(
+        &[VECTOR_CONTRACT],
+        b"example/uniform-field",
+        1,
+        &[],
+        &[0; 32],
+    );
+    assert_eq!(code_of(&got), Some(3));
+}
+
+#[test]
+fn admission_codes_7_8_9() {
+    let id = b"vectors/uniform-field";
+    let good = uniform_params(2, -4);
+    let digest = params_digest(&good);
+    assert!(admit(&[VECTOR_CONTRACT], id, 1, &good, &digest).is_ok());
+    let bad = [0x01, 0x01];
+    assert_eq!(
+        code_of(&admit(
+            &[VECTOR_CONTRACT],
+            id,
+            1,
+            &bad,
+            &params_digest(&bad)
+        )),
+        Some(7)
+    );
+    let short = digest.get(..31).unwrap_or(&[]);
+    assert_eq!(
+        code_of(&admit(&[VECTOR_CONTRACT], id, 1, &good, short)),
+        Some(8)
+    );
+    assert_eq!(
+        code_of(&admit(&[VECTOR_CONTRACT], id, 1, &good, &[0; 32])),
+        Some(8)
+    );
+    let out = uniform_params(2, -4001);
+    assert_eq!(
+        code_of(&admit(
+            &[VECTOR_CONTRACT],
+            id,
+            1,
+            &out,
+            &params_digest(&out)
+        )),
+        Some(9)
+    );
+}
+
+#[test]
+fn admitted_descriptor_reports_size_bounds() -> Result<(), String> {
+    let doc = core()?;
+    let bytes = named_params(&doc, "spec-valid")?;
+    let digest = params_digest(&bytes);
+    let contracts = [VECTOR_CONTRACT];
+    let admitted = admit(&contracts, b"vectors/uniform-field", 1, &bytes, &digest)
+        .map_err(|c| c.to_string())?;
+    let stats = TopologyStats {
+        n_nodes: 100,
+        n_edges: 150,
+        max_degree: 4,
+    };
+    let got = admitted.size_bounds(&stats).map_err(|c| c.to_string())?;
+    let want = SizeBounds {
+        nodes: 200,
+        edges: 400,
+        degree: 5,
+    };
+    if got != want {
+        return Err(format!("{got:?}"));
+    }
+    Ok(())
 }

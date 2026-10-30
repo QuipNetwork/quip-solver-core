@@ -4,6 +4,7 @@
 //! parameter codec (FAM-10 to FAM-16). It does not allocate.
 
 use crate::digest::BufferedHasher;
+use crate::instance::InstanceLimits;
 use crate::Code;
 
 /// The first byte of every canonical parameter encoding.
@@ -418,4 +419,179 @@ pub fn topology_order_digest(nodes: &[u32], edges: &[(u32, u32)]) -> Option<[u8;
         hasher.put(&v.to_le_bytes());
     }
     Some(hasher.finish())
+}
+
+/// Counts from a built topology that a family size bound reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TopologyStats {
+    /// The node count of the base topology.
+    pub n_nodes: u64,
+    /// The edge count of the base topology.
+    pub n_edges: u64,
+    /// The largest degree of the base topology.
+    pub max_degree: u64,
+}
+
+/// The sizes a family contract computes for one instance.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SizeBounds {
+    /// The node count of the instance.
+    pub nodes: u64,
+    /// The edge count of the instance.
+    pub edges: u64,
+    /// The largest degree of the instance.
+    pub degree: u64,
+}
+
+/// Limits a lease advertises. A value of 0 makes no claim.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AdvertisedLimits {
+    /// The advertised node limit, or 0.
+    pub max_nodes: u64,
+    /// The advertised edge limit, or 0.
+    pub max_edges: u64,
+    /// The advertised degree limit, or 0.
+    pub max_degree: u64,
+}
+
+/// Check computed sizes against the contract limits and the advertised
+/// limits.
+///
+/// # Errors
+///
+/// Returns [`Code::BoundsExceeded`] (13) when the nodes or edges are above the
+/// contract limits, or when a size is above an advertised limit that is not 0.
+pub fn check_size_bounds(
+    bounds: &SizeBounds,
+    limits: &InstanceLimits,
+    advertised: &AdvertisedLimits,
+) -> Result<(), Code> {
+    let over = |value: u64, limit: u64| limit != 0 && value > limit;
+    if bounds.nodes > u64::from(limits.max_nodes())
+        || bounds.edges > u64::from(limits.max_edges())
+        || over(bounds.nodes, advertised.max_nodes)
+        || over(bounds.edges, advertised.max_edges)
+        || over(bounds.degree, advertised.max_degree)
+    {
+        return Err(Code::BoundsExceeded);
+    }
+    Ok(())
+}
+
+/// The function a family revision uses to compute the sizes of an instance
+/// from its parameters and base topology.
+///
+/// # Errors
+///
+/// Returns [`Code::BoundsExceeded`] (13) when a size overflows `u64`.
+pub type SizeBoundsFn = fn(&Params<'_>, &TopologyStats) -> Result<SizeBounds, Code>;
+
+/// One family revision a solver supports.
+#[derive(Clone, Copy, Debug)]
+pub struct Contract {
+    /// The family id.
+    pub family_id: &'static str,
+    /// The revision.
+    pub revision: u32,
+    /// The parameter schema.
+    pub schema: &'static [FieldSpec],
+    /// The metadata kinds the family accepts.
+    pub metadata_kinds: &'static [u16],
+    /// The instance limits of the revision.
+    pub limits: InstanceLimits,
+    /// The size bound function of the revision.
+    pub size_bounds: SizeBoundsFn,
+}
+
+/// A descriptor that passed admission, with its parsed parameters and the
+/// contract that matched.
+#[derive(Clone, Copy, Debug)]
+pub struct Admitted<'a> {
+    descriptor: Descriptor<'a>,
+    params: Params<'a>,
+    contract: &'a Contract,
+}
+
+impl<'a> Admitted<'a> {
+    /// The descriptor.
+    #[must_use]
+    pub const fn descriptor(&self) -> &Descriptor<'a> {
+        &self.descriptor
+    }
+
+    /// The parsed parameters.
+    #[must_use]
+    pub const fn params(&self) -> &Params<'a> {
+        &self.params
+    }
+
+    /// The matching contract.
+    #[must_use]
+    pub const fn contract(&self) -> &'a Contract {
+        self.contract
+    }
+
+    /// The sizes the contract computes for `stats`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Code::BoundsExceeded`] (13) when the size function reports
+    /// an overflow.
+    pub fn size_bounds(&self, stats: &TopologyStats) -> Result<SizeBounds, Code> {
+        (self.contract.size_bounds)(&self.params, stats)
+    }
+}
+
+/// Admit a lease descriptor against the supported contracts.
+///
+/// The checks run in this order, and none allocates: the id and revision
+/// ([`Descriptor::new`] with [`IdContext::Lease`]), then the family and
+/// revision lookup, the parameter layout, the sent parameter digest, and the
+/// parameter bounds.
+///
+/// Codes 1, 2, 10, 11, and 12 belong to the caller, and so does the admission
+/// use of code 13 (see [`check_size_bounds`]).
+///
+/// # Errors
+///
+/// Returns [`Code::FamilyIdInvalid`] (3), [`Code::RevisionZero`] (4),
+/// [`Code::FamilyUnsupported`] (5) when no contract has the id,
+/// [`Code::RevisionUnsupported`] (6) when a contract has the id but not the
+/// revision, [`Code::ParamsMalformed`] (7), [`Code::ParamsDigestMismatch`]
+/// (8) when the sent digest is not 32 bytes or differs from the parameter
+/// digest, or [`Code::ParamsOutOfBounds`] (9).
+pub fn admit<'a>(
+    contracts: &'a [Contract],
+    family_id: &'a [u8],
+    revision: u32,
+    params: &'a [u8],
+    sent_params_digest: &[u8],
+) -> Result<Admitted<'a>, Code> {
+    let descriptor = Descriptor::new(family_id, revision, params, IdContext::Lease)?;
+    let mut known = false;
+    let mut found = None;
+    for contract in contracts {
+        if contract.family_id.as_bytes() == family_id {
+            known = true;
+            if contract.revision == revision {
+                found = Some(contract);
+                break;
+            }
+        }
+    }
+    let contract = match found {
+        Some(contract) => contract,
+        None if known => return Err(Code::RevisionUnsupported),
+        None => return Err(Code::FamilyUnsupported),
+    };
+    let parsed = Params::parse(contract.schema, params)?;
+    if sent_params_digest != params_digest(params).as_slice() {
+        return Err(Code::ParamsDigestMismatch);
+    }
+    parsed.check_bounds()?;
+    Ok(Admitted {
+        descriptor,
+        params: parsed,
+        contract,
+    })
 }
