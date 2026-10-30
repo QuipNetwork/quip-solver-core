@@ -5,6 +5,7 @@ from pathlib import Path
 
 import blake3
 import pytest
+from family_oracle import decisions
 from family_oracle.chacha8 import ChaCha8, shuffle, uniform
 from family_oracle.digests import (
     derive_key,
@@ -411,3 +412,183 @@ def test_archived_nonce_is_zero_filled():
 def test_default_node_order():
     used = {907, 41, 4294967295, 12, 3}
     assert default_node_order(SPARSE_NODES, used) == [907, 41, 4294967295, 12, 3]
+
+
+# ---- decision tables ----
+
+D1 = params_digest(SPEC_PARAMS)
+D2 = params_digest(encode_params(UNIFORM_FIELD, {"n_layers": 1, "field_milli": -1500}))
+
+_CODE_ROWS = [
+    (1, "DescriptorMissing", ["admission"], "MALFORMED", None),
+    (2, "DescriptorUnexpected", ["admission"], "MALFORMED", None),
+    (3, "FamilyIdInvalid", ["admission"], "MALFORMED", None),
+    (4, "RevisionZero", ["admission"], "MALFORMED", None),
+    (5, "FamilyUnsupported", ["admission"], "FAMILY_UNSUPPORTED", None),
+    (6, "RevisionUnsupported", ["admission"], "FAMILY_UNSUPPORTED", None),
+    (7, "ParamsMalformed", ["admission", "explicit-job"], "MALFORMED", "MALFORMED"),
+    (
+        8,
+        "ParamsDigestMismatch",
+        ["admission", "explicit-job"],
+        "MALFORMED",
+        "MALFORMED",
+    ),
+    (9, "ParamsOutOfBounds", ["admission", "explicit-job"], "MALFORMED", "MALFORMED"),
+    (
+        10,
+        "ParamsRestricted",
+        ["admission", "explicit-job"],
+        "FAMILY_UNSUPPORTED",
+        "FAMILY_UNSUPPORTED",
+    ),
+    (11, "TopologyOrderMismatch", ["admission"], "TOPOLOGY_MISMATCH", None),
+    (12, "TopologyIncompatible", ["admission"], "FAMILY_UNSUPPORTED", None),
+    (
+        13,
+        "BoundsExceeded",
+        ["admission", "generation", "explicit-job"],
+        "TOO_LARGE",
+        "TOO_LARGE",
+    ),
+    (14, "NoInstance", ["generation"], None, None),
+    (15, "InstanceDigestMismatch", ["explicit-job"], None, "MALFORMED"),
+    (16, "MetadataInvalid", ["explicit-job"], None, "MALFORMED"),
+]
+
+
+def test_codes_table():
+    expected = [
+        {
+            "code": code,
+            "name": name,
+            "phases": phases,
+            "wire_admission": admission,
+            "wire_generation": None,
+            "wire_explicit_job": explicit,
+        }
+        for code, name, phases, admission, explicit in _CODE_ROWS
+    ]
+    assert decisions.CODES == expected
+
+
+def test_order_lengths():
+    assert len(decisions.LEASE_ADMISSION_ORDER) == 22
+    assert len(decisions.EXPLICIT_JOB_ORDER) == 8
+
+
+def _lease(faults: list[str]) -> tuple[str, int | None, str | None]:
+    step = decisions.winner(decisions.LEASE_ADMISSION_ORDER, faults)
+    code, wire = decisions.step_outcome(step, "admission")
+    return step, code, wire
+
+
+def _job(faults: list[str]) -> tuple[str, int | None, str | None]:
+    step = decisions.winner(decisions.EXPLICIT_JOB_ORDER, faults)
+    code, wire = decisions.step_outcome(step, "explicit-job")
+    return step, code, wire
+
+
+def test_lease_admission_winners():
+    assert _lease(["code:1", "session:expired"]) == (
+        "session:expired",
+        None,
+        "EXPIRED",
+    )
+    assert _lease(["code:1", "field:salt-count-zero"]) == (
+        "field:salt-count-zero",
+        None,
+        "MALFORMED",
+    )
+    assert _lease(["session:topology-hash-mismatch", "code:10"]) == (
+        "code:10",
+        10,
+        "FAMILY_UNSUPPORTED",
+    )
+    assert _lease(["code:11", "session:topology-hash-mismatch"]) == (
+        "session:topology-hash-mismatch",
+        None,
+        "TOPOLOGY_MISMATCH",
+    )
+    assert _lease(["code:13", "code:11"])[1] == 11
+    assert _lease(["code:5"]) == ("code:5", 5, "FAMILY_UNSUPPORTED")
+
+
+def test_explicit_job_winners():
+    assert _job(["tier:not-listed", "code:15"]) == (
+        "tier:not-listed",
+        None,
+        None,
+    )
+    assert _job(["code:15", "code:13"]) == ("code:13", 13, "TOO_LARGE")
+    assert _job(["code:16", "code:8"])[1] == 8
+    assert _job(["code:16"]) == ("code:16", 16, "MALFORMED")
+
+
+def test_winner_rejects_bad_input():
+    with pytest.raises(ValueError):
+        decisions.winner(decisions.LEASE_ADMISSION_ORDER, [])
+    with pytest.raises(ValueError):
+        decisions.winner(decisions.LEASE_ADMISSION_ORDER, ["code:99"])
+
+
+def _entry(family_id, revisions, digests=()):
+    return {
+        "family_id": family_id,
+        "revisions": list(revisions),
+        "params_digests": [d.hex() if isinstance(d, bytes) else d for d in digests],
+    }
+
+
+def test_entry_claims():
+    t = "quip/twisted-ice-dimer"
+    cases = [
+        ([_entry(t, [1])], [True]),
+        ([_entry(t, [1], [D1])], [True]),
+        ([_entry("example/foo", [1])], [False]),
+        ([_entry(t, [])], [False]),
+        ([_entry(t, [0, 1])], [False]),
+        ([_entry(t, [1], ["00" * 31])], [False]),
+        ([_entry("Quip/X", [1])], [False]),
+        (
+            [_entry(t, [1]), _entry(t, [2]), _entry("quip/other", [1])],
+            [False, False, True],
+        ),
+    ]
+    for entries, expected in cases:
+        assert decisions.entry_claims(entries) == expected
+
+
+def test_lease_codes():
+    entries = [
+        _entry("quip/twisted-ice-dimer", [1]),
+        _entry("quip/charged-ice", [2], [D1]),
+    ]
+    cases = [
+        ("quip/twisted-ice-dimer", 1, D1, None),
+        ("quip/twisted-ice-dimer", 2, D1, 6),
+        ("quip/charged-ice", 1, D1, 6),
+        ("quip/routing", 1, D1, 5),
+        ("quip/charged-ice", 2, D1, None),
+        ("quip/charged-ice", 2, D2, 10),
+    ]
+    for family_id, revision, digest, expected in cases:
+        assert decisions.lease_code(entries, family_id, revision, digest) == expected
+
+
+def test_field_length_codes():
+    f = decisions.field_length_code
+    d = "FamilyDescriptor.params_digest"
+    assert [f(d, n, None) for n in (32, 31, 33, 0)] == [None, 8, 8, 8]
+    g = "IsingProblemGenerator.topology_order_digest"
+    assert [f(g, n, None) for n in (32, 0, 31)] == [None, 1, 1]
+    n = "FamilyBinding.nonce"
+    assert [f(n, k, None) for k in (0, 32, 31, 33)] == [None, None, 15, 15]
+    i = "FamilyBinding.instance_digest"
+    assert [f(i, k, None) for k in (32, 0)] == [None, 15]
+    t = "FamilyBinding.topology_order_digest"
+    assert [f(t, k, None) for k in (32, 31)] == [None, 15]
+    ids = "FamilyBinding.node_ids"
+    assert [f(ids, k, 5) for k in (5, 4, 6)] == [None, 15, 15]
+    with pytest.raises(ValueError):
+        f("Nope.field", 1, None)
