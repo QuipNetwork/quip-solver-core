@@ -6,8 +6,10 @@ from . import build
 
 
 def _targets() -> dict:
-    # Task 11 adds LEGACY_PATH with build_legacy.
-    return {build.CORE_PATH: build.render(build.build_core())}
+    return {
+        build.CORE_PATH: build.render(build.build_core()),
+        build.LEGACY_PATH: build.render(build.build_legacy()),
+    }
 
 
 def main(argv: list[str]) -> int:

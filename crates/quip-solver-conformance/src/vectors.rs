@@ -164,3 +164,10 @@ pub const FAMILY_CORE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/vectors/families/core.json"
 ));
+
+/// References to the legacy production draw vectors, pinned by case hash
+/// (schema revision 1, provenance `legacy-production`).
+pub const FAMILY_LEGACY: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/vectors/families/legacy.json"
+));

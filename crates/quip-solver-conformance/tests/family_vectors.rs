@@ -8,6 +8,8 @@ mod decisions;
 mod digests;
 #[path = "family_vectors/instance.rs"]
 mod instance;
+#[path = "family_vectors/legacy.rs"]
+mod legacy;
 #[path = "family_vectors/schema_check.rs"]
 mod schema_check;
 
@@ -16,6 +18,10 @@ use serde_json::{json, Value};
 
 fn core() -> Result<Value, String> {
     serde_json::from_str(quip_solver_conformance::FAMILY_CORE).map_err(|e| e.to_string())
+}
+
+fn legacy_doc() -> Result<Value, String> {
+    serde_json::from_str(quip_solver_conformance::FAMILY_LEGACY).map_err(|e| e.to_string())
 }
 
 fn section<'a>(doc: &'a Value, name: &str) -> Result<&'a [Value], String> {
@@ -1214,14 +1220,12 @@ fn check_size_bounds(doc: &Value) -> Result<(), String> {
     Ok(())
 }
 
-/// `SC-2:legacy-replay-bit-for-bit` has its case in legacy.json. Task 11 adds
-/// that file and removes this exemption.
-const EVIDENCE_IN_LEGACY_FILE: &str = "legacy-replay-bit-for-bit";
 /// Number of `SC-2:` ids in the spec Traceability table.
 const EVIDENCE_ID_COUNT: usize = 51;
 
-fn check_evidence(doc: &Value) -> Result<(), String> {
-    let evidence = doc.get("evidence").ok_or("no evidence section")?;
+/// The evidence lists come from `core`. Case evidence is cited across `docs`.
+fn check_evidence(core: &Value, docs: &[&Value]) -> Result<(), String> {
+    let evidence = core.get("evidence").ok_or("no evidence section")?;
     let ids_of = |key: &str| -> Result<Vec<String>, String> {
         let items = evidence
             .get(key)
@@ -1256,27 +1260,29 @@ fn check_evidence(doc: &Value) -> Result<(), String> {
         ));
     }
     let mut cited = std::collections::BTreeSet::new();
-    for (key, cases) in doc.as_object().ok_or("document is not an object")? {
-        if key == "evidence" {
-            continue;
-        }
-        let Some(cases) = cases.as_array() else {
-            continue;
-        };
-        for case in cases {
-            for id in case
-                .get("evidence")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-            {
-                let id = id.as_str().ok_or("evidence item is not a string")?;
-                cited.extend([id.strip_prefix("SC-2:").unwrap_or(id).to_owned()]);
+    for doc in docs {
+        for (key, cases) in doc.as_object().ok_or("document is not an object")? {
+            if key == "evidence" {
+                continue;
+            }
+            let Some(cases) = cases.as_array() else {
+                continue;
+            };
+            for case in cases {
+                for id in case
+                    .get("evidence")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
+                    let id = id.as_str().ok_or("evidence item is not a string")?;
+                    cited.extend([id.strip_prefix("SC-2:").unwrap_or(id).to_owned()]);
+                }
             }
         }
     }
     for id in provided.iter().chain(&partial) {
-        if id != EVIDENCE_IN_LEGACY_FILE && !cited.contains(id) {
+        if !cited.contains(id) {
             return Err(format!("evidence id {id} has no case"));
         }
     }
@@ -1308,8 +1314,23 @@ fn check_core(doc: &Value) -> Result<(), String> {
     check_field_lengths(doc)?;
     check_family_support(doc)?;
     check_lease_codes(doc)?;
-    check_size_bounds(doc)?;
-    check_evidence(doc)
+    check_size_bounds(doc)
+}
+
+fn check_legacy(doc: &Value) -> Result<(), String> {
+    validate(&schema()?, doc)?;
+    check_names_unique(doc)?;
+    for reference in section(doc, "legacy_references")? {
+        let case = legacy::referenced_case(reference)?;
+        compare(
+            reference,
+            "case_blake3",
+            &legacy::case_blake3(&case)?,
+            &str_field(reference, "case_blake3")?.to_owned(),
+        )?;
+        legacy::replay(reference, &case)?;
+    }
+    Ok(())
 }
 
 #[test]
@@ -1881,7 +1902,105 @@ fn size_bound_cases_recompute() -> Result<(), String> {
 
 #[test]
 fn every_provided_evidence_id_has_a_case() -> Result<(), String> {
-    check_evidence(&core()?)
+    check_evidence(&core()?, &[&core()?, &legacy_doc()?])
+}
+
+#[test]
+fn legacy_evidence_alone_is_not_enough() -> Result<(), String> {
+    expect_err(
+        &check_evidence(&core()?, &[&core()?]),
+        "a core-only evidence check",
+    )
+}
+
+#[test]
+fn legacy_fixture_matches_schema() -> Result<(), String> {
+    validate(&schema()?, &legacy_doc()?)?;
+    match legacy_doc()?.get("provenance").and_then(Value::as_str) {
+        Some("legacy-production") => Ok(()),
+        other => Err(format!(
+            "provenance is {other:?}, expected legacy-production"
+        )),
+    }
+}
+
+#[test]
+fn legacy_case_hashes_match_referenced_vectors() -> Result<(), String> {
+    for reference in section(&legacy_doc()?, "legacy_references")? {
+        let case = legacy::referenced_case(reference)?;
+        compare(
+            reference,
+            "case_blake3",
+            &legacy::case_blake3(&case)?,
+            &str_field(reference, "case_blake3")?.to_owned(),
+        )?;
+    }
+    Ok(())
+}
+
+#[test]
+fn legacy_cases_replay_bit_for_bit() -> Result<(), String> {
+    check_legacy(&legacy_doc()?)
+}
+
+#[test]
+fn canonical_json_ignores_key_order() -> Result<(), String> {
+    let first: Value =
+        serde_json::from_str(r#"{"b":[1,{"y":2,"x":1}],"a":"s"}"#).map_err(|e| e.to_string())?;
+    let second: Value =
+        serde_json::from_str(r#"{"a":"s","b":[1,{"x":1,"y":2}]}"#).map_err(|e| e.to_string())?;
+    compare(
+        &first,
+        "canonical",
+        &legacy::canonical_json(&first)?,
+        &r#"{"a":"s","b":[1,{"x":1,"y":2}]}"#.to_owned(),
+    )?;
+    compare(
+        &first,
+        "hash",
+        &legacy::case_blake3(&first)?,
+        &legacy::case_blake3(&second)?,
+    )
+}
+
+#[test]
+fn canonical_json_rejects_floats_and_non_ascii() {
+    assert!(legacy::canonical_json(&json!({"a": 1.5})).is_err());
+    assert!(legacy::canonical_json(&json!(["caf\u{e9}"])).is_err());
+    assert!(legacy::canonical_json(&json!({"caf\u{e9}": 1})).is_err());
+}
+
+#[test]
+fn changed_legacy_case_fails() -> Result<(), String> {
+    let reference = legacy_doc()?
+        .pointer("/legacy_references")
+        .and_then(Value::as_array)
+        .and_then(|refs| {
+            refs.iter()
+                .find(|r| r.get("section").and_then(Value::as_str) == Some("cases"))
+                .cloned()
+        })
+        .ok_or("no golden_lease reference")?;
+    let case = legacy::referenced_case(&reference)?;
+    let nonce = case
+        .pointer("/salts/0/nonce")
+        .and_then(Value::as_str)
+        .ok_or("no nonce")?;
+    let changed = mutate(&case, "/salts/0/nonce", json!(flip_last_hex_digit(nonce)));
+    if legacy::case_blake3(&changed)? == str_field(&reference, "case_blake3")? {
+        return Err("a changed case kept its hash".to_owned());
+    }
+    expect_err(&legacy::replay(&reference, &changed), "a changed nonce")
+}
+
+#[test]
+fn changed_legacy_hash_fails() -> Result<(), String> {
+    let doc = mutate(
+        &legacy_doc()?,
+        "/legacy_references/0/case_blake3",
+        json!("0".repeat(64)),
+    );
+    expect_err(&check_legacy(&doc), "a wrong case hash")
 }
 
 #[test]
@@ -1951,7 +2070,10 @@ fn size_bound_overflow_is_code_thirteen() {
 #[test]
 fn unlisted_evidence_id_fails() -> Result<(), String> {
     let doc = mutate(&core()?, "/evidence/provided/0", json!("no-such-case"));
-    expect_err(&check_evidence(&doc), "an id with no case")
+    expect_err(
+        &check_evidence(&doc, &[&doc, &legacy_doc()?]),
+        "an id with no case",
+    )
 }
 
 #[test]
