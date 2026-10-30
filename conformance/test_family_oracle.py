@@ -13,6 +13,18 @@ from family_oracle.digests import (
     lease_salts,
     params_digest,
 )
+from family_oracle.instance import (
+    bound_code,
+    canonical_bytes,
+    default_node_order,
+    edge_fault,
+    energy_plain,
+    example_size_bounds,
+    metadata_code,
+    pack_spins,
+    size_bound_code,
+    unpack_spins,
+)
 from family_oracle.params import (
     ALL_TYPES,
     UNIFORM_FIELD,
@@ -254,3 +266,148 @@ def test_label_limits():
     assert not label_valid(b"")
     assert not label_valid(b"a" * 33)
     assert not label_valid(b"fiel\x80")
+
+
+SPARSE_NODES = [907, 41, 0, 4294967295, 12, 3]
+SPARSE_METADATA = bytes.fromhex("020001000400000001020304030001000000ff")
+SPARSE_EDGES = [(0, 1), (0, 4), (1, 3), (2, 3), (3, 4)]
+
+
+def _section(kind: int, payload: bytes) -> bytes:
+    return kind.to_bytes(2, "little") + len(payload).to_bytes(4, "little") + payload
+
+
+def _region(*sections: bytes) -> bytes:
+    return len(sections).to_bytes(2, "little") + b"".join(sections)
+
+
+def test_spec_size_bounds_example():
+    bounds = example_size_bounds(2, 100, 150, 4)
+    assert bounds == (200, 400, 5)
+    assert size_bound_code(bounds, None, None, 4) == 13
+    assert size_bound_code(bounds, None, None, 0) is None
+    assert size_bound_code(bounds, None, None, None) is None
+    assert size_bound_code(bounds, 0, 0, 0) is None
+    assert size_bound_code(bounds, 199, None, None) == 13
+    assert size_bound_code(bounds, None, 399, None) == 13
+    assert size_bound_code(bounds, 200, 400, 5) is None
+
+
+def test_size_bounds_instance_limits():
+    def code(*args):
+        return size_bound_code(example_size_bounds(*args), None, None, None)
+
+    assert code(2, 8388608, 0, 0) is None
+    assert code(2, 8388609, 0, 0) == 13
+    assert code(1, 2, 67108864, 1) is None
+    assert code(1, 2, 67108865, 1) == 13
+    assert code(16, 4294967295, 0, 0) == 13
+
+
+def test_size_bounds_u64_overflow():
+    huge = example_size_bounds(2**40, 2**30, 0, 0)
+    assert size_bound_code(huge, None, None, None) == 13
+    assert size_bound_code((2**64, 0, 0), None, None, None) == 13
+    assert size_bound_code((0, 0, 2**64), None, None, None) == 13
+
+
+def test_metadata_faults():
+    kinds = [1, 3]
+    assert metadata_code(SPARSE_METADATA, kinds) is None
+    assert metadata_code(bytes.fromhex("0000"), kinds) is None
+    one = _section(1, b"\x01")
+    three = _section(3, b"\x01")
+    assert metadata_code(_region(_section(6, b"")), kinds) == 16
+    assert metadata_code(_region(_section(0, b"")), kinds) == 16
+    assert metadata_code(_region(_section(2, b"")), kinds) == 16
+    assert metadata_code(_region(three, one), kinds) == 16
+    assert metadata_code(_region(one, one), kinds) == 16
+    assert metadata_code(bytes.fromhex("010001000900000001"), kinds) == 16
+    assert metadata_code(bytes.fromhex("0200") + one, kinds) == 16
+    assert metadata_code(SPARSE_METADATA + b"\x00", kinds) == 16
+    assert metadata_code(b"\x00", kinds) == 16
+    assert metadata_code(b"", kinds) == 16
+    assert metadata_code(bytes.fromhex("0000") + b"\x00", kinds) == 16
+
+
+def test_bounds():
+    for q in ("h", "j"):
+        assert bound_code(q, 2**30) is None
+        assert bound_code(q, -(2**30)) is None
+        for v in (2**30 + 1, -(2**30) - 1, -(2**31), 2**31 - 1):
+            assert bound_code(q, v) == 13
+    assert bound_code("offset", 2**56) is None
+    assert bound_code("offset", -(2**56)) is None
+    for v in (2**56 + 1, -(2**63), 2**63 - 1):
+        assert bound_code("offset", v) == 13
+
+
+def test_edge_faults():
+    assert edge_fault(SPARSE_EDGES, 5) is None
+    defects = {
+        "unsorted": ([(0, 4), (0, 1), (1, 3), (2, 3), (3, 4)], "FAM-32"),
+        "duplicate": ([(0, 1), (0, 1), (1, 3), (2, 3), (3, 4)], "FAM-32"),
+        "self-loop": ([(0, 0), (0, 4), (1, 3), (2, 3), (3, 4)], "FAM-32"),
+        "reversed-pair": ([(1, 0), (0, 4), (1, 3), (2, 3), (3, 4)], "FAM-32"),
+        "position-out-of-range": (
+            [(0, 1), (0, 4), (1, 3), (2, 3), (3, 5)],
+            "FAM-30",
+        ),
+    }
+    for name, (edges, rule) in defects.items():
+        assert edge_fault(edges, 5) == rule, name
+    # A position fault wins over an order fault.
+    assert edge_fault([(5, 0), (0, 1)], 5) == "FAM-30"
+
+
+def test_spins_packing():
+    assert pack_spins([1, -1, 1, -1, 1]).hex() == "15"
+    assert pack_spins([1] * 10).hex() == "ff03"
+    assert len(pack_spins([1, -1] * 4)) == 1
+    assert unpack_spins(bytes.fromhex("15"), 5) == ([1, -1, 1, -1, 1], None)
+    assert unpack_spins(bytes.fromhex("35"), 5) == (None, "padding-bit-set")
+    assert unpack_spins(b"", 5) == (None, "wrong-length")
+    assert unpack_spins(bytes.fromhex("1500"), 5) == (None, "wrong-length")
+    assert unpack_spins(bytes.fromhex("ff07"), 10) == (None, "padding-bit-set")
+    assert unpack_spins(bytes.fromhex("ff03"), 10) == ([1] * 10, None)
+
+
+def test_energy_plain():
+    assert energy_plain([1, 2], [3], [(0, 1)], [1, -1]) == 1 - 2 - 3
+    assert energy_plain([1, 2], [3], [(0, 1)], [1, 1]) == 1 + 2 + 3
+
+
+def _sparse_canonical(nonce: bytes) -> bytes:
+    return canonical_bytes(
+        b"\x01" * 32,
+        b"\x02" * 32,
+        nonce,
+        [907, 41, 4294967295, 12, 3],
+        SPARSE_EDGES,
+        [1073741824, -1073741824, 0, 1500, -1],
+        [1073741824, -1073741824, 1000, -1000, 0],
+        -72057594037927936,
+        SPARSE_METADATA,
+    )
+
+
+def test_canonical_bytes_layout():
+    data = _sparse_canonical(b"\x03" * 32)
+    assert data[0] == 1
+    assert data[1:33] == b"\x01" * 32
+    assert data[33:65] == b"\x02" * 32
+    assert data[65:97] == b"\x03" * 32
+    assert data[97:101] == (5).to_bytes(4, "little")
+    assert data.endswith(SPARSE_METADATA)
+    assert len(data) == 1 + 96 + 4 + 20 + 4 + 40 + 20 + 20 + 8 + len(SPARSE_METADATA)
+    with pytest.raises(ValueError):
+        _sparse_canonical(b"\x03" * 31)
+
+
+def test_archived_nonce_is_zero_filled():
+    assert _sparse_canonical(b"") == _sparse_canonical(bytes(32))
+
+
+def test_default_node_order():
+    used = {907, 41, 4294967295, 12, 3}
+    assert default_node_order(SPARSE_NODES, used) == [907, 41, 4294967295, 12, 3]
