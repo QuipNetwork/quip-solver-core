@@ -12,10 +12,6 @@
 
 #![no_std]
 
-#[expect(
-    unused_extern_crates,
-    reason = "later modules use alloc; remove this attribute with the first use"
-)]
 extern crate alloc;
 
 mod digest;

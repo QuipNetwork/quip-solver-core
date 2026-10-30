@@ -6,6 +6,7 @@ use ising_generators::descriptor::{
     check_family_id, params_digest, topology_order_digest, Descriptor, FieldSpec, IdContext,
     Params, Value as ParamValue, ValueType, MAX_PARAMS_LEN,
 };
+use ising_generators::instance::{validate_metadata, Instance, InstanceLimits, InstanceParts};
 use ising_generators::legacy::derive_nonce;
 use ising_generators::rng::{stream_seed, uniform, ChaCha8Rng};
 use ising_generators::Code;
@@ -653,4 +654,241 @@ fn stream_vectors() -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn i64_of(v: &Value) -> Result<i64, String> {
+    v.as_str()
+        .ok_or("not a decimal string")?
+        .parse::<i64>()
+        .map_err(|e| e.to_string())
+}
+
+fn i32_list(case: &Value, key: &str) -> Result<Vec<i32>, String> {
+    section(case, key)?
+        .iter()
+        .map(|v| {
+            v.as_i64()
+                .and_then(|n| i32::try_from(n).ok())
+                .ok_or_else(|| format!("{key}: bad i32"))
+        })
+        .collect()
+}
+
+fn instance_parts(case: &Value) -> Result<InstanceParts, String> {
+    let doc = core()?;
+    let topology = str_field(case, "topology")?;
+    let order = section(&doc, "topologies")?
+        .iter()
+        .find(|t| t.get("name").and_then(Value::as_str) == Some(topology))
+        .ok_or_else(|| format!("no topology {topology}"))?;
+    let nonce = match str_field(case, "nonce")? {
+        "" => None,
+        other => Some(hex32(other)?),
+    };
+    Ok(InstanceParts {
+        descriptor_digest: hex32(str_field(case, "descriptor_digest")?)?,
+        topology_order_digest: hex32(str_field(order, "order_digest")?)?,
+        nonce,
+        node_ids: section(case, "node_ids")?
+            .iter()
+            .map(u32_of)
+            .collect::<Result<_, _>>()?,
+        edges: edges_of(case)?,
+        h: i32_list(case, "h")?,
+        j: i32_list(case, "j")?,
+        offset_milli: i64_of(case.get("offset_milli").ok_or("no offset_milli")?)?,
+        metadata: hex(str_field(case, "metadata_hex")?)?,
+    })
+}
+
+fn kinds_of(case: &Value, key: &str) -> Result<Vec<u16>, String> {
+    section(case, key)?
+        .iter()
+        .map(|v| {
+            v.as_u64()
+                .and_then(|n| u16::try_from(n).ok())
+                .ok_or_else(|| format!("{key}: bad kind"))
+        })
+        .collect()
+}
+
+#[test]
+fn instance_vectors() -> Result<(), String> {
+    let doc = core()?;
+    let cases = section(&doc, "instances")?;
+    if cases.len() != 4 {
+        return Err(format!("expected 4 instances, found {}", cases.len()));
+    }
+    for case in cases {
+        let name = str_field(case, "name")?;
+        let kinds = kinds_of(case, "metadata_kinds")?;
+        let instance = Instance::new(instance_parts(case)?, &InstanceLimits::FAM_37, &kinds)
+            .map_err(|c| format!("{name}: code {c}"))?;
+        let want = hex(str_field(case, "canonical_hex")?)?;
+        let bytes = instance
+            .canonical_bytes()
+            .map_err(|e| format!("{name}: {e}"))?;
+        if bytes != want {
+            return Err(format!("{name}: canonical bytes differ"));
+        }
+        if instance.canonical_len() != want.len() {
+            return Err(format!("{name}: canonical_len differs"));
+        }
+        if instance.digest() != hex32(str_field(case, "instance_digest")?)? {
+            return Err(format!("{name}: digest differs"));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn instance_defect_vectors() -> Result<(), String> {
+    let doc = core()?;
+    let bases = section(&doc, "instances")?;
+    let defects = section(&doc, "instance_defects")?;
+    if defects.len() != 5 {
+        return Err(format!("expected 5 defects, found {}", defects.len()));
+    }
+    for defect in defects {
+        let name = str_field(defect, "name")?;
+        let base_name = str_field(defect, "instance")?;
+        let base = bases
+            .iter()
+            .find(|b| b.get("name").and_then(Value::as_str) == Some(base_name))
+            .ok_or_else(|| format!("{name}: no base {base_name}"))?;
+        let mut parts = instance_parts(base)?;
+        parts.edges = edges_of(defect)?;
+        let kinds = kinds_of(base, "metadata_kinds")?;
+        let got = Instance::new(parts, &InstanceLimits::FAM_37, &kinds);
+        if code_of(&got) != Some(15) || expected(defect)? != Some(15) {
+            return Err(format!("{name}: got {:?}", code_of(&got)));
+        }
+    }
+    Ok(())
+}
+
+fn one_node_parts(h: i32, j: i32, offset_milli: i64) -> InstanceParts {
+    InstanceParts {
+        descriptor_digest: [1; 32],
+        topology_order_digest: [2; 32],
+        nonce: None,
+        node_ids: vec![0, 1],
+        edges: vec![(0, 1)],
+        h: vec![h, 0],
+        j: vec![j],
+        offset_milli,
+        metadata: vec![0, 0],
+    }
+}
+
+#[test]
+fn instance_bound_vectors() -> Result<(), String> {
+    let doc = core()?;
+    let cases = section(&doc, "instance_bounds")?;
+    if cases.len() != 17 {
+        return Err(format!("expected 17 bounds, found {}", cases.len()));
+    }
+    for case in cases {
+        let name = str_field(case, "name")?;
+        let value = str_field(case, "value")?;
+        let parts = match str_field(case, "quantity")? {
+            "h" => one_node_parts(value.parse::<i32>().unwrap_or(i32::MAX), 0, 0),
+            "j" => one_node_parts(0, value.parse::<i32>().unwrap_or(i32::MAX), 0),
+            "offset" => one_node_parts(0, 0, i64_of(case.get("value").ok_or("no value")?)?),
+            other => return Err(format!("{name}: quantity {other}")),
+        };
+        let got = Instance::new(parts, &InstanceLimits::FAM_37, &[]);
+        if code_of(&got) != expected(case)? {
+            return Err(format!("{name}: got {:?}", code_of(&got)));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn metadata_vectors() -> Result<(), String> {
+    let doc = core()?;
+    let cases = section(&doc, "metadata")?;
+    if cases.len() != 13 {
+        return Err(format!("expected 13 metadata cases, found {}", cases.len()));
+    }
+    for case in cases {
+        let name = str_field(case, "name")?;
+        let region = hex(str_field(case, "metadata_hex")?)?;
+        let kinds = kinds_of(case, "contract_kinds")?;
+        let got = validate_metadata(&region, &kinds);
+        if code_of(&got) != expected(case)? {
+            return Err(format!("{name}: got {:?}", code_of(&got)));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn bounds_beat_edges_beat_metadata() {
+    let mut parts = one_node_parts(0, 0, 72_057_594_037_927_937);
+    parts.node_ids = vec![0, 1, 2];
+    parts.h = vec![0, 0, 0];
+    parts.edges = vec![(1, 2), (0, 1)];
+    parts.j = vec![0, 0];
+    parts.metadata = vec![1, 0, 6, 0, 0, 0, 0, 0];
+    let limits = InstanceLimits::FAM_37;
+    let code = |p: &InstanceParts| code_of(&Instance::new(p.clone(), &limits, &[1, 2, 3]));
+    assert_eq!(code(&parts), Some(13));
+    parts.offset_milli = 0;
+    assert_eq!(code(&parts), Some(15));
+    parts.edges = vec![(0, 1), (1, 2)];
+    assert_eq!(code(&parts), Some(16));
+}
+
+#[test]
+fn length_mismatch_is_code_15() {
+    let mut parts = one_node_parts(0, 0, 0);
+    parts.h = vec![0];
+    assert_eq!(
+        code_of(&Instance::new(parts, &InstanceLimits::FAM_37, &[])),
+        Some(15)
+    );
+}
+
+#[test]
+fn edge_position_beats_edge_order() {
+    let mut parts = one_node_parts(0, 0, 0);
+    parts.edges = vec![(1, 0)];
+    assert_eq!(
+        code_of(&Instance::new(parts.clone(), &InstanceLimits::FAM_37, &[])),
+        Some(15)
+    );
+    parts.edges = vec![(0, 2)];
+    assert_eq!(
+        code_of(&Instance::new(parts, &InstanceLimits::FAM_37, &[])),
+        Some(15)
+    );
+}
+
+#[test]
+fn tighter_limits_apply() {
+    let tight = InstanceLimits::new(4, 1, 1_073_741_824, 72_057_594_037_927_936, 67_108_864);
+    let mut parts = one_node_parts(0, 0, 0);
+    parts.node_ids = vec![0, 1, 2, 3, 4];
+    parts.h = vec![0; 5];
+    assert_eq!(
+        tight.and_then(|l| code_of(&Instance::new(parts, &l, &[])).into()),
+        Some(Some(13))
+    );
+    assert!(InstanceLimits::new(16_777_217, 1, 1, 1, 1).is_none());
+    assert!(InstanceLimits::new(1, 67_108_865, 1, 1, 1).is_none());
+    assert!(InstanceLimits::new(1, 1, 1_073_741_825, 1, 1).is_none());
+    assert!(InstanceLimits::new(1, 1, 1, 72_057_594_037_927_937, 1).is_none());
+    assert!(InstanceLimits::new(1, 1, 1, 1, 67_108_865).is_none());
+    assert_eq!(
+        InstanceLimits::new(
+            16_777_216,
+            67_108_864,
+            1_073_741_824,
+            72_057_594_037_927_936,
+            67_108_864
+        ),
+        Some(InstanceLimits::FAM_37)
+    );
 }
