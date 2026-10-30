@@ -1,5 +1,8 @@
 //! Family primitives checked against `vectors/families/core.json`.
 
+use core::num::NonZeroU32;
+
+use ising_generators::rng::{uniform, ChaCha8Rng};
 use ising_generators::Code;
 use serde_json::Value;
 
@@ -28,7 +31,6 @@ fn hex(s: &str) -> Result<Vec<u8>, String> {
         .collect()
 }
 
-#[expect(dead_code, reason = "shared helper used by later tasks")]
 fn hex32(s: &str) -> Result<[u8; 32], String> {
     hex(s)?
         .try_into()
@@ -68,6 +70,76 @@ fn codes_match_the_fixture_table() -> Result<(), String> {
         if found.to_string() != name {
             return Err(format!("code {value}: display {found} but fixture {name}"));
         }
+    }
+    Ok(())
+}
+
+fn nz(n: u64) -> Result<NonZeroU32, String> {
+    u32::try_from(n)
+        .ok()
+        .and_then(NonZeroU32::new)
+        .ok_or_else(|| format!("n {n} is not a non-zero u32"))
+}
+
+#[test]
+fn uniform_vectors() -> Result<(), String> {
+    let doc = core()?;
+    for case in section(&doc, "uniform")? {
+        let seed = hex32(case.get("seed").and_then(Value::as_str).ok_or("no seed")?)?;
+        let calls = case
+            .get("calls")
+            .and_then(Value::as_array)
+            .ok_or("no calls")?;
+        let mut stream = ChaCha8Rng::from_seed(seed);
+        let words: Vec<u32> = (0..calls.len() * 64 + 64)
+            .map(|_| stream.next_u32())
+            .collect();
+        for k in 0..calls.len() {
+            let mut rng = ChaCha8Rng::from_seed(seed);
+            for (i, call) in calls.iter().enumerate().take(k + 1) {
+                let n = nz(call.get("n").and_then(Value::as_u64).ok_or("no n")?)?;
+                let want = call
+                    .get("result")
+                    .and_then(Value::as_u64)
+                    .ok_or("no result")?;
+                let got = uniform(&mut rng, n);
+                if u64::from(got) != want {
+                    return Err(format!("call {i}: got {got}, want {want}"));
+                }
+            }
+            let used = call_words_used(calls, k)?;
+            let next = rng.next_u32();
+            if words.get(used) != Some(&next) {
+                return Err(format!(
+                    "call {k}: words_used {used} does not match the stream"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn call_words_used(calls: &[Value], k: usize) -> Result<usize, String> {
+    let v = calls
+        .get(k)
+        .and_then(|c| c.get("words_used"))
+        .and_then(Value::as_u64)
+        .ok_or("no words_used")?;
+    usize::try_from(v).map_err(|e| e.to_string())
+}
+
+#[test]
+fn uniform_of_one_reads_one_word() -> Result<(), String> {
+    let seed = [7u8; 32];
+    let mut a = ChaCha8Rng::from_seed(seed);
+    let mut b = ChaCha8Rng::from_seed(seed);
+    let one = nz(1)?;
+    if uniform(&mut a, one) != 0 {
+        return Err("uniform(1) is not 0".into());
+    }
+    let _ = b.next_u32();
+    if a.next_u32() != b.next_u32() {
+        return Err("uniform(1) did not read exactly one word".into());
     }
     Ok(())
 }
