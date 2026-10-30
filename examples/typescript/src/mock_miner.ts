@@ -119,6 +119,9 @@ function capabilities(): Capabilities {
     nativeTopologyHash: undefined,
     encodings: [CoefficientEncoding.COEFFICIENT_ENCODING_I32],
     generators: [],
+    solverId: "",
+    generatedFamilies: [],
+    acceptedFamilies: [],
   };
 }
 
