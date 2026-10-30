@@ -6,7 +6,7 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 readme.workspace = true
-description = "Wire codec, energy and diversity scoring, handshake, and nonce derivation for the Quip solver protocol"
+description = "Wire codec, energy and diversity scoring, and handshake for the Quip solver protocol"
 keywords = ["quip", "protocol", "ising", "consensus", "grpc"]
 categories = ["network-programming", "cryptography"]
 
@@ -19,7 +19,7 @@ session = ["dep:quip-proto"]
 
 [dependencies]
 quip-proto = { workspace = true, optional = true }
-blake3 = "1"
+ising-generators = { workspace = true }
 
 [dev-dependencies]
 # Path-only and deliberately unversioned. quip-solver-conformance depends on
@@ -28,6 +28,7 @@ blake3 = "1"
 # which breaks the cycle without affecting `cargo test` in this workspace.
 quip-solver-conformance = { path = "../quip-solver-conformance" }
 serde_json = "1"
+blake3 = "1"
 
 [lints]
 workspace = true

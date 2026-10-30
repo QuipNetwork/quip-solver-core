@@ -376,8 +376,8 @@ smoke:typescript:
 #   environment  as named on the job below (crates-io, pypi, npm)
 #
 # crates.io needs one registration per crate, at
-# crates.io/crates/<name>/settings: quip-proto, quip-protocol,
-# quip-solver-core, quip-solver-conformance. Its GitLab support is public beta
+# crates.io/crates/<name>/settings: quip-proto, ising-generators,
+# quip-protocol, quip-solver-core, quip-solver-conformance. Its GitLab support is public beta
 # and gitlab.com only.
 #
 # Protected tag pattern `v*` already exists, which is what keeps these
@@ -866,7 +866,7 @@ release:notes:
 
       | Artifact | Where |
       | -- | -- |
-      | `quip-solver-core`, `quip-protocol`, `quip-proto`, `quip-solver-conformance` | crates.io |
+      | `quip-solver-core`, `quip-protocol`, `ising-generators`, `quip-proto`, `quip-solver-conformance` | crates.io |
       | `quip-solver-core` wheel | PyPI |
       | `@quip.network/quip-solver-core` | npm |
       | `libquip_solver_c` plus `quip_solver.h` | attached below |

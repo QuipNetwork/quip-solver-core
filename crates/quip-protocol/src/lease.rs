@@ -4,8 +4,8 @@
 //! An all-zero `base_salt` is the coordinator's counter salt. The chain
 //! re-derives the same nonce and the same draw in `submit_proof`.
 
-use crate::chacha8::DrawError;
 use crate::target::{ProofStats, Target, TargetMiss};
+use {crate::chacha8::DrawError, ising_generators::legacy as legacy_nonces};
 
 /// The deterministic generator a lease uses to draw each problem.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -48,9 +48,9 @@ impl std::error::Error for LeaseError {}
 pub struct LeaseSpec {
     /// Generator that draws each salt.
     pub generator: Generator,
-    /// `last_proof` input to [`crate::derive::derive_nonce`].
+    /// `last_proof` input to [`legacy_nonces::derive_nonce`].
     pub last_proof_block_hash: [u8; 32],
-    /// Miner account input to [`crate::derive::derive_nonce`].
+    /// Miner account input to [`legacy_nonces::derive_nonce`].
     pub miner_account: [u8; 32],
     /// Salt template. Bytes 0 to 7 are replaced by the counter.
     pub base_salt: [u8; 32],
@@ -107,7 +107,7 @@ impl LeaseSpec {
     #[must_use]
     pub fn nonce(&self, index: u64) -> Option<[u8; 32]> {
         self.salt(index).map(|salt| {
-            crate::derive::derive_nonce(self.last_proof_block_hash, self.miner_account, salt)
+            legacy_nonces::derive_nonce(self.last_proof_block_hash, self.miner_account, salt)
         })
     }
 
@@ -181,7 +181,7 @@ impl TopologyView {
 pub enum VerifyError {
     /// The salt is not one this lease issues.
     SaltOutsideLease,
-    /// The nonce is not [`crate::derive::derive_nonce`] of the lease inputs and this salt.
+    /// The nonce is not [`legacy_nonces::derive_nonce`] of the lease inputs and this salt.
     NonceMismatch,
     /// Solution `index` does not have one spin per node.
     MalformedSpins {
@@ -260,7 +260,7 @@ pub fn verify_lease_solutions(
     if spec.index_of(salt).is_none() {
         return Err(VerifyError::SaltOutsideLease);
     }
-    if crate::derive::derive_nonce(spec.last_proof_block_hash, spec.miner_account, *salt) != *nonce
+    if legacy_nonces::derive_nonce(spec.last_proof_block_hash, spec.miner_account, *salt) != *nonce
     {
         return Err(VerifyError::NonceMismatch);
     }
@@ -382,7 +382,7 @@ pub fn verify_lease_result(
         .as_slice()
         .try_into()
         .map_err(|_| VerifyError::NonceMismatch)?;
-    if crate::derive::derive_nonce(lease.last_proof_block_hash, lease.miner_account, salt) != nonce
+    if legacy_nonces::derive_nonce(lease.last_proof_block_hash, lease.miner_account, salt) != nonce
     {
         return Err(VerifyError::NonceMismatch);
     }
@@ -478,7 +478,7 @@ mod tests {
         let salt = s.salt(2).unwrap();
         assert_eq!(
             s.nonce(2),
-            Some(crate::derive::derive_nonce([0x11; 32], [0x22; 32], salt))
+            Some(legacy_nonces::derive_nonce([0x11; 32], [0x22; 32], salt))
         );
     }
 

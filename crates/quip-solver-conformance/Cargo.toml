@@ -33,6 +33,7 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 [dev-dependencies]
 # The same 1.x line quip-protocol already uses; the family vector tests recompute digests with it.
 blake3 = "1"
+ising-generators = { workspace = true }
 
 [lints]
 workspace = true

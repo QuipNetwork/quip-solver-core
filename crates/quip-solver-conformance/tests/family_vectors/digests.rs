@@ -96,14 +96,14 @@ pub(crate) fn stream_seed(
 
 /// `ChaCha8` stream that counts every word drawn.
 pub(crate) struct CountingRng {
-    rng: quip_protocol::chacha8::ChaCha8Rng,
+    rng: ising_generators::rng::ChaCha8Rng,
     pub(crate) used: u64,
 }
 
 impl CountingRng {
     pub(crate) fn new(seed: [u8; 32]) -> Self {
         Self {
-            rng: quip_protocol::chacha8::ChaCha8Rng::from_seed(seed),
+            rng: ising_generators::rng::ChaCha8Rng::from_seed(seed),
             used: 0,
         }
     }

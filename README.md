@@ -22,7 +22,8 @@ The [miner hardware guide](docs/miner-side-generation.md) describes how a GPU or
 | -- | -- |
 | `quip-solver-core` | The `Sampler` trait, Ising and compressed sparse row types, inverse-temperature ladder, adaptive budget, session loop |
 | `quip-proto` | Generated tonic and prost stubs for `proto/quip/v1/miner.proto` |
-| `quip-protocol` | Wire codec, energy and diversity scoring, handshake, ChaCha8 draw, nonce derivation |
+| `quip-protocol` | Wire codec, energy and diversity scoring, handshake, ChaCha8 draw |
+| `ising-generators` | Family descriptors, canonical instances, ChaCha8 streams, and nonce derivation, `no_std` |
 | `quip-solver-conformance` | Golden vectors and the scripted session driver |
 | `quip-protocol-py` | PyO3 bindings exposing `quip-protocol` scoring and wire primitives to Python |
 | `quip-protocol-wasm` | WebAssembly bindings behind the npm package |
