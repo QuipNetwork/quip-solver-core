@@ -157,3 +157,10 @@ pub const FAMILY_SCHEMA: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/vectors/families/schema.json"
 ));
+
+/// Specified family golden vectors: identity, parameters, descriptors, and the
+/// rest of the SC-2 set (schema revision 1, provenance `specified`).
+pub const FAMILY_CORE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/vectors/families/core.json"
+));
