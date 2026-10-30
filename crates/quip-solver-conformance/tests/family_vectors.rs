@@ -4,6 +4,8 @@
 mod codec;
 #[path = "family_vectors/digests.rs"]
 mod digests;
+#[path = "family_vectors/instance.rs"]
+mod instance;
 #[path = "family_vectors/schema_check.rs"]
 mod schema_check;
 
@@ -691,6 +693,270 @@ fn check_leases(doc: &Value) -> Result<(), String> {
     Ok(())
 }
 
+fn i64_decimal(case: &Value, key: &str) -> Result<i64, String> {
+    str_field(case, key)?
+        .parse::<i64>()
+        .map_err(|e| format!("{}: {key}: {e}", case_name(case)))
+}
+
+/// A decimal-string field that may be null.
+fn opt_i64_decimal(case: &Value, key: &str) -> Result<Option<i64>, String> {
+    match case.get(key) {
+        Some(Value::Null) => Ok(None),
+        Some(_) => i64_decimal(case, key).map(Some),
+        None => Err(format!("{}: missing field {key}", case_name(case))),
+    }
+}
+
+fn i32_list(case: &Value, key: &str) -> Result<Vec<i32>, String> {
+    case.get(key)
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("{}: {key} is not an array", case_name(case)))?
+        .iter()
+        .map(|v| {
+            v.as_i64()
+                .and_then(|n| i32::try_from(n).ok())
+                .ok_or_else(|| format!("{}: {key} has a non-i32 entry", case_name(case)))
+        })
+        .collect()
+}
+
+fn edge_list(value: &Value) -> Result<Vec<(u32, u32)>, String> {
+    value
+        .as_array()
+        .ok_or("edges is not an array")?
+        .iter()
+        .map(|e| match u32_list(e, "edge")?.as_slice() {
+            [u, v] => Ok((*u, *v)),
+            _ => Err("edge is not a pair".to_owned()),
+        })
+        .collect()
+}
+
+fn find_named<'a>(doc: &'a Value, section_name: &str, name: &str) -> Result<&'a Value, String> {
+    section(doc, section_name)?
+        .iter()
+        .find(|c| c.get("name").and_then(Value::as_str) == Some(name))
+        .ok_or_else(|| format!("no {name} case in {section_name}"))
+}
+
+/// Instance inputs from a fixture case. Digests and nonce are decoded from the
+/// fixture, and `descriptor_digest` is checked separately.
+fn instance_parts(case: &Value) -> Result<instance::InstanceParts, String> {
+    let nonce = codec::hex_decode(str_field(case, "nonce")?)?;
+    if !nonce.is_empty() && nonce.len() != 32 {
+        return Err(format!(
+            "{}: nonce is {} bytes",
+            case_name(case),
+            nonce.len()
+        ));
+    }
+    Ok(instance::InstanceParts {
+        descriptor_digest: codec::hex32(str_field(case, "descriptor_digest")?)?,
+        topology_order_digest: [0; 32],
+        nonce,
+        node_ids: u32_list(case.get("node_ids").ok_or("no node_ids")?, "node_ids")?,
+        edges: edge_list(case.get("edges").ok_or("no edges")?)?,
+        h: i32_list(case, "h")?,
+        j: i32_list(case, "j")?,
+        offset_milli: i64_decimal(case, "offset_milli")?,
+        metadata: codec::hex_decode(str_field(case, "metadata_hex")?)?,
+    })
+}
+
+fn contract_kinds(case: &Value, key: &str) -> Result<Vec<u16>, String> {
+    case.get(key)
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("{}: {key} is not an array", case_name(case)))?
+        .iter()
+        .map(|v| {
+            v.as_u64()
+                .and_then(|n| u16::try_from(n).ok())
+                .ok_or_else(|| format!("{}: {key} has a non-u16 entry", case_name(case)))
+        })
+        .collect()
+}
+
+fn check_witness(case: &Value, parts: &instance::InstanceParts, w: &Value) -> Result<(), String> {
+    let name = format!("{}/{}", case_name(case), case_name(w));
+    let tagged = json!({"name": name});
+    let bytes = codec::hex_decode(str_field(w, "spins_hex")?)?;
+    let claimed = i64_decimal(w, "claimed_energy_milli")?;
+    let valid = w.get("valid").and_then(Value::as_bool).ok_or("no valid")?;
+    let reason = w.get("reason").and_then(Value::as_str);
+    match instance::unpack_spins(&bytes, parts.node_ids.len()) {
+        Err(why) => {
+            compare(&tagged, "reason", &reason, &Some(why))?;
+            compare(&tagged, "spins", &w.get("spins"), &Some(&Value::Null))?;
+            compare(
+                &tagged,
+                "energy",
+                &opt_i64_decimal(w, "energy_milli")?,
+                &None,
+            )?;
+            compare(
+                &tagged,
+                "plain",
+                &opt_i64_decimal(w, "energy_milli_plain")?,
+                &None,
+            )?;
+            compare(&tagged, "claimed", &claimed, &0)?;
+            compare(&tagged, "valid", &valid, &false)
+        }
+        Ok(spins) => {
+            let listed = w
+                .get("spins")
+                .and_then(Value::as_array)
+                .ok_or_else(|| format!("{name}: spins is null"))?
+                .iter()
+                .map(|v| v.as_i64().and_then(|n| i8::try_from(n).ok()))
+                .collect::<Option<Vec<i8>>>()
+                .ok_or_else(|| format!("{name}: bad spins"))?;
+            compare(&tagged, "spins", &spins, &listed)?;
+            compare(&tagged, "pack", &instance::pack_spins(&listed), &bytes)?;
+            let plain = instance::energy_plain(parts, &spins)?;
+            let total = instance::energy_with_offset(parts, &spins)?;
+            compare(
+                &tagged,
+                "energy_milli_plain",
+                &opt_i64_decimal(w, "energy_milli_plain")?,
+                &Some(plain),
+            )?;
+            compare(
+                &tagged,
+                "energy_milli",
+                &opt_i64_decimal(w, "energy_milli")?,
+                &Some(total),
+            )?;
+            compare(&tagged, "valid", &valid, &(claimed == total))?;
+            let want = if claimed == total {
+                None
+            } else {
+                Some("energy-mismatch")
+            };
+            compare(&tagged, "reason", &reason, &want)
+        }
+    }
+}
+
+fn check_instances(doc: &Value) -> Result<(), String> {
+    for case in section(doc, "instances")? {
+        let family = str_field(case, "family_id")?;
+        let revision = u32_field(case, "revision")?;
+        let params = codec::hex_decode(str_field(case, "params_hex")?)?;
+        let descriptor = digests::descriptor_digest(
+            family.as_bytes(),
+            revision,
+            &digests::params_digest(&params),
+        );
+        compare(
+            case,
+            "descriptor_digest",
+            &codec::hex_encode(&descriptor),
+            &str_field(case, "descriptor_digest")?.to_owned(),
+        )?;
+        let topology = find_named(doc, "topologies", str_field(case, "topology")?)?;
+        let (nodes, topo_edges) = topology_inputs(topology)?;
+        let mut parts = instance_parts(case)?;
+        parts.topology_order_digest = digests::topology_order_digest(&nodes, &topo_edges);
+        let expected_nodes: Vec<u32> = nodes
+            .iter()
+            .copied()
+            .filter(|n| parts.node_ids.contains(n))
+            .collect();
+        compare(case, "node_ids (FAM-31)", &parts.node_ids, &expected_nodes)?;
+        compare(
+            case,
+            "edge fault",
+            &instance::edge_fault(&parts.edges, parts.node_ids.len()),
+            &None,
+        )?;
+        for value in parts.h.iter().chain(&parts.j) {
+            compare(
+                case,
+                "coefficient bound",
+                &instance::coefficient_code(i64::from(*value)),
+                &None,
+            )?;
+        }
+        compare(
+            case,
+            "offset bound",
+            &instance::offset_code(parts.offset_milli),
+            &None,
+        )?;
+        let kinds = contract_kinds(case, "metadata_kinds")?;
+        compare(
+            case,
+            "metadata",
+            &instance::metadata_code(&parts.metadata, &kinds),
+            &None,
+        )?;
+        let canonical = instance::canonical_bytes(&parts)?;
+        compare(
+            case,
+            "canonical_hex",
+            &codec::hex_encode(&canonical),
+            &str_field(case, "canonical_hex")?.to_owned(),
+        )?;
+        compare(
+            case,
+            "instance_digest",
+            &codec::hex_encode(&digests::instance_digest(&canonical)),
+            &str_field(case, "instance_digest")?.to_owned(),
+        )?;
+        let witnesses = case
+            .get("witnesses")
+            .and_then(Value::as_array)
+            .filter(|w| !w.is_empty())
+            .ok_or_else(|| format!("{}: no witnesses", case_name(case)))?;
+        for w in witnesses {
+            check_witness(case, &parts, w)?;
+        }
+    }
+    Ok(())
+}
+
+fn check_instance_defects(doc: &Value) -> Result<(), String> {
+    for case in section(doc, "instance_defects")? {
+        let base = find_named(doc, "instances", str_field(case, "instance")?)?;
+        let n_nodes = u32_list(base.get("node_ids").ok_or("no node_ids")?, "node_ids")?.len();
+        let edges = edge_list(case.get("edges").ok_or("no edges")?)?;
+        let fault = instance::edge_fault(&edges, n_nodes);
+        compare(case, "rule", &fault, &Some(str_field(case, "rule")?))?;
+        let code = fault.map(|_| 15_u8);
+        compare(case, "code", &code, &expected_code(case)?)?;
+    }
+    Ok(())
+}
+
+fn check_instance_bounds(doc: &Value) -> Result<(), String> {
+    for case in section(doc, "instance_bounds")? {
+        let value = i64_decimal(case, "value")?;
+        let code = match str_field(case, "quantity")? {
+            "h" | "j" => instance::coefficient_code(value),
+            "offset" => instance::offset_code(value),
+            other => return Err(format!("{}: quantity {other}", case_name(case))),
+        };
+        compare(case, "code", &code, &expected_code(case)?)?;
+    }
+    Ok(())
+}
+
+fn check_metadata(doc: &Value) -> Result<(), String> {
+    for case in section(doc, "metadata")? {
+        let region = codec::hex_decode(str_field(case, "metadata_hex")?)?;
+        let kinds = contract_kinds(case, "contract_kinds")?;
+        compare(
+            case,
+            "code",
+            &instance::metadata_code(&region, &kinds),
+            &expected_code(case)?,
+        )?;
+    }
+    Ok(())
+}
+
 fn mutate(doc: &Value, pointer: &str, value: Value) -> Value {
     let mut copy = doc.clone();
     if let Some(slot) = copy.pointer_mut(pointer) {
@@ -1039,4 +1305,174 @@ fn label_length_and_byte_limits() {
     assert!(!codec::label_valid(&[b'a'; 33]));
     assert!(!codec::label_valid(&[b'a', 0x80]));
     assert!(codec::label_valid(&[0x00, 0x7F]));
+}
+
+fn instance_digest_of(case: &Value) -> Result<String, String> {
+    let parts = instance_parts(case)?;
+    Ok(codec::hex_encode(&digests::instance_digest(
+        &instance::canonical_bytes(&parts)?,
+    )))
+}
+
+fn instance_index(doc: &Value, name: &str) -> Result<usize, String> {
+    find_index(doc, "instances", name)
+}
+
+#[test]
+fn instances_rebuild_canonical_bytes() -> Result<(), String> {
+    check_instances(&core()?)
+}
+
+#[test]
+fn archived_instance_uses_zero_nonce() -> Result<(), String> {
+    let doc = core()?;
+    let cases = section(&doc, "instances")?;
+    let archived = cases
+        .get(instance_index(&doc, "archived-zero-nonce")?)
+        .ok_or("no archived case")?;
+    let sparse = cases
+        .get(instance_index(&doc, "sparse-default-order")?)
+        .ok_or("no sparse case")?;
+    let bytes = codec::hex_decode(str_field(archived, "canonical_hex")?)?;
+    if bytes.get(65..97) != Some(&[0_u8; 32][..]) {
+        return Err("archived nonce bytes 65..97 are not zero".to_owned());
+    }
+    if instance_digest_of(archived)? == instance_digest_of(sparse)? {
+        return Err("archived digest equals the sparse digest".to_owned());
+    }
+    Ok(())
+}
+
+#[test]
+fn metadata_change_changes_digest() -> Result<(), String> {
+    let doc = core()?;
+    let cases = section(&doc, "instances")?;
+    let changed = cases
+        .get(instance_index(&doc, "metadata-changed")?)
+        .ok_or("no metadata-changed case")?;
+    let sparse = cases
+        .get(instance_index(&doc, "sparse-default-order")?)
+        .ok_or("no sparse case")?;
+    if instance_digest_of(changed)? == instance_digest_of(sparse)? {
+        return Err("metadata change did not change the digest".to_owned());
+    }
+    Ok(())
+}
+
+#[test]
+fn instance_witnesses_recompute() -> Result<(), String> {
+    let doc = core()?;
+    check_instances(&doc)?;
+    let mut valid = 0_usize;
+    let mut invalid = 0_usize;
+    for case in section(&doc, "instances")? {
+        for w in case
+            .get("witnesses")
+            .and_then(Value::as_array)
+            .ok_or("no witnesses")?
+        {
+            if w.get("valid").and_then(Value::as_bool) == Some(true) {
+                valid += 1;
+            } else {
+                invalid += 1;
+            }
+        }
+    }
+    if valid >= 2 && invalid >= 6 {
+        Ok(())
+    } else {
+        Err(format!("witness mix {valid} valid, {invalid} invalid"))
+    }
+}
+
+#[test]
+fn instance_defects_are_detected() -> Result<(), String> {
+    check_instance_defects(&core()?)
+}
+
+#[test]
+fn instance_bounds_recompute() -> Result<(), String> {
+    check_instance_bounds(&core()?)
+}
+
+#[test]
+fn metadata_cases_recompute() -> Result<(), String> {
+    check_metadata(&core()?)
+}
+
+#[test]
+fn pack_spins_eight_nodes_has_no_padding_byte() -> Result<(), String> {
+    let spins = [1_i8, -1, 1, 1, -1, -1, -1, 1];
+    let packed = instance::pack_spins(&spins);
+    if packed != [0x8d] {
+        return Err(format!("packed {packed:?}"));
+    }
+    if instance::unpack_spins(&packed, 8) != Ok(spins.to_vec()) {
+        return Err("round trip failed".to_owned());
+    }
+    if instance::unpack_spins(&[0x8d, 0], 8) != Err("wrong-length") {
+        return Err("a padding byte was accepted".to_owned());
+    }
+    Ok(())
+}
+
+#[test]
+fn minimum_values_exceed_bounds_without_panic() -> Result<(), String> {
+    compare(
+        &Value::Null,
+        "coefficient",
+        &instance::coefficient_code(i64::from(i32::MIN)),
+        &Some(13),
+    )?;
+    compare(
+        &Value::Null,
+        "offset",
+        &instance::offset_code(i64::MIN),
+        &Some(13),
+    )
+}
+
+#[test]
+fn changed_canonical_byte_fails() -> Result<(), String> {
+    let doc = core()?;
+    let pointer = format!(
+        "/instances/{}/canonical_hex",
+        instance_index(&doc, "sparse-default-order")?
+    );
+    let good = doc
+        .pointer(&pointer)
+        .and_then(Value::as_str)
+        .ok_or("no canonical_hex")?;
+    let broken = mutate(&doc, &pointer, json!(flip_last_hex_digit(good)));
+    expect_err(&check_instances(&broken), "a changed canonical byte")
+}
+
+#[test]
+fn wrong_instance_digest_fails() -> Result<(), String> {
+    let doc = core()?;
+    let pointer = format!(
+        "/instances/{}/instance_digest",
+        instance_index(&doc, "reverse-ten")?
+    );
+    let good = doc
+        .pointer(&pointer)
+        .and_then(Value::as_str)
+        .ok_or("no instance_digest")?;
+    let broken = mutate(&doc, &pointer, json!(flip_last_hex_digit(good)));
+    expect_err(&check_instances(&broken), "a wrong instance digest")
+}
+
+#[test]
+fn changed_metadata_byte_fails() -> Result<(), String> {
+    let doc = core()?;
+    let pointer = format!(
+        "/instances/{}/metadata_hex",
+        instance_index(&doc, "sparse-default-order")?
+    );
+    let good = doc
+        .pointer(&pointer)
+        .and_then(Value::as_str)
+        .ok_or("no metadata_hex")?;
+    let broken = mutate(&doc, &pointer, json!(flip_last_hex_digit(good)));
+    expect_err(&check_instances(&broken), "a changed metadata byte")
 }
