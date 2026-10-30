@@ -1,6 +1,8 @@
 //! Family primitives checked against `vectors/families/core.json`.
 
+use core::cell::Cell;
 use core::num::NonZeroU32;
+use std::alloc::{GlobalAlloc, Layout, System};
 
 use ising_generators::descriptor::{
     admit, check_family_id, check_size_bounds, params_digest, topology_order_digest,
@@ -1103,4 +1105,250 @@ fn admitted_descriptor_reports_size_bounds() -> Result<(), String> {
         return Err(format!("{got:?}"));
     }
     Ok(())
+}
+
+thread_local! {
+    static ARMED: Cell<bool> = const { Cell::new(false) };
+    static COUNT: Cell<usize> = const { Cell::new(0) };
+    static BYTES: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Counts allocation calls and bytes on the thread that armed `ARMED`.
+struct Counting;
+
+// SAFETY: every method delegates to `System` with the arguments it received,
+// so `System` upholds the `GlobalAlloc` contract. The counting touches only
+// thread-local `Cell`s and never allocates.
+#[expect(
+    unsafe_code,
+    reason = "test-only counting allocator that delegates to System"
+)]
+unsafe impl GlobalAlloc for Counting {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        if ARMED.try_with(Cell::get).unwrap_or(false) {
+            let _count = COUNT.try_with(|c| c.set(c.get() + 1));
+            let _bytes = BYTES.try_with(|b| b.set(b.get() + layout.size()));
+        }
+        // SAFETY: the caller upholds the `GlobalAlloc::alloc` contract for `layout`.
+        unsafe { System.alloc(layout) }
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        // SAFETY: the caller passes a pointer from this allocator with its `layout`,
+        // and `alloc` returned `System` memory.
+        unsafe { System.dealloc(ptr, layout) }
+    }
+}
+
+#[global_allocator]
+static GLOBAL: Counting = Counting;
+
+#[derive(Debug, PartialEq, Eq)]
+struct Allocs {
+    count: usize,
+    bytes: usize,
+}
+
+const NONE: Allocs = Allocs { count: 0, bytes: 0 };
+
+/// Runs `f` and reports the allocations that this thread made inside it.
+fn measure<R>(f: impl FnOnce() -> R) -> (R, Allocs) {
+    COUNT.with(|c| c.set(0));
+    BYTES.with(|b| b.set(0));
+    ARMED.with(|a| a.set(true));
+    let result = f();
+    ARMED.with(|a| a.set(false));
+    let allocs = Allocs {
+        count: COUNT.with(Cell::get),
+        bytes: BYTES.with(Cell::get),
+    };
+    (result, allocs)
+}
+
+#[test]
+fn measure_sees_an_allocation() {
+    let (v, allocs) = measure(|| vec![0_u8; 100]);
+    assert_eq!(v.len(), 100);
+    assert_eq!(
+        allocs,
+        Allocs {
+            count: 1,
+            bytes: 100
+        }
+    );
+}
+
+#[test]
+fn unknown_family_admission_allocates_nothing() {
+    let big = vec![0_u8; 1 << 20];
+    let contracts = [VECTOR_CONTRACT];
+    let (got, allocs) = measure(|| code_of(&admit(&contracts, b"quip/routing", 1, &big, &[0; 32])));
+    assert_eq!(got, Some(5));
+    assert_eq!(allocs, NONE);
+}
+
+#[test]
+fn oversized_params_allocate_nothing() {
+    let big = vec![0_u8; MAX_PARAMS_LEN + 1];
+    let contracts = [VECTOR_CONTRACT];
+    let (got, allocs) = measure(|| {
+        code_of(&admit(
+            &contracts,
+            b"vectors/uniform-field",
+            1,
+            &big,
+            &[0; 32],
+        ))
+    });
+    assert_eq!(got, Some(7));
+    assert_eq!(allocs, NONE);
+}
+
+#[test]
+fn params_vectors_allocate_nothing() -> Result<(), String> {
+    let doc = core()?;
+    let mut cases = Vec::new();
+    for case in section(&doc, "params")? {
+        let family_id = str_field(case, "family_id")?;
+        let bytes = hex(str_field(case, "params_hex")?)?;
+        cases.push((schema_for(family_id)?, bytes));
+    }
+    let (sum, allocs) = measure(|| {
+        let mut sum = 0_u32;
+        for (schema, bytes) in &cases {
+            let outcome = Params::parse(schema, bytes).and_then(|p| p.check_bounds().map(|()| p));
+            sum += u32::from(code_of(&outcome).unwrap_or(0));
+            if let Ok(params) = outcome {
+                for spec in *schema {
+                    sum += u32::from(params.get(spec.tag).is_some());
+                }
+            }
+        }
+        sum
+    });
+    if allocs != NONE {
+        return Err(format!("{allocs:?}"));
+    }
+    if sum == 0 {
+        return Err("no case ran".into());
+    }
+    Ok(())
+}
+
+#[test]
+fn digests_allocate_nothing() -> Result<(), String> {
+    let params = uniform_params(2, -1500);
+    let descriptor = Descriptor::new(b"vectors/uniform-field", 1, &params, IdContext::Direct)
+        .map_err(|c| c.to_string())?;
+    let nodes: Vec<u32> = (0..100_000).collect();
+    let edges: Vec<(u32, u32)> = (0..99_999).map(|i| (i, i + 1)).chain([(0, 1)]).collect();
+    let (digests, allocs) = measure(|| {
+        (
+            descriptor.digest(),
+            descriptor.params_digest(),
+            params_digest(&params),
+            topology_order_digest(&nodes, &edges),
+            stream_seed(&[1; 32], &[2; 32], &[3; 32], b"fields"),
+        )
+    });
+    if allocs != NONE {
+        return Err(format!("{allocs:?}"));
+    }
+    if digests.3.is_none() || digests.4.is_err() {
+        return Err("a digest was refused".into());
+    }
+    Ok(())
+}
+
+#[test]
+fn stream_draws_allocate_nothing() -> Result<(), String> {
+    let mut rng = ChaCha8Rng::from_seed([7; 32]);
+    let n = nz(1000)?;
+    let (sum, allocs) = measure(|| {
+        let mut sum = 0_u64;
+        for _ in 0..1000 {
+            sum += u64::from(uniform(&mut rng, n));
+        }
+        sum
+    });
+    if allocs != NONE {
+        return Err(format!("{allocs:?}"));
+    }
+    if sum == 0 {
+        return Err("all draws were zero".into());
+    }
+    Ok(())
+}
+
+#[test]
+fn instance_checks_allocate_nothing() {
+    let limits = InstanceLimits::FAM_37;
+    let ok = one_node_parts(0, 0, 0);
+    let over_bound = one_node_parts(1 << 30 | 1, 0, 0);
+    let mut bad_length = one_node_parts(0, 0, 0);
+    bad_length.h = vec![0];
+    let mut bad_metadata = one_node_parts(0, 0, 0);
+    bad_metadata.metadata = vec![1, 0, 9, 0, 0, 0, 0, 0];
+    let region = [0_u8, 0];
+
+    let (instance, allocs) = measure(|| Instance::new(ok, &limits, &[]));
+    assert_eq!(allocs, NONE);
+    assert!(instance.is_ok());
+
+    for (parts, code) in [(over_bound, 13), (bad_length, 15), (bad_metadata, 16)] {
+        let (got, allocs) = measure(|| code_of(&Instance::new(parts, &limits, &[])));
+        assert_eq!(got, Some(code));
+        assert_eq!(allocs, NONE);
+    }
+
+    let (got, allocs) = measure(|| code_of(&validate_metadata(&region, &[])));
+    assert_eq!(got, None);
+    assert_eq!(allocs, NONE);
+
+    if let Ok(instance) = instance {
+        let (_digest, allocs) = measure(|| instance.digest());
+        assert_eq!(allocs, NONE);
+    }
+}
+
+#[test]
+fn canonical_bytes_allocate_exactly_once() -> Result<(), String> {
+    let instance = Instance::new(one_node_parts(5, -7, 9), &InstanceLimits::FAM_37, &[])
+        .map_err(|c| c.to_string())?;
+    let (bytes, allocs) = measure(|| instance.canonical_bytes());
+    let bytes = bytes.map_err(|e| e.to_string())?;
+    let want = Allocs {
+        count: 1,
+        bytes: instance.canonical_len(),
+    };
+    if allocs != want {
+        return Err(format!("{allocs:?}, want {want:?}"));
+    }
+    if bytes.len() != instance.canonical_len() {
+        return Err("length differs from canonical_len".into());
+    }
+    Ok(())
+}
+
+#[test]
+fn size_bound_check_allocates_nothing() {
+    let bounds = SizeBounds {
+        nodes: 200,
+        edges: 400,
+        degree: 5,
+    };
+    let advertised = AdvertisedLimits {
+        max_nodes: 100,
+        max_edges: 0,
+        max_degree: 4,
+    };
+    let (got, allocs) = measure(|| {
+        code_of(&check_size_bounds(
+            &bounds,
+            &InstanceLimits::FAM_37,
+            &advertised,
+        ))
+    });
+    assert_eq!(got, Some(13));
+    assert_eq!(allocs, NONE);
 }
