@@ -275,7 +275,7 @@ In `miner.proto`, `GENERATOR_ALGORITHM_FAMILY_CHACHA8_V1` is value 2.
 A solver session does not yet admit family leases.
 The session answers value 2 with `MALFORMED`.
 A legacy lease that sets `family` or `topology_order_digest` also gets `MALFORMED`.
-Its leases carry a `FamilyDescriptor` and a `topology_order_digest`.
+A family lease carries a `FamilyDescriptor` and a `topology_order_digest`.
 A coordinator sends them only after the solver negotiates the family.
 `FAMILY_UNSUPPORTED` covers an unsupported family or revision.
 It also covers valid parameters outside the solver's advertised restriction, and a topology the family cannot build on.

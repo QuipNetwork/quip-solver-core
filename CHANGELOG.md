@@ -30,8 +30,10 @@ it advertises no families and admits no family lease. `protocol_version` stays
   `LeaseError::DescriptorUnexpected`. A solver session maps it to `MALFORMED`.
   The new variant breaks an exhaustive `match` on `LeaseError`.
 - Rust struct literals of `Capabilities`, `IsingProblemGenerator`, and
-  `IsingProblem`, and TypeScript object literals of `Capabilities`, need the
-  new fields. In Rust, add `..Default::default()`.
+  `IsingProblem` need the new fields. In Rust, add `..Default::default()`.
+- TypeScript object literals of `Capabilities`, `IsingProblem`, and
+  `IsingProblemGenerator` need the new required keys, so `tsc` rejects them.
+  Build these messages with `fromPartial` to avoid the break.
 
 ## 0.0.4
 

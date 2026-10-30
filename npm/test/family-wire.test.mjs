@@ -1,5 +1,6 @@
 // Wire checks for the problem-family extension. The reference bytes come from
-// the family wire spec and were produced by an independent encoder.
+// the plan's reference table, produced by Python protobuf 7.35.1 from the edited
+// proto.
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";

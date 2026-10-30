@@ -408,6 +408,7 @@ pub struct FamilyDescriptor {
     pub family_id: ::prost::alloc::string::String,
     #[prost(uint32, tag = "2")]
     pub revision: u32,
+    /// canonical parameter bytes
     #[prost(bytes = "vec", tag = "3")]
     pub params: ::prost::alloc::vec::Vec<u8>,
     /// 32 bytes
@@ -430,8 +431,10 @@ pub struct FamilyBinding {
     /// 32 bytes
     #[prost(bytes = "vec", tag = "5")]
     pub topology_order_digest: ::prost::alloc::vec::Vec<u8>,
+    /// native node ids in instance output order
     #[prost(uint32, repeated, tag = "6")]
     pub node_ids: ::prost::alloc::vec::Vec<u32>,
+    /// the instance offset
     #[prost(int64, tag = "7")]
     pub offset_milli: i64,
 }
@@ -439,6 +442,7 @@ pub struct FamilyBinding {
 pub struct FamilySupport {
     #[prost(string, tag = "1")]
     pub family_id: ::prost::alloc::string::String,
+    /// exact revisions
     #[prost(uint32, repeated, tag = "2")]
     pub revisions: ::prost::alloc::vec::Vec<u32>,
     /// empty = every valid parameter set
@@ -685,7 +689,7 @@ pub enum RejectReason {
     TopologyMismatch = 7,
     TopologyMissing = 8,
     TargetMissing = 9,
-    /// Family admission codes 5, 6, 10, and 12 map here (FAM-42).
+    /// Admission codes 5, 6, 10, and 12 map here, and explicit-job code 10 (FAM-42).
     FamilyUnsupported = 10,
 }
 impl RejectReason {

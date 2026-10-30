@@ -388,7 +388,7 @@ export enum RejectReason {
   TOPOLOGY_MISMATCH = 7,
   TOPOLOGY_MISSING = 8,
   TARGET_MISSING = 9,
-  /** FAMILY_UNSUPPORTED - Family admission codes 5, 6, 10, and 12 map here (FAM-42). */
+  /** FAMILY_UNSUPPORTED - Admission codes 5, 6, 10, and 12 map here, and explicit-job code 10 (FAM-42). */
   FAMILY_UNSUPPORTED = 10,
   UNRECOGNIZED = -1,
 }
@@ -776,6 +776,7 @@ export interface LeaseDone {
 export interface FamilyDescriptor {
   familyId: string;
   revision: number;
+  /** canonical parameter bytes */
   params: Uint8Array;
   /** 32 bytes */
   paramsDigest: Uint8Array;
@@ -793,12 +794,15 @@ export interface FamilyBinding {
   metadata: Uint8Array;
   /** 32 bytes */
   topologyOrderDigest: Uint8Array;
+  /** native node ids in instance output order */
   nodeIds: number[];
+  /** the instance offset */
   offsetMilli: bigint;
 }
 
 export interface FamilySupport {
   familyId: string;
+  /** exact revisions */
   revisions: number[];
   /** empty = every valid parameter set */
   paramsDigests: Uint8Array[];

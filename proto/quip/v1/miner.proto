@@ -75,7 +75,7 @@ enum RejectReason {
   TOPOLOGY_MISMATCH = 7;
   TOPOLOGY_MISSING = 8;
   TARGET_MISSING = 9;
-  // Family admission codes 5, 6, 10, and 12 map here (FAM-42).
+  // Admission codes 5, 6, 10, and 12 map here, and explicit-job code 10 (FAM-42).
   FAMILY_UNSUPPORTED = 10;
 }
 
@@ -317,7 +317,7 @@ message LeaseDone {
 message FamilyDescriptor {
   string family_id    = 1;
   uint32 revision     = 2;
-  bytes  params       = 3;
+  bytes  params       = 3;       // canonical parameter bytes
   bytes  params_digest = 4; // 32 bytes
 }
 
@@ -327,12 +327,12 @@ message FamilyBinding {
   bytes  instance_digest = 3;       // 32 bytes, digest of the canonical instance bytes (FAM-30, FAM-68)
   bytes  metadata = 4;              // the metadata region: u16 n_sections, then sections (FAM-34, FAM-67)
   bytes  topology_order_digest = 5; // 32 bytes
-  repeated uint32 node_ids = 6;
-  int64  offset_milli = 7;
+  repeated uint32 node_ids = 6;     // native node ids in instance output order
+  int64  offset_milli = 7;          // the instance offset
 }
 
 message FamilySupport {
   string family_id = 1;
-  repeated uint32 revisions = 2;
+  repeated uint32 revisions = 2;     // exact revisions
   repeated bytes params_digests = 3; // empty = every valid parameter set
 }

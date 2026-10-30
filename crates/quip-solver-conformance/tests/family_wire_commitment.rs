@@ -114,7 +114,11 @@ fn check_same(name: &str, sent: &[u8], got: &[u8]) -> Result<(), String> {
 #[test]
 fn field_lengths_cross_the_wire_unchanged() -> Result<(), String> {
     let doc = core()?;
-    for case in section(&doc, "field_lengths")? {
+    let cases = section(&doc, "field_lengths")?;
+    if cases.is_empty() {
+        return Err("field_lengths section is empty".to_owned());
+    }
+    for case in cases {
         let name = str_of(&case, "name")?;
         let field = str_of(&case, "field")?;
         let length = case
@@ -228,6 +232,9 @@ fn binding_commits_to_the_instance_after_the_wire() -> Result<(), String> {
     let doc = core()?;
     let descriptors = section(&doc, "descriptors")?;
     let instances = section(&doc, "instances")?;
+    if instances.is_empty() {
+        return Err("instances section is empty".to_owned());
+    }
     for case in &instances {
         let name = str_of(case, "name")?;
         let family_id = str_of(case, "family_id")?;
@@ -292,7 +299,22 @@ fn binding_commits_to_the_instance_after_the_wire() -> Result<(), String> {
             }),
             ..Default::default()
         };
-        let parts = parts_from_job(name, &round_trip(&job)?)?;
+        let decoded = round_trip(&job)?;
+        let wire_binding = decoded
+            .ising
+            .as_ref()
+            .and_then(|p| p.family.as_ref())
+            .ok_or_else(|| format!("{name}: no binding after the wire"))?;
+        let wire_descriptor = wire_binding
+            .family
+            .as_ref()
+            .ok_or_else(|| format!("{name}: no descriptor after the wire"))?;
+        check_same(
+            name,
+            &wire_descriptor.params_digest,
+            &params_digest(&wire_descriptor.params),
+        )?;
+        let parts = parts_from_job(name, &decoded)?;
         let kinds: Vec<u16> = u32s(case, "metadata_kinds")?
             .into_iter()
             .map(|k| u16::try_from(k).map_err(|e| e.to_string()))
@@ -300,6 +322,7 @@ fn binding_commits_to_the_instance_after_the_wire() -> Result<(), String> {
         let instance = Instance::new(parts, &InstanceLimits::FAM_37, &kinds, None)
             .map_err(|c| format!("{name}: instance {c}"))?;
         check_same(name, &hex_of(case, "instance_digest")?, &instance.digest())?;
+        check_same(name, &wire_binding.instance_digest, &instance.digest())?;
         let bytes = instance
             .canonical_bytes()
             .map_err(|e| format!("{name}: {e}"))?;

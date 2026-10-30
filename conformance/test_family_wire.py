@@ -1,7 +1,8 @@
 """Wire-level checks for the problem-family extension (FAM-44, FAM-45).
 
-The reference bytes come from the family wire spec. Each one is parsed and
-re-serialized to pin tags, presence, and open-enum behavior.
+The reference bytes are the plan's reference table, produced by Python
+protobuf 7.35.1 from the edited proto. Each one is parsed and re-serialized
+to pin tags, presence, and open-enum behavior.
 """
 
 import json
