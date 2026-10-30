@@ -150,6 +150,8 @@ pub struct IsingProblem {
     pub h: ::prost::alloc::vec::Vec<u8>,
     #[prost(bytes = "vec", tag = "16")]
     pub j: ::prost::alloc::vec::Vec<u8>,
+    #[prost(message, optional, tag = "17")]
+    pub family: ::core::option::Option<FamilyBinding>,
     /// per-job override; 0 = unset -> SetTarget/adapt
     #[prost(uint32, tag = "5")]
     pub num_reads: u32,
@@ -357,6 +359,12 @@ pub struct Capabilities {
     /// makes no claim.
     #[prost(uint32, optional, tag = "16")]
     pub exact_resolution_milli: ::core::option::Option<u32>,
+    #[prost(string, tag = "17")]
+    pub solver_id: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag = "18")]
+    pub generated_families: ::prost::alloc::vec::Vec<FamilySupport>,
+    #[prost(message, repeated, tag = "19")]
+    pub accepted_families: ::prost::alloc::vec::Vec<FamilySupport>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct IsingProblemGenerator {
@@ -378,6 +386,12 @@ pub struct IsingProblemGenerator {
     pub salt_start: u64,
     #[prost(uint64, tag = "7")]
     pub salt_count: u64,
+    /// required iff algorithm == FAMILY_CHACHA8_V1 (FAM-48, FAM-49)
+    #[prost(message, optional, tag = "8")]
+    pub family: ::core::option::Option<FamilyDescriptor>,
+    /// 32 bytes, required iff family is set (FAM-49, FAM-50)
+    #[prost(bytes = "vec", tag = "9")]
+    pub topology_order_digest: ::prost::alloc::vec::Vec<u8>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct LeaseDone {
@@ -387,6 +401,49 @@ pub struct LeaseDone {
     pub salts_done: u64,
     #[prost(int64, tag = "3")]
     pub best_energy_milli: i64,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct FamilyDescriptor {
+    #[prost(string, tag = "1")]
+    pub family_id: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "2")]
+    pub revision: u32,
+    #[prost(bytes = "vec", tag = "3")]
+    pub params: ::prost::alloc::vec::Vec<u8>,
+    /// 32 bytes
+    #[prost(bytes = "vec", tag = "4")]
+    pub params_digest: ::prost::alloc::vec::Vec<u8>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct FamilyBinding {
+    #[prost(message, optional, tag = "1")]
+    pub family: ::core::option::Option<FamilyDescriptor>,
+    /// 0 or 32 bytes
+    #[prost(bytes = "vec", tag = "2")]
+    pub nonce: ::prost::alloc::vec::Vec<u8>,
+    /// 32 bytes, digest of the canonical instance bytes (FAM-30, FAM-68)
+    #[prost(bytes = "vec", tag = "3")]
+    pub instance_digest: ::prost::alloc::vec::Vec<u8>,
+    /// the metadata region: u16 n_sections, then sections (FAM-34, FAM-67)
+    #[prost(bytes = "vec", tag = "4")]
+    pub metadata: ::prost::alloc::vec::Vec<u8>,
+    /// 32 bytes
+    #[prost(bytes = "vec", tag = "5")]
+    pub topology_order_digest: ::prost::alloc::vec::Vec<u8>,
+    #[prost(uint32, repeated, tag = "6")]
+    pub node_ids: ::prost::alloc::vec::Vec<u32>,
+    #[prost(int64, tag = "7")]
+    pub offset_milli: i64,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct FamilySupport {
+    #[prost(string, tag = "1")]
+    pub family_id: ::prost::alloc::string::String,
+    #[prost(uint32, repeated, tag = "2")]
+    pub revisions: ::prost::alloc::vec::Vec<u32>,
+    /// empty = every valid parameter set
+    #[prost(bytes = "vec", repeated, tag = "3")]
+    pub params_digests: ::prost::alloc::vec::Vec<::prost::alloc::vec::Vec<u8>>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
@@ -558,6 +615,7 @@ pub enum GeneratorAlgorithm {
     /// ChaCha8 seeded with the nonce draws h for each node, then j for each
     /// edge, each value allowed\[next_u32 % len\], in cached Topology order.
     Blake3Chacha8V1 = 1,
+    FamilyChacha8V1 = 2,
 }
 impl GeneratorAlgorithm {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -568,6 +626,7 @@ impl GeneratorAlgorithm {
         match self {
             Self::Unspecified => "GENERATOR_ALGORITHM_UNSPECIFIED",
             Self::Blake3Chacha8V1 => "GENERATOR_ALGORITHM_BLAKE3_CHACHA8_V1",
+            Self::FamilyChacha8V1 => "GENERATOR_ALGORITHM_FAMILY_CHACHA8_V1",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -575,6 +634,7 @@ impl GeneratorAlgorithm {
         match value {
             "GENERATOR_ALGORITHM_UNSPECIFIED" => Some(Self::Unspecified),
             "GENERATOR_ALGORITHM_BLAKE3_CHACHA8_V1" => Some(Self::Blake3Chacha8V1),
+            "GENERATOR_ALGORITHM_FAMILY_CHACHA8_V1" => Some(Self::FamilyChacha8V1),
             _ => None,
         }
     }
@@ -625,6 +685,8 @@ pub enum RejectReason {
     TopologyMismatch = 7,
     TopologyMissing = 8,
     TargetMissing = 9,
+    /// Family admission codes 5, 6, 10, and 12 map here (FAM-42).
+    FamilyUnsupported = 10,
 }
 impl RejectReason {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -643,6 +705,7 @@ impl RejectReason {
             Self::TopologyMismatch => "TOPOLOGY_MISMATCH",
             Self::TopologyMissing => "TOPOLOGY_MISSING",
             Self::TargetMissing => "TARGET_MISSING",
+            Self::FamilyUnsupported => "FAMILY_UNSUPPORTED",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -658,6 +721,7 @@ impl RejectReason {
             "TOPOLOGY_MISMATCH" => Some(Self::TopologyMismatch),
             "TOPOLOGY_MISSING" => Some(Self::TopologyMissing),
             "TARGET_MISSING" => Some(Self::TargetMissing),
+            "FAMILY_UNSUPPORTED" => Some(Self::FamilyUnsupported),
             _ => None,
         }
     }

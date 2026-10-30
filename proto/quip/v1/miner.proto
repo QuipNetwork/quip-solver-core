@@ -54,6 +54,7 @@ enum GeneratorAlgorithm {
   // ChaCha8 seeded with the nonce draws h for each node, then j for each
   // edge, each value allowed[next_u32 % len], in cached Topology order.
   GENERATOR_ALGORITHM_BLAKE3_CHACHA8_V1 = 1;
+  GENERATOR_ALGORITHM_FAMILY_CHACHA8_V1 = 2;
 }
 
 enum JobKind {
@@ -74,6 +75,8 @@ enum RejectReason {
   TOPOLOGY_MISMATCH = 7;
   TOPOLOGY_MISSING = 8;
   TARGET_MISSING = 9;
+  // Family admission codes 5, 6, 10, and 12 map here (FAM-42).
+  FAMILY_UNSUPPORTED = 10;
 }
 
 message MinerMsg {
@@ -169,6 +172,7 @@ message IsingProblem {
   uint32 scale = 14;
   bytes h = 15;
   bytes j = 16;
+  FamilyBinding family = 17;
   uint32 num_reads      = 5; // per-job override; 0 = unset -> SetTarget/adapt
   uint32 num_sweeps     = 7; // per-job override; 0 = unset
   uint32 anneal_time_us = 8; // per-job override; 0 = unset
@@ -287,6 +291,9 @@ message Capabilities {
   // Step, in milli, at which coefficients are represented exactly. Unset or 0
   // makes no claim.
   optional uint32 exact_resolution_milli = 16;
+  string solver_id = 17;
+  repeated FamilySupport generated_families = 18;
+  repeated FamilySupport accepted_families = 19;
 }
 
 message IsingProblemGenerator {
@@ -297,10 +304,35 @@ message IsingProblemGenerator {
   bytes  base_salt = 5;              // 32 bytes
   uint64 salt_start = 6;
   uint64 salt_count = 7;
+  FamilyDescriptor family = 8;       // required iff algorithm == FAMILY_CHACHA8_V1 (FAM-48, FAM-49)
+  bytes  topology_order_digest = 9;  // 32 bytes, required iff family is set (FAM-49, FAM-50)
 }
 
 message LeaseDone {
   bytes  job_id = 1;
   uint64 salts_done = 2;
   int64  best_energy_milli = 3;
+}
+
+message FamilyDescriptor {
+  string family_id    = 1;
+  uint32 revision     = 2;
+  bytes  params       = 3;
+  bytes  params_digest = 4; // 32 bytes
+}
+
+message FamilyBinding {
+  FamilyDescriptor family = 1;
+  bytes  nonce = 2;                 // 0 or 32 bytes
+  bytes  instance_digest = 3;       // 32 bytes, digest of the canonical instance bytes (FAM-30, FAM-68)
+  bytes  metadata = 4;              // the metadata region: u16 n_sections, then sections (FAM-34, FAM-67)
+  bytes  topology_order_digest = 5; // 32 bytes
+  repeated uint32 node_ids = 6;
+  int64  offset_milli = 7;
+}
+
+message FamilySupport {
+  string family_id = 1;
+  repeated uint32 revisions = 2;
+  repeated bytes params_digests = 3; // empty = every valid parameter set
 }

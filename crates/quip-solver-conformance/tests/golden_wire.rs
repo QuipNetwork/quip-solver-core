@@ -12,9 +12,10 @@
 
 use prost::Message;
 use quip_proto::v1::{
-    Algorithm, Backend, Capabilities, CoefficientEncoding, EdgeList, Fatal, GeneratorAlgorithm,
-    Hello, IsingProblem, IsingProblemGenerator, Job, JobKind, LeaseDone, Provenance, Reject,
-    RejectReason, Result as JobResult, SamplerMeta, SetTarget, Solution, Status, Topology,
+    Algorithm, Backend, Capabilities, CoefficientEncoding, EdgeList, FamilySupport, Fatal,
+    GeneratorAlgorithm, Hello, IsingProblem, IsingProblemGenerator, Job, JobKind, LeaseDone,
+    Provenance, Reject, RejectReason, Result as JobResult, SamplerMeta, SetTarget, Solution,
+    Status, Topology,
 };
 use quip_solver_conformance::golden_wire;
 use std::collections::{BTreeMap, HashMap};
@@ -97,6 +98,9 @@ fn hello() -> Hello {
             max_degree: None,
             max_local_field_milli: None,
             exact_resolution_milli: None,
+            solver_id: String::new(),
+            generated_families: vec![],
+            accepted_families: vec![],
         }),
     }
 }
@@ -163,6 +167,8 @@ fn job_generate() -> Job {
             base_salt: vec![0x33; 32],
             salt_start: 256,
             salt_count: 16,
+            family: None,
+            topology_order_digest: vec![],
         }),
         ..Default::default()
     }
@@ -234,6 +240,9 @@ fn capabilities() -> Capabilities {
         max_degree: None,
         max_local_field_milli: None,
         exact_resolution_milli: None,
+        solver_id: String::new(),
+        generated_families: vec![],
+        accepted_families: vec![],
     }
 }
 
@@ -296,7 +305,8 @@ fn enum_numbers_match_the_fixture() {
             Malformed,
             TopologyMismatch,
             TopologyMissing,
-            TargetMissing
+            TargetMissing,
+            FamilyUnsupported
         ]
     );
     pin_enum!(
@@ -331,7 +341,10 @@ fn enum_numbers_match_the_fixture() {
         CoefficientEncoding,
         [Unspecified, I32, I16, I8, F16, F32, F64]
     );
-    pin_enum!(GeneratorAlgorithm, [Unspecified, Blake3Chacha8V1]);
+    pin_enum!(
+        GeneratorAlgorithm,
+        [Unspecified, Blake3Chacha8V1, FamilyChacha8V1]
+    );
     assert_eq!(generated, golden_wire().enums, "enum numbers changed");
 }
 
@@ -352,4 +365,113 @@ fn every_variant_the_fixture_pins_still_parses_from_its_name() {
             assert!(parsed, "{kind}::{name} no longer exists");
         }
     }
+}
+
+#[expect(
+    clippy::expect_used,
+    reason = "helpers for a test over a checked-in fixture; a malformed fixture must fail loudly"
+)]
+fn core_vectors() -> serde_json::Value {
+    serde_json::from_str(quip_solver_conformance::FAMILY_CORE).expect("core.json parses")
+}
+
+#[expect(
+    clippy::panic,
+    reason = "helpers for a test over a checked-in fixture; a malformed fixture must fail loudly"
+)]
+fn cases<'a>(core: &'a serde_json::Value, section: &str) -> &'a [serde_json::Value] {
+    core.get(section)
+        .and_then(serde_json::Value::as_array)
+        .unwrap_or_else(|| panic!("section {section} is missing"))
+}
+
+#[expect(
+    clippy::expect_used,
+    reason = "helpers for a test over a checked-in fixture; a malformed fixture must fail loudly"
+)]
+fn support_entry(entry: &serde_json::Value) -> FamilySupport {
+    let revisions = entry["revisions"].as_array().expect("revisions");
+    let digests = entry["params_digests"].as_array().expect("params_digests");
+    FamilySupport {
+        family_id: entry["family_id"].as_str().expect("family_id").to_owned(),
+        revisions: revisions
+            .iter()
+            .map(|r| u32::try_from(r.as_u64().expect("revision")).expect("u32 revision"))
+            .collect(),
+        params_digests: digests
+            .iter()
+            .map(|d| from_hex(d.as_str().expect("digest hex")))
+            .collect(),
+    }
+}
+
+#[expect(
+    clippy::expect_used,
+    reason = "helpers for a test over a checked-in fixture; a malformed fixture must fail loudly"
+)]
+fn assert_roundtrips(caps: &Capabilities, name: &str) {
+    let decoded = Capabilities::decode(&caps.encode_to_vec()[..]).expect("decode");
+    assert_eq!(&decoded, caps, "{name}");
+}
+
+#[test]
+fn family_wire_vectors_cross_the_wire() {
+    let core = core_vectors();
+
+    for case in cases(&core, "solver_ids") {
+        let name = case["name"].as_str().expect("name");
+        let bytes = from_hex(case["solver_id_hex"].as_str().expect("solver_id_hex"));
+        let solver_id = String::from_utf8(bytes).expect("every solver id vector is UTF-8");
+        let caps = Capabilities {
+            solver_id,
+            ..Default::default()
+        };
+        assert_roundtrips(&caps, name);
+    }
+
+    for case in cases(&core, "family_support") {
+        let name = case["name"].as_str().expect("name");
+        let entries: Vec<FamilySupport> = case["entries"]
+            .as_array()
+            .expect("entries")
+            .iter()
+            .map(support_entry)
+            .collect();
+        let generated = Capabilities {
+            generated_families: entries.clone(),
+            ..Default::default()
+        };
+        let accepted = Capabilities {
+            accepted_families: entries,
+            ..Default::default()
+        };
+        assert_roundtrips(&generated, name);
+        assert_roundtrips(&accepted, name);
+    }
+
+    let rows = cases(&core, "wire_reasons");
+    for row in rows {
+        let value = i32::try_from(row["value"].as_i64().expect("value")).expect("i32 value");
+        let reason = RejectReason::try_from(value).expect("known reason");
+        assert_eq!(
+            reason.as_str_name(),
+            row["reason"].as_str().expect("reason")
+        );
+    }
+    let variants = [
+        RejectReason::Unspecified,
+        RejectReason::UnsupportedKind,
+        RejectReason::TooLarge,
+        RejectReason::Expired,
+        RejectReason::Overloaded,
+        RejectReason::ShuttingDown,
+        RejectReason::Malformed,
+        RejectReason::TopologyMismatch,
+        RejectReason::TopologyMissing,
+        RejectReason::TargetMissing,
+        RejectReason::FamilyUnsupported,
+    ];
+    assert_eq!(rows.len(), variants.len());
+
+    assert_eq!(quip_protocol::session::PROTOCOL_VERSION, 2);
 }

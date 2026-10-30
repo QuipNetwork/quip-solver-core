@@ -335,6 +335,7 @@ fn job(count: u64) -> wire::Job {
             base_salt: vec![0; 32],
             salt_start: 10,
             salt_count: count,
+            ..Default::default()
         }),
         ..Default::default()
     }

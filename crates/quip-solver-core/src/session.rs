@@ -148,6 +148,10 @@ pub fn capabilities(id: &BackendIdentity, stream_width: u32) -> Capabilities {
         max_degree: id.limits.max_degree,
         max_local_field_milli: id.limits.max_local_field_milli,
         exact_resolution_milli: id.limits.exact_resolution_milli,
+        // No family is advertised, so `generators` lists only the legacy algorithm (FAM-58).
+        solver_id: String::new(),
+        generated_families: vec![],
+        accepted_families: vec![],
     }
 }
 

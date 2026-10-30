@@ -1043,6 +1043,8 @@ fn lease_generator() -> IsingProblemGenerator {
         base_salt: vec![0x44; 32],
         salt_start: 10,
         salt_count: u64::from(LEASE_SALTS),
+        family: None,
+        topology_order_digest: vec![],
     }
 }
 
@@ -1805,6 +1807,9 @@ mod tests {
             max_degree: None,
             max_local_field_milli: None,
             exact_resolution_milli: None,
+            solver_id: String::new(),
+            generated_families: vec![],
+            accepted_families: vec![],
         }
     }
 
