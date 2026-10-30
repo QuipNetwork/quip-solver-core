@@ -416,7 +416,7 @@ The right column gives the wire mapping.
 |---|---|---|---|
 | 1 | `DescriptorMissing` | family generator algorithm without `family` | `MALFORMED` |
 | 2 | `DescriptorUnexpected` | legacy algorithm with `family` set | `MALFORMED` |
-| 3 | `FamilyIdInvalid` | `family_id` breaks the grammar or uses `example` | `MALFORMED` |
+| 3 | `FamilyIdInvalid` | `family_id` breaks the grammar, has a length outside 3 to 64 bytes, or uses `example` | `MALFORMED` |
 | 4 | `RevisionZero` | `revision == 0` | `MALFORMED` |
 | 5 | `FamilyUnsupported` | `family_id` not supported by this party | `FAMILY_UNSUPPORTED` |
 | 6 | `RevisionUnsupported` | known family, revision not supported | `FAMILY_UNSUPPORTED` |
