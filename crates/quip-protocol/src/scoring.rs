@@ -391,7 +391,7 @@ mod tests {
         assert!((0.0..=0.5).contains(&d), "diversity {d} outside [0, 0.5]");
     }
 
-    use crate::chacha8::ChaCha8Rng;
+    use ising_generators::rng::ChaCha8Rng;
 
     /// The unit-float form a binding builds from milli coefficients.
     fn unit(milli: &[i32]) -> Vec<f64> {

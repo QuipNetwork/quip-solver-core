@@ -6,6 +6,7 @@ members = ["crates/*"]
 # [workspace.dependencies], but it is left out of default-members so a bare
 # `cargo build` / `cargo test` skips it.
 default-members = [
+    "crates/ising-generators",
     "crates/quip-proto",
     "crates/quip-protocol",
     "crates/quip-solver-core",
@@ -71,6 +72,7 @@ all = "warn"
 # what lets crates.io resolve them. quip-solver-conformance is deliberately
 # absent: it is only ever a dev-dependency, and versioning it would create a
 # publish cycle with quip-protocol. See the note in crates/quip-protocol.
+ising-generators = { path = "crates/ising-generators", version = "0.0.4" }
 quip-proto = { path = "crates/quip-proto", version = "0.0.4" }
 quip-protocol = { path = "crates/quip-protocol", version = "0.0.4" }
 quip-solver-core = { path = "crates/quip-solver-core", version = "0.0.4" }

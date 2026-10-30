@@ -1,0 +1,30 @@
+[package]
+name = "ising-generators"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+description = "no_std family descriptors, canonical instances, and ChaCha8 streams for the Quip solver protocol"
+keywords = ["quip", "ising", "consensus", "no-std"]
+categories = ["no-std", "algorithms", "cryptography"]
+
+[features]
+default = ["std"]
+# Runtime SIMD detection in blake3. No API change: the crate is no_std either way.
+std = ["blake3/std"]
+
+[dependencies]
+blake3 = { version = "1", default-features = false }
+
+[dev-dependencies]
+# Path-only and unversioned, as in crates/quip-protocol: quip-protocol depends on
+# this crate, so a version here would make publishing order impossible. Cargo
+# drops versionless dev-dependencies from the published manifest.
+quip-protocol = { path = "../quip-protocol" }
+quip-solver-conformance = { path = "../quip-solver-conformance" }
+serde_json = "1"
+
+[lints]
+workspace = true

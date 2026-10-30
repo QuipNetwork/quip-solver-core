@@ -17,6 +17,7 @@ path = "src/lib.rs"
 [dependencies]
 quip-proto = { workspace = true }
 quip-protocol = { workspace = true }
+ising-generators = { workspace = true }
 tonic = { workspace = true }
 prost = { workspace = true }
 tokio = { workspace = true }

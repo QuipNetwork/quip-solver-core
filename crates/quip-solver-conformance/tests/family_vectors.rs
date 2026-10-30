@@ -665,7 +665,7 @@ fn check_leases(doc: &Value) -> Result<(), String> {
         )?;
         for (i, entry) in (0u64..).zip(fixture_salts) {
             let salt = spec.salt(i).ok_or("salt index outside the lease")?;
-            let nonce = quip_protocol::derive::derive_nonce(
+            let nonce = ising_generators::random::derive_nonce(
                 spec.last_proof_block_hash,
                 spec.miner_account,
                 salt,

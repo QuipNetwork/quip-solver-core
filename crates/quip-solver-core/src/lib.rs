@@ -35,13 +35,20 @@ pub use session::{
     INITIAL_SPINS_FEATURE, LINEAR_SCHEDULE_FEATURE,
 };
 
+/// Family descriptors, canonical instances, `ChaCha8` streams, and nonce
+/// derivation.
+///
+/// Re-exported for the same reason as [`quip_protocol`]. A solver that derives
+/// a nonce calls `quip_solver_core::ising_generators::random::derive_nonce`
+/// without adding a dependency that must move in lockstep.
+pub use ising_generators;
 /// The generated protobuf and tonic stubs for the wire contract.
 ///
 /// Re-exported so a solver depends on this one crate. Reaching for
 /// `quip-proto` directly only pins a second version of the same code.
 pub use quip_proto;
 /// The consensus primitives: energy and diversity scoring, the `ChaCha8` draw,
-/// nonce derivation, wire codecs, and the handshake.
+/// wire codecs, and the handshake.
 ///
 /// Re-exported for the same reason as [`quip_proto`]. A solver that scores its
 /// own solutions calls `quip_solver_core::quip_protocol::scoring::energy_milli`

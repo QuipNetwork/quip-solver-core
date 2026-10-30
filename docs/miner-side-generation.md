@@ -107,7 +107,7 @@ For each salt, the host sends only the 32-byte nonce.
 
 ### The algorithm
 
-This is the complete draw. The reference is `quip_protocol::chacha8`.
+This is the complete draw. The keystream reference is `ising_generators::rng::ChaCha8Rng`. The draw is `quip_protocol::chacha8::draw_into`.
 
 1. Read the nonce as eight little-endian `u32` key words, `k0` to `k7`.
 2. Keystream block `b` starts from this 16-word state:
