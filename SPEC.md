@@ -222,7 +222,8 @@ Its field number is 3. The schema reserves the old `spins_bytes` name and field 
 Plain and mempool jobs keep their credits, rejects, provenance, and warm-start behavior.
 
 `IsingProblem.family` is tag 17.
-The SC-4 proto change adds this field. `miner.proto` does not have it yet.
+`miner.proto` defines this field.
+A solver session does not yet use it. It ignores the field and solves the plain model.
 A solver that lists the revision in `accepted_families` validates the binding and may use its structure.
 Any other solver ignores the field and solves the plain model.
 See [Explicit family jobs](docs/problem-families.md#explicit-family-jobs).
@@ -269,7 +270,11 @@ Empty reads send no result and do not change the lowest energy.
 The stop rules in section 5 bound this completion sequence.
 
 The legacy algorithm stays unchanged, and its leases must not carry `family`.
-The SC-4 proto change adds `GENERATOR_ALGORITHM_FAMILY_CHACHA8_V1`. `miner.proto` does not have it yet.
+In `miner.proto`, `GENERATOR_ALGORITHM_FAMILY_CHACHA8_V1` is value 2.
+`IsingProblemGenerator` has `family` at field 8 and `topology_order_digest` at field 9.
+A solver session does not yet admit family leases.
+The session answers value 2 with `MALFORMED`.
+A legacy lease that sets `family` or `topology_order_digest` also gets `MALFORMED`.
 Its leases carry a `FamilyDescriptor` and a `topology_order_digest`.
 A coordinator sends them only after the solver negotiates the family.
 `FAMILY_UNSUPPORTED` covers an unsupported family or revision.
@@ -307,7 +312,8 @@ A generic solver does not list that revision and solves a problem that has a fam
 An accepted-family solver lists the revision in `accepted_families`.
 A generated-family solver lists it in `generated_families`.
 `solver_id` names the solver across releases.
-The SC-4 proto change adds `Capabilities` fields 17 to 19: `solver_id`, `generated_families`, and `accepted_families`.
+`Capabilities` has fields 17 to 19: `solver_id`, `generated_families`, and `accepted_families`.
+A solver session does not yet advertise families. It sends an empty `solver_id` and both lists empty.
 A pin on `solver_id` never bypasses these compatibility checks.
 See [Capabilities](docs/problem-families.md#capabilities) and [Dispatch and pins](docs/problem-families.md#dispatch-and-pins).
 

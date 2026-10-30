@@ -74,10 +74,12 @@ Each call returns `Err(DrawError::EmptyAllowedValues)` when its output range is 
 
 The draw in the rest of this guide does not apply to a family lease.
 A family lease uses different random streams, described in [Random streams](problem-families.md#random-streams).
-The wire fields for generator value 2 and `generated_families` are future additions (SC-4 and SC-6).
-The current code does not support them.
+The wire fields for generator value 2 and `generated_families` exist in `miner.proto`.
+Session support for family leases comes in SC-5.
+Advertising families comes in SC-6.
+The current session does not support them.
 
-When the wire fields exist, a miner may use an optimized family generator only under these conditions:
+When the session supports them, a miner may use an optimized family generator only under these conditions:
 
 - The claimed `(family_id, revision)` must pass SC-7 conformance (future) on the actual code that generates the instance.
   The default session path and a device path are separate code, and each must pass.

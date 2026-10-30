@@ -5,6 +5,34 @@ This file documents changes to the Quip solver contract.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+The wire fields for problem families. A solver session does not use them yet:
+it advertises no families and admits no family lease. `protocol_version` stays
+2, and old encodings do not change.
+
+### Added
+
+- `miner.proto`: the enum values `GENERATOR_ALGORITHM_FAMILY_CHACHA8_V1` = 2
+  and `FAMILY_UNSUPPORTED` = 10. The messages `FamilyDescriptor`,
+  `FamilyBinding`, and `FamilySupport`. The fields
+  `IsingProblemGenerator.family` at tag 8, `IsingProblemGenerator.topology_order_digest`
+  at tag 9, `IsingProblem.family` at tag 17, `Capabilities.solver_id` at tag 17,
+  `Capabilities.generated_families` at tag 18, and `Capabilities.accepted_families`
+  at tag 19. The Rust, Python, and TypeScript bindings include them.
+- `quip_protocol::family::reject_reason` and `CodePhase`, behind the
+  `session` feature. They map a family rejection code to a wire reject reason.
+
+### Changed
+
+- `LeaseSpec::from_proto` refuses a legacy lease with algorithm 1 that sets
+  `family` or a non-empty `topology_order_digest`, with the new
+  `LeaseError::DescriptorUnexpected`. A solver session maps it to `MALFORMED`.
+  The new variant breaks an exhaustive `match` on `LeaseError`.
+- Rust struct literals of `Capabilities`, `IsingProblemGenerator`, and
+  `IsingProblem`, and TypeScript object literals of `Capabilities`, need the
+  new fields. In Rust, add `..Default::default()`.
+
 ## 0.0.4
 
 `--solve` keys for quantum annealers, faster lease mining on lane-paired
