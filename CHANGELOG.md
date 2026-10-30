@@ -5,32 +5,14 @@ This file documents changes to the Quip solver contract.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
-
-### Added
-
-- The `ising-generators` crate, a `no_std` library with these modules:
-  - `descriptor`: family identity, canonical parameter bytes, digests, size
-    bounds, and descriptor admission.
-  - `instance`: bounded canonical instances and metadata validation.
-  - `rng`: the scalar `ChaCha8Rng`, `uniform`, and the family stream seeds.
-  - `random`: `derive_nonce` and `NonceDeriver` for the random generator.
-
-### Changed
-
-- `ChaCha8Rng` moved from `quip_protocol::chacha8` to
-  `ising_generators::rng`. `derive_nonce` and `NonceDeriver` moved from
-  `quip_protocol::derive` to `ising_generators::random`. The old paths do not
-  exist and have no re-export.
-- `quip_solver_core` re-exports `ising_generators`.
-- Draw output does not change. The golden vectors pin it.
-
-## 0.0.4-rc2
+## 0.0.4
 
 `--solve` keys for quantum annealers, faster lease mining on lane-paired
-backends, and a draft contract for problem families. Existing solvers need no
-change: a solver that lists neither new feature refuses the new key, as it
-already does.
+backends, a draft contract for problem families, and the `ising-generators`
+crate. Existing solvers need no change: a solver that lists neither new
+feature refuses the new key, as it already does. Rust code that imports the
+scalar `ChaCha8Rng` or the nonce derivation from `quip_protocol` must import
+them from `ising_generators` instead.
 
 ### Added
 
@@ -47,8 +29,24 @@ already does.
 - `docs/problem-families.md`: the contract for problem families. It covers
   family identity, canonical parameter bytes, digests, the family random
   stream, size bounds, stable rejection codes, and the planned wire fields.
-  `SPEC.md` and `docs/miner-side-generation.md` refer to it. No code supports
-  it yet, and the `.proto` files do not change.
+  `SPEC.md` and `docs/miner-side-generation.md` refer to it. The
+  `ising-generators` crate holds its primitives. The `.proto` files do
+  not change.
+- The `ising-generators` crate, a `no_std` library with these modules:
+  - `descriptor`: family identity, canonical parameter bytes, digests, size
+    bounds, and descriptor admission.
+  - `instance`: bounded canonical instances and metadata validation.
+  - `rng`: the scalar `ChaCha8Rng`, `uniform`, and the family stream seeds.
+  - `random`: `derive_nonce` and `NonceDeriver` for the random generator.
+
+### Changed
+
+- `ChaCha8Rng` moved from `quip_protocol::chacha8` to
+  `ising_generators::rng`. `derive_nonce` and `NonceDeriver` moved from
+  `quip_protocol::derive` to `ising_generators::random`. The old paths do not
+  exist and have no re-export.
+- `quip_solver_core` re-exports `ising_generators`.
+- Draw output does not change. The golden vectors pin it.
 
 ### Fixed
 
