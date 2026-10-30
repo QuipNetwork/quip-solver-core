@@ -39,7 +39,7 @@ pub use session::{
 /// derivation.
 ///
 /// Re-exported for the same reason as [`quip_protocol`]. A solver that derives
-/// a nonce calls `quip_solver_core::ising_generators::legacy::derive_nonce`
+/// a nonce calls `quip_solver_core::ising_generators::random::derive_nonce`
 /// without adding a dependency that must move in lockstep.
 pub use ising_generators;
 /// The generated protobuf and tonic stubs for the wire contract.

@@ -2,7 +2,7 @@
 //! production vectors (`golden_vectors.json` and `golden_lease.json`).
 
 use super::{case_name, codec, str_field, u64_decimal};
-use ising_generators::legacy::derive_nonce;
+use ising_generators::random::derive_nonce;
 use ising_generators::rng::ChaCha8Rng;
 use quip_protocol::chacha8::draw_ising_milli;
 use quip_protocol::lease::{Generator, LeaseSpec, TopologyView};

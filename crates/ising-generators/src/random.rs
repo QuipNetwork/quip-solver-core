@@ -1,4 +1,4 @@
-//! Legacy `PoW` nonce derivation: BLAKE3 over (`last_proof`, miner, salt).
+//! `PoW` nonce derivation for the random generator: BLAKE3 over (`last_proof`, miner, salt).
 //!
 //! Golden-pinned against the `derive_nonce` cases of the `golden_vectors.json`
 //! conformance fixture, and against `golden_lease.json`.
