@@ -156,7 +156,7 @@ The fixture format makes these decisions.
 | F5 | `legacy.json` hashes the canonical JSON of each referenced case | A case change fails, but a new section does not |
 | F6 | The Rust test re-derives every expected code with its own decision functions | A Python bug in a code cannot ship unchecked |
 | F7 | `src/vectors.rs` exports `FAMILY_SCHEMA`, `FAMILY_CORE`, and `FAMILY_LEGACY` | Later family crates read the same bytes |
-| F8 | ChaCha8 checkpoints stop at word 1002, and "large counters" means salt counters near `u64::MAX` | `ChaCha8Rng` has no seek, and a seek would change `quip-protocol` |
+| F8 | ChaCha8 checkpoints stop at word 1002, and "large counters" means salt counters near `u64::MAX` | `ChaCha8Rng` has no seek, and a seek would change the scalar reference in `ising-generators` |
 | F9 | CI runs the drift test in the `conformance` job, with no `.gitlab-ci.yml` change | That job already installs `blake3` |
 
 ## Regenerating

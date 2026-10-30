@@ -1,6 +1,7 @@
-//! `PoW` nonce derivation: BLAKE3 over (`last_proof`, miner, salt).
+//! Legacy `PoW` nonce derivation: BLAKE3 over (`last_proof`, miner, salt).
 //!
-//! Golden-pinned against `conformance/golden_vectors.json` `derive_nonce`.
+//! Golden-pinned against the `derive_nonce` cases of the `golden_vectors.json`
+//! conformance fixture, and against `golden_lease.json`.
 
 /// Derive the canonical 32-byte `PoW` nonce.
 ///
@@ -136,7 +137,7 @@ mod tests {
 
     #[test]
     fn matches_golden_vector() {
-        // conformance/golden_vectors.json derive_nonce[0]
+        // golden_vectors.json derive_nonce[0]
         let last = [0u8; 32];
         let miner = [1u8; 32];
         let salt = [2u8; 32];

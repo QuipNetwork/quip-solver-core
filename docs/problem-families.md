@@ -212,7 +212,7 @@ No family revision changes the legacy stream or reinterprets a legacy draw.
 **FAM-21.** Each substream is its own ChaCha8 instance.
 Its 32-byte key is the stream seed from the digest table.
 It starts at keystream word 0.
-The cipher is the existing `ChaCha8Rng` (8 rounds, `crates/quip-protocol/src/chacha8.rs`).
+The cipher is the existing `ChaCha8Rng` (8 rounds, `crates/ising-generators/src/rng.rs`).
 
 **FAM-22.** A substream label must be ASCII and 1 to 32 bytes long.
 Sample labels are `fields`, `perm`, and `match`.

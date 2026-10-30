@@ -5,6 +5,26 @@ This file documents changes to the Quip solver contract.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+
+- The `ising-generators` crate, a `no_std` library with these modules:
+  - `descriptor`: family identity, canonical parameter bytes, digests, size
+    bounds, and descriptor admission.
+  - `instance`: bounded canonical instances and metadata validation.
+  - `rng`: the scalar `ChaCha8Rng`, `uniform`, and the family stream seeds.
+  - `legacy`: `derive_nonce` and `NonceDeriver` for the legacy stream.
+
+### Changed
+
+- `ChaCha8Rng` moved from `quip_protocol::chacha8` to
+  `ising_generators::rng`. `derive_nonce` and `NonceDeriver` moved from
+  `quip_protocol::derive` to `ising_generators::legacy`. The old paths do not
+  exist and have no re-export.
+- `quip_solver_core` re-exports `ising_generators`.
+- Draw output does not change. The golden vectors pin it.
+
 ## 0.0.4-rc2
 
 `--solve` keys for quantum annealers, faster lease mining on lane-paired

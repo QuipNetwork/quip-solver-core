@@ -6,10 +6,10 @@ use crate::{
     CancelToken, IsingGraph, SampleError, SampleParams, Sampler, SamplerResult, StreamJob,
     StreamOutcome, StreamResult,
 };
+use ising_generators::legacy::NonceDeriver;
 use quip_proto::v1::{
     miner_msg, Job, JobRequest, LeaseDone, MinerMsg, RejectReason, SamplerMeta, Solution,
 };
-use quip_protocol::derive::NonceDeriver;
 use quip_protocol::lease::{Generator, LeaseSpec, TopologyView};
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
