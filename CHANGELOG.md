@@ -30,7 +30,7 @@ them from `ising_generators` instead.
   family identity, canonical parameter bytes, digests, the family random
   stream, size bounds, stable rejection codes, and the planned wire fields.
   `SPEC.md` and `docs/miner-side-generation.md` refer to it. The
-  `ising-generators` crate implements its primitives. The `.proto` files do
+  `ising-generators` crate holds its primitives. The `.proto` files do
   not change.
 - The `ising-generators` crate, a `no_std` library with these modules:
   - `descriptor`: family identity, canonical parameter bytes, digests, size
