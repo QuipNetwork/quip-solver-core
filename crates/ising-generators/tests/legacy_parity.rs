@@ -258,8 +258,8 @@ fn golden_lease_cases_agree_three_ways() -> Result<(), String> {
     }
     for case in cases {
         let name = str_field(case, "name")?;
-        let n_nodes = len_of_count(case, "n_nodes")?;
-        let n_edges = len_of_count(case, "n_edges")?;
+        let n_nodes = count_of(case, "n_nodes")?;
+        let n_edges = count_of(case, "n_edges")?;
         let allowed_h = i32_list(case, "allowed_h_milli")?;
         let allowed_j = i32_list(case, "allowed_j_milli")?;
         let salt_start: u64 = str_field(case, "salt_start")?
@@ -315,7 +315,7 @@ fn golden_lease_cases_agree_three_ways() -> Result<(), String> {
     Ok(())
 }
 
-fn len_of_count(case: &Value, key: &str) -> Result<usize, String> {
+fn count_of(case: &Value, key: &str) -> Result<usize, String> {
     let n = case
         .get(key)
         .and_then(Value::as_u64)
@@ -377,12 +377,11 @@ fn dispatched_path_is_reported() {
 }
 
 /// Seed `000102...1f`, the first golden `chacha8` case.
-fn vector_seed() -> [u8; 32] {
-    let mut seed = [0_u8; 32];
-    for (i, b) in seed.iter_mut().enumerate() {
-        *b = u8::try_from(i).unwrap_or(0);
-    }
-    seed
+const fn vector_seed() -> [u8; 32] {
+    [
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
+        25, 26, 27, 28, 29, 30, 31,
+    ]
 }
 
 fn set_draw(set: &[i32]) -> Result<[i32; 4], String> {
@@ -438,10 +437,13 @@ fn single_value_set_still_consumes_words() -> Result<(), String> {
     }
     let want: Vec<i32> = (0..4)
         .map(|_| {
-            let index = usize::try_from(rng.next_u32() % 3).unwrap_or(0);
-            allowed_j.get(index).copied().unwrap_or(0)
+            let index = usize::try_from(rng.next_u32() % 3).map_err(|e| e.to_string())?;
+            allowed_j
+                .get(index)
+                .copied()
+                .ok_or_else(|| format!("index {index} outside the allowed set"))
         })
-        .collect();
+        .collect::<Result<_, String>>()?;
     expect_eq!("j", j, want)
 }
 

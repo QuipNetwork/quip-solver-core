@@ -23,6 +23,7 @@ pub fn key_words(seed: &[u8; 32]) -> [u32; 8] {
 /// Deterministic `ChaCha8` stream (8 rounds, 64-bit block counter from 0).
 ///
 /// Not a general-purpose CSPRNG.
+#[derive(Debug)]
 pub struct ChaCha8Rng {
     /// Expanded 256-bit key as eight little-endian words.
     key: [u32; 8],

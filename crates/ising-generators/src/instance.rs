@@ -101,6 +101,8 @@ impl InstanceLimits {
 /// Check the metadata region layout (FAM-34).
 ///
 /// The region size bound is not checked here. `Instance::new` checks it.
+/// An instance with no sections carries the 2-byte region `[0, 0]`. An empty
+/// region is code 16.
 ///
 /// # Errors
 ///
@@ -166,7 +168,8 @@ pub struct InstanceParts {
     pub j: Vec<i32>,
     /// The offset in milli.
     pub offset_milli: i64,
-    /// The metadata region, from the `u16` section count.
+    /// The metadata region, from the `u16` section count. An instance with no
+    /// sections carries the 2-byte region `[0, 0]`. An empty `Vec` is code 16.
     pub metadata: Vec<u8>,
 }
 

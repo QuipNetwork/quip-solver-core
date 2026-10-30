@@ -377,8 +377,8 @@ smoke:typescript:
 #
 # crates.io needs one registration per crate, at
 # crates.io/crates/<name>/settings: quip-proto, ising-generators,
-# quip-protocol, quip-solver-core, quip-solver-conformance. Its GitLab support is public beta
-# and gitlab.com only.
+# quip-protocol, quip-solver-core, quip-solver-conformance. Its GitLab
+# support is public beta and gitlab.com only.
 #
 # Protected tag pattern `v*` already exists, which is what keeps these
 # environments reachable only from a Maintainer-pushed tag.

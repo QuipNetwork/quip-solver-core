@@ -65,11 +65,11 @@ fn quarter_round_lanes<const L: usize>(
 
 /// Keystream blocks `counter .. counter + L`, block by block in stream order.
 ///
-/// Byte-identical to `L` calls of the scalar `ChaCha8Rng` block function. The state
-/// is held word-major, one [`Lanes`] array per state word, so every round step
-/// is one operation across the `L` blocks. The 16 state words stay live
-/// through every round, so `L` lanes of one word should fill one vector
-/// register, or the rounds spill to the stack.
+/// Byte-identical to `L` calls of the scalar `ChaCha8Rng` block function.
+/// The state is held word-major, one [`Lanes`] array per state word, so
+/// every round step is one operation across the `L` blocks. The 16 state
+/// words stay live through every round, so `L` lanes of one word should
+/// fill one vector register, or the rounds spill to the stack.
 #[inline(always)]
 #[expect(
     clippy::inline_always,

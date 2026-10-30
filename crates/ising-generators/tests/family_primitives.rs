@@ -63,6 +63,21 @@ fn codes_match_the_fixture_table() -> Result<(), String> {
     {
         return Err("Code::ALL is not ascending".into());
     }
+    let mut values = Vec::new();
+    for row in rows {
+        values.push(
+            row.get("code")
+                .and_then(Value::as_u64)
+                .ok_or("row without code")?,
+        );
+    }
+    if values != (1..=16).collect::<Vec<u64>>() {
+        return Err(format!("fixture codes are not exactly 1..=16: {values:?}"));
+    }
+    let as_error: &dyn core::error::Error = &Code::MetadataInvalid;
+    if as_error.to_string() != Code::MetadataInvalid.to_string() {
+        return Err("Code as dyn Error displays differently".into());
+    }
     for row in rows {
         let value = row
             .get("code")
@@ -520,9 +535,42 @@ fn layout_beats_bounds() -> Result<(), String> {
 
 #[test]
 fn params_longer_than_4096_bytes_fail_before_parsing() -> Result<(), String> {
-    let mut bytes = hex("01010002000000020002000400000024faffff")?;
-    bytes.resize(MAX_PARAMS_LEN + 1, 0);
-    if code_of(&Params::parse(UNIFORM_FIELD, &bytes)) != Some(7) {
+    // `all-types-4096` is layout-valid at the cap. Growing its tag-8 bytes
+    // field by one byte gives 4097 bytes that are layout-valid apart from the
+    // length cap, and the tag-8 maximum of 4096 is not what rejects them.
+    let doc = core()?;
+    let at_cap = named_params(&doc, "all-types-4096")?;
+    if at_cap.len() != MAX_PARAMS_LEN || Params::parse(ALL_TYPES, &at_cap).is_err() {
+        return Err("all-types-4096 must parse at the cap".into());
+    }
+    let mut over = at_cap;
+    let mut pos = 1;
+    loop {
+        let tag = over
+            .get(pos..pos + 2)
+            .ok_or("tag 8 not found")?
+            .try_into()
+            .map(u16::from_le_bytes)
+            .map_err(|_| "short tag")?;
+        let len_at = pos + 2;
+        let len_bytes: [u8; 4] = over
+            .get(len_at..len_at + 4)
+            .ok_or("short length")?
+            .try_into()
+            .map_err(|_| "short length")?;
+        let len = u32::from_le_bytes(len_bytes);
+        let end = len_at + 4 + usize::try_from(len).map_err(|e| e.to_string())?;
+        if tag == 8 {
+            drop(over.splice(len_at..len_at + 4, (len + 1).to_le_bytes()));
+            over.insert(end, 0);
+            break;
+        }
+        pos = end;
+    }
+    if over.len() != MAX_PARAMS_LEN + 1 {
+        return Err(format!("built {} bytes", over.len()));
+    }
+    if code_of(&Params::parse(ALL_TYPES, &over)) != Some(7) {
         return Err("4097 bytes must give 7".into());
     }
     Ok(())
@@ -787,7 +835,7 @@ fn instance_defect_vectors() -> Result<(), String> {
     Ok(())
 }
 
-fn one_node_parts(h: i32, j: i32, offset_milli: i64) -> InstanceParts {
+fn two_node_parts(h: i32, j: i32, offset_milli: i64) -> InstanceParts {
     InstanceParts {
         descriptor_digest: [1; 32],
         topology_order_digest: [2; 32],
@@ -812,9 +860,17 @@ fn instance_bound_vectors() -> Result<(), String> {
         let name = str_field(case, "name")?;
         let value = str_field(case, "value")?;
         let parts = match str_field(case, "quantity")? {
-            "h" => one_node_parts(value.parse::<i32>().unwrap_or(i32::MAX), 0, 0),
-            "j" => one_node_parts(0, value.parse::<i32>().unwrap_or(i32::MAX), 0),
-            "offset" => one_node_parts(0, 0, i64_of(case.get("value").ok_or("no value")?)?),
+            "h" => two_node_parts(
+                value.parse::<i32>().map_err(|e| format!("{name}: {e}"))?,
+                0,
+                0,
+            ),
+            "j" => two_node_parts(
+                0,
+                value.parse::<i32>().map_err(|e| format!("{name}: {e}"))?,
+                0,
+            ),
+            "offset" => two_node_parts(0, 0, i64_of(case.get("value").ok_or("no value")?)?),
             other => return Err(format!("{name}: quantity {other}")),
         };
         let got = Instance::new(parts, &InstanceLimits::FAM_37, &[], None);
@@ -846,7 +902,7 @@ fn metadata_vectors() -> Result<(), String> {
 
 #[test]
 fn bounds_beat_edges_beat_metadata() {
-    let mut parts = one_node_parts(0, 0, 72_057_594_037_927_937);
+    let mut parts = two_node_parts(0, 0, 72_057_594_037_927_937);
     parts.node_ids = vec![0, 1, 2];
     parts.h = vec![0, 0, 0];
     parts.edges = vec![(1, 2), (0, 1)];
@@ -863,7 +919,7 @@ fn bounds_beat_edges_beat_metadata() {
 
 #[test]
 fn length_mismatch_is_code_15() {
-    let mut parts = one_node_parts(0, 0, 0);
+    let mut parts = two_node_parts(0, 0, 0);
     parts.h = vec![0];
     assert_eq!(
         code_of(&Instance::new(parts, &InstanceLimits::FAM_37, &[], None)),
@@ -872,8 +928,8 @@ fn length_mismatch_is_code_15() {
 }
 
 #[test]
-fn edge_position_beats_edge_order() {
-    let mut parts = one_node_parts(0, 0, 0);
+fn edge_faults_are_code_15() {
+    let mut parts = two_node_parts(0, 0, 0);
     parts.edges = vec![(1, 0)];
     assert_eq!(
         code_of(&Instance::new(
@@ -892,21 +948,22 @@ fn edge_position_beats_edge_order() {
 }
 
 #[test]
-fn tighter_limits_apply() {
-    let tight = InstanceLimits::new(4, 1, 1_073_741_824, 72_057_594_037_927_936, 67_108_864);
-    let mut parts = one_node_parts(0, 0, 0);
+fn tighter_limits_apply() -> Result<(), String> {
+    let tight = InstanceLimits::new(4, 1, 1_073_741_824, 72_057_594_037_927_936, 67_108_864)
+        .ok_or("limits are at most FAM-37")?;
+    let mut parts = two_node_parts(0, 0, 0);
     parts.node_ids = vec![0, 1, 2, 3, 4];
     parts.h = vec![0; 5];
-    assert_eq!(
-        tight.and_then(|l| code_of(&Instance::new(parts, &l, &[], None)).into()),
-        Some(Some(13))
-    );
-    assert!(InstanceLimits::new(16_777_217, 1, 1, 1, 1).is_none());
-    assert!(InstanceLimits::new(1, 67_108_865, 1, 1, 1).is_none());
-    assert!(InstanceLimits::new(1, 1, 1_073_741_825, 1, 1).is_none());
-    assert!(InstanceLimits::new(1, 1, 1, 72_057_594_037_927_937, 1).is_none());
-    assert!(InstanceLimits::new(1, 1, 1, 1, 67_108_865).is_none());
-    assert_eq!(
+    expect_eq!(code_of(&Instance::new(parts, &tight, &[], None)), Some(13))?;
+    expect_eq!(InstanceLimits::new(16_777_217, 1, 1, 1, 1), None)?;
+    expect_eq!(InstanceLimits::new(1, 67_108_865, 1, 1, 1), None)?;
+    expect_eq!(InstanceLimits::new(1, 1, 1_073_741_825, 1, 1), None)?;
+    expect_eq!(
+        InstanceLimits::new(1, 1, 1, 72_057_594_037_927_937, 1),
+        None
+    )?;
+    expect_eq!(InstanceLimits::new(1, 1, 1, 1, 67_108_865), None)?;
+    expect_eq!(
         InstanceLimits::new(
             16_777_216,
             67_108_864,
@@ -915,6 +972,41 @@ fn tighter_limits_apply() {
             67_108_864
         ),
         Some(InstanceLimits::FAM_37)
+    )?;
+    Ok(())
+}
+
+#[test]
+fn edge_count_over_the_limit_is_code_13() -> Result<(), String> {
+    let limits = InstanceLimits::new(8, 1, 1000, 1000, 16).ok_or("limits are at most FAM-37")?;
+    let mut parts = two_node_parts(0, 0, 0);
+    parts.node_ids = vec![0, 1, 2];
+    parts.h = vec![0; 3];
+    parts.edges = vec![(0, 1), (1, 2)];
+    parts.j = vec![0, 0];
+    expect_eq!(code_of(&Instance::new(parts, &limits, &[], None)), Some(13))?;
+    Ok(())
+}
+
+#[test]
+fn metadata_size_over_the_limit_is_code_13() -> Result<(), String> {
+    let limits = InstanceLimits::new(8, 8, 1000, 1000, 2).ok_or("limits are at most FAM-37")?;
+    let mut parts = two_node_parts(0, 0, 0);
+    parts.metadata = vec![1, 0, 1, 0, 0, 0, 0, 0];
+    expect_eq!(
+        code_of(&Instance::new(parts, &limits, &[1], None)),
+        Some(13)
+    )?;
+    Ok(())
+}
+
+#[test]
+fn j_length_mismatch_is_code_15() {
+    let mut parts = two_node_parts(0, 0, 0);
+    parts.j = vec![0, 0];
+    assert_eq!(
+        code_of(&Instance::new(parts, &InstanceLimits::FAM_37, &[], None)),
+        Some(15)
     );
 }
 
@@ -943,7 +1035,7 @@ fn new_with_digest(
 
 #[test]
 fn digest_mismatch_beats_metadata() -> Result<(), String> {
-    let mut parts = one_node_parts(0, 0, 0);
+    let mut parts = two_node_parts(0, 0, 0);
     parts.metadata = vec![1, 0, 6, 0, 0, 0, 0, 0];
     let kinds = [1, 2, 3];
     let right = digest_over(&parts)?;
@@ -967,7 +1059,7 @@ fn edge_fault_beats_digest_mismatch() {
     // Both faults are code 15, so the code cannot show which check ran first.
     // The test still runs the edge step and the digest step on the same
     // input, and `digest_mismatch_beats_metadata` pins the later steps.
-    let mut parts = one_node_parts(0, 0, 0);
+    let mut parts = two_node_parts(0, 0, 0);
     parts.node_ids = vec![0, 1, 2];
     parts.h = vec![0; 3];
     parts.edges = vec![(1, 2), (0, 1)];
@@ -980,7 +1072,7 @@ fn edge_fault_beats_digest_mismatch() {
 
 #[test]
 fn bounds_beat_digest_mismatch() {
-    let parts = one_node_parts(0, 0, 72_057_594_037_927_937);
+    let parts = two_node_parts(0, 0, 72_057_594_037_927_937);
     assert_eq!(
         code_of(&new_with_digest(&parts, &[], &[0xEE; 32])),
         Some(13)
@@ -1186,6 +1278,14 @@ fn admitted_descriptor_reports_size_bounds() -> Result<(), String> {
         n_edges: 150,
         max_degree: 4,
     };
+    if admitted.contract().family_id != "vectors/uniform-field"
+        || admitted.descriptor().family_id() != "vectors/uniform-field"
+        || admitted.descriptor().revision() != 1
+        || admitted.descriptor().params() != bytes.as_slice()
+        || admitted.params().bytes() != bytes.as_slice()
+    {
+        return Err("an Admitted accessor returned the wrong value".into());
+    }
     let got = admitted.size_bounds(&stats).map_err(|c| c.to_string())?;
     let want = SizeBounds {
         nodes: 200,
@@ -1372,26 +1472,29 @@ fn stream_draws_allocate_nothing() -> Result<(), String> {
 }
 
 #[test]
-fn instance_checks_allocate_nothing() {
+fn instance_checks_allocate_nothing() -> Result<(), String> {
     let limits = InstanceLimits::FAM_37;
-    let ok = one_node_parts(0, 0, 0);
-    let over_bound = one_node_parts(1 << 30 | 1, 0, 0);
-    let mut bad_length = one_node_parts(0, 0, 0);
+    let ok = two_node_parts(0, 0, 0);
+    let over_bound = two_node_parts(1 << 30 | 1, 0, 0);
+    let mut bad_length = two_node_parts(0, 0, 0);
     bad_length.h = vec![0];
-    let mut bad_metadata = one_node_parts(0, 0, 0);
+    let mut bad_metadata = two_node_parts(0, 0, 0);
     bad_metadata.metadata = vec![1, 0, 9, 0, 0, 0, 0, 0];
-    let region = [0_u8, 0];
-    let wrong_digest_parts = one_node_parts(0, 0, 0);
+    let wrong_digest_parts = two_node_parts(0, 0, 0);
     let wrong = [0xEE; 32];
+    let bad_region = [1_u8, 0, 9, 0, 0, 0, 0, 0];
+    let region = [0_u8, 0];
 
     let (instance, allocs) = measure(|| Instance::new(ok, &limits, &[], None));
-    assert_eq!(allocs, NONE);
-    assert!(instance.is_ok());
+    expect_eq!(allocs, NONE)?;
+    let Ok(instance) = instance else {
+        return Err("the valid instance was refused".into());
+    };
 
     for (parts, code) in [(over_bound, 13), (bad_length, 15), (bad_metadata, 16)] {
         let (got, allocs) = measure(|| code_of(&Instance::new(parts, &limits, &[], None)));
-        assert_eq!(got, Some(code));
-        assert_eq!(allocs, NONE);
+        expect_eq!(got, Some(code))?;
+        expect_eq!(allocs, NONE)?;
     }
 
     let (got, allocs) = measure(|| {
@@ -1402,22 +1505,25 @@ fn instance_checks_allocate_nothing() {
             Some(&wrong),
         ))
     });
-    assert_eq!(got, Some(15));
-    assert_eq!(allocs, NONE);
+    expect_eq!(got, Some(15))?;
+    expect_eq!(allocs, NONE)?;
 
     let (got, allocs) = measure(|| code_of(&validate_metadata(&region, &[])));
-    assert_eq!(got, None);
-    assert_eq!(allocs, NONE);
+    expect_eq!(got, None)?;
+    expect_eq!(allocs, NONE)?;
 
-    if let Ok(instance) = instance {
-        let (_digest, allocs) = measure(|| instance.digest());
-        assert_eq!(allocs, NONE);
-    }
+    let (got, allocs) = measure(|| code_of(&validate_metadata(&bad_region, &[])));
+    expect_eq!(got, Some(16))?;
+    expect_eq!(allocs, NONE)?;
+
+    let (_digest, allocs) = measure(|| instance.digest());
+    expect_eq!(allocs, NONE)?;
+    Ok(())
 }
 
 #[test]
 fn canonical_bytes_allocate_exactly_once() -> Result<(), String> {
-    let instance = Instance::new(one_node_parts(5, -7, 9), &InstanceLimits::FAM_37, &[], None)
+    let instance = Instance::new(two_node_parts(5, -7, 9), &InstanceLimits::FAM_37, &[], None)
         .map_err(|c| c.to_string())?;
     let (bytes, allocs) = measure(|| instance.canonical_bytes());
     let bytes = bytes.map_err(|e| e.to_string())?;
@@ -1455,4 +1561,103 @@ fn size_bound_check_allocates_nothing() {
     });
     assert_eq!(got, Some(13));
     assert_eq!(allocs, NONE);
+}
+
+#[test]
+fn size_bound_check_ok_path_allocates_nothing() {
+    let bounds = SizeBounds {
+        nodes: 200,
+        edges: 400,
+        degree: 5,
+    };
+    let advertised = AdvertisedLimits {
+        max_nodes: 0,
+        max_edges: 0,
+        max_degree: 0,
+    };
+    let (got, allocs) = measure(|| {
+        code_of(&check_size_bounds(
+            &bounds,
+            &InstanceLimits::FAM_37,
+            &advertised,
+        ))
+    });
+    assert_eq!(got, None);
+    assert_eq!(allocs, NONE);
+}
+
+#[test]
+fn family_id_rejection_allocates_nothing() {
+    let (got, allocs) = measure(|| code_of(&check_family_id(b"example/x", IdContext::Lease)));
+    assert_eq!(got, Some(3));
+    assert_eq!(allocs, NONE);
+}
+
+#[test]
+fn example_namespace_is_exactly_example() {
+    let lease = |id: &[u8]| code_of(&check_family_id(id, IdContext::Lease));
+    assert_eq!(lease(b"example.foo/x"), None);
+    assert_eq!(lease(b"examples/x"), None);
+    assert_eq!(lease(b"example/x"), Some(3));
+}
+
+#[test]
+fn contract_limits_tighter_than_fam_37_apply() -> Result<(), String> {
+    let tight =
+        InstanceLimits::new(199, 400, 4000, 1000, 1024).ok_or("limits are at most FAM-37")?;
+    let bounds = SizeBounds {
+        nodes: 200,
+        edges: 400,
+        degree: 5,
+    };
+    let none = AdvertisedLimits {
+        max_nodes: 0,
+        max_edges: 0,
+        max_degree: 0,
+    };
+    expect_eq!(
+        code_of(&check_size_bounds(&bounds, &tight, &none)),
+        Some(13)
+    )?;
+    expect_eq!(
+        code_of(&check_size_bounds(&bounds, &InstanceLimits::FAM_37, &none)),
+        None
+    )?;
+    Ok(())
+}
+
+#[test]
+fn trailing_bytes_are_code_7() {
+    let mut bytes = uniform_params(2, -4);
+    assert_eq!(code_of(&Params::parse(UNIFORM_FIELD, &bytes)), None);
+    bytes.push(0);
+    assert_eq!(code_of(&Params::parse(UNIFORM_FIELD, &bytes)), Some(7));
+}
+
+#[test]
+fn size_function_overflow_in_the_edges_arm_is_code_13() -> Result<(), String> {
+    let bytes = uniform_params(16, 0);
+    let params = Params::parse(UNIFORM_FIELD, &bytes).map_err(|c| c.to_string())?;
+    // layers * n_edges overflows u64 while layers * n_nodes does not.
+    let stats = TopologyStats {
+        n_nodes: 1,
+        n_edges: u64::MAX / 2,
+        max_degree: 0,
+    };
+    expect_eq!(code_of(&example_size_bounds(&params, &stats)), Some(13))?;
+    Ok(())
+}
+
+#[test]
+fn size_function_overflow_in_the_degree_arm_is_code_13() -> Result<(), String> {
+    let bytes = uniform_params(16, 0);
+    let params = Params::parse(UNIFORM_FIELD, &bytes).map_err(|c| c.to_string())?;
+    // nodes and edges fit, and max_degree + 2 overflows u64.
+    let stats = TopologyStats {
+        n_nodes: 1,
+        n_edges: 0,
+        max_degree: u64::MAX,
+    };
+    expect_eq!(code_of(&example_size_bounds(&params, &stats)), Some(13))?;
+    Ok(())
 }
