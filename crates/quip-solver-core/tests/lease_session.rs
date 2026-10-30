@@ -1218,3 +1218,33 @@ async fn shutdown_reports_a_lease_whose_salt_never_returns() {
             .success()
     );
 }
+#[tokio::test]
+async fn family_tagged_leases_are_rejected_before_drawing() {
+    let mut s = Session::start(false).await;
+    s.setup(i64::MAX).await;
+    for variant in 0..4 {
+        let mut j = job(5);
+        let g = j.generator.as_mut().unwrap();
+        let descriptor = || quip_proto::v1::FamilyDescriptor {
+            family_id: "quip/x".into(),
+            revision: 1,
+            ..Default::default()
+        };
+        match variant {
+            0 => g.family = Some(descriptor()),
+            1 => g.topology_order_digest = vec![7; 32],
+            2 => {
+                g.algorithm = quip_proto::v1::GeneratorAlgorithm::FamilyChacha8V1 as i32;
+                g.family = Some(descriptor());
+                g.topology_order_digest = vec![7; 32];
+            }
+            _ => g.algorithm = quip_proto::v1::GeneratorAlgorithm::FamilyChacha8V1 as i32,
+        }
+        s.send(coord_msg::Msg::Job(j)).await;
+        assert!(
+            matches!(s.recv().await, miner_msg::Msg::Reject(r) if r.reason == wire::RejectReason::Malformed as i32)
+        );
+        s.refund().await;
+    }
+    s.finish().await;
+}
