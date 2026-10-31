@@ -1241,9 +1241,13 @@ async fn family_tagged_leases_are_rejected_before_drawing() {
             _ => g.algorithm = quip_proto::v1::GeneratorAlgorithm::FamilyChacha8V1 as i32,
         }
         s.send(coord_msg::Msg::Job(j)).await;
-        assert!(
-            matches!(s.recv().await, miner_msg::Msg::Reject(r) if r.reason == wire::RejectReason::Malformed as i32)
-        );
+        // FAM-54: value 2 is known; no generated family is code 5
+        let expected = if variant == 2 {
+            wire::RejectReason::FamilyUnsupported
+        } else {
+            wire::RejectReason::Malformed
+        };
+        assert!(matches!(s.recv().await, miner_msg::Msg::Reject(r) if r.reason == expected as i32));
         s.refund().await;
     }
     s.finish().await;

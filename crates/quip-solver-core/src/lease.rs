@@ -1,15 +1,23 @@
 //! Default salt expansion and lease completion accounting.
 use crate::coefficient::Coefficient;
+use crate::families::FamilyTable;
 use crate::job::{miner, now_unix_ms, os_seed, pick_param, ExactEnergy, SessionTarget};
 use crate::session::{BackendIdentity, Control, JobSender, PendingJob, PendingParams};
 use crate::{
     CancelToken, IsingGraph, SampleError, SampleParams, Sampler, SamplerResult, StreamJob,
     StreamOutcome, StreamResult,
 };
-use ising_generators::random::NonceDeriver;
-use quip_proto::v1::{
-    miner_msg, Job, JobRequest, LeaseDone, MinerMsg, RejectReason, SamplerMeta, Solution,
+use ising_generators::descriptor::{
+    admit, Admitted, AdvertisedLimits, Contract, Descriptor, IdContext, SizeBounds,
 };
+use ising_generators::family::{admit_topology, BaseTopology, Defect, SaltFault};
+use ising_generators::instance::Instance;
+use ising_generators::random::NonceDeriver;
+use ising_generators::Code;
+use quip_proto::v1::{
+    miner_msg, Job, JobRequest, LeaseDone, MinerMsg, RejectReason, SamplerMeta, Solution, Topology,
+};
+use quip_protocol::family::{reject_reason, support_code, CodePhase};
 use quip_protocol::lease::{Generator, LeaseSpec, TopologyView};
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
@@ -29,13 +37,20 @@ pub struct Lease {
     spec: LeaseSpec,
     /// Nonce state after the block every salt in this lease shares.
     nonces: NonceDeriver,
+    family: Option<Arc<FamilyLease>>,
 }
 impl Lease {
-    pub(crate) fn new(spec: LeaseSpec) -> Self {
+    pub(crate) fn new(spec: LeaseSpec, family: Option<FamilyLease>) -> Self {
         Self {
             nonces: NonceDeriver::new(spec.last_proof_block_hash, spec.miner_account),
             spec,
+            family: family.map(Arc::new),
         }
+    }
+    /// The family inputs, or `None` for a legacy lease.
+    #[must_use]
+    pub fn family(&self) -> Option<&FamilyLease> {
+        self.family.as_deref()
     }
     /// Number of salts in the range.
     #[must_use]
@@ -58,6 +73,74 @@ impl Lease {
     #[must_use]
     pub const fn generator(&self) -> Generator {
         self.spec.generator
+    }
+}
+
+/// The family inputs of a lease, fixed at admission (FAM-47 to FAM-52).
+///
+/// Owns its parameter bytes and holds the base topology the session cached
+/// when the lease was admitted, so a later `Job` or `Topology` cannot change
+/// the instances of an admitted lease.
+#[derive(Debug)]
+pub struct FamilyLease {
+    contract: &'static Contract,
+    params: Vec<u8>,
+    params_digest: [u8; 32],
+    descriptor_digest: [u8; 32],
+    topology: Arc<BaseTopology>,
+    bounds: SizeBounds,
+}
+impl FamilyLease {
+    /// The contract the lease was admitted against.
+    #[must_use]
+    pub const fn contract(&self) -> &'static Contract {
+        self.contract
+    }
+    /// The family id of the descriptor.
+    #[must_use]
+    pub const fn family_id(&self) -> &'static str {
+        self.contract.family_id
+    }
+    /// The revision of the descriptor.
+    #[must_use]
+    pub const fn revision(&self) -> u32 {
+        self.contract.revision
+    }
+    /// The canonical parameter bytes of the descriptor.
+    #[must_use]
+    pub fn params(&self) -> &[u8] {
+        &self.params
+    }
+    /// The descriptor digest (FAM-18).
+    #[must_use]
+    pub const fn descriptor_digest(&self) -> &[u8; 32] {
+        &self.descriptor_digest
+    }
+    /// The base topology the lease builds on.
+    #[must_use]
+    pub fn topology(&self) -> &BaseTopology {
+        &self.topology
+    }
+    /// The size bounds computed at admission.
+    #[must_use]
+    pub const fn size_bounds(&self) -> &SizeBounds {
+        &self.bounds
+    }
+    /// The canonical instance of `nonce`. The coordinator regenerates the same one.
+    ///
+    /// # Errors
+    /// See `ising_generators::family::generate_instance`.
+    pub fn generate(&self, nonce: [u8; 32]) -> Result<Instance, SaltFault> {
+        // The same inputs passed `admit` at admission, so this cannot fail.
+        let admitted = admit(
+            std::slice::from_ref(self.contract),
+            self.contract.family_id.as_bytes(),
+            self.contract.revision,
+            &self.params,
+            &self.params_digest,
+        )
+        .map_err(|code| SaltFault::Defect(Defect::ConstructionCode(code)))?;
+        ising_generators::family::generate_instance(&admitted, &self.topology, &self.bounds, nonce)
     }
 }
 
@@ -150,6 +233,14 @@ impl LeaseState {
             permit.send(msg);
         }
     }
+    /// Count a salt that generation skipped (FAM-52). No `Result`, no energy,
+    /// and `Status.jobs_done` is unchanged because nothing was sampled.
+    pub(crate) fn skip_salt(&self) {
+        let mut progress = self.progress();
+        if !progress.done_sent {
+            progress.salts_done += 1;
+        }
+    }
     fn try_finish(&self, force: bool) -> Option<MinerMsg> {
         self.finish_locked(&mut self.progress(), force)
     }
@@ -215,7 +306,7 @@ pub(crate) fn test_state(watermark: Option<u64>) -> Arc<LeaseState> {
     let spec = LeaseSpec::new(Generator::Blake3Chacha8V1, [1; 32], [2; 32], [3; 32], 0, 1).unwrap();
     Arc::new(LeaseState {
         job_id: b"lease".to_vec(),
-        lease: Lease::new(spec),
+        lease: Lease::new(spec, None),
         topology: Arc::new(TopologyView {
             num_nodes: 1,
             edges: vec![],
@@ -267,7 +358,104 @@ pub(crate) struct Expander<C: Coefficient> {
     pub(crate) ctrl: mpsc::Sender<Control>,
 }
 
-pub(crate) type CachedLeaseTopology = (Vec<u8>, Result<Arc<TopologyView>, RejectReason>);
+/// The session's cached `Topology`, as a lease reads it at admission.
+pub(crate) struct LeaseTopology {
+    pub(crate) hash: Vec<u8>,
+    pub(crate) view: Result<Arc<TopologyView>, RejectReason>,
+    /// Built only when the declaration lists a generated family.
+    pub(crate) family: Option<Result<Arc<BaseTopology>, RejectReason>>,
+}
+impl LeaseTopology {
+    pub(crate) fn new(t: &Topology, families: &FamilyTable) -> Self {
+        let family = (!families.generated().is_empty()).then(|| {
+            let (u, v) = t
+                .edges
+                .as_ref()
+                .map_or((&[][..], &[][..]), |e| (&e.u[..], &e.v[..]));
+            if u.len() != v.len() {
+                return Err(RejectReason::Malformed);
+            }
+            let edges = u.iter().copied().zip(v.iter().copied()).collect::<Vec<_>>();
+            BaseTopology::new(t.nodes.clone(), &edges)
+                .map(Arc::new)
+                .map_err(|_| RejectReason::Malformed)
+        });
+        Self {
+            hash: t.hash.clone(),
+            view: TopologyView::from_proto(t)
+                .map(Arc::new)
+                .map_err(|_| RejectReason::Malformed),
+            family,
+        }
+    }
+}
+
+/// The wire reason of a family code at admission (FAM-42).
+fn admission_reject(code: Code) -> RejectReason {
+    tracing::debug!(code = code.value(), "family lease rejected");
+    reject_reason(code, CodePhase::Admission).unwrap_or(RejectReason::Malformed)
+}
+
+/// Codes 3 to 10 of FAM-47, from the declaration's generated contracts.
+/// Code 8 beats a pending code 10, which was computed with the sent digest.
+fn admit_descriptor<'a>(
+    family: &'a quip_proto::v1::FamilyDescriptor,
+    families: &FamilyTable,
+) -> Result<(&'static Contract, Admitted<'a>), Code> {
+    let _ = Descriptor::new(
+        family.family_id.as_bytes(),
+        family.revision,
+        &family.params,
+        IdContext::Lease,
+    )?;
+    let pending = match support_code(
+        families.generated(),
+        &family.family_id,
+        family.revision,
+        &family.params_digest,
+    ) {
+        Some(Code::ParamsRestricted) => Some(Code::ParamsRestricted),
+        Some(code) => return Err(code),
+        None => None,
+    };
+    let contract = families
+        .generated_contract(&family.family_id, family.revision)
+        .ok_or(Code::FamilyUnsupported)?;
+    let admitted = admit(
+        std::slice::from_ref(contract),
+        family.family_id.as_bytes(),
+        family.revision,
+        &family.params,
+        &family.params_digest,
+    )?;
+    pending.map_or(Ok((contract, admitted)), Err)
+}
+
+/// Codes 11, 12, and the admission part of 13 (FAM-47 step 5) against the
+/// cached base topology and the advertised limits, then the snapshot.
+fn admit_family(
+    contract: &'static Contract,
+    admitted: &Admitted<'_>,
+    topology: Arc<BaseTopology>,
+    sent_order_digest: &[u8],
+    id: &BackendIdentity,
+) -> Result<FamilyLease, RejectReason> {
+    let advertised = AdvertisedLimits {
+        max_nodes: id.max_nodes.into(),
+        max_edges: id.max_edges.into(),
+        max_degree: id.limits.max_degree.map_or(0, u64::from),
+    };
+    let bounds = admit_topology(admitted, &topology, sent_order_digest, &advertised)
+        .map_err(admission_reject)?;
+    Ok(FamilyLease {
+        contract,
+        params: admitted.descriptor().params().to_vec(),
+        params_digest: admitted.descriptor().params_digest(),
+        descriptor_digest: admitted.descriptor().digest(),
+        topology,
+        bounds,
+    })
+}
 
 /// Validate before starting a task or drawing any salt.
 #[expect(
@@ -276,9 +464,10 @@ pub(crate) type CachedLeaseTopology = (Vec<u8>, Result<Arc<TopologyView>, Reject
 )]
 pub(crate) fn prepare(
     job: &Job,
-    topology: Option<&CachedLeaseTopology>,
+    topology: Option<&Arc<LeaseTopology>>,
     target: Option<&SessionTarget>,
     id: &BackendIdentity,
+    families: &FamilyTable,
     max_reads: u32,
     default_sweeps: usize,
     sweeps_per_beta: Option<usize>,
@@ -288,30 +477,49 @@ pub(crate) fn prepare(
     if expired(job.deadline_ms) {
         return Err(RejectReason::Expired);
     }
-    let (hash, topology) = topology.ok_or(RejectReason::TopologyMissing)?;
+    let cached = topology.ok_or(RejectReason::TopologyMissing)?;
     let target = target
         .filter(|t| t.max_proof_solutions != 0)
         .ok_or(RejectReason::TargetMissing)?;
     let generator = job.generator.as_ref().ok_or(RejectReason::Malformed)?;
     let spec = LeaseSpec::from_proto(generator).map_err(|_| RejectReason::Malformed)?;
-    // SC-5 Task 5 replaces this guard
-    if spec.generator != Generator::Blake3Chacha8V1 {
-        return Err(RejectReason::Malformed);
-    }
-    if generator.topology_hash != *hash {
+    // `from_proto` guarantees a descriptor on a family lease (code 1).
+    let descriptor = match (spec.generator, generator.family.as_ref()) {
+        (Generator::FamilyChacha8V1, Some(family)) => {
+            Some(admit_descriptor(family, families).map_err(admission_reject)?)
+        }
+        (Generator::FamilyChacha8V1, None) => return Err(RejectReason::Malformed),
+        (Generator::Blake3Chacha8V1, _) => None,
+    };
+    if generator.topology_hash != cached.hash {
         return Err(RejectReason::TopologyMismatch);
     }
-    let topology = topology.as_ref().map_err(|reason| *reason)?;
-    if (topology.num_nodes != 0 && topology.allowed_h_milli.is_empty())
-        || (!topology.edges.is_empty() && topology.allowed_j_milli.is_empty())
-    {
-        return Err(RejectReason::Malformed);
-    }
-    if (id.max_nodes != 0 && topology.num_nodes > id.max_nodes as usize)
-        || (id.max_edges != 0 && topology.edges.len() > id.max_edges as usize)
-    {
-        return Err(RejectReason::TooLarge);
-    }
+    let topology = cached.view.as_ref().map_err(|reason| *reason)?;
+    let family = if let Some((contract, admitted)) = descriptor {
+        let base = match &cached.family {
+            Some(Ok(base)) => Arc::clone(base),
+            Some(Err(_)) | None => return Err(RejectReason::Malformed),
+        };
+        Some(admit_family(
+            contract,
+            &admitted,
+            base,
+            &generator.topology_order_digest,
+            id,
+        )?)
+    } else {
+        if (topology.num_nodes != 0 && topology.allowed_h_milli.is_empty())
+            || (!topology.edges.is_empty() && topology.allowed_j_milli.is_empty())
+        {
+            return Err(RejectReason::Malformed);
+        }
+        if (id.max_nodes != 0 && topology.num_nodes > id.max_nodes as usize)
+            || (id.max_edges != 0 && topology.edges.len() > id.max_edges as usize)
+        {
+            return Err(RejectReason::TooLarge);
+        }
+        None
+    };
     let adapt = crate::adapt::adapt_params(
         target.max_energy_milli,
         target.min_solutions.max(1),
@@ -335,7 +543,7 @@ pub(crate) fn prepare(
     }
     let state = Arc::new(LeaseState {
         job_id: job.job_id.clone(),
-        lease: Lease::new(spec),
+        lease: Lease::new(spec, family),
         topology: Arc::clone(topology),
         edges: topology.edges.as_slice().into(),
         watermark: (job.generation != 0).then_some(job.generation),
@@ -405,7 +613,57 @@ fn draw_graph<C: Coefficient>(
     Ok((graph, exact))
 }
 
+/// A salt's graph, its exact coefficients when `C` loses precision, and its
+/// instance offset (zero on a legacy lease).
+type SaltGraph<C> = (IsingGraph<C>, Option<ExactEnergy>, i64);
+
+/// The canonical instance of the salt at `index` as an [`IsingGraph`], with
+/// its exact coefficients when `C` loses precision, and its offset.
+fn family_graph<C: Coefficient>(
+    family: &FamilyLease,
+    nonce: [u8; 32],
+) -> Result<SaltGraph<C>, SaltFault> {
+    let instance = family.generate(nonce)?;
+    let edges: Arc<[(usize, usize)]> = instance
+        .edges()
+        .iter()
+        .map(|&(u, v)| (u as usize, v as usize))
+        .collect();
+    let (h, j, exact_milli) =
+        crate::encoding::convert_milli::<C>(instance.h().to_vec(), instance.j().to_vec());
+    let exact = exact_milli.map(|(h, j)| ExactEnergy::new(h, j, Arc::clone(&edges)));
+    Ok((IsingGraph { h, j, edges }, exact, instance.offset_milli()))
+}
+
+/// The graph, exact coefficients, and offset of the salt at `index`.
+/// `Ok(None)` skips the salt: codes 13 and 14 (FAM-52), and a construction
+/// that breaks its contract (G1), which is also logged.
+fn salt_graph<C: Coefficient>(
+    state: &LeaseState,
+    index: u64,
+) -> Result<Option<SaltGraph<C>>, quip_protocol::chacha8::DrawError> {
+    let Some(family) = state.lease.family() else {
+        return draw_graph::<C>(state, index).map(|(graph, exact)| Some((graph, exact, 0)));
+    };
+    match family_graph::<C>(family, state.lease.nonce(index)) {
+        Ok(drawn) => Ok(Some(drawn)),
+        Err(SaltFault::Skip(_)) => Ok(None),
+        Err(SaltFault::Defect(defect)) => {
+            tracing::error!(
+                ?defect,
+                salt_index = index,
+                "family construction broke its contract; skipping the salt"
+            );
+            Ok(None)
+        }
+    }
+}
+
 impl<C: Coefficient> Expander<C> {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "salt dispatch and the completion wait share one permit and shutdown loop"
+    )]
     pub(crate) async fn run(mut self, state: Arc<LeaseState>, mut params: SampleParams) {
         let mut tick = tokio::time::interval(std::time::Duration::from_millis(50));
         for index in 0..state.lease.salt_count() {
@@ -426,8 +684,13 @@ impl<C: Coefficient> Expander<C> {
             if state.stopped(&self.cancel) || self.shutdown.borrow().is_some() {
                 break;
             }
-            let (graph, exact_energy) = match draw_graph::<C>(&state, index) {
-                Ok(drawn) => drawn,
+            let (graph, exact_energy, offset_milli) = match salt_graph::<C>(&state, index) {
+                Ok(Some(drawn)) => drawn,
+                Ok(None) => {
+                    drop(permit);
+                    state.skip_salt();
+                    continue;
+                }
                 Err(error) => {
                     tracing::error!(%error, "validated lease could not draw");
                     break;
@@ -440,6 +703,7 @@ impl<C: Coefficient> Expander<C> {
             let job_id = crate::session::pending_id(&state.job_id, Some(index));
             let entry = PendingJob {
                 exact_energy,
+                offset_milli,
                 num_reads: u32::try_from(params.num_reads).unwrap_or(u32::MAX),
                 num_sweeps: u32::try_from(params.num_sweeps).unwrap_or(u32::MAX),
                 started: std::time::Instant::now(),
@@ -1130,7 +1394,7 @@ mod tests {
         )?;
         let state = LeaseState {
             job_id: b"lease".to_vec(),
-            lease: Lease::new(spec),
+            lease: Lease::new(spec, None),
             topology: Arc::new(TopologyView {
                 num_nodes: NODES,
                 edges: (1..NODES)
@@ -1183,7 +1447,7 @@ mod tests {
         assert_eq!(ctrl.capacity(), 0);
         let spec =
             LeaseSpec::new(Generator::Blake3Chacha8V1, [1; 32], [2; 32], [3; 32], 0, 1).unwrap();
-        let topology = TopologyView::from_proto(&quip_proto::v1::Topology {
+        let topology = TopologyView::from_proto(&Topology {
             nodes: vec![1],
             allowed_h_milli: vec![1000],
             ..Default::default()
@@ -1191,7 +1455,7 @@ mod tests {
         .unwrap();
         let state = Arc::new(LeaseState {
             job_id: b"lease".to_vec(),
-            lease: Lease::new(spec),
+            lease: Lease::new(spec, None),
             edges: topology.edges.as_slice().into(),
             topology: Arc::new(topology),
             watermark: None,
@@ -1250,7 +1514,7 @@ mod tests {
     fn lease_wrapper_maps_out_of_range_indices_to_zero() {
         let spec =
             LeaseSpec::new(Generator::Blake3Chacha8V1, [1; 32], [2; 32], [3; 32], 10, 2).unwrap();
-        let lease = Lease::new(spec);
+        let lease = Lease::new(spec, None);
         assert_eq!(lease.salt_count(), 2);
         assert_eq!(lease.generator(), Generator::Blake3Chacha8V1);
         for index in 0..2 {
@@ -1261,5 +1525,478 @@ mod tests {
             assert_eq!(lease.salt(index), [0; 32]);
             assert_eq!(lease.nonce(index), [0; 32]);
         }
+    }
+}
+
+#[cfg(test)]
+mod family_tests {
+    use super::*;
+    use crate::families::{Declaration, FamilyClaim};
+    use crate::layered;
+    use ising_generators::descriptor::params_digest;
+    use ising_generators::instance::InstanceLimits;
+    use quip_proto::v1::{EdgeList, FamilyDescriptor, GeneratorAlgorithm, IsingProblemGenerator};
+
+    const TIGHT_LIMITS: InstanceLimits = match InstanceLimits::new(
+        16_777_216,
+        67_108_864,
+        2000,
+        72_057_594_037_927_936,
+        67_108_864,
+    ) {
+        Some(limits) => limits,
+        None => InstanceLimits::FAM_37,
+    };
+    const UNIFORM_V1: Contract = Contract {
+        family_id: "vectors/uniform-field",
+        revision: 1,
+        schema: layered::UNIFORM_FIELD,
+        metadata_kinds: &[1],
+        limits: TIGHT_LIMITS,
+        size_bounds: layered::example_size_bounds,
+        construction: Some(&layered::LAYERED),
+    };
+    const RESTRICTED_V1: Contract = Contract {
+        family_id: "vectors/restricted-field",
+        ..UNIFORM_V1
+    };
+    const P_SPEC: [u8; 19] = [
+        0x01, 1, 0, 2, 0, 0, 0, 2, 0, 2, 0, 4, 0, 0, 0, 0x24, 0xfa, 0xff, 0xff,
+    ];
+    const P_L2_F0: [u8; 19] = [0x01, 1, 0, 2, 0, 0, 0, 2, 0, 2, 0, 4, 0, 0, 0, 0, 0, 0, 0];
+    const P_L3_F0: [u8; 19] = [0x01, 1, 0, 2, 0, 0, 0, 3, 0, 2, 0, 4, 0, 0, 0, 0, 0, 0, 0];
+    const P_F5000: [u8; 19] = [
+        0x01, 1, 0, 2, 0, 0, 0, 2, 0, 2, 0, 4, 0, 0, 0, 0x88, 0x13, 0, 0,
+    ];
+    const CLAIMS: &[FamilyClaim] = &[
+        FamilyClaim {
+            revisions: &[UNIFORM_V1],
+            only_params: &[],
+        },
+        FamilyClaim {
+            revisions: &[RESTRICTED_V1],
+            only_params: &[&P_SPEC],
+        },
+    ];
+    /// `T_SPARSE` edges in registration order.
+    const SPARSE_EDGES: [(u32, u32); 7] = [
+        (907, 41),
+        (41, 0),
+        (0, 4_294_967_295),
+        (4_294_967_295, 12),
+        (12, 3),
+        (3, 907),
+        (41, 12),
+    ];
+
+    fn table() -> FamilyTable {
+        Declaration {
+            solver_id: "quip-mock/family-lease",
+            generated: CLAIMS,
+            accepted: CLAIMS,
+        }
+        .validate()
+        .expect("the test declaration is valid")
+    }
+
+    fn wire_topology(nodes: &[u32], edges: &[(u32, u32)]) -> Topology {
+        Topology {
+            hash: vec![7; 32],
+            nodes: nodes.to_vec(),
+            edges: Some(EdgeList {
+                u: edges.iter().map(|e| e.0).collect(),
+                v: edges.iter().map(|e| e.1).collect(),
+            }),
+            allowed_h_milli: vec![-1000, 0, 1000],
+            allowed_j_milli: vec![-1000, 1000],
+        }
+    }
+
+    fn sparse() -> Topology {
+        wire_topology(&[907, 41, 0, 4_294_967_295, 12, 3], &SPARSE_EDGES)
+    }
+
+    fn digest_of(t: &Topology) -> Vec<u8> {
+        let base = LeaseTopology::new(t, &table())
+            .family
+            .expect("built")
+            .expect("valid");
+        base.order_digest().to_vec()
+    }
+
+    fn identity() -> BackendIdentity {
+        BackendIdentity {
+            backend: quip_proto::v1::Backend::Mock,
+            algorithm: quip_proto::v1::Algorithm::Sa,
+            max_nodes: 0,
+            max_edges: 0,
+            features: &[],
+            adapt: crate::adapt::AdaptBounds {
+                min_sweeps: 64,
+                max_sweeps: 4096,
+                min_reads: 64,
+                max_reads: 512,
+                reads_solution_min_factor: 4,
+                reads_solution_max_factor: 8,
+                reads_solution_floor_factor: 0,
+            },
+            limits: crate::ModelLimits {
+                max_degree: Some(4),
+                ..crate::ModelLimits::UNSTATED
+            },
+        }
+    }
+
+    const TARGET: SessionTarget = SessionTarget {
+        max_energy_milli: i64::MAX,
+        min_solutions: 1,
+        max_proof_solutions: 32,
+        num_reads: 1,
+        num_sweeps: 1,
+    };
+
+    fn family_job(contract: &Contract, params: &[u8]) -> Job {
+        Job {
+            job_id: b"lease".to_vec(),
+            generation: 1,
+            generator: Some(IsingProblemGenerator {
+                algorithm: GeneratorAlgorithm::FamilyChacha8V1 as i32,
+                topology_hash: vec![7; 32],
+                last_proof_block_hash: vec![0x11; 32],
+                miner_account: vec![0x22; 32],
+                base_salt: [vec![0; 8], vec![0x33; 24]].concat(),
+                salt_start: 5,
+                salt_count: 4,
+                family: Some(FamilyDescriptor {
+                    family_id: contract.family_id.into(),
+                    revision: contract.revision,
+                    params: params.to_vec(),
+                    params_digest: params_digest(params).to_vec(),
+                }),
+                topology_order_digest: digest_of(&sparse()),
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn run_prepare(
+        job: &Job,
+        topology: Option<&Arc<LeaseTopology>>,
+        target: Option<&SessionTarget>,
+        families: &FamilyTable,
+        max_reads: u32,
+    ) -> Result<(Arc<LeaseState>, SampleParams), RejectReason> {
+        prepare(
+            job,
+            topology,
+            target,
+            &identity(),
+            families,
+            max_reads,
+            64,
+            None,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicU64::new(0)),
+        )
+    }
+
+    fn generator(job: &mut Job) -> &mut IsingProblemGenerator {
+        job.generator.as_mut().expect("generator")
+    }
+
+    fn descriptor(job: &mut Job) -> &mut FamilyDescriptor {
+        generator(job).family.as_mut().expect("family")
+    }
+
+    fn set_params(job: &mut Job, contract: &Contract, params: &[u8]) {
+        let family = descriptor(job);
+        contract.family_id.clone_into(&mut family.family_id);
+        family.params = params.to_vec();
+        family.params_digest = params_digest(params).to_vec();
+    }
+
+    #[test]
+    #[expect(
+        clippy::type_complexity,
+        clippy::too_many_lines,
+        reason = "one table of named mutations covers every FAM-47 step"
+    )]
+    fn admission_codes_follow_fam_47() {
+        let families = table();
+        let generic = Declaration::GENERIC.validate().expect("generic");
+        let sparse_cache = Arc::new(LeaseTopology::new(&sparse(), &families));
+        let mut doubled_edges = SPARSE_EDGES.to_vec();
+        doubled_edges.push((41, 907));
+        let doubled = wire_topology(&[907, 41, 0, 4_294_967_295, 12, 3], &doubled_edges);
+        let doubled_cache = Arc::new(LeaseTopology::new(&doubled, &families));
+        let mut reordered_edges = SPARSE_EDGES.to_vec();
+        reordered_edges.swap(0, 1);
+        let reordered = wire_topology(&[907, 41, 0, 4_294_967_295, 12, 3], &reordered_edges);
+        let invalid = Arc::new(LeaseTopology::new(&wire_topology(&[1, 1], &[]), &families));
+        let none = |_: &mut Job| {};
+        let cases: Vec<(
+            &str,
+            Box<dyn Fn(&mut Job)>,
+            Option<&Arc<LeaseTopology>>,
+            bool,
+            RejectReason,
+        )> = vec![
+            (
+                "expired",
+                Box::new(|j| j.deadline_ms = 1),
+                None,
+                false,
+                RejectReason::Expired,
+            ),
+            (
+                "topology missing",
+                Box::new(none),
+                None,
+                true,
+                RejectReason::TopologyMissing,
+            ),
+            (
+                "target missing",
+                Box::new(none),
+                Some(&sparse_cache),
+                false,
+                RejectReason::TargetMissing,
+            ),
+            (
+                "generator absent",
+                Box::new(|j| j.generator = None),
+                Some(&sparse_cache),
+                true,
+                RejectReason::Malformed,
+            ),
+            (
+                "salt count zero",
+                Box::new(|j| generator(j).salt_count = 0),
+                Some(&sparse_cache),
+                true,
+                RejectReason::Malformed,
+            ),
+            (
+                "code 1",
+                Box::new(|j| generator(j).family = None),
+                Some(&sparse_cache),
+                true,
+                RejectReason::Malformed,
+            ),
+            (
+                "code 2",
+                Box::new(|j| generator(j).algorithm = GeneratorAlgorithm::Blake3Chacha8V1 as i32),
+                Some(&sparse_cache),
+                true,
+                RejectReason::Malformed,
+            ),
+            (
+                "code 3",
+                Box::new(|j| "Quip/X".clone_into(&mut descriptor(j).family_id)),
+                Some(&sparse_cache),
+                true,
+                RejectReason::Malformed,
+            ),
+            (
+                "code 4",
+                Box::new(|j| descriptor(j).revision = 0),
+                Some(&sparse_cache),
+                true,
+                RejectReason::Malformed,
+            ),
+            (
+                "code 5",
+                Box::new(|j| "vectors/none".clone_into(&mut descriptor(j).family_id)),
+                Some(&sparse_cache),
+                true,
+                RejectReason::FamilyUnsupported,
+            ),
+            (
+                "code 6",
+                Box::new(|j| descriptor(j).revision = 2),
+                Some(&sparse_cache),
+                true,
+                RejectReason::FamilyUnsupported,
+            ),
+            (
+                "code 7",
+                Box::new(|j| set_params(j, &UNIFORM_V1, &[0x02])),
+                Some(&sparse_cache),
+                true,
+                RejectReason::Malformed,
+            ),
+            (
+                "code 8",
+                Box::new(|j| descriptor(j).params_digest = vec![0; 32]),
+                Some(&sparse_cache),
+                true,
+                RejectReason::Malformed,
+            ),
+            (
+                "code 9",
+                Box::new(|j| set_params(j, &UNIFORM_V1, &P_F5000)),
+                Some(&sparse_cache),
+                true,
+                RejectReason::Malformed,
+            ),
+            (
+                "code 10",
+                Box::new(|j| set_params(j, &RESTRICTED_V1, &P_L2_F0)),
+                Some(&sparse_cache),
+                true,
+                RejectReason::FamilyUnsupported,
+            ),
+            (
+                "code 8 beats a pending 10",
+                Box::new(|j| {
+                    set_params(j, &RESTRICTED_V1, &P_L2_F0);
+                    descriptor(j).params_digest = params_digest(&P_SPEC).to_vec();
+                }),
+                Some(&sparse_cache),
+                true,
+                RejectReason::Malformed,
+            ),
+            (
+                "code 10 beats the topology hash",
+                Box::new(|j| {
+                    set_params(j, &RESTRICTED_V1, &P_L2_F0);
+                    generator(j).topology_hash = vec![9; 32];
+                }),
+                Some(&sparse_cache),
+                true,
+                RejectReason::FamilyUnsupported,
+            ),
+            (
+                "topology hash",
+                Box::new(|j| generator(j).topology_hash = vec![9; 32]),
+                Some(&sparse_cache),
+                true,
+                RejectReason::TopologyMismatch,
+            ),
+            (
+                "invalid cached topology",
+                Box::new(none),
+                Some(&invalid),
+                true,
+                RejectReason::Malformed,
+            ),
+            (
+                "code 11",
+                Box::new(|j| generator(j).topology_order_digest = digest_of(&reordered)),
+                Some(&sparse_cache),
+                true,
+                RejectReason::TopologyMismatch,
+            ),
+            (
+                "code 12",
+                Box::new(|j| {
+                    generator(j).topology_order_digest = digest_of(&doubled);
+                    set_params(j, &UNIFORM_V1, &P_L3_F0);
+                }),
+                Some(&doubled_cache),
+                true,
+                RejectReason::FamilyUnsupported,
+            ),
+            (
+                "code 13",
+                Box::new(|j| set_params(j, &UNIFORM_V1, &P_L3_F0)),
+                Some(&sparse_cache),
+                true,
+                RejectReason::TooLarge,
+            ),
+        ];
+        for (name, mutate, topology, with_target, expected) in cases {
+            let mut job = family_job(&UNIFORM_V1, &P_SPEC);
+            mutate(&mut job);
+            let target = with_target.then_some(&TARGET);
+            let got = run_prepare(&job, topology, target, &families, 512).map(|_| ());
+            assert_eq!(got, Err(expected), "{name}");
+        }
+        let job = family_job(&UNIFORM_V1, &P_SPEC);
+        assert_eq!(
+            run_prepare(&job, Some(&sparse_cache), Some(&TARGET), &families, 0).map(|_| ()),
+            Err(RejectReason::TooLarge),
+            "max_reads is last"
+        );
+        let generic_cache = Arc::new(LeaseTopology::new(&sparse(), &generic));
+        assert!(generic_cache.family.is_none());
+        assert_eq!(
+            run_prepare(&job, Some(&generic_cache), Some(&TARGET), &generic, 512).map(|_| ()),
+            Err(RejectReason::FamilyUnsupported),
+            "FAM-54"
+        );
+        let (state, _) = run_prepare(&job, Some(&sparse_cache), Some(&TARGET), &families, 512)
+            .expect("the base lease is admitted");
+        let family = state.lease.family().expect("a family lease");
+        assert_eq!(
+            (family.family_id(), family.revision(), family.params()),
+            (UNIFORM_V1.family_id, 1, &P_SPEC[..])
+        );
+        assert_eq!(
+            *family.size_bounds(),
+            SizeBounds {
+                nodes: 12,
+                edges: 20,
+                degree: 4
+            }
+        );
+    }
+
+    #[test]
+    fn a_family_lease_snapshot_ignores_later_inputs() {
+        let families = table();
+        let mut cache = Arc::new(LeaseTopology::new(&sparse(), &families));
+        let mut job = family_job(&UNIFORM_V1, &P_SPEC);
+        let (state, _) =
+            run_prepare(&job, Some(&cache), Some(&TARGET), &families, 512).expect("admitted");
+        let nonce = state.lease.nonce(1);
+        let family = state.lease.family().expect("a family lease");
+        let before = family
+            .generate(nonce)
+            .expect("salt 1 is not skipped")
+            .canonical_bytes()
+            .expect("bytes");
+        set_params(&mut job, &UNIFORM_V1, &P_L2_F0);
+        generator(&mut job).topology_order_digest = vec![0; 32];
+        let mut reordered_edges = SPARSE_EDGES.to_vec();
+        reordered_edges.swap(0, 1);
+        cache = Arc::new(LeaseTopology::new(
+            &wire_topology(&[907, 41, 0, 4_294_967_295, 12, 3], &reordered_edges),
+            &families,
+        ));
+        drop(cache);
+        let after = family
+            .generate(nonce)
+            .expect("salt 1 is not skipped")
+            .canonical_bytes()
+            .expect("bytes");
+        assert_eq!(before, after);
+        assert_eq!(family.params(), &P_SPEC[..]);
+        assert_eq!(
+            family.topology().order_digest()[..],
+            digest_of(&sparse())[..]
+        );
+    }
+
+    #[test]
+    fn a_skipped_salt_counts_without_energy() {
+        let state = test_state(None);
+        state.skip_salt();
+        {
+            let progress = state.progress();
+            assert_eq!(
+                (progress.salts_done, progress.dispatched, progress.finished),
+                (1, 0, 0)
+            );
+            assert_eq!(progress.best_energy_milli, i64::MAX);
+        }
+        assert_eq!(state.jobs_done.load(Ordering::Relaxed), 0);
+        state.progress().done_sent = true;
+        state.skip_salt();
+        assert_eq!(
+            state.progress().salts_done,
+            1,
+            "a reported lease counts nothing"
+        );
     }
 }
