@@ -2605,6 +2605,33 @@ mod tests {
         }
     }
 
+    /// The bytes a solver with no family declaration advertises. A later
+    /// change must leave them as they are.
+    #[test]
+    fn generic_capabilities_bytes_are_unchanged() {
+        use prost::Message as _;
+        use std::fmt::Write as _;
+        struct Plain;
+        impl Sampler for Plain {
+            fn sample(
+                &self,
+                _graph: &crate::ising::IsingGraph,
+                _params: &crate::SampleParams,
+            ) -> Result<Vec<crate::SamplerResult>, crate::SampleError> {
+                Ok(vec![])
+            }
+        }
+        let bytes = advertised_capabilities::<Plain, f64>(&test_identity()).encode_to_vec();
+        let hex = bytes.iter().fold(String::new(), |mut out, b| {
+            let _ = write!(out, "{b:02x}");
+            out
+        });
+        assert_eq!(
+            hex,
+            "1a020103206428c801320973747265616d696e6738024001520201065a010160076801"
+        );
+    }
+
     #[test]
     fn capabilities_constructor_matches_the_printer() {
         let id = test_identity();
