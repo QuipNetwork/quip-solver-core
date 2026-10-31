@@ -1877,6 +1877,9 @@ fn map_err_to_exit(err: Box<dyn std::error::Error>, backend: &str) -> ExitCode {
 /// Prefer [`run`] from a Rust `main`. This variant exists because
 /// `std::process::ExitCode` cannot be read back into a number, which a foreign
 /// function interface has to do to return the code to its own caller.
+///
+/// An invalid [`Sampler::declaration`] exits 70 ([`ExitCode::InternalFatal`])
+/// in every mode, before the device opens.
 pub fn run_code<S: Sampler<C>, C: Coefficient>(
     id: BackendIdentity,
     common: &CommonArgs,
