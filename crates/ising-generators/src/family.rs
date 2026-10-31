@@ -63,7 +63,9 @@ impl BaseTopology {
     pub fn new(node_ids: Vec<u32>, native_edges: &[(u32, u32)]) -> Result<Self, TopologyFault> {
         let too_large = TopologyFault::TooLarge;
         let n_nodes = u32::try_from(node_ids.len()).map_err(|_| too_large)?;
-        let _n_edges = u32::try_from(native_edges.len()).map_err(|_| too_large)?;
+        if u32::try_from(native_edges.len()).is_err() {
+            return Err(too_large);
+        }
         let mut position: BTreeMap<u32, u32> = BTreeMap::new();
         for (pos, id) in (0..n_nodes).zip(&node_ids) {
             if position.insert(*id, pos).is_some() {
@@ -151,7 +153,10 @@ impl<'a> Streams<'a> {
 
     /// The stream for `label`, at keystream word 0. `None` when the
     /// construction does not list `label`. The salt is then a generator
-    /// defect, whatever the construction returns.
+    /// defect, whatever the construction returns. A label that is listed but
+    /// invalid sets the same fault and reports [`Defect::UnlistedLabel`]; a
+    /// declaration that passed `Declaration::validate` never reaches that
+    /// case, because validation refuses invalid labels.
     pub fn open(&mut self, label: &str) -> Option<ChaCha8Rng> {
         let seed = self
             .labels

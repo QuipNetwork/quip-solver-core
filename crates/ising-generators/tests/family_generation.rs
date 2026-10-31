@@ -260,10 +260,13 @@ fn layered_generate(
                 base.checked_add(a.max(b)).ok_or(overflow)?,
             ));
         }
-        if k + 1 < layers {
+        if k.checked_add(1).ok_or(overflow)? < layers {
             let next = base.checked_add(n).ok_or(overflow)?;
             for pos in 0..n {
-                edges.push((base + pos, next.checked_add(pos).ok_or(overflow)?));
+                edges.push((
+                    base.checked_add(pos).ok_or(overflow)?,
+                    next.checked_add(pos).ok_or(overflow)?,
+                ));
             }
         }
     }
