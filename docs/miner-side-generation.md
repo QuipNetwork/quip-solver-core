@@ -75,9 +75,9 @@ Each call returns `Err(DrawError::EmptyAllowedValues)` when its output range is 
 The draw in the rest of this guide does not apply to a family lease.
 A family lease uses different random streams, described in [Random streams](problem-families.md#random-streams).
 The wire fields for generator value 2 and `generated_families` exist in `miner.proto`.
-Session support for family leases comes in SC-5.
-Advertising families comes in SC-6.
-The current session does not support them.
+A Rust solver declares the families it generates through `Sampler::declaration`, and the session advertises them.
+Lease expansion comes in SC-5.
+The current session does not yet support family leases and answers value 2 with `MALFORMED`.
 
 When the session supports them, a miner may use an optimized family generator only under these conditions:
 

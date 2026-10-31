@@ -313,7 +313,10 @@ An accepted-family solver lists the revision in `accepted_families`.
 A generated-family solver lists it in `generated_families`.
 `solver_id` names the solver across releases.
 `Capabilities` has fields 17 to 19: `solver_id`, `generated_families`, and `accepted_families`.
-A solver session does not yet advertise families. It sends an empty `solver_id` and both lists empty.
+A Rust solver declares `solver_id` and both lists through `Sampler::declaration`.
+The default declares the generic tier, with an empty `solver_id` and both lists empty.
+The session adds `GENERATOR_ALGORITHM_FAMILY_CHACHA8_V1` to the advertised generators exactly when `generated_families` is not empty (FAM-58).
+The session does not yet admit family leases or check family bindings (SC-5).
 A pin on `solver_id` never bypasses these compatibility checks.
 See [Capabilities](docs/problem-families.md#capabilities) and [Dispatch and pins](docs/problem-families.md#dispatch-and-pins).
 
@@ -417,7 +420,7 @@ Use `Backend::Cpu` and `Algorithm::Sa` for a CPU simulated annealer.
 The [migration name table](MIGRATING.md#identity-names) lists all supported names.
 The fixed map in `quip_protocol::session` keeps command-line identity strings lowercase.
 
-The twelve defaulted methods are:
+The thirteen defaulted methods are:
 
 | Method | Default |
 |---|---|
@@ -433,6 +436,15 @@ The twelve defaulted methods are:
 | `apply_config` | No action. |
 | `generates_locally` | `false`. The session draws lease problems. |
 | `sample_lease` | Returns `DeviceFault` if called without an override. |
+| `declaration` | `Declaration::GENERIC`: no `solver_id` and no family listed. |
+
+A `Declaration` holds a `solver_id` and two lists of `FamilyClaim`, `generated` and `accepted`.
+A `FamilyClaim` names one or more contracts of the same family, one for each revision, and an optional `only_params` list of canonical parameter bytes.
+An empty `only_params` claims every valid parameter set of each listed revision.
+Each listed parameter set must pass the schema and bounds of every listed revision.
+The session validates the declaration before it runs any mode.
+An invalid declaration logs an error and exits 70 in every mode, before the device opens.
+`capabilities_for::<S, C>(&id)` builds the advertised `Capabilities` and returns `DeclarationError` for an invalid declaration.
 
 ### Optional local generation
 
@@ -656,6 +668,7 @@ The fields are:
 - `maxDegree`, `maxLocalFieldMilli`, and `exactResolutionMilli`. Omit each
   when unset. A set `0` is printed.
 - `solverId`, `generatedFamilies`, and `acceptedFamilies`. Omit each when empty.
+  Each family entry omits an empty `paramsDigests`. Digests are standard base64.
 
 `backend` and `algorithm` keep names such as `"cpu"`, `"sa"`, and `"dwave-qpu"`.
 Job kinds, encodings, and generators use their protobuf enum names.
@@ -687,6 +700,9 @@ such as a lane count derived from a GPU's multiprocessor count.
 answer. The in-session `Capabilities` reply comes from a session that holds
 the device open, and carries the live width instead. This is the one field
 where the two answers can differ.
+`solverId`, `generatedFamilies`, and `acceptedFamilies` come from `Sampler::declaration`.
+They never differ between `Hello` and the `GetCapabilities` reply.
+A binary with an invalid declaration exits 70 before any output (G8).
 
 ## 9. Adding a solver in another language
 
