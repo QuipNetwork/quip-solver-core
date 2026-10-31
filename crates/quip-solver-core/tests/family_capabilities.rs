@@ -1,7 +1,11 @@
 //! Typed family declarations and their validation (FAM-56 to FAM-62).
 
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine as _;
 use quip_proto::v1::FamilySupport;
+use quip_proto::v1::GeneratorAlgorithm;
 use quip_protocol::family::support_code;
+use quip_solver_conformance::driver::drive_miner;
 use quip_solver_core::families::{
     Declaration, DeclarationError, FamilyClaim, FamilyList, FamilyTable,
 };
@@ -11,7 +15,12 @@ use quip_solver_core::ising_generators::descriptor::{
 };
 use quip_solver_core::ising_generators::instance::InstanceLimits;
 use quip_solver_core::ising_generators::Code;
+use quip_solver_core::{
+    capabilities_for, BackendIdentity, IsingGraph, SampleError, SampleParams, Sampler,
+    SamplerResult,
+};
 use serde_json::Value;
+use std::process::Command;
 
 const UNIFORM_FIELD: &[FieldSpec] = &[
     FieldSpec {
@@ -331,6 +340,249 @@ fn an_empty_restriction_claims_every_parameter_set() -> Result<(), String> {
     let digest = params_digest(&FIELD_1000_PARAMS);
     if support_code(listed, "vectors/uniform-field", 1, &digest).is_some() {
         return Err("an unrestricted claim refused a parameter set".to_owned());
+    }
+    Ok(())
+}
+
+fn example_bin(name: &str) -> Result<String, String> {
+    let status = Command::new(env!("CARGO"))
+        .args(["build", "--example", name, "-p", "quip-solver-core"])
+        .status()
+        .map_err(|e| e.to_string())?;
+    if !status.success() {
+        return Err(format!("failed to build example {name}"));
+    }
+    let mut p = std::env::current_exe().map_err(|e| e.to_string())?;
+    let _ = p.pop();
+    let _ = p.pop();
+    p.push("examples");
+    p.push(name);
+    Ok(p.to_string_lossy().into_owned())
+}
+
+fn unique_socket(tag: &str) -> Result<String, String> {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_nanos();
+    Ok(format!(
+        "/tmp/quip-core-{tag}-{}-{nanos}.sock",
+        std::process::id()
+    ))
+}
+
+fn identity() -> BackendIdentity {
+    BackendIdentity {
+        backend: quip_proto::v1::Backend::Mock,
+        algorithm: quip_proto::v1::Algorithm::Sa,
+        max_nodes: 100,
+        max_edges: 100,
+        features: &[],
+        adapt: quip_solver_core::adapt::AdaptBounds {
+            min_sweeps: 1,
+            max_sweeps: 1,
+            min_reads: 1,
+            max_reads: 1,
+            reads_solution_min_factor: 1,
+            reads_solution_max_factor: 1,
+            reads_solution_floor_factor: 0,
+        },
+        limits: quip_solver_core::ModelLimits::UNSTATED,
+    }
+}
+
+const GENERATED: &[FamilyClaim] = &[claim(&[UNIFORM_V1], &[&ZERO_FIELD_PARAMS])];
+const ACCEPTED: &[FamilyClaim] = &[claim(&[UNIFORM_V1], &[])];
+
+struct Generic;
+impl Sampler for Generic {
+    fn sample(&self, _: &IsingGraph, _: &SampleParams) -> Result<Vec<SamplerResult>, SampleError> {
+        Ok(vec![])
+    }
+}
+
+struct Restricted;
+impl Sampler for Restricted {
+    fn sample(&self, _: &IsingGraph, _: &SampleParams) -> Result<Vec<SamplerResult>, SampleError> {
+        Ok(vec![])
+    }
+    fn declaration() -> Declaration {
+        declaration(GENERATED, ACCEPTED)
+    }
+}
+
+struct Local;
+impl Sampler for Local {
+    fn sample(&self, _: &IsingGraph, _: &SampleParams) -> Result<Vec<SamplerResult>, SampleError> {
+        Ok(vec![])
+    }
+    fn generates_locally() -> bool {
+        true
+    }
+    fn declaration() -> Declaration {
+        declaration(GENERATED, ACCEPTED)
+    }
+}
+
+struct BadId;
+impl Sampler for BadId {
+    fn sample(&self, _: &IsingGraph, _: &SampleParams) -> Result<Vec<SamplerResult>, SampleError> {
+        Ok(vec![])
+    }
+    fn declaration() -> Declaration {
+        Declaration {
+            solver_id: "Bad",
+            generated: &[],
+            accepted: &[],
+        }
+    }
+}
+
+const LEGACY: i32 = GeneratorAlgorithm::Blake3Chacha8V1 as i32;
+const FAMILY: i32 = GeneratorAlgorithm::FamilyChacha8V1 as i32;
+
+#[test]
+fn generic_sampler_advertises_no_family() -> Result<(), String> {
+    let caps = capabilities_for::<Generic, f64>(&identity()).map_err(|e| e.to_string())?;
+    if !caps.solver_id.is_empty()
+        || !caps.generated_families.is_empty()
+        || !caps.accepted_families.is_empty()
+        || caps.generators != [LEGACY]
+    {
+        return Err(format!("generic advertises families: {caps:?}"));
+    }
+    Ok(())
+}
+
+#[test]
+fn restricted_family_sampler_advertises_its_declaration() -> Result<(), String> {
+    let table = table_of(&Restricted::declaration())?;
+    let caps = capabilities_for::<Restricted, f64>(&identity()).map_err(|e| e.to_string())?;
+    if caps.solver_id != table.solver_id()
+        || caps.generated_families != table.generated()
+        || caps.accepted_families != table.accepted()
+        || caps.generators != [LEGACY, FAMILY]
+    {
+        return Err(format!("capabilities differ from the table: {caps:?}"));
+    }
+    Ok(())
+}
+
+#[test]
+fn local_and_default_generators_advertise_the_same_families() -> Result<(), String> {
+    let id = identity();
+    let local = capabilities_for::<Local, f64>(&id).map_err(|e| e.to_string())?;
+    let default = capabilities_for::<Restricted, f64>(&id).map_err(|e| e.to_string())?;
+    if local.solver_id != default.solver_id
+        || local.generators != default.generators
+        || local.generated_families != default.generated_families
+        || local.accepted_families != default.accepted_families
+    {
+        return Err(format!("local {local:?} differs from default {default:?}"));
+    }
+    Ok(())
+}
+
+#[test]
+fn an_invalid_declaration_has_no_capabilities() -> Result<(), String> {
+    match capabilities_for::<BadId, f64>(&identity()) {
+        Err(DeclarationError::InvalidSolverId("Bad")) => Ok(()),
+        other => Err(format!("expected InvalidSolverId, got {other:?}")),
+    }
+}
+
+fn cli_json() -> Result<Value, String> {
+    let out = Command::new(example_bin("mock_sampler_families")?)
+        .arg("--capabilities")
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        return Err("--capabilities failed".to_owned());
+    }
+    serde_json::from_slice(&out.stdout).map_err(|e| e.to_string())
+}
+
+#[test]
+fn cli_prints_the_family_fields() -> Result<(), String> {
+    let v = cli_json()?;
+    let digest = STANDARD.encode(params_digest(&ZERO_FIELD_PARAMS));
+    let expected = serde_json::json!({
+        "generators": [
+            "GENERATOR_ALGORITHM_BLAKE3_CHACHA8_V1",
+            "GENERATOR_ALGORITHM_FAMILY_CHACHA8_V1"
+        ],
+        "solverId": "quip-mock/families",
+        "generatedFamilies": [{
+            "familyId": "vectors/uniform-field",
+            "revisions": [1],
+            "paramsDigests": [digest]
+        }],
+        "acceptedFamilies": [{"familyId": "vectors/uniform-field", "revisions": [1]}]
+    });
+    for (key, want) in expected.as_object().ok_or("expected is not an object")? {
+        if v.get(key) != Some(want) {
+            return Err(format!("{key}: got {:?}, want {want}", v.get(key)));
+        }
+    }
+    Ok(())
+}
+
+fn support_json(entries: &[FamilySupport]) -> Value {
+    Value::Array(
+        entries
+            .iter()
+            .map(|e| {
+                let mut o = serde_json::Map::new();
+                let _ = o.insert("familyId".to_owned(), Value::from(e.family_id.clone()));
+                if !e.revisions.is_empty() {
+                    let _ = o.insert("revisions".to_owned(), Value::from(e.revisions.clone()));
+                }
+                if !e.params_digests.is_empty() {
+                    let digests: Vec<String> = e
+                        .params_digests
+                        .iter()
+                        .map(|d| STANDARD.encode(d))
+                        .collect();
+                    let _ = o.insert("paramsDigests".to_owned(), Value::from(digests));
+                }
+                Value::Object(o)
+            })
+            .collect(),
+    )
+}
+
+#[tokio::test]
+async fn cli_and_session_answers_agree() -> Result<(), String> {
+    let bin = example_bin("mock_sampler_families")?;
+    let socket = unique_socket("families")?;
+    let report = drive_miner(&bin, &format!("unix://{socket}")).await;
+    if !report.is_conformant() {
+        return Err(report.summary());
+    }
+    let hello = report
+        .hello
+        .as_ref()
+        .and_then(|h| h.capabilities.as_ref())
+        .ok_or("no Hello capabilities")?;
+    let reply = report
+        .capabilities_received
+        .as_ref()
+        .ok_or("no Capabilities reply")?;
+    if hello.solver_id != reply.solver_id
+        || hello.generated_families != reply.generated_families
+        || hello.accepted_families != reply.accepted_families
+        || hello.generators != reply.generators
+    {
+        return Err(format!("Hello {hello:?} differs from reply {reply:?}"));
+    }
+    let v = cli_json()?;
+    if v.get("solverId") != Some(&Value::from(reply.solver_id.clone()))
+        || v.get("generatedFamilies") != Some(&support_json(&reply.generated_families))
+        || v.get("acceptedFamilies") != Some(&support_json(&reply.accepted_families))
+    {
+        return Err(format!(
+            "CLI JSON {v} differs from the session reply {reply:?}"
+        ));
     }
     Ok(())
 }

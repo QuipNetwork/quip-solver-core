@@ -32,8 +32,8 @@ pub use lease::{Lease, LeaseSink, LeaseStopped};
 pub use limits::ModelLimits;
 pub use quip_protocol::lease::TopologyView;
 pub use session::{
-    capabilities, run, run_code, BackendIdentity, OpenError, EXACT_COEFFICIENTS_FEATURE,
-    INITIAL_SPINS_FEATURE, LINEAR_SCHEDULE_FEATURE,
+    capabilities, capabilities_for, run, run_code, BackendIdentity, OpenError,
+    EXACT_COEFFICIENTS_FEATURE, INITIAL_SPINS_FEATURE, LINEAR_SCHEDULE_FEATURE,
 };
 
 /// Family descriptors, canonical instances, `ChaCha8` streams, and nonce
