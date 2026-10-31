@@ -9,6 +9,8 @@
 //! - [`random`]: nonce derivation for the random generator, which draws an
 //!   Ising model for a given topology.
 //! - [`descriptor`]: family ids, parameter schemas, descriptors, and admission.
+//! - [`family`]: base topologies, substreams, and canonical instance
+//!   generation for family leases.
 //! - [`instance`]: canonical instance bytes, limits, and metadata validation.
 
 #![no_std]
@@ -18,6 +20,7 @@ extern crate alloc;
 mod digest;
 
 pub mod descriptor;
+pub mod family;
 pub mod instance;
 pub mod random;
 pub mod rng;

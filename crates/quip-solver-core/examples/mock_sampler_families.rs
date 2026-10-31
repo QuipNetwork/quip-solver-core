@@ -62,6 +62,7 @@ const UNIFORM_V1: Contract = Contract {
     metadata_kinds: &[],
     limits: InstanceLimits::FAM_37,
     size_bounds: example_size_bounds,
+    construction: None,
 };
 
 struct MockSampler;

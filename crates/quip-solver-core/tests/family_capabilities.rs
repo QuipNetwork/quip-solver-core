@@ -94,6 +94,7 @@ const fn contract(
         metadata_kinds: &[],
         limits: InstanceLimits::FAM_37,
         size_bounds: example_size_bounds,
+        construction: None,
     }
 }
 
