@@ -47,6 +47,11 @@ impl FamilyList {
 /// cannot check either rule. A revision missing from `accepted` is served at
 /// the generic tier: the plain model is solved and the coordinator decides
 /// acceptance (FAM-55, FAM-69).
+///
+/// The session advertises a declaration but does not yet act on it: it
+/// still refuses family leases with `MALFORMED` and solves every explicit
+/// family job as a plain model, without the `FamilyBinding` checks of
+/// FAM-65 to FAM-68.
 #[derive(Clone, Copy, Debug)]
 pub struct Declaration {
     /// Stable id across releases (FAM-60), or `""` for no pin target.

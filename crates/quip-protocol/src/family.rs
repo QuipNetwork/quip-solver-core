@@ -152,6 +152,11 @@ pub fn entry_claims(list: &[FamilySupport]) -> Vec<bool> {
 /// `Some(ParamsRestricted)` if every listing entry restricts and none has
 /// `params_digest`, else `None`. Only entries that claim (see
 /// [`entry_claims`]) count, so an empty or invalid list claims nothing.
+///
+/// For a lease checked against `generated_families`, each code is a reject.
+/// For an explicit job checked against `accepted_families`, codes 5 and 6
+/// mean that the solver is a generic solver for the job and solves the plain
+/// model (FAM-65). Only code 10 is a reject there.
 #[must_use]
 pub fn support_code(
     list: &[FamilySupport],

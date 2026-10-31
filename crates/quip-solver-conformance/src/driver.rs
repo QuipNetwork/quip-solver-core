@@ -346,8 +346,9 @@ impl DriverReport {
     /// The returned `Capabilities` agrees with the identity the miner
     /// advertised in its own `Hello`.
     ///
-    /// Every static field must match the handshake. Features and stream width
-    /// may differ (SPEC section 8).
+    /// Every field must match the handshake except features, stream width,
+    /// and the three model limits (`max_degree`, `max_local_field_milli`,
+    /// `exact_resolution_milli`), which this check does not compare.
     #[must_use]
     pub fn capabilities_conformant(&self) -> bool {
         let (Some(c), Some(h)) = (self.capabilities_received.as_ref(), self.hello.as_ref()) else {
