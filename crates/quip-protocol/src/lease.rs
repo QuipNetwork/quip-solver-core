@@ -28,6 +28,8 @@ pub enum LeaseError {
     },
     /// The generator id is not [`Generator::Blake3Chacha8V1`].
     UnknownGenerator(i32),
+    /// The legacy generator carries `family` or a non-empty `topology_order_digest` (FAM-48, code 2).
+    DescriptorUnexpected,
 }
 
 impl std::fmt::Display for LeaseError {
@@ -37,6 +39,9 @@ impl std::fmt::Display for LeaseError {
             Self::CounterOverflow => write!(f, "lease salt counter overflows u64"),
             Self::BadLength { field } => write!(f, "lease field {field} has the wrong length"),
             Self::UnknownGenerator(id) => write!(f, "unknown generator id {id}"),
+            Self::DescriptorUnexpected => {
+                write!(f, "lease uses the legacy generator but carries family data")
+            }
         }
     }
 }
@@ -292,6 +297,8 @@ impl LeaseSpec {
     ///
     /// # Errors
     /// Rejects unknown generators, incorrect field lengths, and invalid counters.
+    /// A legacy lease that sets `family` or a non-empty `topology_order_digest`
+    /// is [`LeaseError::DescriptorUnexpected`], checked after the field errors.
     pub fn from_proto(g: &quip_proto::v1::IsingProblemGenerator) -> Result<Self, LeaseError> {
         if g.algorithm != quip_proto::v1::GeneratorAlgorithm::Blake3Chacha8V1 as i32 {
             return Err(LeaseError::UnknownGenerator(g.algorithm));
@@ -301,14 +308,18 @@ impl LeaseSpec {
                 .try_into()
                 .map_err(|_| LeaseError::BadLength { field })
         };
-        Self::new(
+        let spec = Self::new(
             Generator::Blake3Chacha8V1,
             fixed(&g.last_proof_block_hash, "last_proof_block_hash")?,
             fixed(&g.miner_account, "miner_account")?,
             fixed(&g.base_salt, "base_salt")?,
             g.salt_start,
             g.salt_count,
-        )
+        )?;
+        if g.family.is_some() || !g.topology_order_digest.is_empty() {
+            return Err(LeaseError::DescriptorUnexpected);
+        }
+        Ok(spec)
     }
 }
 

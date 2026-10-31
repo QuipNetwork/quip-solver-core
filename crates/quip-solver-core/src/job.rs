@@ -1693,4 +1693,22 @@ mod tests {
         assert!(milli.exact_energy.is_none());
         assert_eq!(milli.graph.h, vec![Fixed(499), Fixed(-501)]);
     }
+
+    #[test]
+    fn a_family_binding_does_not_change_the_plain_model() {
+        let plain = edges_job(1).ising.unwrap();
+        let bound = IsingProblem {
+            family: Some(quip_proto::v1::FamilyBinding {
+                node_ids: vec![10, 11],
+                offset_milli: 5,
+                ..Default::default()
+            }),
+            ..plain.clone()
+        };
+        let plain = parse_ising::<f64>(&plain, 100, 100, None).expect("plain");
+        let bound = parse_ising::<f64>(&bound, 100, 100, None).expect("bound");
+        assert_eq!(bound.graph.edges, plain.graph.edges);
+        assert_eq!(bound.graph.h, plain.graph.h);
+        assert_eq!(bound.graph.j, plain.graph.j);
+    }
 }

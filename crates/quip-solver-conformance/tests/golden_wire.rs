@@ -12,9 +12,10 @@
 
 use prost::Message;
 use quip_proto::v1::{
-    Algorithm, Backend, Capabilities, CoefficientEncoding, EdgeList, Fatal, GeneratorAlgorithm,
-    Hello, IsingProblem, IsingProblemGenerator, Job, JobKind, LeaseDone, Provenance, Reject,
-    RejectReason, Result as JobResult, SamplerMeta, SetTarget, Solution, Status, Topology,
+    Algorithm, Backend, Capabilities, CoefficientEncoding, EdgeList, FamilySupport, Fatal,
+    GeneratorAlgorithm, Hello, IsingProblem, IsingProblemGenerator, Job, JobKind, LeaseDone,
+    Provenance, Reject, RejectReason, Result as JobResult, SamplerMeta, SetTarget, Solution,
+    Status, Topology,
 };
 use quip_solver_conformance::golden_wire;
 use std::collections::{BTreeMap, HashMap};
@@ -97,6 +98,9 @@ fn hello() -> Hello {
             max_degree: None,
             max_local_field_milli: None,
             exact_resolution_milli: None,
+            solver_id: String::new(),
+            generated_families: vec![],
+            accepted_families: vec![],
         }),
     }
 }
@@ -163,6 +167,8 @@ fn job_generate() -> Job {
             base_salt: vec![0x33; 32],
             salt_start: 256,
             salt_count: 16,
+            family: None,
+            topology_order_digest: vec![],
         }),
         ..Default::default()
     }
@@ -234,6 +240,9 @@ fn capabilities() -> Capabilities {
         max_degree: None,
         max_local_field_milli: None,
         exact_resolution_milli: None,
+        solver_id: String::new(),
+        generated_families: vec![],
+        accepted_families: vec![],
     }
 }
 
@@ -296,7 +305,8 @@ fn enum_numbers_match_the_fixture() {
             Malformed,
             TopologyMismatch,
             TopologyMissing,
-            TargetMissing
+            TargetMissing,
+            FamilyUnsupported
         ]
     );
     pin_enum!(
@@ -331,7 +341,10 @@ fn enum_numbers_match_the_fixture() {
         CoefficientEncoding,
         [Unspecified, I32, I16, I8, F16, F32, F64]
     );
-    pin_enum!(GeneratorAlgorithm, [Unspecified, Blake3Chacha8V1]);
+    pin_enum!(
+        GeneratorAlgorithm,
+        [Unspecified, Blake3Chacha8V1, FamilyChacha8V1]
+    );
     assert_eq!(generated, golden_wire().enums, "enum numbers changed");
 }
 
@@ -352,4 +365,129 @@ fn every_variant_the_fixture_pins_still_parses_from_its_name() {
             assert!(parsed, "{kind}::{name} no longer exists");
         }
     }
+}
+
+fn core_vectors() -> Result<serde_json::Value, String> {
+    serde_json::from_str(quip_solver_conformance::FAMILY_CORE).map_err(|e| e.to_string())
+}
+
+fn cases<'a>(
+    core: &'a serde_json::Value,
+    section: &str,
+) -> Result<&'a [serde_json::Value], String> {
+    core.get(section)
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::as_slice)
+        .ok_or_else(|| format!("section {section} is missing or not an array"))
+}
+
+fn str_field<'a>(case: &'a serde_json::Value, key: &str) -> Result<&'a str, String> {
+    case.get(key)
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| format!("missing string field {key}"))
+}
+
+fn array_field<'a>(
+    case: &'a serde_json::Value,
+    key: &str,
+) -> Result<&'a [serde_json::Value], String> {
+    case.get(key)
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::as_slice)
+        .ok_or_else(|| format!("missing array field {key}"))
+}
+
+fn support_entry(entry: &serde_json::Value) -> Result<FamilySupport, String> {
+    let revisions = array_field(entry, "revisions")?
+        .iter()
+        .map(|r| {
+            r.as_u64()
+                .and_then(|n| u32::try_from(n).ok())
+                .ok_or_else(|| "revision is not a u32".to_owned())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let params_digests = array_field(entry, "params_digests")?
+        .iter()
+        .map(|d| {
+            d.as_str()
+                .map(from_hex)
+                .ok_or_else(|| "digest is not a hex string".to_owned())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(FamilySupport {
+        family_id: str_field(entry, "family_id")?.to_owned(),
+        revisions,
+        params_digests,
+    })
+}
+
+fn roundtrips(caps: &Capabilities) -> Result<bool, String> {
+    let decoded = Capabilities::decode(&caps.encode_to_vec()[..]).map_err(|e| e.to_string())?;
+    Ok(&decoded == caps)
+}
+
+#[test]
+fn family_wire_vectors_cross_the_wire() {
+    let core = core_vectors().unwrap();
+
+    for case in cases(&core, "solver_ids").unwrap() {
+        let name = str_field(case, "name").unwrap();
+        let bytes = from_hex(str_field(case, "solver_id_hex").unwrap());
+        let solver_id = String::from_utf8(bytes).expect("every solver id vector is UTF-8");
+        let caps = Capabilities {
+            solver_id,
+            ..Default::default()
+        };
+        assert!(roundtrips(&caps).unwrap(), "{name}");
+    }
+
+    for case in cases(&core, "family_support").unwrap() {
+        let name = str_field(case, "name").unwrap();
+        let entries = array_field(case, "entries")
+            .unwrap()
+            .iter()
+            .map(support_entry)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let generated = Capabilities {
+            generated_families: entries.clone(),
+            ..Default::default()
+        };
+        let accepted = Capabilities {
+            accepted_families: entries,
+            ..Default::default()
+        };
+        assert!(roundtrips(&generated).unwrap(), "{name}");
+        assert!(roundtrips(&accepted).unwrap(), "{name}");
+    }
+
+    let rows = cases(&core, "wire_reasons").unwrap();
+    for row in rows {
+        let value = row
+            .get("value")
+            .and_then(serde_json::Value::as_i64)
+            .and_then(|v| i32::try_from(v).ok())
+            .expect("value is an i32");
+        let reason = RejectReason::try_from(value).expect("known reason");
+        assert_eq!(reason.as_str_name(), str_field(row, "reason").unwrap());
+    }
+    let variants = [
+        RejectReason::Unspecified,
+        RejectReason::UnsupportedKind,
+        RejectReason::TooLarge,
+        RejectReason::Expired,
+        RejectReason::Overloaded,
+        RejectReason::ShuttingDown,
+        RejectReason::Malformed,
+        RejectReason::TopologyMismatch,
+        RejectReason::TopologyMissing,
+        RejectReason::TargetMissing,
+        RejectReason::FamilyUnsupported,
+    ];
+    assert_eq!(rows.len(), variants.len());
+}
+
+#[test]
+fn protocol_version_stays_two() {
+    assert_eq!(quip_protocol::session::PROTOCOL_VERSION, 2);
 }

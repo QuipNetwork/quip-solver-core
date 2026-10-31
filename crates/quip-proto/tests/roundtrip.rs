@@ -21,6 +21,9 @@ fn hello_roundtrips_through_prost() {
             max_degree: None,
             max_local_field_milli: None,
             exact_resolution_milli: None,
+            solver_id: String::new(),
+            generated_families: vec![],
+            accepted_families: vec![],
         }),
     };
     let msg = MinerMsg {
@@ -54,6 +57,9 @@ fn capabilities_roundtrips() {
         max_degree: Some(20),
         max_local_field_milli: Some(63_000),
         exact_resolution_milli: Some(1000),
+        solver_id: String::new(),
+        generated_families: vec![],
+        accepted_families: vec![],
     };
     let bytes = c.encode_to_vec();
     assert_eq!(Capabilities::decode(&bytes[..]).expect("decode"), c);

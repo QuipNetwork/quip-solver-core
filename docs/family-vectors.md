@@ -105,7 +105,7 @@ The `evidence` section of `core.json` records the same split, and the drift test
 | `metadata-kind-and-section-length-faults`, `explicit-job-metadata-invalid` | `metadata` | provided |
 | `size-bounds-example-family`, `size-bounds-over-instance-bounds-at-admission` | `size_bounds` | provided |
 | `stable-code-values-and-wire-mapping` | `codes`, `wire_reasons` | provided |
-| `code-phase-lowest-code-wins`, `lease-admission-order-with-field-checks`, `legacy-lease-with-family-rejected`, `family-lease-without-descriptor-rejected`, `unknown-generator-value-malformed` | `lease_admission` | provided with abstract fault sets. Concrete proto leases need SC-4 tags 8 and 9. |
+| `code-phase-lowest-code-wins`, `lease-admission-order-with-field-checks`, `legacy-lease-with-family-rejected`, `family-lease-without-descriptor-rejected`, `unknown-generator-value-malformed` | `lease_admission` | provided with abstract fault sets. The tags exist. Concrete proto leases and session admission are SC-5. |
 | `explicit-job-tier-lookup-and-validation-order`, `explicit-job-topology-hash-form-rejected` | `explicit_job` | provided with abstract fault sets |
 | `extension-field-wrong-length-codes` | `field_lengths` | provided |
 | `family-support-entry-validity-and-duplicate-id` | `family_support` | provided |

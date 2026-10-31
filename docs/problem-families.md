@@ -602,11 +602,11 @@ The first failure wins, and no step draws a random word.
 
 1. The session checks that run before `LeaseSpec::from_proto` today keep their place: `EXPIRED`, `TOPOLOGY_MISSING`, then `TARGET_MISSING`.
 2. The lease field checks of today, unchanged, each with `MALFORMED`. These checks come before code 1.
-   - `Job.generator` is absent (`crates/quip-solver-core/src/lease.rs:295`).
-   - `last_proof_block_hash`, `miner_account`, or `base_salt` is not 32 bytes (`crates/quip-protocol/src/lease.rs:302`).
-   - `salt_count` is zero (`crates/quip-protocol/src/lease.rs:81`).
-   - `salt_start + salt_count` overflows `u64` (`crates/quip-protocol/src/lease.rs:84`).
-   - The session maps each of these errors to `MALFORMED` (`crates/quip-solver-core/src/lease.rs:296`). [Generated jobs](../SPEC.md#generated-jobs) in the solver contract states the same rules.
+   - `Job.generator` is absent (`prepare` in `crates/quip-solver-core/src/lease.rs`).
+   - `last_proof_block_hash`, `miner_account`, or `base_salt` is not 32 bytes (`LeaseError::BadLength` from `LeaseSpec::from_proto` in `crates/quip-protocol/src/lease.rs`).
+   - `salt_count` is zero (`LeaseError::ZeroCount` from `LeaseSpec::new` in `crates/quip-protocol/src/lease.rs`).
+   - `salt_start + salt_count` overflows `u64` (`LeaseError::CounterOverflow` from `LeaseSpec::new` in `crates/quip-protocol/src/lease.rs`).
+   - The session maps each of these errors to `MALFORMED` (`prepare` in `crates/quip-solver-core/src/lease.rs`). [Generated jobs](../SPEC.md#generated-jobs) in the solver contract states the same rules.
 3. Codes 1 to 10, in ascending order.
 4. The `topology_hash` check that exists today. A hash that differs from the cached `Topology.hash` gives `TOPOLOGY_MISMATCH`.
 5. Codes 11, 12, and the admission part of code 13, in ascending order.
@@ -675,10 +675,10 @@ A v2 consumer that predates this document cannot generate a family instance.
 It fails safe for three reasons.
 
 First, it rejects any generator value other than 1 with `MALFORMED` before any draw.
-`LeaseSpec::from_proto` returns `LeaseError::UnknownGenerator` for any algorithm other than 1 (`crates/quip-protocol/src/lease.rs:296`).
-The session maps that error to `MALFORMED` (`crates/quip-solver-core/src/lease.rs:296`).
-The test at `crates/quip-protocol/tests/proto_lease.rs:113` checks the rejection.
-The session test at `crates/quip-solver-core/tests/lease_session.rs:449`, `malformed_leases_are_rejected_before_drawing`, sends a lease with `algorithm = 0`, and three leases with bad salt fields.
+`LeaseSpec::from_proto` returns `LeaseError::UnknownGenerator` for any algorithm other than 1 (`LeaseSpec::from_proto` in `crates/quip-protocol/src/lease.rs`).
+The session maps that error to `MALFORMED` (`prepare` in `crates/quip-solver-core/src/lease.rs`).
+The test `proto_result_verifies_and_rejects_malformed_fields` in `crates/quip-protocol/tests/proto_lease.rs` checks the rejection.
+The session test `malformed_leases_are_rejected_before_drawing` in `crates/quip-solver-core/tests/lease_session.rs` sends a lease with `algorithm = 0`, and three leases with bad salt fields.
 It checks that the first reply to each lease is a `MALFORMED` reject.
 
 Second, a coordinator never sends a family lease to a session that did not ask for it in `generated_families` (FAM-72).

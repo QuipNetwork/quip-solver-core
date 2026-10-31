@@ -546,6 +546,10 @@ def main() -> int:
             always_print_fields_with_no_presence=True,
             preserving_proto_field_name=False,
         )
+        # FAM-63: the family fields are omitted when empty.
+        for key in ("solverId", "generatedFamilies", "acceptedFamilies"):
+            if not payload.get(key):
+                payload.pop(key, None)
         payload["backend"] = session.BACKEND_NAMES[message.backend]
         payload["algorithm"] = session.ALGORITHM_NAMES[message.algorithm]
         print(json.dumps(payload))

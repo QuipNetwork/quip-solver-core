@@ -22,3 +22,10 @@ pub mod wire;
 /// golden-pinned math intact.
 #[cfg(feature = "session")]
 pub mod session;
+
+/// FAM-42 mapping from family codes to wire reject reasons.
+///
+/// Behind `session` for the same reason as [`session`]: it names the generated
+/// `RejectReason`.
+#[cfg(feature = "session")]
+pub mod family;

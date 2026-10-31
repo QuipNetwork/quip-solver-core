@@ -295,6 +295,7 @@ export enum GeneratorAlgorithm {
    * edge, each value allowed[next_u32 % len], in cached Topology order.
    */
   GENERATOR_ALGORITHM_BLAKE3_CHACHA8_V1 = 1,
+  GENERATOR_ALGORITHM_FAMILY_CHACHA8_V1 = 2,
   UNRECOGNIZED = -1,
 }
 
@@ -306,6 +307,9 @@ export function generatorAlgorithmFromJSON(object: any): GeneratorAlgorithm {
     case 1:
     case "GENERATOR_ALGORITHM_BLAKE3_CHACHA8_V1":
       return GeneratorAlgorithm.GENERATOR_ALGORITHM_BLAKE3_CHACHA8_V1;
+    case 2:
+    case "GENERATOR_ALGORITHM_FAMILY_CHACHA8_V1":
+      return GeneratorAlgorithm.GENERATOR_ALGORITHM_FAMILY_CHACHA8_V1;
     case -1:
     case "UNRECOGNIZED":
     default:
@@ -319,6 +323,8 @@ export function generatorAlgorithmToJSON(object: GeneratorAlgorithm): string {
       return "GENERATOR_ALGORITHM_UNSPECIFIED";
     case GeneratorAlgorithm.GENERATOR_ALGORITHM_BLAKE3_CHACHA8_V1:
       return "GENERATOR_ALGORITHM_BLAKE3_CHACHA8_V1";
+    case GeneratorAlgorithm.GENERATOR_ALGORITHM_FAMILY_CHACHA8_V1:
+      return "GENERATOR_ALGORITHM_FAMILY_CHACHA8_V1";
     case GeneratorAlgorithm.UNRECOGNIZED:
     default:
       return "UNRECOGNIZED";
@@ -382,6 +388,8 @@ export enum RejectReason {
   TOPOLOGY_MISMATCH = 7,
   TOPOLOGY_MISSING = 8,
   TARGET_MISSING = 9,
+  /** FAMILY_UNSUPPORTED - Admission codes 5, 6, 10, and 12 map here, and explicit-job code 10 (FAM-42). */
+  FAMILY_UNSUPPORTED = 10,
   UNRECOGNIZED = -1,
 }
 
@@ -417,6 +425,9 @@ export function rejectReasonFromJSON(object: any): RejectReason {
     case 9:
     case "TARGET_MISSING":
       return RejectReason.TARGET_MISSING;
+    case 10:
+    case "FAMILY_UNSUPPORTED":
+      return RejectReason.FAMILY_UNSUPPORTED;
     case -1:
     case "UNRECOGNIZED":
     default:
@@ -446,6 +457,8 @@ export function rejectReasonToJSON(object: RejectReason): string {
       return "TOPOLOGY_MISSING";
     case RejectReason.TARGET_MISSING:
       return "TARGET_MISSING";
+    case RejectReason.FAMILY_UNSUPPORTED:
+      return "FAMILY_UNSUPPORTED";
     case RejectReason.UNRECOGNIZED:
     default:
       return "UNRECOGNIZED";
@@ -555,6 +568,9 @@ export interface IsingProblem {
   scale: number;
   h: Uint8Array;
   j: Uint8Array;
+  family:
+    | FamilyBinding
+    | undefined;
   /** per-job override; 0 = unset -> SetTarget/adapt */
   numReads: number;
   /** per-job override; 0 = unset */
@@ -726,6 +742,9 @@ export interface Capabilities {
    * makes no claim.
    */
   exactResolutionMilli?: number | undefined;
+  solverId: string;
+  generatedFamilies: FamilySupport[];
+  acceptedFamilies: FamilySupport[];
 }
 
 export interface IsingProblemGenerator {
@@ -740,12 +759,53 @@ export interface IsingProblemGenerator {
   baseSalt: Uint8Array;
   saltStart: bigint;
   saltCount: bigint;
+  /** required iff algorithm == FAMILY_CHACHA8_V1 (FAM-48, FAM-49) */
+  family:
+    | FamilyDescriptor
+    | undefined;
+  /** 32 bytes, required iff family is set (FAM-49, FAM-50) */
+  topologyOrderDigest: Uint8Array;
 }
 
 export interface LeaseDone {
   jobId: Uint8Array;
   saltsDone: bigint;
   bestEnergyMilli: bigint;
+}
+
+export interface FamilyDescriptor {
+  familyId: string;
+  revision: number;
+  /** canonical parameter bytes */
+  params: Uint8Array;
+  /** 32 bytes */
+  paramsDigest: Uint8Array;
+}
+
+export interface FamilyBinding {
+  family:
+    | FamilyDescriptor
+    | undefined;
+  /** 0 or 32 bytes */
+  nonce: Uint8Array;
+  /** 32 bytes, digest of the canonical instance bytes (FAM-30, FAM-68) */
+  instanceDigest: Uint8Array;
+  /** the metadata region: u16 n_sections, then sections (FAM-34, FAM-67) */
+  metadata: Uint8Array;
+  /** 32 bytes */
+  topologyOrderDigest: Uint8Array;
+  /** native node ids in instance output order */
+  nodeIds: number[];
+  /** the instance offset */
+  offsetMilli: bigint;
+}
+
+export interface FamilySupport {
+  familyId: string;
+  /** exact revisions */
+  revisions: number[];
+  /** empty = every valid parameter set */
+  paramsDigests: Uint8Array[];
 }
 
 function createBaseMinerMsg(): MinerMsg {
@@ -2014,6 +2074,7 @@ function createBaseIsingProblem(): IsingProblem {
     scale: 0,
     h: new Uint8Array(0),
     j: new Uint8Array(0),
+    family: undefined,
     numReads: 0,
     numSweeps: 0,
     annealTimeUs: 0,
@@ -2043,6 +2104,9 @@ export const IsingProblem: MessageFns<IsingProblem> = {
     }
     if (message.j.length !== 0) {
       writer.uint32(130).bytes(message.j);
+    }
+    if (message.family !== undefined) {
+      FamilyBinding.encode(message.family, writer.uint32(138).fork()).join();
     }
     if (message.numReads !== 0) {
       writer.uint32(40).uint32(message.numReads);
@@ -2123,6 +2187,14 @@ export const IsingProblem: MessageFns<IsingProblem> = {
           message.j = reader.bytes();
           continue;
         }
+        case 17: {
+          if (tag !== 138) {
+            break;
+          }
+
+          message.family = FamilyBinding.decode(reader, reader.uint32());
+          continue;
+        }
         case 5: {
           if (tag !== 40) {
             break;
@@ -2200,6 +2272,7 @@ export const IsingProblem: MessageFns<IsingProblem> = {
       scale: isSet(object.scale) ? globalThis.Number(object.scale) : 0,
       h: isSet(object.h) ? bytesFromBase64(object.h) : new Uint8Array(0),
       j: isSet(object.j) ? bytesFromBase64(object.j) : new Uint8Array(0),
+      family: isSet(object.family) ? FamilyBinding.fromJSON(object.family) : undefined,
       numReads: isSet(object.numReads)
         ? globalThis.Number(object.numReads)
         : isSet(object.num_reads)
@@ -2258,6 +2331,9 @@ export const IsingProblem: MessageFns<IsingProblem> = {
     if (message.j.length !== 0) {
       obj.j = base64FromBytes(message.j);
     }
+    if (message.family !== undefined) {
+      obj.family = FamilyBinding.toJSON(message.family);
+    }
     if (message.numReads !== 0) {
       obj.numReads = Math.round(message.numReads);
     }
@@ -2295,6 +2371,9 @@ export const IsingProblem: MessageFns<IsingProblem> = {
     message.scale = object.scale ?? 0;
     message.h = object.h ?? new Uint8Array(0);
     message.j = object.j ?? new Uint8Array(0);
+    message.family = (object.family !== undefined && object.family !== null)
+      ? FamilyBinding.fromPartial(object.family)
+      : undefined;
     message.numReads = object.numReads ?? 0;
     message.numSweeps = object.numSweeps ?? 0;
     message.annealTimeUs = object.annealTimeUs ?? 0;
@@ -3770,6 +3849,9 @@ function createBaseCapabilities(): Capabilities {
     maxDegree: undefined,
     maxLocalFieldMilli: undefined,
     exactResolutionMilli: undefined,
+    solverId: "",
+    generatedFamilies: [],
+    acceptedFamilies: [],
   };
 }
 
@@ -3822,6 +3904,15 @@ export const Capabilities: MessageFns<Capabilities> = {
     }
     if (message.exactResolutionMilli !== undefined) {
       writer.uint32(128).uint32(message.exactResolutionMilli);
+    }
+    if (message.solverId !== "") {
+      writer.uint32(138).string(message.solverId);
+    }
+    for (const v of message.generatedFamilies) {
+      FamilySupport.encode(v!, writer.uint32(146).fork()).join();
+    }
+    for (const v of message.acceptedFamilies) {
+      FamilySupport.encode(v!, writer.uint32(154).fork()).join();
     }
     return writer;
   },
@@ -3975,6 +4066,30 @@ export const Capabilities: MessageFns<Capabilities> = {
           message.exactResolutionMilli = reader.uint32();
           continue;
         }
+        case 17: {
+          if (tag !== 138) {
+            break;
+          }
+
+          message.solverId = reader.string();
+          continue;
+        }
+        case 18: {
+          if (tag !== 146) {
+            break;
+          }
+
+          message.generatedFamilies.push(FamilySupport.decode(reader, reader.uint32()));
+          continue;
+        }
+        case 19: {
+          if (tag !== 154) {
+            break;
+          }
+
+          message.acceptedFamilies.push(FamilySupport.decode(reader, reader.uint32()));
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -4040,6 +4155,21 @@ export const Capabilities: MessageFns<Capabilities> = {
         : isSet(object.exact_resolution_milli)
         ? globalThis.Number(object.exact_resolution_milli)
         : undefined,
+      solverId: isSet(object.solverId)
+        ? globalThis.String(object.solverId)
+        : isSet(object.solver_id)
+        ? globalThis.String(object.solver_id)
+        : "",
+      generatedFamilies: globalThis.Array.isArray(object?.generatedFamilies)
+        ? object.generatedFamilies.map((e: any) => FamilySupport.fromJSON(e))
+        : globalThis.Array.isArray(object?.generated_families)
+        ? object.generated_families.map((e: any) => FamilySupport.fromJSON(e))
+        : [],
+      acceptedFamilies: globalThis.Array.isArray(object?.acceptedFamilies)
+        ? object.acceptedFamilies.map((e: any) => FamilySupport.fromJSON(e))
+        : globalThis.Array.isArray(object?.accepted_families)
+        ? object.accepted_families.map((e: any) => FamilySupport.fromJSON(e))
+        : [],
     };
   },
 
@@ -4087,6 +4217,15 @@ export const Capabilities: MessageFns<Capabilities> = {
     if (message.exactResolutionMilli !== undefined) {
       obj.exactResolutionMilli = Math.round(message.exactResolutionMilli);
     }
+    if (message.solverId !== "") {
+      obj.solverId = message.solverId;
+    }
+    if (message.generatedFamilies?.length) {
+      obj.generatedFamilies = message.generatedFamilies.map((e) => FamilySupport.toJSON(e));
+    }
+    if (message.acceptedFamilies?.length) {
+      obj.acceptedFamilies = message.acceptedFamilies.map((e) => FamilySupport.toJSON(e));
+    }
     return obj;
   },
 
@@ -4109,6 +4248,9 @@ export const Capabilities: MessageFns<Capabilities> = {
     message.maxDegree = object.maxDegree ?? undefined;
     message.maxLocalFieldMilli = object.maxLocalFieldMilli ?? undefined;
     message.exactResolutionMilli = object.exactResolutionMilli ?? undefined;
+    message.solverId = object.solverId ?? "";
+    message.generatedFamilies = object.generatedFamilies?.map((e) => FamilySupport.fromPartial(e)) || [];
+    message.acceptedFamilies = object.acceptedFamilies?.map((e) => FamilySupport.fromPartial(e)) || [];
     return message;
   },
 };
@@ -4122,6 +4264,8 @@ function createBaseIsingProblemGenerator(): IsingProblemGenerator {
     baseSalt: new Uint8Array(0),
     saltStart: 0n,
     saltCount: 0n,
+    family: undefined,
+    topologyOrderDigest: new Uint8Array(0),
   };
 }
 
@@ -4153,6 +4297,12 @@ export const IsingProblemGenerator: MessageFns<IsingProblemGenerator> = {
         throw new globalThis.Error("value provided for field message.saltCount of type uint64 too large");
       }
       writer.uint32(56).uint64(message.saltCount);
+    }
+    if (message.family !== undefined) {
+      FamilyDescriptor.encode(message.family, writer.uint32(66).fork()).join();
+    }
+    if (message.topologyOrderDigest.length !== 0) {
+      writer.uint32(74).bytes(message.topologyOrderDigest);
     }
     return writer;
   },
@@ -4220,6 +4370,22 @@ export const IsingProblemGenerator: MessageFns<IsingProblemGenerator> = {
           message.saltCount = reader.uint64() as bigint;
           continue;
         }
+        case 8: {
+          if (tag !== 66) {
+            break;
+          }
+
+          message.family = FamilyDescriptor.decode(reader, reader.uint32());
+          continue;
+        }
+        case 9: {
+          if (tag !== 74) {
+            break;
+          }
+
+          message.topologyOrderDigest = reader.bytes();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -4262,6 +4428,12 @@ export const IsingProblemGenerator: MessageFns<IsingProblemGenerator> = {
         : isSet(object.salt_count)
         ? BigInt(object.salt_count)
         : 0n,
+      family: isSet(object.family) ? FamilyDescriptor.fromJSON(object.family) : undefined,
+      topologyOrderDigest: isSet(object.topologyOrderDigest)
+        ? bytesFromBase64(object.topologyOrderDigest)
+        : isSet(object.topology_order_digest)
+        ? bytesFromBase64(object.topology_order_digest)
+        : new Uint8Array(0),
     };
   },
 
@@ -4288,6 +4460,12 @@ export const IsingProblemGenerator: MessageFns<IsingProblemGenerator> = {
     if (message.saltCount !== 0n) {
       obj.saltCount = message.saltCount.toString();
     }
+    if (message.family !== undefined) {
+      obj.family = FamilyDescriptor.toJSON(message.family);
+    }
+    if (message.topologyOrderDigest.length !== 0) {
+      obj.topologyOrderDigest = base64FromBytes(message.topologyOrderDigest);
+    }
     return obj;
   },
 
@@ -4303,6 +4481,10 @@ export const IsingProblemGenerator: MessageFns<IsingProblemGenerator> = {
     message.baseSalt = object.baseSalt ?? new Uint8Array(0);
     message.saltStart = (object.saltStart !== undefined && object.saltStart !== null) ? BigInt(object.saltStart) : 0n;
     message.saltCount = (object.saltCount !== undefined && object.saltCount !== null) ? BigInt(object.saltCount) : 0n;
+    message.family = (object.family !== undefined && object.family !== null)
+      ? FamilyDescriptor.fromPartial(object.family)
+      : undefined;
+    message.topologyOrderDigest = object.topologyOrderDigest ?? new Uint8Array(0);
     return message;
   },
 };
@@ -4415,6 +4597,435 @@ export const LeaseDone: MessageFns<LeaseDone> = {
     message.bestEnergyMilli = (object.bestEnergyMilli !== undefined && object.bestEnergyMilli !== null)
       ? BigInt(object.bestEnergyMilli)
       : 0n;
+    return message;
+  },
+};
+
+function createBaseFamilyDescriptor(): FamilyDescriptor {
+  return { familyId: "", revision: 0, params: new Uint8Array(0), paramsDigest: new Uint8Array(0) };
+}
+
+export const FamilyDescriptor: MessageFns<FamilyDescriptor> = {
+  encode(message: FamilyDescriptor, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.familyId !== "") {
+      writer.uint32(10).string(message.familyId);
+    }
+    if (message.revision !== 0) {
+      writer.uint32(16).uint32(message.revision);
+    }
+    if (message.params.length !== 0) {
+      writer.uint32(26).bytes(message.params);
+    }
+    if (message.paramsDigest.length !== 0) {
+      writer.uint32(34).bytes(message.paramsDigest);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): FamilyDescriptor {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseFamilyDescriptor();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.familyId = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.revision = reader.uint32();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.params = reader.bytes();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.paramsDigest = reader.bytes();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): FamilyDescriptor {
+    return {
+      familyId: isSet(object.familyId)
+        ? globalThis.String(object.familyId)
+        : isSet(object.family_id)
+        ? globalThis.String(object.family_id)
+        : "",
+      revision: isSet(object.revision) ? globalThis.Number(object.revision) : 0,
+      params: isSet(object.params) ? bytesFromBase64(object.params) : new Uint8Array(0),
+      paramsDigest: isSet(object.paramsDigest)
+        ? bytesFromBase64(object.paramsDigest)
+        : isSet(object.params_digest)
+        ? bytesFromBase64(object.params_digest)
+        : new Uint8Array(0),
+    };
+  },
+
+  toJSON(message: FamilyDescriptor): unknown {
+    const obj: any = {};
+    if (message.familyId !== "") {
+      obj.familyId = message.familyId;
+    }
+    if (message.revision !== 0) {
+      obj.revision = Math.round(message.revision);
+    }
+    if (message.params.length !== 0) {
+      obj.params = base64FromBytes(message.params);
+    }
+    if (message.paramsDigest.length !== 0) {
+      obj.paramsDigest = base64FromBytes(message.paramsDigest);
+    }
+    return obj;
+  },
+
+  create(base?: DeepPartial<FamilyDescriptor>): FamilyDescriptor {
+    return FamilyDescriptor.fromPartial(base ?? {});
+  },
+  fromPartial(object: DeepPartial<FamilyDescriptor>): FamilyDescriptor {
+    const message = createBaseFamilyDescriptor();
+    message.familyId = object.familyId ?? "";
+    message.revision = object.revision ?? 0;
+    message.params = object.params ?? new Uint8Array(0);
+    message.paramsDigest = object.paramsDigest ?? new Uint8Array(0);
+    return message;
+  },
+};
+
+function createBaseFamilyBinding(): FamilyBinding {
+  return {
+    family: undefined,
+    nonce: new Uint8Array(0),
+    instanceDigest: new Uint8Array(0),
+    metadata: new Uint8Array(0),
+    topologyOrderDigest: new Uint8Array(0),
+    nodeIds: [],
+    offsetMilli: 0n,
+  };
+}
+
+export const FamilyBinding: MessageFns<FamilyBinding> = {
+  encode(message: FamilyBinding, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.family !== undefined) {
+      FamilyDescriptor.encode(message.family, writer.uint32(10).fork()).join();
+    }
+    if (message.nonce.length !== 0) {
+      writer.uint32(18).bytes(message.nonce);
+    }
+    if (message.instanceDigest.length !== 0) {
+      writer.uint32(26).bytes(message.instanceDigest);
+    }
+    if (message.metadata.length !== 0) {
+      writer.uint32(34).bytes(message.metadata);
+    }
+    if (message.topologyOrderDigest.length !== 0) {
+      writer.uint32(42).bytes(message.topologyOrderDigest);
+    }
+    writer.uint32(50).fork();
+    for (const v of message.nodeIds) {
+      writer.uint32(v);
+    }
+    writer.join();
+    if (message.offsetMilli !== 0n) {
+      if (BigInt.asIntN(64, message.offsetMilli) !== message.offsetMilli) {
+        throw new globalThis.Error("value provided for field message.offsetMilli of type int64 too large");
+      }
+      writer.uint32(56).int64(message.offsetMilli);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): FamilyBinding {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseFamilyBinding();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.family = FamilyDescriptor.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.nonce = reader.bytes();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.instanceDigest = reader.bytes();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.metadata = reader.bytes();
+          continue;
+        }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.topologyOrderDigest = reader.bytes();
+          continue;
+        }
+        case 6: {
+          if (tag === 48) {
+            message.nodeIds.push(reader.uint32());
+
+            continue;
+          }
+
+          if (tag === 50) {
+            const end2 = reader.uint32() + reader.pos;
+            while (reader.pos < end2) {
+              message.nodeIds.push(reader.uint32());
+            }
+
+            continue;
+          }
+
+          break;
+        }
+        case 7: {
+          if (tag !== 56) {
+            break;
+          }
+
+          message.offsetMilli = reader.int64() as bigint;
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): FamilyBinding {
+    return {
+      family: isSet(object.family) ? FamilyDescriptor.fromJSON(object.family) : undefined,
+      nonce: isSet(object.nonce) ? bytesFromBase64(object.nonce) : new Uint8Array(0),
+      instanceDigest: isSet(object.instanceDigest)
+        ? bytesFromBase64(object.instanceDigest)
+        : isSet(object.instance_digest)
+        ? bytesFromBase64(object.instance_digest)
+        : new Uint8Array(0),
+      metadata: isSet(object.metadata) ? bytesFromBase64(object.metadata) : new Uint8Array(0),
+      topologyOrderDigest: isSet(object.topologyOrderDigest)
+        ? bytesFromBase64(object.topologyOrderDigest)
+        : isSet(object.topology_order_digest)
+        ? bytesFromBase64(object.topology_order_digest)
+        : new Uint8Array(0),
+      nodeIds: globalThis.Array.isArray(object?.nodeIds)
+        ? object.nodeIds.map((e: any) => globalThis.Number(e))
+        : globalThis.Array.isArray(object?.node_ids)
+        ? object.node_ids.map((e: any) => globalThis.Number(e))
+        : [],
+      offsetMilli: isSet(object.offsetMilli)
+        ? BigInt(object.offsetMilli)
+        : isSet(object.offset_milli)
+        ? BigInt(object.offset_milli)
+        : 0n,
+    };
+  },
+
+  toJSON(message: FamilyBinding): unknown {
+    const obj: any = {};
+    if (message.family !== undefined) {
+      obj.family = FamilyDescriptor.toJSON(message.family);
+    }
+    if (message.nonce.length !== 0) {
+      obj.nonce = base64FromBytes(message.nonce);
+    }
+    if (message.instanceDigest.length !== 0) {
+      obj.instanceDigest = base64FromBytes(message.instanceDigest);
+    }
+    if (message.metadata.length !== 0) {
+      obj.metadata = base64FromBytes(message.metadata);
+    }
+    if (message.topologyOrderDigest.length !== 0) {
+      obj.topologyOrderDigest = base64FromBytes(message.topologyOrderDigest);
+    }
+    if (message.nodeIds?.length) {
+      obj.nodeIds = message.nodeIds.map((e) => Math.round(e));
+    }
+    if (message.offsetMilli !== 0n) {
+      obj.offsetMilli = message.offsetMilli.toString();
+    }
+    return obj;
+  },
+
+  create(base?: DeepPartial<FamilyBinding>): FamilyBinding {
+    return FamilyBinding.fromPartial(base ?? {});
+  },
+  fromPartial(object: DeepPartial<FamilyBinding>): FamilyBinding {
+    const message = createBaseFamilyBinding();
+    message.family = (object.family !== undefined && object.family !== null)
+      ? FamilyDescriptor.fromPartial(object.family)
+      : undefined;
+    message.nonce = object.nonce ?? new Uint8Array(0);
+    message.instanceDigest = object.instanceDigest ?? new Uint8Array(0);
+    message.metadata = object.metadata ?? new Uint8Array(0);
+    message.topologyOrderDigest = object.topologyOrderDigest ?? new Uint8Array(0);
+    message.nodeIds = object.nodeIds?.map((e) => e) || [];
+    message.offsetMilli = (object.offsetMilli !== undefined && object.offsetMilli !== null)
+      ? BigInt(object.offsetMilli)
+      : 0n;
+    return message;
+  },
+};
+
+function createBaseFamilySupport(): FamilySupport {
+  return { familyId: "", revisions: [], paramsDigests: [] };
+}
+
+export const FamilySupport: MessageFns<FamilySupport> = {
+  encode(message: FamilySupport, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.familyId !== "") {
+      writer.uint32(10).string(message.familyId);
+    }
+    writer.uint32(18).fork();
+    for (const v of message.revisions) {
+      writer.uint32(v);
+    }
+    writer.join();
+    for (const v of message.paramsDigests) {
+      writer.uint32(26).bytes(v!);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): FamilySupport {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseFamilySupport();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.familyId = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag === 16) {
+            message.revisions.push(reader.uint32());
+
+            continue;
+          }
+
+          if (tag === 18) {
+            const end2 = reader.uint32() + reader.pos;
+            while (reader.pos < end2) {
+              message.revisions.push(reader.uint32());
+            }
+
+            continue;
+          }
+
+          break;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.paramsDigests.push(reader.bytes());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): FamilySupport {
+    return {
+      familyId: isSet(object.familyId)
+        ? globalThis.String(object.familyId)
+        : isSet(object.family_id)
+        ? globalThis.String(object.family_id)
+        : "",
+      revisions: globalThis.Array.isArray(object?.revisions)
+        ? object.revisions.map((e: any) => globalThis.Number(e))
+        : [],
+      paramsDigests: globalThis.Array.isArray(object?.paramsDigests)
+        ? object.paramsDigests.map((e: any) => bytesFromBase64(e))
+        : globalThis.Array.isArray(object?.params_digests)
+        ? object.params_digests.map((e: any) => bytesFromBase64(e))
+        : [],
+    };
+  },
+
+  toJSON(message: FamilySupport): unknown {
+    const obj: any = {};
+    if (message.familyId !== "") {
+      obj.familyId = message.familyId;
+    }
+    if (message.revisions?.length) {
+      obj.revisions = message.revisions.map((e) => Math.round(e));
+    }
+    if (message.paramsDigests?.length) {
+      obj.paramsDigests = message.paramsDigests.map((e) => base64FromBytes(e));
+    }
+    return obj;
+  },
+
+  create(base?: DeepPartial<FamilySupport>): FamilySupport {
+    return FamilySupport.fromPartial(base ?? {});
+  },
+  fromPartial(object: DeepPartial<FamilySupport>): FamilySupport {
+    const message = createBaseFamilySupport();
+    message.familyId = object.familyId ?? "";
+    message.revisions = object.revisions?.map((e) => e) || [];
+    message.paramsDigests = object.paramsDigests?.map((e) => e) || [];
     return message;
   },
 };
