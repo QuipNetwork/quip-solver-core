@@ -108,6 +108,9 @@ impl Session {
         Self::start_with_gate(binary, false).await
     }
     async fn start_with_gate(binary: &str, gated: bool) -> Self {
+        Self::start_with(binary, gated, &[]).await
+    }
+    async fn start_with(binary: &str, gated: bool, extra_args: &[&str]) -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let bin = build_example(binary);
         let dir = std::path::PathBuf::from(format!(
@@ -137,6 +140,7 @@ impl Session {
                 "--log-level",
                 "error",
             ])
+            .args(extra_args)
             .env("QUIP_SESSION_TOKEN", "test")
             .kill_on_drop(true);
         if gated {
@@ -177,6 +181,26 @@ impl Session {
         assert!(matches!(s.recv().await, miner_msg::Msg::Ready(_)));
         assert!(matches!(s.recv().await, miner_msg::Msg::JobRequest(_)));
         s
+    }
+    async fn wait_for_log(&self, needle: &str) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let notified = self.logs.1.notified();
+                if self
+                    .logs
+                    .0
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|l| l.contains(needle))
+                {
+                    return;
+                }
+                notified.await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("miner never logged {needle:?}"));
     }
     async fn blocked_sample(&self) -> tokio::net::UnixStream {
         tokio::time::timeout(Duration::from_secs(10), self.gate.accept())
@@ -871,6 +895,51 @@ async fn skipped_salts_count_and_send_no_result() {
         .collect::<Vec<_>>();
     assert_eq!(reported, expected);
     assert_eq!(done.salts_done, 64);
+    s.refund().await;
+    s.finish().await;
+}
+
+/// Run a 64-salt family lease on `mode`. Returns the Results by salt, and the summary.
+async fn run_64(mode: &str) -> (Vec<wire::Result>, wire::LeaseDone) {
+    let j = family_job(64, &UNIFORM_V1, &P_SPEC);
+    let mut s = Session::start_with("mock_sampler_family_lease", false, &["--mode", mode]).await;
+    s.setup(i64::MAX).await;
+    s.send(coord_msg::Msg::Job(j.clone())).await;
+    let (mut results, done) = drain_lease(&mut s).await;
+    results.sort_by_key(|r| index_of(&j, r));
+    s.refund().await;
+    s.finish().await;
+    (results, done)
+}
+
+#[tokio::test]
+async fn a_local_family_generator_matches_the_session_path() {
+    let (local, local_done) = run_64("local").await;
+    let (default, default_done) = run_64("default").await;
+    assert!(!local.is_empty());
+    assert_eq!(local.len(), default.len());
+    for (l, d) in local.iter().zip(&default) {
+        assert_eq!(l.salt, d.salt);
+        assert_eq!(l.nonce, d.nonce);
+        assert_eq!(l.solutions, d.solutions);
+    }
+    assert_eq!(local_done.salts_done, 64);
+    assert_eq!(local_done.salts_done, default_done.salts_done);
+    assert_eq!(local_done.best_energy_milli, default_done.best_energy_milli);
+}
+
+#[tokio::test]
+async fn a_local_generator_sees_the_admitted_inputs() {
+    let mut s = Session::start_with("mock_sampler_family_lease", false, &["--mode", "local"]).await;
+    s.setup(i64::MAX).await;
+    let j = family_job(4, &UNIFORM_V1, &P_SPEC);
+    s.send(coord_msg::Msg::Job(j)).await;
+    let digest = hex(&order_digest(&topology()));
+    s.wait_for_log(&format!(
+        "family lease inputs: family_id=vectors/uniform-field revision=1 order_digest={digest}"
+    ))
+    .await;
+    let _ = drain_lease(&mut s).await;
     s.refund().await;
     s.finish().await;
 }

@@ -9,11 +9,13 @@ use quip_protocol::scoring::energy_from_milli;
 use quip_solver_core::coefficient::Milli;
 use quip_solver_core::families::{Declaration, FamilyClaim};
 use quip_solver_core::ising_generators::descriptor::Contract;
+use quip_solver_core::ising_generators::family::SaltFault;
 use quip_solver_core::ising_generators::instance::InstanceLimits;
 use quip_solver_core::{
-    run, BackendIdentity, CommonArgs, IsingGraph, ModelLimits, SampleError, SampleParams, Sampler,
-    SamplerResult,
+    run, BackendIdentity, CommonArgs, IsingGraph, Lease, LeaseSink, ModelLimits, SampleError,
+    SampleParams, Sampler, SamplerResult, TopologyView,
 };
+use std::fmt::Write as _;
 use std::process::ExitCode;
 
 #[path = "support/layered_family.rs"]
@@ -105,11 +107,91 @@ impl Sampler<Milli> for DefaultFamily {
     }
 }
 
+/// Generates the family instances itself, from the inputs the session admitted.
+struct LocalFamily;
+
+impl Sampler<Milli> for LocalFamily {
+    fn generates_locally() -> bool {
+        true
+    }
+
+    fn declaration() -> Declaration {
+        DefaultFamily::declaration()
+    }
+
+    fn sample_lease(
+        &self,
+        lease: &Lease,
+        _topology: &TopologyView,
+        _params: &SampleParams,
+        out: &LeaseSink,
+    ) -> Result<(), SampleError> {
+        let family = lease.family().ok_or_else(|| {
+            SampleError::DeviceFault("a family generator received a legacy lease".into())
+        })?;
+        let digest = family
+            .topology()
+            .order_digest()
+            .iter()
+            .fold(String::new(), |mut acc, b| {
+                let _ = write!(acc, "{b:02x}");
+                acc
+            });
+        // The test harness runs the miner at error level, so this line is visible.
+        tracing::error!(
+            "family lease inputs: family_id={} revision={} order_digest={digest}",
+            family.family_id(),
+            family.revision(),
+        );
+        for i in 0..lease.salt_count() {
+            if out.is_stopped() {
+                break;
+            }
+            let stopped = match family.generate(lease.nonce(i)) {
+                Err(SaltFault::Skip(_) | SaltFault::Defect(_)) => out.skip(i),
+                Ok(instance) => {
+                    let spins = vec![1i8; instance.node_ids().len()];
+                    let edges = instance
+                        .edges()
+                        .iter()
+                        .map(|&(u, v)| (u as usize, v as usize))
+                        .collect::<Vec<_>>();
+                    let energy = instance.offset_milli()
+                        + energy_from_milli(&spins, instance.h(), instance.j(), &edges);
+                    out.push(
+                        i,
+                        vec![SamplerResult {
+                            spins,
+                            energy_milli: energy,
+                        }],
+                    )
+                }
+            };
+            if stopped.is_err() {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    fn sample(
+        &self,
+        _graph: &IsingGraph<Milli>,
+        _params: &SampleParams,
+    ) -> Result<Vec<SamplerResult>, SampleError> {
+        Err(SampleError::DeviceFault(
+            "the local family sampler generates leases itself".into(),
+        ))
+    }
+}
+
 /// Which lease path the binary exercises.
 #[derive(Clone, Copy, clap::ValueEnum)]
 enum Mode {
     /// The session expands each salt and streams the instance to `sample`.
     Default,
+    /// The sampler generates the instances itself and pushes the reads.
+    Local,
 }
 
 #[derive(Parser)]
@@ -147,5 +229,6 @@ fn main() -> ExitCode {
     };
     match cli.mode {
         Mode::Default => run(id, &cli.common, || Ok(DefaultFamily { gate: cli.gate })),
+        Mode::Local => run(id, &cli.common, || Ok(LocalFamily)),
     }
 }

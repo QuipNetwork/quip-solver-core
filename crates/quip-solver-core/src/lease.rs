@@ -898,6 +898,9 @@ impl LeaseSink {
     /// until the lease closes. A repeated `salt_index` is ignored and
     /// logged. It sends and counts nothing.
     ///
+    /// For a family lease, each energy is the FAM-33 energy with the instance
+    /// offset included. The sink forwards it unchanged.
+    ///
     /// # Errors
     /// Returns a stop if the lease has ended, the index is outside its
     /// range, or the writer has gone.
@@ -935,7 +938,8 @@ impl LeaseSink {
 
     /// Count a salt the backend screened out, from a blocking sampler thread.
     /// Its energy folds into the lease's best energy. Sends nothing.
-    /// A repeated `salt_index` is ignored and logged.
+    /// A repeated `salt_index` is ignored and logged. For a family lease, the
+    /// energy is the FAM-33 energy with the offset included, folded unchanged.
     ///
     /// # Errors
     /// Returns a stop if the lease has ended, the index is outside its range,
@@ -962,6 +966,35 @@ impl LeaseSink {
         progress.best_energy_milli = progress.best_energy_milli.min(energy_milli);
         drop(progress);
         let _ = self.state.jobs_done.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Count a salt that generation skipped (code 13 or 14, FAM-52), from a
+    /// blocking sampler thread. Sends nothing and leaves the best energy alone.
+    /// A repeated `salt_index` is ignored and logged.
+    ///
+    /// # Errors
+    /// Returns a stop if the lease has ended, the index is outside its range,
+    /// or the writer has gone.
+    pub fn skip(&self, salt_index: u64) -> Result<(), LeaseStopped> {
+        if self.rejects_push() || salt_index >= self.state.lease.salt_count() {
+            return Err(LeaseStopped);
+        }
+        let first = {
+            let mut progress = self.state.progress();
+            if progress.closed || progress.done_sent {
+                return Err(LeaseStopped);
+            }
+            progress.pushed.insert(salt_index)
+        };
+        if first {
+            self.state.skip_salt();
+        } else {
+            tracing::warn!(
+                salt_index,
+                "local sampler skipped a salt twice; ignoring the repeat"
+            );
+        }
         Ok(())
     }
 
@@ -1184,6 +1217,35 @@ mod tests {
         assert_eq!(progress.best_energy_milli, -700);
         drop(progress);
         assert!(ctrl_rx.try_recv().is_err(), "screen sends nothing");
+    }
+
+    #[test]
+    fn skip_counts_a_salt_once_and_sends_nothing() {
+        let state = test_state(None);
+        let (ctrl, mut ctrl_rx) = mpsc::channel::<Control>(4);
+        let sink = sink_for(&state, None, &ctrl);
+        assert_eq!(sink.skip(0), Ok(()));
+        assert_eq!(sink.skip(0), Ok(()), "a repeat is ignored");
+        assert_eq!(sink.skip(1), Err(LeaseStopped), "outside the lease");
+        let progress = state.progress();
+        assert_eq!(
+            (progress.dispatched, progress.finished, progress.salts_done),
+            (0, 0, 1)
+        );
+        assert_eq!(progress.best_energy_milli, i64::MAX);
+        drop(progress);
+        assert_eq!(state.jobs_done.load(Ordering::Relaxed), 0);
+        assert!(ctrl_rx.try_recv().is_err(), "skip sends nothing");
+    }
+
+    #[test]
+    fn a_closed_lease_refuses_skips() {
+        let state = test_state(None);
+        state.progress().closed = true;
+        let (ctrl, _ctrl_rx) = mpsc::channel::<Control>(4);
+        let sink = sink_for(&state, None, &ctrl);
+        assert_eq!(sink.skip(0), Err(LeaseStopped));
+        assert_eq!(state.progress().salts_done, 0);
     }
 
     #[test]
