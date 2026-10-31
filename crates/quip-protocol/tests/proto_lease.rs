@@ -284,6 +284,11 @@ fn verify_refuses_a_family_lease() {
         verify_lease_result(&g, &topology, &target, &result),
         Err(VerifyError::FamilyLease)
     );
+    let no_descriptor = IsingProblemGenerator { family: None, ..g };
+    assert_eq!(
+        verify_lease_result(&no_descriptor, &topology, &target, &result),
+        Err(VerifyError::FamilyLease)
+    );
 }
 
 #[test]

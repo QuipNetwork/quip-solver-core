@@ -409,10 +409,10 @@ pub fn verify_lease_result(
     target: &Target,
     result: &quip_proto::v1::Result,
 ) -> Result<Verified, VerifyError> {
-    let lease = LeaseSpec::from_proto(lease).map_err(|_| VerifyError::SaltOutsideLease)?;
-    if lease.generator == Generator::FamilyChacha8V1 {
+    if lease.algorithm == quip_proto::v1::GeneratorAlgorithm::FamilyChacha8V1 as i32 {
         return Err(VerifyError::FamilyLease);
     }
+    let lease = LeaseSpec::from_proto(lease).map_err(|_| VerifyError::SaltOutsideLease)?;
     let salt = result
         .salt
         .as_slice()
