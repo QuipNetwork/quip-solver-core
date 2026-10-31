@@ -16,9 +16,10 @@
 //! this module only maps a code in a phase.
 //!
 //! The module also holds the pure wire checks for the support lists in
-//! `Capabilities`: [`solver_id_class`] (FAM-60), [`entry_claims`] (FAM-61)
-//! and [`support_code`] (FAM-62). An entry that breaks FAM-61 claims nothing,
-//! so an invalid list behaves like an empty one.
+//! `Capabilities`: [`solver_id_class`](crate::family::solver_id_class)
+//! (FAM-60), [`entry_claims`](crate::family::entry_claims) (FAM-61) and
+//! [`support_code`](crate::family::support_code) (FAM-62). An entry that
+//! breaks FAM-61 claims nothing, so an invalid list behaves like an empty one.
 
 use ising_generators::descriptor::{check_family_id, IdContext};
 use ising_generators::Code;
