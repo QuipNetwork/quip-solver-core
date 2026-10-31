@@ -23,7 +23,6 @@ and bytes of a solver that declares nothing do not change. `protocol_version` st
   at tag 19. The Rust, Python, and TypeScript bindings include them.
 - `quip_protocol::family::reject_reason` and `CodePhase`, behind the
   `session` feature. They map a family rejection code to a wire reject reason.
-
 - `Sampler::declaration`, `families::{Declaration, FamilyClaim, FamilyList,
   FamilyTable, DeclarationError}`, and `capabilities_for`. A Rust solver
   declares its `solver_id` and family lists, and the session advertises them

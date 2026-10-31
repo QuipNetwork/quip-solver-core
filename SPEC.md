@@ -702,7 +702,7 @@ the device open, and carries the live width instead. This is the one field
 where the two answers can differ.
 `solverId`, `generatedFamilies`, and `acceptedFamilies` come from `Sampler::declaration`.
 They never differ between `Hello` and the `GetCapabilities` reply.
-A binary with an invalid declaration exits 70 before any output (G8).
+A binary with an invalid declaration exits 70 before it prints any capabilities.
 
 ## 9. Adding a solver in another language
 
