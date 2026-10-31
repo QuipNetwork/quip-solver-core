@@ -80,6 +80,7 @@ The session admits and expands a family lease for each revision in `generated_fa
 A solver that generates locally reads the lease through `Lease::family()`, which returns `None` for a legacy lease.
 `FamilyLease::generate(nonce)` returns the canonical instance of one salt.
 A salt that `generate` skips goes to `LeaseSink::skip(salt_index)`, with no `Result`.
+A `SaltFault::Defect` goes there too, as on the default path, which skips the salt and logs an error.
 Each family read carries the energy of the instance, including its `offset`.
 A local sampler reports that energy to `LeaseSink::push` and `LeaseSink::screen`, and the sink forwards it unchanged.
 The default session path adds the offset itself.

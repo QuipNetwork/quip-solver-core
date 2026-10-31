@@ -49,7 +49,7 @@ not change. `protocol_version` stays 2, and old encodings do not change.
 - `verify_lease_result` returns `VerifyError::FamilyLease` for a family lease.
 - `LeaseSpec::from_proto` now returns `Generator::FamilyChacha8V1` for value 2,
   where it returned `LeaseError::UnknownGenerator(2)` before.
-  `verify_lease_solutions` returns `VerifyError::FamilyLease` for a family spec.
+  `verify_lease_solutions` returns `VerifyError::FamilyLease` for a family lease specification.
 - A binary with an invalid declaration exits 70 in every mode, before the
   device opens.
 - `DriverReport::capabilities_conformant` compares `Capabilities` fields 17
@@ -63,11 +63,8 @@ not change. `protocol_version` stays 2, and old encodings do not change.
 - TypeScript object literals of `Capabilities`, `IsingProblem`, and
   `IsingProblemGenerator` need the new required keys, so `tsc` rejects them.
   Build these messages with `fromPartial` to avoid the break.
-
-### Breaking
-
-- `Generator`, `LeaseError`, and `VerifyError` have new variants, so an
-  exhaustive `match` on them fails to compile.
+- `Generator` and `VerifyError` have new variants, so an exhaustive `match`
+  on them fails to compile.
 - `Contract` has the new `construction` field, so a struct literal needs it.
 
 ## 0.0.4

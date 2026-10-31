@@ -282,13 +282,15 @@ The other family codes keep their `MALFORMED`, `TOPOLOGY_MISMATCH`, or `TOO_LARG
 See [Stable codes](docs/problem-families.md#stable-codes).
 
 The session admits a family lease in the order of FAM-47.
-It checks the field codes first, then codes 1 to 10, the topology hash, and codes 11 to 13.
+It checks `EXPIRED`, `TOPOLOGY_MISSING`, and `TARGET_MISSING` first (FAM-47 step 1).
+Then it checks the field codes, codes 1 to 10, the topology hash, and codes 11 to 13.
 The first failure wins, and the session draws no random word before admission completes.
 Each code has the wire reason that FAM-42 gives.
 A rejected family lease gets one `Reject` and one credit refund.
 The session keeps its legacy and plain work.
 
 A solver that lists no generated family rejects a family lease with `FAMILY_UNSUPPORTED`, code 5.
+A session with no cached topology answers `TOPOLOGY_MISSING` first, and a session with no target answers `TARGET_MISSING`.
 A family lease also needs a cached `Topology`.
 The session builds the base topology when the `Topology` message arrives, and only if the solver lists a generated family.
 A base topology that has a self-loop gives code 12.
@@ -505,6 +507,7 @@ It returns `Err(SaltFault)` for a salt to skip or a construction defect.
 The instance graph comes from `FamilyLease::generate`.
 
 Call `LeaseSink::skip(salt_index)` for a salt that `generate` skips.
+Treat `SaltFault::Defect` the same way, as the default path does. The default path skips the salt and logs an error.
 It counts the salt in `salts_done` and sends nothing. The lowest energy stays unchanged.
 It ignores a repeated index and returns `Err(LeaseStopped)` on the same conditions as `push`.
 

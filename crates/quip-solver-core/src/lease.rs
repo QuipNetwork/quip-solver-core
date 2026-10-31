@@ -973,6 +973,9 @@ impl LeaseSink {
     /// blocking sampler thread. Sends nothing and leaves the best energy alone.
     /// A repeated `salt_index` is ignored and logged.
     ///
+    /// A local sampler also calls this for `SaltFault::Defect`, as the default
+    /// path does. The default path skips that salt and logs an error.
+    ///
     /// # Errors
     /// Returns a stop if the lease has ended, the index is outside its range,
     /// or the writer has gone.
@@ -992,7 +995,7 @@ impl LeaseSink {
         } else {
             tracing::warn!(
                 salt_index,
-                "local sampler skipped a salt twice; ignoring the repeat"
+                "local sampler reported a salt twice; ignoring the repeat"
             );
         }
         Ok(())
