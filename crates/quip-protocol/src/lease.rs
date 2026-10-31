@@ -12,6 +12,8 @@ use {crate::chacha8::DrawError, ising_generators::random as random_nonces};
 pub enum Generator {
     /// `BLAKE3` nonce, then the `ChaCha8` milli draw.
     Blake3Chacha8V1,
+    /// Family lease: legacy nonce and salt rules (FAM-20), then a family construction.
+    FamilyChacha8V1,
 }
 
 /// Why a lease specification was rejected.
@@ -26,10 +28,12 @@ pub enum LeaseError {
         /// Name of the field that had the wrong length.
         field: &'static str,
     },
-    /// The generator id is not [`Generator::Blake3Chacha8V1`].
+    /// The generator id is neither [`Generator::Blake3Chacha8V1`] nor [`Generator::FamilyChacha8V1`].
     UnknownGenerator(i32),
     /// The legacy generator carries `family` or a non-empty `topology_order_digest` (FAM-48, code 2).
     DescriptorUnexpected,
+    /// A family lease has no `family` or a `topology_order_digest` that is not 32 bytes (code 1).
+    DescriptorMissing,
 }
 
 impl std::fmt::Display for LeaseError {
@@ -41,6 +45,12 @@ impl std::fmt::Display for LeaseError {
             Self::UnknownGenerator(id) => write!(f, "unknown generator id {id}"),
             Self::DescriptorUnexpected => {
                 write!(f, "lease uses the legacy generator but carries family data")
+            }
+            Self::DescriptorMissing => {
+                write!(
+                    f,
+                    "family lease lacks a descriptor or a 32-byte topology digest"
+                )
             }
         }
     }
@@ -184,6 +194,8 @@ impl TopologyView {
 /// Why a reported lease result was rejected.
 #[derive(Debug, PartialEq, Eq)]
 pub enum VerifyError {
+    /// The lease is a family lease, which legacy verification cannot check.
+    FamilyLease,
     /// The salt is not one this lease issues.
     SaltOutsideLease,
     /// The nonce is not [`random_nonces::derive_nonce`] of the lease inputs and this salt.
@@ -207,6 +219,7 @@ pub enum VerifyError {
 impl std::fmt::Display for VerifyError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::FamilyLease => write!(f, "family leases are not verified by the legacy path"),
             Self::SaltOutsideLease => write!(f, "salt is outside the lease"),
             Self::NonceMismatch => write!(f, "nonce does not match the derived nonce"),
             Self::MalformedSpins { index } => {
@@ -298,26 +311,43 @@ impl LeaseSpec {
     /// # Errors
     /// Rejects unknown generators, incorrect field lengths, and invalid counters.
     /// A legacy lease that sets `family` or a non-empty `topology_order_digest`
-    /// is [`LeaseError::DescriptorUnexpected`], checked after the field errors.
+    /// is [`LeaseError::DescriptorUnexpected`], and a family lease without
+    /// `family` or a 32-byte digest is [`LeaseError::DescriptorMissing`]. Both
+    /// are checked after the field errors.
     pub fn from_proto(g: &quip_proto::v1::IsingProblemGenerator) -> Result<Self, LeaseError> {
-        if g.algorithm != quip_proto::v1::GeneratorAlgorithm::Blake3Chacha8V1 as i32 {
-            return Err(LeaseError::UnknownGenerator(g.algorithm));
-        }
+        let generator = match g.algorithm {
+            a if a == quip_proto::v1::GeneratorAlgorithm::Blake3Chacha8V1 as i32 => {
+                Generator::Blake3Chacha8V1
+            }
+            a if a == quip_proto::v1::GeneratorAlgorithm::FamilyChacha8V1 as i32 => {
+                Generator::FamilyChacha8V1
+            }
+            other => return Err(LeaseError::UnknownGenerator(other)),
+        };
         let fixed = |bytes: &[u8], field| {
             bytes
                 .try_into()
                 .map_err(|_| LeaseError::BadLength { field })
         };
         let spec = Self::new(
-            Generator::Blake3Chacha8V1,
+            generator,
             fixed(&g.last_proof_block_hash, "last_proof_block_hash")?,
             fixed(&g.miner_account, "miner_account")?,
             fixed(&g.base_salt, "base_salt")?,
             g.salt_start,
             g.salt_count,
         )?;
-        if g.family.is_some() || !g.topology_order_digest.is_empty() {
-            return Err(LeaseError::DescriptorUnexpected);
+        match generator {
+            Generator::Blake3Chacha8V1 => {
+                if g.family.is_some() || !g.topology_order_digest.is_empty() {
+                    return Err(LeaseError::DescriptorUnexpected);
+                }
+            }
+            Generator::FamilyChacha8V1 => {
+                if g.family.is_none() || g.topology_order_digest.len() != 32 {
+                    return Err(LeaseError::DescriptorMissing);
+                }
+            }
         }
         Ok(spec)
     }
@@ -380,6 +410,9 @@ pub fn verify_lease_result(
     result: &quip_proto::v1::Result,
 ) -> Result<Verified, VerifyError> {
     let lease = LeaseSpec::from_proto(lease).map_err(|_| VerifyError::SaltOutsideLease)?;
+    if lease.generator == Generator::FamilyChacha8V1 {
+        return Err(VerifyError::FamilyLease);
+    }
     let salt = result
         .salt
         .as_slice()

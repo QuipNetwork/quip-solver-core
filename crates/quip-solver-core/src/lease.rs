@@ -294,6 +294,10 @@ pub(crate) fn prepare(
         .ok_or(RejectReason::TargetMissing)?;
     let generator = job.generator.as_ref().ok_or(RejectReason::Malformed)?;
     let spec = LeaseSpec::from_proto(generator).map_err(|_| RejectReason::Malformed)?;
+    // SC-5 Task 5 replaces this guard
+    if spec.generator != Generator::Blake3Chacha8V1 {
+        return Err(RejectReason::Malformed);
+    }
     if generator.topology_hash != *hash {
         return Err(RejectReason::TopologyMismatch);
     }
