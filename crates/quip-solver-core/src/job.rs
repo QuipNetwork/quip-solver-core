@@ -943,6 +943,101 @@ mod tests {
         );
     }
 
+    fn bound(mut job: Job) -> Job {
+        if let Some(ising) = job.ising.as_mut() {
+            ising.family = Some(quip_proto::v1::FamilyBinding {
+                node_ids: vec![10, 11],
+                ..Default::default()
+            });
+        }
+        job
+    }
+
+    /// A family binding adds no limit of its own and removes none: the model
+    /// limits still apply to a bound job (the generic tier).
+    #[test]
+    fn a_family_binding_keeps_the_model_limits() {
+        let unlimited = crate::limits::ModelLimits::UNSTATED;
+        let too_field = BackendIdentity {
+            limits: crate::limits::ModelLimits {
+                max_local_field_milli: Some(1999),
+                ..unlimited
+            },
+            ..identity("sa")
+        };
+        let too_degree = BackendIdentity {
+            limits: crate::limits::ModelLimits {
+                max_degree: Some(1),
+                ..unlimited
+            },
+            ..identity("sa")
+        };
+        let two_edges = |job: Job| {
+            let mut job = job;
+            if let Some(ising) = job.ising.as_mut() {
+                ising.graph = Some(Graph::Edges(EdgeList {
+                    u: vec![0, 0],
+                    v: vec![1, 1],
+                }));
+                ising.j = encode_i32_le(&[0, 0]);
+            }
+            job
+        };
+        let too_large = Some(RejectReason::TooLarge as i32);
+        assert_eq!(
+            reject_reason_for(edges_job(1), &StubSampler, &too_field),
+            too_large
+        );
+        assert_eq!(
+            reject_reason_for(bound(edges_job(1)), &StubSampler, &too_field),
+            too_large
+        );
+        assert_eq!(
+            reject_reason_for(two_edges(edges_job(1)), &StubSampler, &too_degree),
+            too_large
+        );
+        assert_eq!(
+            reject_reason_for(bound(two_edges(edges_job(1))), &StubSampler, &too_degree),
+            too_large
+        );
+
+        let mut lossy = edges_job(1);
+        if let Some(ising) = lossy.ising.as_mut() {
+            ising.h = encode_i32_le(&[500, 1000]);
+        }
+        let exact = BackendIdentity {
+            features: &[crate::session::EXACT_COEFFICIENTS_FEATURE],
+            ..identity("sa")
+        };
+        assert_eq!(
+            reject_reason_for(lossy.clone(), &NarrowStub, &exact),
+            too_large
+        );
+        assert_eq!(
+            reject_reason_for(bound(lossy), &NarrowStub, &exact),
+            too_large
+        );
+    }
+
+    /// A zero field is on every resolution step, so a bound job with `h` all
+    /// zero runs on an exact solver.
+    #[test]
+    fn a_zero_field_family_job_runs_on_an_exact_solver() {
+        let mut job = edges_job(1);
+        if let Some(ising) = job.ising.as_mut() {
+            ising.h = encode_i32_le(&[0, 0]);
+        }
+        let exact = BackendIdentity {
+            features: &[crate::session::EXACT_COEFFICIENTS_FEATURE],
+            limits: crate::limits::ModelLimits {
+                exact_resolution_milli: Some(1000),
+                ..crate::limits::ModelLimits::UNSTATED
+            },
+            ..identity("sa")
+        };
+        assert_eq!(reject_reason_for(bound(job), &NarrowStub, &exact), None);
+    }
+
     #[test]
     fn generator_jobs_are_not_accepted_before_lease_support() {
         let mut job = edges_job(1);

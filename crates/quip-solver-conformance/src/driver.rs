@@ -346,7 +346,9 @@ impl DriverReport {
     /// The returned `Capabilities` agrees with the identity the miner
     /// advertised in its own `Hello`.
     ///
-    /// Every field except features and stream width must match the handshake.
+    /// Every field must match the handshake except features, stream width,
+    /// and the three model limits (`max_degree`, `max_local_field_milli`,
+    /// `exact_resolution_milli`), which this check does not compare.
     #[must_use]
     pub fn capabilities_conformant(&self) -> bool {
         let (Some(c), Some(h)) = (self.capabilities_received.as_ref(), self.hello.as_ref()) else {
@@ -364,6 +366,9 @@ impl DriverReport {
             && c.native_topology_hash == h.native_topology_hash
             && c.encodings == h.encodings
             && c.generators == h.generators
+            && c.solver_id == h.solver_id
+            && c.generated_families == h.generated_families
+            && c.accepted_families == h.accepted_families
     }
 
     /// Cancellation is honoured: a job at or below the cancelled watermark
@@ -1759,6 +1764,7 @@ impl DriverReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use quip_proto::v1::FamilySupport;
 
     fn bare_report() -> DriverReport {
         DriverReport {
@@ -2350,6 +2356,38 @@ mod tests {
             c.algorithm = quip_proto::v1::Algorithm::Gibbs as i32;
         }
         assert!(!r.sweeps_honoured(), "{r:?}");
+    }
+
+    #[test]
+    fn capabilities_must_agree_on_family_fields() {
+        let list = || {
+            vec![FamilySupport {
+                family_id: "quip/x".into(),
+                revisions: vec![1],
+                params_digests: vec![],
+            }]
+        };
+        let mutations: [fn(&mut Capabilities, Vec<FamilySupport>); 3] = [
+            |c, _| c.solver_id = "abc".into(),
+            |c, l| c.generated_families = l,
+            |c, l| c.accepted_families = l,
+        ];
+        for mutate in mutations {
+            let mut differs = conformant_report();
+            if let Some(c) = differs.capabilities_received.as_mut() {
+                mutate(c, list());
+            }
+            assert!(!differs.capabilities_conformant(), "{differs:?}");
+
+            let mut agrees = conformant_report();
+            if let Some(c) = agrees.capabilities_received.as_mut() {
+                mutate(c, list());
+            }
+            if let Some(c) = agrees.hello.as_mut().and_then(|h| h.capabilities.as_mut()) {
+                mutate(c, list());
+            }
+            assert!(agrees.capabilities_conformant(), "{agrees:?}");
+        }
     }
 
     #[test]

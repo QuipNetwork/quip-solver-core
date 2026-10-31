@@ -7,8 +7,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
 
-The wire fields for problem families. A solver session does not use them yet:
-it advertises no families and admits no family lease. `protocol_version` stays
+The wire fields for problem families, and the declaration that advertises
+them. A solver session does not admit family leases yet. The default output
+and bytes of a solver that declares nothing do not change. `protocol_version` stays
 2, and old encodings do not change.
 
 ### Added
@@ -22,9 +23,21 @@ it advertises no families and admits no family lease. `protocol_version` stays
   at tag 19. The Rust, Python, and TypeScript bindings include them.
 - `quip_protocol::family::reject_reason` and `CodePhase`, behind the
   `session` feature. They map a family rejection code to a wire reject reason.
+- `Sampler::declaration`, `families::{Declaration, FamilyClaim, FamilyList,
+  FamilyTable, DeclarationError}`, and `capabilities_for`. A Rust solver
+  declares its `solver_id` and family lists, and the session advertises them
+  in `Hello` and `GetCapabilities`.
+- `quip_protocol::family::{SolverIdClass, solver_id_class, entry_claims,
+  support_code}`.
+- The `--capabilities` keys `solverId`, `generatedFamilies`, and
+  `acceptedFamilies`. Each key is absent when its list is empty.
 
 ### Changed
 
+- A binary with an invalid declaration exits 70 in every mode, before the
+  device opens.
+- `DriverReport::capabilities_conformant` compares `Capabilities` fields 17
+  to 19 between `Hello` and `GetCapabilities`.
 - `LeaseSpec::from_proto` refuses a legacy lease with algorithm 1 that sets
   `family` or a non-empty `topology_order_digest`, with the new
   `LeaseError::DescriptorUnexpected`. A solver session maps it to `MALFORMED`.

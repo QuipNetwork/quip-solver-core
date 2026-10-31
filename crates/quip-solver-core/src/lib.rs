@@ -16,6 +16,7 @@ mod display;
 pub mod driver;
 mod encoding;
 pub mod error;
+pub mod families;
 pub mod ising;
 mod job;
 mod lease;
@@ -31,8 +32,8 @@ pub use lease::{Lease, LeaseSink, LeaseStopped};
 pub use limits::ModelLimits;
 pub use quip_protocol::lease::TopologyView;
 pub use session::{
-    capabilities, run, run_code, BackendIdentity, OpenError, EXACT_COEFFICIENTS_FEATURE,
-    INITIAL_SPINS_FEATURE, LINEAR_SCHEDULE_FEATURE,
+    capabilities, capabilities_for, run, run_code, BackendIdentity, OpenError,
+    EXACT_COEFFICIENTS_FEATURE, INITIAL_SPINS_FEATURE, LINEAR_SCHEDULE_FEATURE,
 };
 
 /// Family descriptors, canonical instances, `ChaCha8` streams, and nonce
@@ -327,6 +328,20 @@ pub trait Sampler<C: Coefficient = f64>: Send + Sync + 'static {
         Self: Sized,
     {
         1
+    }
+
+    /// The stable `solver_id` and the family revisions this backend lists,
+    /// answered without a device, because `--capabilities` reads it too.
+    ///
+    /// Default: [`Declaration::GENERIC`](families::Declaration::GENERIC), the
+    /// generic tier. The session validates it once at start and refuses to run
+    /// any mode with an invalid one (exit 70).
+    #[must_use]
+    fn declaration() -> families::Declaration
+    where
+        Self: Sized,
+    {
+        families::Declaration::GENERIC
     }
 
     /// Current utilization for Status messages. `0.0` when no governor.

@@ -7,6 +7,7 @@
 use crate::cli::CommonArgs;
 use crate::coefficient::Coefficient;
 use crate::display::{energy_units, format_duration_ms};
+use crate::families::{DeclarationError, FamilyTable};
 use crate::job::ExactEnergy;
 use crate::job::{
     finalize_result, miner, num_sweeps_from_toml, prepare_job, status_msg, Prepared, SessionTarget,
@@ -20,8 +21,8 @@ use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
 use quip_proto::v1::miner_service_client::MinerServiceClient;
 use quip_proto::v1::{
-    coord_msg, miner_msg, Algorithm, Backend, Capabilities, CoefficientEncoding, CoordMsg, Fatal,
-    GeneratorAlgorithm, JobKind, JobRequest, MinerMsg, Ready,
+    coord_msg, miner_msg, Algorithm, Backend, Capabilities, CoefficientEncoding, CoordMsg,
+    FamilySupport, Fatal, GeneratorAlgorithm, JobKind, JobRequest, MinerMsg, Ready,
 };
 use quip_protocol::session::{
     algorithm_name, backend_name, build_hello, check_welcome, ExitCode, SessionConfig, SessionError,
@@ -129,8 +130,10 @@ fn coord_msg_name(msg: Option<&coord_msg::Msg>) -> &'static str {
     }
 }
 
-/// Build this solver's [`Capabilities`]. The `--capabilities` flag prints it,
-/// and `GetCapabilities` returns it, so both answers come from one place.
+/// Build the generic-tier [`Capabilities`] for this identity and width: no
+/// `solver_id`, no family list. It is the base message only. What the
+/// `--capabilities` flag, Hello and `GetCapabilities` carry is built by
+/// [`capabilities_for`], which adds the sampler's declaration.
 #[must_use]
 pub fn capabilities(id: &BackendIdentity, stream_width: u32) -> Capabilities {
     Capabilities {
@@ -148,7 +151,8 @@ pub fn capabilities(id: &BackendIdentity, stream_width: u32) -> Capabilities {
         max_degree: id.limits.max_degree,
         max_local_field_milli: id.limits.max_local_field_milli,
         exact_resolution_milli: id.limits.exact_resolution_milli,
-        // No family is advertised, so `generators` lists only the legacy algorithm (FAM-58).
+        // The base message is the generic tier. `advertised_capabilities` fills
+        // fields 17 to 19 and the FAM-58 generator from `Sampler::declaration`.
         solver_id: String::new(),
         generated_families: vec![],
         accepted_families: vec![],
@@ -160,6 +164,8 @@ pub fn capabilities(id: &BackendIdentity, stream_width: u32) -> Capabilities {
 /// `native_topology_hash` and the three optional model limits are omitted when
 /// unset, which is the protobuf JSON mapping. When set,
 /// protobuf JSON maps `bytes` to a standard-base64 string, not a number array.
+/// An empty `solverId`, an empty family list and an empty `paramsDigests` are
+/// omitted the same way (FAM-63).
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CapabilitiesJson<'a> {
@@ -181,6 +187,52 @@ struct CapabilitiesJson<'a> {
     max_local_field_milli: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     exact_resolution_milli: Option<u32>,
+    #[serde(skip_serializing_if = "str::is_empty")]
+    solver_id: &'a str,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    generated_families: Vec<FamilySupportJson<'a>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    accepted_families: Vec<FamilySupportJson<'a>>,
+}
+
+/// Protobuf JSON view of a [`FamilySupport`].
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FamilySupportJson<'a> {
+    family_id: &'a str,
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    revisions: &'a [u32],
+    /// Standard base64, as protobuf JSON maps `bytes`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    params_digests: Vec<String>,
+}
+
+fn family_support_json(entries: &[FamilySupport]) -> Vec<FamilySupportJson<'_>> {
+    entries
+        .iter()
+        .map(|e| FamilySupportJson {
+            family_id: &e.family_id,
+            revisions: &e.revisions,
+            params_digests: e
+                .params_digests
+                .iter()
+                .map(|d| STANDARD.encode(d))
+                .collect(),
+        })
+        .collect()
+}
+
+/// The `Capabilities` this sampler advertises: what `--capabilities` prints
+/// and what Hello carries. The `GetCapabilities` reply differs only in a
+/// declared `stream_width` of 0 (SPEC section 8). Opens no device.
+///
+/// # Errors
+/// Returns the [`DeclarationError`] of an invalid [`Sampler::declaration`].
+pub fn capabilities_for<S: Sampler<C>, C: Coefficient>(
+    id: &BackendIdentity,
+) -> Result<Capabilities, DeclarationError> {
+    let families = S::declaration().validate()?;
+    Ok(advertised_capabilities::<S, C>(id, &families))
 }
 
 /// The `Capabilities` this solver advertises, from the one place both answers
@@ -193,7 +245,10 @@ struct CapabilitiesJson<'a> {
 /// answer available without an instance. `--capabilities` used to hardcode `1`
 /// here while the session reported the live width, so a multi-lane backend gave
 /// two different numbers for one message.
-fn advertised_capabilities<S: Sampler<C>, C: Coefficient>(id: &BackendIdentity) -> Capabilities {
+fn advertised_capabilities<S: Sampler<C>, C: Coefficient>(
+    id: &BackendIdentity,
+    families: &FamilyTable,
+) -> Capabilities {
     let mut caps = capabilities(id, S::declared_stream_width());
     let own_encoding = match C::WIRE_FORM {
         crate::coefficient::WireForm::Int { encoding, .. }
@@ -209,6 +264,14 @@ fn advertised_capabilities<S: Sampler<C>, C: Coefficient>(id: &BackendIdentity) 
         .into_iter()
         .map(str::to_owned)
         .collect();
+    families.solver_id().clone_into(&mut caps.solver_id);
+    caps.generated_families = families.generated().to_vec();
+    caps.accepted_families = families.accepted().to_vec();
+    if !caps.generated_families.is_empty() {
+        // FAM-58
+        caps.generators
+            .push(GeneratorAlgorithm::FamilyChacha8V1 as i32);
+    }
     caps
 }
 
@@ -280,9 +343,10 @@ impl<C: Coefficient> JobSender<C> {
 /// open. The static `--capabilities` answer keeps the `0`.
 fn session_capabilities<S: Sampler<C>, C: Coefficient>(
     id: &BackendIdentity,
+    families: &FamilyTable,
     live_width: usize,
 ) -> Capabilities {
-    let mut caps = advertised_capabilities::<S, C>(id);
+    let mut caps = advertised_capabilities::<S, C>(id, families);
     if caps.stream_width == 0 {
         caps.stream_width = u32::try_from(live_width).unwrap_or(u32::MAX);
     }
@@ -328,6 +392,9 @@ fn capabilities_json_from(c: &Capabilities) -> String {
         max_degree: c.max_degree,
         max_local_field_milli: c.max_local_field_milli,
         exact_resolution_milli: c.exact_resolution_milli,
+        solver_id: &c.solver_id,
+        generated_families: family_support_json(&c.generated_families),
+        accepted_families: family_support_json(&c.accepted_families),
     };
     #[expect(
         clippy::expect_used,
@@ -336,7 +403,10 @@ fn capabilities_json_from(c: &Capabilities) -> String {
     serde_json::to_string(&view).expect("serialize capabilities")
 }
 
-fn print_capabilities<S: Sampler<C>, C: Coefficient>(id: &BackendIdentity) -> ExitCode {
+fn print_capabilities<S: Sampler<C>, C: Coefficient>(
+    id: &BackendIdentity,
+    families: &FamilyTable,
+) -> ExitCode {
     // The protobuf JSON mapping, so the flag and the session reply agree on
     // field names and on every value. Both answers are built by
     // [`advertised_capabilities`].
@@ -345,7 +415,8 @@ fn print_capabilities<S: Sampler<C>, C: Coefficient>(id: &BackendIdentity) -> Ex
     // `println!` panics on a closed pipe. Reachability does not depend on the
     // output being large enough to fill the pipe buffer — `--capabilities |
     // false` closes the reader before the write happens, and that panics too.
-    let mut line = capabilities_json_from(&advertised_capabilities::<S, C>(id)).into_bytes();
+    let mut line =
+        capabilities_json_from(&advertised_capabilities::<S, C>(id, families)).into_bytes();
     line.push(b'\n');
     write_and_map(&mut std::io::stdout(), &line)
 }
@@ -966,12 +1037,13 @@ async fn run_session<S: Sampler<C>, C: Coefficient>(
     uri: &str,
     miner_id: &str,
     id: &BackendIdentity,
+    families: &FamilyTable,
     sampler: Arc<S>,
     sweeps_per_beta: Option<usize>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Resolve token before any network I/O so a missing QUIP_SESSION_TOKEN
     // always maps to exit 77 (never InternalFatal from a connect failure).
-    let hello = build_hello(miner_id, advertised_capabilities::<S, C>(id))?;
+    let hello = build_hello(miner_id, advertised_capabilities::<S, C>(id, families))?;
 
     let path = uri.strip_prefix("unix://").unwrap_or(uri).to_string();
     let channel = Endpoint::try_from("http://[::]:50051")? // dummy authority for UDS
@@ -1003,7 +1075,16 @@ async fn run_session<S: Sampler<C>, C: Coefficient>(
     tx.send(miner(miner_msg::Msg::Hello(hello))).await?;
 
     let inbound = client.session(ReceiverStream::new(rx)).await?.into_inner();
-    run_connected_session(inbound, tx, miner_id, id, sampler, sweeps_per_beta).await
+    run_connected_session(
+        inbound,
+        tx,
+        miner_id,
+        id,
+        families,
+        sampler,
+        sweeps_per_beta,
+    )
+    .await
 }
 
 #[expect(
@@ -1015,6 +1096,7 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
     tx: mpsc::Sender<MinerMsg>,
     miner_id: &str,
     id: &BackendIdentity,
+    families: &FamilyTable,
     sampler: Arc<S>,
     sweeps_per_beta: Option<usize>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -1559,7 +1641,7 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
                     if ctrl_tx
                         .send(
                             miner(miner_msg::Msg::Capabilities(session_capabilities::<S, C>(
-                                id, width,
+                                id, families, width,
                             )))
                             .into(),
                         )
@@ -1795,6 +1877,9 @@ fn map_err_to_exit(err: Box<dyn std::error::Error>, backend: &str) -> ExitCode {
 /// Prefer [`run`] from a Rust `main`. This variant exists because
 /// `std::process::ExitCode` cannot be read back into a number, which a foreign
 /// function interface has to do to return the code to its own caller.
+///
+/// An invalid [`Sampler::declaration`] exits 70 ([`ExitCode::InternalFatal`])
+/// in every mode, before the device opens.
 pub fn run_code<S: Sampler<C>, C: Coefficient>(
     id: BackendIdentity,
     common: &CommonArgs,
@@ -1815,8 +1900,16 @@ pub fn run_code<S: Sampler<C>, C: Coefficient>(
         return ExitCode::ConfigInvalid;
     }
 
+    let families = match S::declaration().validate() {
+        Ok(families) => families,
+        Err(e) => {
+            tracing::error!("[quip-solver-{backend}] invalid family declaration: {e}");
+            return ExitCode::InternalFatal;
+        }
+    };
+
     if common.capabilities {
-        return print_capabilities::<S, C>(&id);
+        return print_capabilities::<S, C>(&id, &families);
     }
     if common.solve {
         let sampler = match open() {
@@ -1890,6 +1983,7 @@ pub fn run_code<S: Sampler<C>, C: Coefficient>(
         &uri,
         &miner_id,
         &id,
+        &families,
         Arc::new(sampler),
         common.sweeps_per_beta,
     )) {
@@ -1912,6 +2006,7 @@ pub fn run<S: Sampler<C>, C: Coefficient>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::families::Declaration;
 
     #[test]
     #[expect(
@@ -2138,11 +2233,13 @@ mod tests {
         let (input, incoming) = mpsc::channel(8);
         let (out, mut replies) = mpsc::channel(8);
         let identity = test_identity();
+        let families = generic_table();
         let session = run_connected_session(
             ReceiverStream::new(incoming),
             out,
             "test",
             &identity,
+            &families,
             sampler,
             None,
         );
@@ -2308,11 +2405,13 @@ mod tests {
         let (out, mut replies) = mpsc::channel(64);
         let drain = tokio::spawn(async move { while replies.recv().await.is_some() {} });
         let identity = test_identity();
+        let families = generic_table();
         let session = run_connected_session(
             ReceiverStream::new(incoming),
             out,
             "test",
             &identity,
+            &families,
             sampler,
             None,
         );
@@ -2420,11 +2519,13 @@ mod tests {
         let (sampled_tx, sampled_rx) = tokio::sync::oneshot::channel();
         let sampler = Arc::new(Sampled(StdMutex::new(Some(sampled_tx))));
         let identity = test_identity();
+        let families = generic_table();
         let session = run_connected_session(
             ReceiverStream::new(incoming),
             out,
             "test",
             &identity,
+            &families,
             sampler,
             None,
         );
@@ -2603,6 +2704,38 @@ mod tests {
             },
             limits: crate::limits::ModelLimits::UNSTATED,
         }
+    }
+
+    fn generic_table() -> FamilyTable {
+        Declaration::GENERIC.validate().expect("generic is valid")
+    }
+
+    /// The bytes a solver with no family declaration advertises. A later
+    /// change must leave them as they are.
+    #[test]
+    fn generic_capabilities_bytes_are_unchanged() {
+        use prost::Message as _;
+        use std::fmt::Write as _;
+        struct Plain;
+        impl Sampler for Plain {
+            fn sample(
+                &self,
+                _graph: &crate::ising::IsingGraph,
+                _params: &crate::SampleParams,
+            ) -> Result<Vec<crate::SamplerResult>, crate::SampleError> {
+                Ok(vec![])
+            }
+        }
+        let bytes = advertised_capabilities::<Plain, f64>(&test_identity(), &generic_table())
+            .encode_to_vec();
+        let hex = bytes.iter().fold(String::new(), |mut out, b| {
+            let _ = write!(out, "{b:02x}");
+            out
+        });
+        assert_eq!(
+            hex,
+            "1a020103206428c801320973747265616d696e6738024001520201065a010160076801"
+        );
     }
 
     #[test]
@@ -2940,7 +3073,7 @@ mod tests {
 
         let id = test_identity();
         // What GetCapabilities replies with.
-        let reply = advertised_capabilities::<WideSampler, f64>(&id);
+        let reply = advertised_capabilities::<WideSampler, f64>(&id, &generic_table());
         assert_eq!(reply.stream_width, 8);
         // What `--capabilities` prints, from the same function.
         let v: serde_json::Value =
@@ -2980,11 +3113,11 @@ mod tests {
 
         let id = test_identity();
         assert_eq!(
-            advertised_capabilities::<Warm, f64>(&id).features,
+            advertised_capabilities::<Warm, f64>(&id, &generic_table()).features,
             vec!["streaming", INITIAL_SPINS_FEATURE]
         );
         assert_eq!(
-            advertised_capabilities::<Cold, f64>(&id).features,
+            advertised_capabilities::<Cold, f64>(&id, &generic_table()).features,
             vec!["streaming"]
         );
         // An identity that already lists the feature does not get it twice.
@@ -3021,9 +3154,9 @@ mod tests {
         }
 
         let id = test_identity();
-        let flag = advertised_capabilities::<DeviceWidthSampler, f64>(&id);
+        let flag = advertised_capabilities::<DeviceWidthSampler, f64>(&id, &generic_table());
         assert_eq!(flag.stream_width, 0);
-        let reply = session_capabilities::<DeviceWidthSampler, f64>(&id, 6);
+        let reply = session_capabilities::<DeviceWidthSampler, f64>(&id, &generic_table(), 6);
         assert_eq!(reply.stream_width, 6);
     }
 
@@ -3301,5 +3434,241 @@ mod tests {
         let mut exact = completed_result(1);
         rescore_result(&mut exact, None, false);
         assert!(matches!(exact.outcome, StreamOutcome::Completed(Ok(_))));
+    }
+
+    // Family declarations. Constants as in `tests/family_capabilities.rs`.
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "test asserts on fixed-size results; an out-of-range index is the failure"
+    )]
+    mod families {
+        use super::*;
+        use crate::families::FamilyClaim;
+        use crate::ising_generators::descriptor::{
+            params_digest, Contract, FieldSpec, Params, SizeBounds, TopologyStats,
+            Value as ParamValue, ValueType,
+        };
+        use crate::ising_generators::instance::InstanceLimits;
+        use crate::ising_generators::Code;
+        use std::sync::atomic::AtomicBool;
+
+        const UNIFORM_FIELD: &[FieldSpec] = &[
+            FieldSpec {
+                tag: 1,
+                kind: ValueType::U16,
+                min: 1,
+                max: 16,
+            },
+            FieldSpec {
+                tag: 2,
+                kind: ValueType::I32,
+                min: -4000,
+                max: 4000,
+            },
+        ];
+        const ZERO_FIELD_PARAMS: [u8; 19] =
+            [0x01, 1, 0, 2, 0, 0, 0, 2, 0, 2, 0, 4, 0, 0, 0, 0, 0, 0, 0];
+
+        fn example_size_bounds(
+            params: &Params<'_>,
+            stats: &TopologyStats,
+        ) -> Result<SizeBounds, Code> {
+            let Some(ParamValue::Unsigned(layers)) = params.get(1) else {
+                return Err(Code::ParamsMalformed);
+            };
+            let overflow = || Code::BoundsExceeded;
+            let nodes = layers.checked_mul(stats.n_nodes).ok_or_else(overflow)?;
+            let edges = layers
+                .checked_mul(stats.n_edges)
+                .and_then(|e| e.checked_add(layers.saturating_sub(1).checked_mul(stats.n_nodes)?))
+                .ok_or_else(overflow)?;
+            let degree = stats
+                .max_degree
+                .checked_add(layers.saturating_sub(1).min(2))
+                .ok_or_else(overflow)?;
+            Ok(SizeBounds {
+                nodes,
+                edges,
+                degree,
+            })
+        }
+
+        const fn contract(revision: u32) -> Contract {
+            Contract {
+                family_id: "vectors/uniform-field",
+                revision,
+                schema: UNIFORM_FIELD,
+                metadata_kinds: &[],
+                limits: InstanceLimits::FAM_37,
+                size_bounds: example_size_bounds,
+            }
+        }
+
+        const UNIFORM_V1: Contract = contract(1);
+
+        const GENERATED_CLAIMS: &[FamilyClaim] = &[FamilyClaim {
+            revisions: &[UNIFORM_V1],
+            only_params: &[&ZERO_FIELD_PARAMS],
+        }];
+        const ACCEPTED_CLAIMS: &[FamilyClaim] = &[FamilyClaim {
+            revisions: &[UNIFORM_V1],
+            only_params: &[],
+        }];
+
+        const FULL: Declaration = Declaration {
+            solver_id: "quip-mock/families",
+            generated: GENERATED_CLAIMS,
+            accepted: ACCEPTED_CLAIMS,
+        };
+        const ACCEPT_ONLY: Declaration = Declaration {
+            solver_id: "",
+            generated: &[],
+            accepted: ACCEPTED_CLAIMS,
+        };
+        const INVALID: Declaration = Declaration {
+            solver_id: "Bad",
+            generated: &[],
+            accepted: &[],
+        };
+
+        static OPENED: AtomicBool = AtomicBool::new(false);
+
+        macro_rules! sampler {
+            ($name:ident, $decl:expr $(, width $width:expr)?) => {
+                struct $name;
+                impl Sampler for $name {
+                    fn sample(
+                        &self,
+                        _graph: &crate::IsingGraph,
+                        _params: &crate::SampleParams,
+                    ) -> Result<Vec<crate::SamplerResult>, crate::SampleError> {
+                        Ok(vec![])
+                    }
+                    fn declaration() -> Declaration {
+                        $decl
+                    }
+                    $(
+                        fn declared_stream_width() -> u32 {
+                            $width
+                        }
+                    )?
+                }
+            };
+        }
+
+        sampler!(Generic, Declaration::GENERIC);
+        sampler!(Full, FULL);
+        sampler!(AcceptOnly, ACCEPT_ONLY);
+        sampler!(Invalid, INVALID);
+        sampler!(FullDeviceWidth, FULL, width 0);
+
+        fn caps_of<S: Sampler>() -> Capabilities {
+            let table = S::declaration().validate().expect("valid declaration");
+            advertised_capabilities::<S, f64>(&test_identity(), &table)
+        }
+
+        fn json_of(caps: &Capabilities) -> serde_json::Value {
+            serde_json::from_str(&capabilities_json_from(caps)).expect("printer emits JSON")
+        }
+
+        #[test]
+        fn family_fields_reach_capabilities_and_its_json() {
+            let caps = caps_of::<Full>();
+            let digest = params_digest(&ZERO_FIELD_PARAMS);
+            assert_eq!(caps.solver_id, "quip-mock/families");
+            assert_eq!(caps.generated_families.len(), 1);
+            assert_eq!(
+                caps.generated_families[0].family_id,
+                "vectors/uniform-field"
+            );
+            assert_eq!(caps.generated_families[0].revisions, [1]);
+            assert_eq!(caps.generated_families[0].params_digests, [digest.to_vec()]);
+            assert_eq!(caps.accepted_families.len(), 1);
+            assert!(caps.accepted_families[0].params_digests.is_empty());
+
+            let v = json_of(&caps);
+            assert_eq!(v["solverId"], "quip-mock/families");
+            assert_eq!(
+                v["generatedFamilies"],
+                serde_json::json!([{
+                    "familyId": "vectors/uniform-field",
+                    "revisions": [1],
+                    "paramsDigests": [STANDARD.encode(digest)],
+                }])
+            );
+            assert_eq!(
+                v["acceptedFamilies"],
+                serde_json::json!([{"familyId": "vectors/uniform-field", "revisions": [1]}])
+            );
+
+            let generic = json_of(&caps_of::<Generic>());
+            for key in ["solverId", "generatedFamilies", "acceptedFamilies"] {
+                assert!(generic.get(key).is_none(), "{key} present in generic JSON");
+            }
+        }
+
+        #[test]
+        fn generators_list_the_family_algorithm_iff_generated() {
+            let legacy = GeneratorAlgorithm::Blake3Chacha8V1 as i32;
+            let family = GeneratorAlgorithm::FamilyChacha8V1 as i32;
+            assert_eq!(caps_of::<Generic>().generators, [legacy]);
+            assert_eq!(caps_of::<AcceptOnly>().generators, [legacy]);
+            assert_eq!(caps_of::<Full>().generators, [legacy, family]);
+        }
+
+        #[test]
+        fn the_session_reply_differs_only_in_the_live_width() {
+            let id = test_identity();
+            let table = FULL.validate().expect("valid");
+            let advertised = advertised_capabilities::<FullDeviceWidth, f64>(&id, &table);
+            assert_eq!(advertised.stream_width, 0);
+            let reply = session_capabilities::<FullDeviceWidth, f64>(&id, &table, 6);
+            let mut expected = advertised;
+            expected.stream_width = 6;
+            assert_eq!(reply, expected);
+        }
+
+        fn args(capabilities: bool, check: bool, solve: bool) -> CommonArgs {
+            CommonArgs {
+                quip_coordinator: Some("unix:///nonexistent".to_owned()),
+                miner_id: None,
+                capabilities,
+                solve,
+                check,
+                log_level: "info".to_owned(),
+                sweeps_per_beta: None,
+            }
+        }
+
+        #[test]
+        fn an_invalid_declaration_stops_every_mode_before_the_device() {
+            for (name, common) in [
+                ("capabilities", args(true, false, false)),
+                ("check", args(false, true, false)),
+                ("solve", args(false, false, true)),
+                ("session", args(false, false, false)),
+            ] {
+                let code = run_code::<Invalid, f64>(test_identity(), &common, || {
+                    OPENED.store(true, Ordering::SeqCst);
+                    Ok(Invalid)
+                });
+                assert_eq!(code, ExitCode::InternalFatal, "mode {name}");
+            }
+            assert!(!OPENED.load(Ordering::SeqCst), "the device was opened");
+        }
+
+        #[test]
+        fn capability_probes_open_no_device() {
+            let opened = AtomicBool::new(false);
+            let code = run_code::<Full, f64>(test_identity(), &args(true, false, false), || {
+                opened.store(true, Ordering::SeqCst);
+                Ok(Full)
+            });
+            assert_eq!(code, ExitCode::Clean);
+            assert!(
+                !opened.load(Ordering::SeqCst),
+                "--capabilities opened the device"
+            );
+        }
     }
 }
