@@ -8,10 +8,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## Unreleased
 
 The wire fields for problem families, and the declaration that advertises
-them. A solver session admits and expands family leases for the revisions that it
-generates. The default output
-and bytes of a solver that declares nothing do not change. `protocol_version` stays
-2, and old encodings do not change.
+them. A solver session admits and expands family leases for the revisions that
+it generates. The default output and bytes of a solver that declares nothing do
+not change. `protocol_version` stays 2, and old encodings do not change.
 
 ### Added
 
@@ -64,8 +63,8 @@ and bytes of a solver that declares nothing do not change. `protocol_version` st
 
 ### Breaking
 
-- `Generator`, `LeaseError`, `VerifyError`, and `DeclarationError` have new variants,
-  so an exhaustive `match` on them fails to compile.
+- `Generator`, `LeaseError`, and `VerifyError` have new variants, so an
+  exhaustive `match` on them fails to compile.
 - `Contract` has the new `construction` field, so a struct literal needs it.
 
 ## 0.0.4
