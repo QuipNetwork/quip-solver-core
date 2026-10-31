@@ -47,6 +47,9 @@ not change. `protocol_version` stays 2, and old encodings do not change.
 - Every claimed contract needs a construction, and each label must be 1 to 32 ASCII
   bytes and unique.
 - `verify_lease_result` returns `VerifyError::FamilyLease` for a family lease.
+- `LeaseSpec::from_proto` now returns `Generator::FamilyChacha8V1` for value 2,
+  where it returned `LeaseError::UnknownGenerator(2)` before.
+  `verify_lease_solutions` returns `VerifyError::FamilyLease` for a family spec.
 - A binary with an invalid declaration exits 70 in every mode, before the
   device opens.
 - `DriverReport::capabilities_conformant` compares `Capabilities` fields 17

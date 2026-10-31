@@ -5,7 +5,7 @@ use quip_proto::v1::{
     SetTarget, Solution, Topology,
 };
 use quip_protocol::lease::{
-    verify_lease_result, Generator, LeaseError, LeaseSpec, TopologyError, TopologyView, VerifyError,
+    verify_lease_result, verify_lease_solutions, Generator, LeaseError, LeaseSpec, TopologyError, TopologyView, VerifyError,
 };
 use quip_protocol::target::Target;
 use quip_protocol::wire::encode_spins_packed;
@@ -287,6 +287,31 @@ fn verify_refuses_a_family_lease() {
     let no_descriptor = IsingProblemGenerator { family: None, ..g };
     assert_eq!(
         verify_lease_result(&no_descriptor, &topology, &target, &result),
+        Err(VerifyError::FamilyLease)
+    );
+}
+
+#[test]
+fn verify_solutions_refuses_a_family_spec() {
+    let lease = LeaseSpec::from_proto(&family_lease()).unwrap();
+    assert_eq!(lease.generator, Generator::FamilyChacha8V1);
+    let topology = TopologyView {
+        num_nodes: 3,
+        edges: vec![(0, 2)],
+        allowed_h_milli: vec![1000],
+        allowed_j_milli: vec![-1000],
+    };
+    let target = Target::from_proto(&SetTarget {
+        max_energy_milli: i64::MAX,
+        min_solutions: 1,
+        min_diversity_milli: 0,
+        max_proof_solutions: 32,
+        ..Default::default()
+    });
+    let salt = lease.salt(1).unwrap();
+    let nonce = lease.nonce(1).unwrap();
+    assert_eq!(
+        verify_lease_solutions(&lease, &topology, &target, &salt, &nonce, &[]),
         Err(VerifyError::FamilyLease)
     );
 }

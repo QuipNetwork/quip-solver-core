@@ -263,7 +263,9 @@ pub struct Verified {
 ///
 /// # Errors
 ///
-/// The first failed check: [`VerifyError::SaltOutsideLease`],
+/// [`VerifyError::FamilyLease`] when `spec` is not a legacy lease, because this
+/// function checks only the legacy draw. Otherwise the first failed check:
+/// [`VerifyError::SaltOutsideLease`],
 /// [`VerifyError::NonceMismatch`], [`VerifyError::Draw`],
 /// [`VerifyError::MalformedSpins`], [`VerifyError::EnergyMismatch`], or
 /// [`VerifyError::BelowTarget`].
@@ -275,6 +277,9 @@ pub fn verify_lease_solutions(
     nonce: &[u8; 32],
     solutions: &[(Vec<i8>, i64)],
 ) -> Result<Verified, VerifyError> {
+    if spec.generator != Generator::Blake3Chacha8V1 {
+        return Err(VerifyError::FamilyLease);
+    }
     if spec.index_of(salt).is_none() {
         return Err(VerifyError::SaltOutsideLease);
     }
