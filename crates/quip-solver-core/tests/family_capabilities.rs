@@ -10,9 +10,12 @@ use quip_solver_core::families::{
     Declaration, DeclarationError, FamilyClaim, FamilyList, FamilyTable,
 };
 use quip_solver_core::ising_generators::descriptor::{
-    params_digest, Contract, FieldSpec, Params, SizeBounds, TopologyStats, Value as ParamValue,
-    ValueType,
+    params_digest, Contract, FieldSpec, Params, ValueType,
 };
+use quip_solver_core::ising_generators::family::{
+    BaseTopology, Construction, InstanceBody, Streams,
+};
+use quip_solver_core::ising_generators::instance::Instance;
 use quip_solver_core::ising_generators::instance::InstanceLimits;
 use quip_solver_core::ising_generators::Code;
 use quip_solver_core::{
@@ -22,20 +25,10 @@ use quip_solver_core::{
 use serde_json::Value;
 use std::process::Command;
 
-const UNIFORM_FIELD: &[FieldSpec] = &[
-    FieldSpec {
-        tag: 1,
-        kind: ValueType::U16,
-        min: 1,
-        max: 16,
-    },
-    FieldSpec {
-        tag: 2,
-        kind: ValueType::I32,
-        min: -4000,
-        max: 4000,
-    },
-];
+#[path = "../examples/support/layered_family.rs"]
+mod layered;
+
+use layered::{example_size_bounds, UNIFORM_FIELD};
 
 const ZERO_FIELD_SCHEMA: &[FieldSpec] = &[
     FieldSpec {
@@ -61,27 +54,6 @@ const FIELD_5000_PARAMS: [u8; 19] = [
 ];
 const MALFORMED_PARAMS: [u8; 1] = [0x02];
 
-fn example_size_bounds(params: &Params<'_>, stats: &TopologyStats) -> Result<SizeBounds, Code> {
-    let Some(ParamValue::Unsigned(layers)) = params.get(1) else {
-        return Err(Code::ParamsMalformed);
-    };
-    let overflow = || Code::BoundsExceeded;
-    let nodes = layers.checked_mul(stats.n_nodes).ok_or_else(overflow)?;
-    let edges = layers
-        .checked_mul(stats.n_edges)
-        .and_then(|e| e.checked_add(layers.saturating_sub(1).checked_mul(stats.n_nodes)?))
-        .ok_or_else(overflow)?;
-    let degree = stats
-        .max_degree
-        .checked_add(layers.saturating_sub(1).min(2))
-        .ok_or_else(overflow)?;
-    Ok(SizeBounds {
-        nodes,
-        edges,
-        degree,
-    })
-}
-
 const fn contract(
     family_id: &'static str,
     revision: u32,
@@ -94,7 +66,21 @@ const fn contract(
         metadata_kinds: &[],
         limits: InstanceLimits::FAM_37,
         size_bounds: example_size_bounds,
+        construction: Some(&layered::LAYERED),
+    }
+}
+
+const fn without_construction(contract: Contract) -> Contract {
+    Contract {
         construction: None,
+        ..contract
+    }
+}
+
+const fn with_construction(contract: Contract, construction: &'static Construction) -> Contract {
+    Contract {
+        construction: Some(construction),
+        ..contract
     }
 }
 
@@ -135,6 +121,37 @@ fn entry(family_id: &str, revisions: &[u32], digests: &[[u8; 32]]) -> FamilySupp
 fn table_of(decl: &Declaration) -> Result<FamilyTable, String> {
     decl.validate().map_err(|e| format!("{e:?}"))
 }
+
+fn accept_topology(_: &Params<'_>, _: &BaseTopology) -> bool {
+    true
+}
+
+fn accept_metadata(_: &Params<'_>, _: &Instance) -> bool {
+    true
+}
+
+fn no_instance(
+    _: &Params<'_>,
+    _: &BaseTopology,
+    _: &mut Streams<'_>,
+) -> Result<InstanceBody, Code> {
+    Err(Code::NoInstance)
+}
+
+const fn labelled(labels: &'static [&'static str]) -> Construction {
+    Construction {
+        labels,
+        check_topology: accept_topology,
+        generate: no_instance,
+        check_metadata: accept_metadata,
+    }
+}
+
+static EMPTY_LABEL: Construction = labelled(&[""]);
+static LONG_LABEL: Construction = labelled(&["abcdefghijklmnopqrstuvwxyzabcdefg"]);
+static NON_ASCII_LABEL: Construction = labelled(&["caf\u{e9}"]);
+static REPEATED_LABEL: Construction = labelled(&["salt", "salt"]);
+static LONGEST_LABEL: Construction = labelled(&["abcdefghijklmnopqrstuvwxyzabcdef", "a"]);
 
 #[test]
 fn the_generic_declaration_lists_nothing() -> Result<(), String> {
@@ -584,6 +601,95 @@ async fn cli_and_session_answers_agree() -> Result<(), String> {
         return Err(format!(
             "CLI JSON {v} differs from the session reply {reply:?}"
         ));
+    }
+    Ok(())
+}
+
+#[test]
+fn a_generated_contract_needs_a_construction() {
+    const BARE: &[Contract] = &[without_construction(UNIFORM_V1)];
+    const GENERATED: &[FamilyClaim] = &[claim(BARE, &[])];
+    assert_eq!(
+        declaration(GENERATED, &[]).validate(),
+        Err(DeclarationError::NoConstruction {
+            list: FamilyList::Generated,
+            index: 0,
+            revision: 1
+        })
+    );
+}
+
+#[test]
+fn an_accepted_contract_needs_a_construction() {
+    const BARE: &[Contract] = &[without_construction(UNIFORM_V1)];
+    const ACCEPTED: &[FamilyClaim] = &[claim(BARE, &[])];
+    assert_eq!(
+        declaration(&[], ACCEPTED).validate(),
+        Err(DeclarationError::NoConstruction {
+            list: FamilyList::Accepted,
+            index: 0,
+            revision: 1
+        })
+    );
+}
+
+#[test]
+fn construction_labels_must_be_valid() {
+    const EMPTY: &[Contract] = &[with_construction(UNIFORM_V1, &EMPTY_LABEL)];
+    const LONG: &[Contract] = &[with_construction(UNIFORM_V1, &LONG_LABEL)];
+    const NON_ASCII: &[Contract] = &[with_construction(UNIFORM_V1, &NON_ASCII_LABEL)];
+    const REPEATED: &[Contract] = &[with_construction(UNIFORM_V1, &REPEATED_LABEL)];
+    const LONGEST: &[Contract] = &[with_construction(UNIFORM_V1, &LONGEST_LABEL)];
+    const BAD: [&[FamilyClaim]; 4] = [
+        &[claim(EMPTY, &[])],
+        &[claim(LONG, &[])],
+        &[claim(NON_ASCII, &[])],
+        &[claim(REPEATED, &[])],
+    ];
+    const GOOD: &[FamilyClaim] = &[claim(LONGEST, &[])];
+    for claims in BAD {
+        assert_eq!(
+            declaration(claims, &[]).validate(),
+            Err(DeclarationError::InvalidLabel {
+                list: FamilyList::Generated,
+                index: 0,
+                revision: 1
+            })
+        );
+    }
+    assert!(declaration(GOOD, &[]).validate().is_ok());
+}
+
+#[test]
+fn the_table_finds_each_declared_contract() -> Result<(), String> {
+    const GENERATED: &[FamilyClaim] = &[claim(&[UNIFORM_V1], &[])];
+    const ACCEPTED: &[FamilyClaim] = &[claim(&[UNIFORM_V1, ZERO_FIELD_V2], &[])];
+    let table = table_of(&declaration(GENERATED, ACCEPTED))?;
+    let found = |c: Option<&'static Contract>, revision: u32| {
+        c.is_some_and(|c| c.family_id == "vectors/uniform-field" && c.revision == revision)
+    };
+    if !found(table.generated_contract("vectors/uniform-field", 1), 1)
+        || table
+            .generated_contract("vectors/uniform-field", 2)
+            .is_some()
+        || table.generated_contract("vectors/other", 1).is_some()
+        || !found(table.accepted_contract("vectors/uniform-field", 1), 1)
+        || !found(table.accepted_contract("vectors/uniform-field", 2), 2)
+        || table
+            .accepted_contract("vectors/uniform-field", 3)
+            .is_some()
+    {
+        return Err(format!("contract lookups differ: {table:?}"));
+    }
+    Ok(())
+}
+
+#[test]
+fn tables_compare_by_wire_form() -> Result<(), String> {
+    const GENERATED: &[FamilyClaim] = &[claim(&[UNIFORM_V1], &[&ZERO_FIELD_PARAMS])];
+    let decl = declaration(GENERATED, &[]);
+    if table_of(&decl)? != table_of(&decl)? {
+        return Err("two validations of one declaration differ".to_owned());
     }
     Ok(())
 }

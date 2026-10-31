@@ -5,6 +5,7 @@
 use std::fmt;
 
 use ising_generators::descriptor::{params_digest, Contract, Params};
+use ising_generators::family::Construction;
 use ising_generators::Code;
 use quip_proto::v1::FamilySupport;
 use quip_protocol::family::{entry_claims, solver_id_class, SolverIdClass};
@@ -48,10 +49,10 @@ impl FamilyList {
 /// the generic tier: the plain model is solved and the coordinator decides
 /// acceptance (FAM-55, FAM-69).
 ///
-/// The session advertises a declaration but does not yet act on it: it
-/// still refuses family leases with `MALFORMED` and solves every explicit
-/// family job as a plain model, without the `FamilyBinding` checks of
-/// FAM-65 to FAM-68.
+/// The session admits family leases for the `generated` revisions. It does
+/// not yet check `FamilyBinding`s for the `accepted` revisions (FAM-65 to
+/// FAM-68): every explicit family job is solved as a plain model. Every
+/// claimed contract needs a [`Construction`].
 #[derive(Clone, Copy, Debug)]
 pub struct Declaration {
     /// Stable id across releases (FAM-60), or `""` for no pin target.
@@ -77,7 +78,8 @@ impl Declaration {
     /// Returns the first [`DeclarationError`], in this order: the `solver_id`,
     /// then each generated claim, then each accepted claim. Within a claim:
     /// no revision, mixed families, a repeated revision, then each parameter
-    /// set against each revision. Last, any entry that FAM-61 says claims
+    /// set against each revision, then each contract's construction: missing
+    /// or with an invalid label. Last, any entry that FAM-61 says claims
     /// nothing.
     pub fn validate(&self) -> Result<FamilyTable, DeclarationError> {
         if solver_id_class(self.solver_id.as_bytes()) == SolverIdClass::Invalid {
@@ -91,6 +93,8 @@ impl Declaration {
             solver_id: self.solver_id,
             generated,
             accepted,
+            generated_contracts: contracts_of(self.generated),
+            accepted_contracts: contracts_of(self.accepted),
         })
     }
 }
@@ -148,6 +152,22 @@ fn build_entry(
                 })?;
         }
     }
+    for contract in claim.revisions {
+        let Some(construction) = contract.construction else {
+            return Err(DeclarationError::NoConstruction {
+                list,
+                index,
+                revision: contract.revision,
+            });
+        };
+        if !labels_valid(construction) {
+            return Err(DeclarationError::InvalidLabel {
+                list,
+                index,
+                revision: contract.revision,
+            });
+        }
+    }
     Ok(FamilySupport {
         family_id: first.family_id.to_owned(),
         revisions: claim.revisions.iter().map(|c| c.revision).collect(),
@@ -157,6 +177,30 @@ fn build_entry(
             .map(|bytes| params_digest(bytes).to_vec())
             .collect(),
     })
+}
+
+/// Each label is 1 to 32 ASCII bytes and none is listed twice.
+fn labels_valid(construction: &Construction) -> bool {
+    construction.labels.iter().enumerate().all(|(at, label)| {
+        (1..=32).contains(&label.len())
+            && label.is_ascii()
+            && !construction.labels.iter().take(at).any(|l| l == label)
+    })
+}
+
+fn contracts_of(claims: &'static [FamilyClaim]) -> Vec<&'static Contract> {
+    claims.iter().flat_map(|c| c.revisions).collect()
+}
+
+fn find_contract(
+    contracts: &[&'static Contract],
+    family_id: &str,
+    revision: u32,
+) -> Option<&'static Contract> {
+    contracts
+        .iter()
+        .find(|c| c.family_id == family_id && c.revision == revision)
+        .copied()
 }
 
 fn check_entries(
@@ -179,12 +223,23 @@ fn check_entries(
 }
 
 /// A [`Declaration`] that passed [`Declaration::validate`], in wire form.
-/// Built only by `validate`.
-#[derive(Clone, Debug, PartialEq)]
+/// Built only by `validate`. Two tables are equal when their wire forms are
+/// equal.
+#[derive(Clone, Debug)]
 pub struct FamilyTable {
     solver_id: &'static str,
     generated: Vec<FamilySupport>,
     accepted: Vec<FamilySupport>,
+    generated_contracts: Vec<&'static Contract>,
+    accepted_contracts: Vec<&'static Contract>,
+}
+
+impl PartialEq for FamilyTable {
+    fn eq(&self, other: &Self) -> bool {
+        self.solver_id == other.solver_id
+            && self.generated == other.generated
+            && self.accepted == other.accepted
+    }
 }
 
 impl FamilyTable {
@@ -204,6 +259,19 @@ impl FamilyTable {
     #[must_use]
     pub fn accepted(&self) -> &[FamilySupport] {
         &self.accepted
+    }
+
+    /// The contract of a generated `(family_id, revision)`, exact match
+    /// (FAM-07).
+    #[must_use]
+    pub fn generated_contract(&self, family_id: &str, revision: u32) -> Option<&'static Contract> {
+        find_contract(&self.generated_contracts, family_id, revision)
+    }
+
+    /// The contract of an accepted `(family_id, revision)`.
+    #[must_use]
+    pub fn accepted_contract(&self, family_id: &str, revision: u32) -> Option<&'static Contract> {
+        find_contract(&self.accepted_contracts, family_id, revision)
     }
 }
 
@@ -251,6 +319,24 @@ pub enum DeclarationError {
         /// Why the revision rejects it.
         code: Code,
     },
+    /// A claimed contract has no construction.
+    NoConstruction {
+        /// The list holding the claim.
+        list: FamilyList,
+        /// The position of the claim in its list.
+        index: usize,
+        /// The revision without a construction.
+        revision: u32,
+    },
+    /// A construction label is not 1 to 32 ASCII bytes, or is listed twice.
+    InvalidLabel {
+        /// The list holding the claim.
+        list: FamilyList,
+        /// The position of the claim in its list.
+        index: usize,
+        /// The revision whose construction has the label.
+        revision: u32,
+    },
     /// An entry claims nothing under FAM-61: bad `family_id` or the `example`
     /// namespace, revision 0, or a second entry for the same `family_id`.
     InvalidEntry {
@@ -293,6 +379,24 @@ impl fmt::Display for DeclarationError {
                 "{}[{index}] parameter set {param} fails revision {revision} with code {}",
                 list.field(),
                 *code as u8
+            ),
+            Self::NoConstruction {
+                list,
+                index,
+                revision,
+            } => write!(
+                f,
+                "{}[{index}] revision {revision} has no construction",
+                list.field()
+            ),
+            Self::InvalidLabel {
+                list,
+                index,
+                revision,
+            } => write!(
+                f,
+                "{}[{index}] revision {revision} has an invalid construction label",
+                list.field()
             ),
             Self::InvalidEntry {
                 list,

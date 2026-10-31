@@ -3448,7 +3448,8 @@ mod tests {
             params_digest, Contract, FieldSpec, Params, SizeBounds, TopologyStats,
             Value as ParamValue, ValueType,
         };
-        use crate::ising_generators::instance::InstanceLimits;
+        use crate::ising_generators::family::{BaseTopology, Construction, InstanceBody, Streams};
+        use crate::ising_generators::instance::{Instance, InstanceLimits};
         use crate::ising_generators::Code;
         use std::sync::atomic::AtomicBool;
 
@@ -3501,9 +3502,32 @@ mod tests {
                 metadata_kinds: &[],
                 limits: InstanceLimits::FAM_37,
                 size_bounds: example_size_bounds,
-                construction: None,
+                construction: Some(&TRIVIAL),
             }
         }
+
+        fn accept_topology(_: &Params<'_>, _: &BaseTopology) -> bool {
+            true
+        }
+
+        fn no_instance(
+            _: &Params<'_>,
+            _: &BaseTopology,
+            _: &mut Streams<'_>,
+        ) -> Result<InstanceBody, Code> {
+            Err(Code::NoInstance)
+        }
+
+        fn accept_metadata(_: &Params<'_>, _: &Instance) -> bool {
+            true
+        }
+
+        static TRIVIAL: Construction = Construction {
+            labels: &[],
+            check_topology: accept_topology,
+            generate: no_instance,
+            check_metadata: accept_metadata,
+        };
 
         const UNIFORM_V1: Contract = contract(1);
 
