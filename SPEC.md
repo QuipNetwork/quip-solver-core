@@ -272,9 +272,7 @@ The stop rules in section 5 bound this completion sequence.
 The legacy algorithm stays unchanged, and its leases must not carry `family`.
 In `miner.proto`, `GENERATOR_ALGORITHM_FAMILY_CHACHA8_V1` is value 2.
 `IsingProblemGenerator` has `family` at field 8 and `topology_order_digest` at field 9.
-A solver session does not yet admit family leases.
-The session answers value 2 with `MALFORMED`.
-A legacy lease that sets `family` or `topology_order_digest` also gets `MALFORMED`.
+A legacy lease that sets `family` or `topology_order_digest` gets `MALFORMED`.
 A family lease carries a `FamilyDescriptor` and a `topology_order_digest`.
 A coordinator sends them only after the solver negotiates the family.
 `FAMILY_UNSUPPORTED` covers an unsupported family or revision.
@@ -282,6 +280,32 @@ It also covers valid parameters outside the solver's advertised restriction, and
 A family lease result packs `Solution.spins` in instance node output order, `ceil(n_nodes / 8)` bytes for the instance node count.
 The other family codes keep their `MALFORMED`, `TOPOLOGY_MISMATCH`, or `TOO_LARGE` mapping.
 See [Stable codes](docs/problem-families.md#stable-codes).
+
+The session admits a family lease in the order of FAM-47.
+It checks the field codes first, then codes 1 to 10, the topology hash, and codes 11 to 13.
+The first failure wins, and the session draws no random word before admission completes.
+Each code has the wire reason that FAM-42 gives.
+A rejected family lease gets one `Reject` and one credit refund.
+The session keeps its legacy and plain work.
+
+A solver that lists no generated family rejects a family lease with `FAMILY_UNSUPPORTED`, code 5.
+A family lease also needs a cached `Topology`.
+The session builds the base topology when the `Topology` message arrives, and only if the solver lists a generated family.
+A base topology that has a self-loop gives code 12.
+
+The session fixes the topology and the descriptor at admission.
+A later `Job` or `Topology` message does not change the instances of an admitted lease.
+For each salt, the session regenerates the canonical instance from the nonce, as the coordinator does.
+
+A salt that generation skips counts in `salts_done` and sends no `Result`.
+This covers code 13 and code 14 during generation.
+It also covers a construction that breaks its own contract, which the session logs as an error.
+A skipped salt does not change `best_energy_milli`.
+`Status.jobs_done` does not count it, because the backend sampled nothing.
+
+Each family read carries the energy of the whole instance, including the instance `offset`.
+The default path adds the offset after exact rescoring.
+`Result.solutions` and `best_energy_milli` use that energy.
 The normative rules are in [docs/problem-families.md](docs/problem-families.md).
 See [Wire extension](docs/problem-families.md#wire-extension) and [Lease admission](docs/problem-families.md#lease-admission).
 
@@ -299,6 +323,7 @@ An unset field makes no claim.
 
 A solver rejects a plain job beyond `max_degree` or `max_local_field_milli` with `TOO_LARGE`.
 These limits do not apply to legacy leases, and only `max_degree` applies to family leases.
+The allowed-values check and the topology-size check of a legacy lease do not apply to a family lease.
 A family lease checks `max_nodes`, `max_edges`, and `max_degree` against the declared size bounds of the revision, as [Family contracts](docs/problem-families.md#family-contracts) states.
 
 A solver that lists the `exact-coefficients` feature refuses, rather than quantizes, a coefficient it does not represent exactly.
@@ -316,7 +341,7 @@ A generated-family solver lists it in `generated_families`.
 A Rust solver declares `solver_id` and both lists through `Sampler::declaration`.
 The default declares the generic tier, with an empty `solver_id` and both lists empty.
 The session adds `GENERATOR_ALGORITHM_FAMILY_CHACHA8_V1` to the advertised generators exactly when `generated_families` is not empty (FAM-58).
-The session does not yet admit family leases or check family bindings (SC-5).
+The session admits family leases for the revisions in `generated_families`, but does not check family bindings on explicit jobs.
 A pin on `solver_id` never bypasses these compatibility checks.
 See [Capabilities](docs/problem-families.md#capabilities) and [Dispatch and pins](docs/problem-families.md#dispatch-and-pins).
 
@@ -471,6 +496,22 @@ Those two methods return zero arrays for an out-of-range index.
 `quip_protocol::chacha8::draw_into` draws any range of the draw stream, so threads or devices can split one problem.
 The [miner hardware guide](docs/miner-side-generation.md) gives the complete draw for a device that draws its own problems.
 
+A family lease reaches the solver through `Lease::family()`, which returns `Option<&FamilyLease>`.
+A legacy lease gives `None`.
+`FamilyLease` exposes `contract()`, `family_id()`, `revision()`, `params()`, `descriptor_digest()`, `topology()`, and `size_bounds()`.
+`FamilyLease::generate(nonce)` returns the canonical `Instance` of one salt, with its `h`, `j`, `edges`, and `offset_milli`.
+It returns `Err(SaltFault)` for a salt to skip or a construction defect.
+`sample_lease` receives the base `TopologyView` of the lease.
+The instance graph comes from `FamilyLease::generate`.
+
+Call `LeaseSink::skip(salt_index)` for a salt that `generate` skips.
+It counts the salt in `salts_done` and sends nothing. The lowest energy stays unchanged.
+It ignores a repeated index and returns `Err(LeaseStopped)` on the same conditions as `push`.
+
+A local sampler reports each family read with the FAM-33 energy, including the instance offset.
+`push` and `screen` forward that energy unchanged.
+The default path adds the offset itself, so only a local sampler must add it.
+
 Call `LeaseSink::push(salt_index, reads)` once for each finished salt, including an empty read set.
 It takes `Vec<SamplerResult>` and returns `Result<(), LeaseStopped>`.
 Poll `LeaseSink::is_stopped()` before more work.
@@ -543,6 +584,7 @@ optional. The `None` belongs to the job's watermark.
 The miner commits `LeaseDone` and its credit refund to the outbound queue without an intervening await.
 If the connection stays open, the coordinator receives both messages together.
 `Status.jobs_done` counts completed plain jobs plus sampled lease salts.
+A skipped family salt counts as a finished salt for `LeaseDone`, and a skip is subject to the same stop rules as a completed salt.
 
 For local generation, shutdown makes `LeaseSink::is_stopped()` true immediately, so the sampler starts no new salts.
 The sink accepts pushed results from work already running until the lease close deadline.

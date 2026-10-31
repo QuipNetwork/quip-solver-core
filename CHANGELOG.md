@@ -8,7 +8,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## Unreleased
 
 The wire fields for problem families, and the declaration that advertises
-them. A solver session does not admit family leases yet. The default output
+them. A solver session admits and expands family leases for the revisions that it
+generates. The default output
 and bytes of a solver that declares nothing do not change. `protocol_version` stays
 2, and old encodings do not change.
 
@@ -31,9 +32,22 @@ and bytes of a solver that declares nothing do not change. `protocol_version` st
   support_code}`.
 - The `--capabilities` keys `solverId`, `generatedFamilies`, and
   `acceptedFamilies`. Each key is absent when its list is empty.
+- `ising_generators::family`: family constructions and canonical instance generation.
+- `Contract.construction`, and `FamilyTable::{generated_contract, accepted_contract}`.
+- `DeclarationError::{NoConstruction, InvalidLabel}`.
+- `FamilyLease`, `Lease::family`, and `LeaseSink::skip`. A local sampler reads the
+  family inputs of a lease and reports a skipped salt.
+- `Generator::FamilyChacha8V1`, `LeaseError::DescriptorMissing`, and
+  `VerifyError::FamilyLease`.
 
 ### Changed
 
+- A lease with generator value 2 gets the FAM-47 admission codes (FAM-54). A solver
+  that lists no generated family answers with `FAMILY_UNSUPPORTED`, where it answered
+  `MALFORMED` before.
+- Every claimed contract needs a construction, and each label must be 1 to 32 ASCII
+  bytes and unique.
+- `verify_lease_result` returns `VerifyError::FamilyLease` for a family lease.
 - A binary with an invalid declaration exits 70 in every mode, before the
   device opens.
 - `DriverReport::capabilities_conformant` compares `Capabilities` fields 17
@@ -47,6 +61,12 @@ and bytes of a solver that declares nothing do not change. `protocol_version` st
 - TypeScript object literals of `Capabilities`, `IsingProblem`, and
   `IsingProblemGenerator` need the new required keys, so `tsc` rejects them.
   Build these messages with `fromPartial` to avoid the break.
+
+### Breaking
+
+- `Generator`, `LeaseError`, `VerifyError`, and `DeclarationError` have new variants,
+  so an exhaustive `match` on them fails to compile.
+- `Contract` has the new `construction` field, so a struct literal needs it.
 
 ## 0.0.4
 

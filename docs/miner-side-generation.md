@@ -76,10 +76,15 @@ The draw in the rest of this guide does not apply to a family lease.
 A family lease uses different random streams, described in [Random streams](problem-families.md#random-streams).
 The wire fields for generator value 2 and `generated_families` exist in `miner.proto`.
 A Rust solver declares the families it generates through `Sampler::declaration`, and the session advertises them.
-Lease expansion comes in SC-5.
-The current session does not yet support family leases and answers value 2 with `MALFORMED`.
+The session admits and expands a family lease for each revision in `generated_families`.
+A solver that generates locally reads the lease through `Lease::family()`, which returns `None` for a legacy lease.
+`FamilyLease::generate(nonce)` returns the canonical instance of one salt.
+A salt that `generate` skips goes to `LeaseSink::skip(salt_index)`, with no `Result`.
+Each family read carries the energy of the instance, including its `offset`.
+A local sampler reports that energy to `LeaseSink::push` and `LeaseSink::screen`, and the sink forwards it unchanged.
+The default session path adds the offset itself.
 
-When the session supports them, a miner may use an optimized family generator only under these conditions:
+A miner may use an optimized family generator only under these conditions:
 
 - The claimed `(family_id, revision)` must pass SC-7 conformance (future) on the actual code that generates the instance.
   The default session path and a device path are separate code, and each must pass.
