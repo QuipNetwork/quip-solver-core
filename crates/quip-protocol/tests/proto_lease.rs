@@ -5,7 +5,8 @@ use quip_proto::v1::{
     SetTarget, Solution, Topology,
 };
 use quip_protocol::lease::{
-    verify_lease_result, verify_lease_solutions, Generator, LeaseError, LeaseSpec, TopologyError, TopologyView, VerifyError,
+    verify_lease_result, verify_lease_solutions, Generator, LeaseError, LeaseSpec, TopologyError,
+    TopologyView, VerifyError,
 };
 use quip_protocol::target::Target;
 use quip_protocol::wire::encode_spins_packed;
