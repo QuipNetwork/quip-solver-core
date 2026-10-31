@@ -1073,7 +1073,10 @@ async fn a_deadline_stops_a_family_lease() {
     let mut held = s.blocked_sample().await;
     let (results, done) = drain_lease(&mut s).await;
     assert!(results.is_empty(), "the held salt never finished");
-    assert!(done.salts_done < 40);
+    // Salt 0 is skipped before the held salt; later skips may count too.
+    let skipped_below_40 = SKIPPED_64.iter().filter(|&&i| i < 40).count();
+    assert!(done.salts_done >= 1);
+    assert!(done.salts_done <= u64::try_from(skipped_below_40).unwrap());
     s.refund().await;
     release(&mut held).await;
     // Salts handed over behind the held one belong to a reported lease. They

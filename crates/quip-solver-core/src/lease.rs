@@ -1715,9 +1715,17 @@ mod family_tests {
         family.params_digest = params_digest(params).to_vec();
     }
 
+    /// One row of the FAM-47 admission table.
+    struct Case<'a> {
+        name: &'static str,
+        mutate: Box<dyn Fn(&mut Job)>,
+        topology: Option<&'a Arc<LeaseTopology>>,
+        target: bool,
+        expected: RejectReason,
+    }
+
     #[test]
     #[expect(
-        clippy::type_complexity,
         clippy::too_many_lines,
         reason = "one table of named mutations covers every FAM-47 step"
     )]
@@ -1733,184 +1741,174 @@ mod family_tests {
         reordered_edges.swap(0, 1);
         let reordered = wire_topology(&[907, 41, 0, 4_294_967_295, 12, 3], &reordered_edges);
         let invalid = Arc::new(LeaseTopology::new(&wire_topology(&[1, 1], &[]), &families));
-        let none = |_: &mut Job| {};
-        let cases: Vec<(
-            &str,
-            Box<dyn Fn(&mut Job)>,
-            Option<&Arc<LeaseTopology>>,
-            bool,
-            RejectReason,
-        )> = vec![
-            (
-                "expired",
-                Box::new(|j| j.deadline_ms = 1),
-                None,
-                false,
-                RejectReason::Expired,
-            ),
-            (
-                "topology missing",
-                Box::new(none),
-                None,
-                true,
-                RejectReason::TopologyMissing,
-            ),
-            (
-                "target missing",
-                Box::new(none),
-                Some(&sparse_cache),
-                false,
-                RejectReason::TargetMissing,
-            ),
-            (
+        let reordered_digest = digest_of(&reordered);
+        let doubled_digest = digest_of(&doubled);
+        // Most rows mutate the base lease on the cached `T_SPARSE` with a target.
+        let row = |name, expected, mutate: Box<dyn Fn(&mut Job)>| Case {
+            name,
+            mutate,
+            topology: Some(&sparse_cache),
+            target: true,
+            expected,
+        };
+        let cases = vec![
+            Case {
+                topology: None,
+                target: false,
+                ..row(
+                    "expired",
+                    RejectReason::Expired,
+                    Box::new(|j| j.deadline_ms = 1),
+                )
+            },
+            Case {
+                topology: None,
+                ..row(
+                    "topology missing",
+                    RejectReason::TopologyMissing,
+                    Box::new(|_| {}),
+                )
+            },
+            Case {
+                target: false,
+                ..row(
+                    "target missing",
+                    RejectReason::TargetMissing,
+                    Box::new(|_| {}),
+                )
+            },
+            row(
                 "generator absent",
+                RejectReason::Malformed,
                 Box::new(|j| j.generator = None),
-                Some(&sparse_cache),
-                true,
-                RejectReason::Malformed,
             ),
-            (
+            row(
                 "salt count zero",
+                RejectReason::Malformed,
                 Box::new(|j| generator(j).salt_count = 0),
-                Some(&sparse_cache),
-                true,
-                RejectReason::Malformed,
             ),
-            (
+            row(
                 "code 1",
+                RejectReason::Malformed,
                 Box::new(|j| generator(j).family = None),
-                Some(&sparse_cache),
-                true,
-                RejectReason::Malformed,
             ),
-            (
+            row(
                 "code 2",
+                RejectReason::Malformed,
                 Box::new(|j| generator(j).algorithm = GeneratorAlgorithm::Blake3Chacha8V1 as i32),
-                Some(&sparse_cache),
-                true,
-                RejectReason::Malformed,
             ),
-            (
+            row(
                 "code 3",
+                RejectReason::Malformed,
                 Box::new(|j| "Quip/X".clone_into(&mut descriptor(j).family_id)),
-                Some(&sparse_cache),
-                true,
-                RejectReason::Malformed,
             ),
-            (
+            row(
                 "code 4",
+                RejectReason::Malformed,
                 Box::new(|j| descriptor(j).revision = 0),
-                Some(&sparse_cache),
-                true,
-                RejectReason::Malformed,
             ),
-            (
+            row(
                 "code 5",
+                RejectReason::FamilyUnsupported,
                 Box::new(|j| "vectors/none".clone_into(&mut descriptor(j).family_id)),
-                Some(&sparse_cache),
-                true,
-                RejectReason::FamilyUnsupported,
             ),
-            (
+            row(
                 "code 6",
+                RejectReason::FamilyUnsupported,
                 Box::new(|j| descriptor(j).revision = 2),
-                Some(&sparse_cache),
-                true,
-                RejectReason::FamilyUnsupported,
             ),
-            (
+            row(
                 "code 7",
+                RejectReason::Malformed,
                 Box::new(|j| set_params(j, &UNIFORM_V1, &[0x02])),
-                Some(&sparse_cache),
-                true,
-                RejectReason::Malformed,
             ),
-            (
+            row(
                 "code 8",
+                RejectReason::Malformed,
                 Box::new(|j| descriptor(j).params_digest = vec![0; 32]),
-                Some(&sparse_cache),
-                true,
-                RejectReason::Malformed,
             ),
-            (
+            row(
                 "code 9",
-                Box::new(|j| set_params(j, &UNIFORM_V1, &P_F5000)),
-                Some(&sparse_cache),
-                true,
                 RejectReason::Malformed,
+                Box::new(|j| set_params(j, &UNIFORM_V1, &P_F5000)),
             ),
-            (
+            row(
                 "code 10",
-                Box::new(|j| set_params(j, &RESTRICTED_V1, &P_L2_F0)),
-                Some(&sparse_cache),
-                true,
                 RejectReason::FamilyUnsupported,
+                Box::new(|j| set_params(j, &RESTRICTED_V1, &P_L2_F0)),
             ),
-            (
-                "code 8 beats a pending 10",
+            row(
+                "a sent digest on the allow list does not hide code 8",
+                RejectReason::Malformed,
                 Box::new(|j| {
                     set_params(j, &RESTRICTED_V1, &P_L2_F0);
                     descriptor(j).params_digest = params_digest(&P_SPEC).to_vec();
                 }),
-                Some(&sparse_cache),
-                true,
-                RejectReason::Malformed,
             ),
-            (
+            // `support_code` holds code 10 for this digest; `admit` then gives 8.
+            row(
+                "code 8 beats a pending 10",
+                RejectReason::Malformed,
+                Box::new(|j| {
+                    set_params(j, &RESTRICTED_V1, &P_L2_F0);
+                    descriptor(j).params_digest = vec![0; 32];
+                }),
+            ),
+            row(
                 "code 10 beats the topology hash",
+                RejectReason::FamilyUnsupported,
                 Box::new(|j| {
                     set_params(j, &RESTRICTED_V1, &P_L2_F0);
                     generator(j).topology_hash = vec![9; 32];
                 }),
-                Some(&sparse_cache),
-                true,
-                RejectReason::FamilyUnsupported,
             ),
-            (
+            row(
                 "topology hash",
+                RejectReason::TopologyMismatch,
                 Box::new(|j| generator(j).topology_hash = vec![9; 32]),
-                Some(&sparse_cache),
-                true,
-                RejectReason::TopologyMismatch,
             ),
-            (
-                "invalid cached topology",
-                Box::new(none),
-                Some(&invalid),
-                true,
-                RejectReason::Malformed,
-            ),
-            (
+            Case {
+                topology: Some(&invalid),
+                ..row(
+                    "invalid cached topology",
+                    RejectReason::Malformed,
+                    Box::new(|_| {}),
+                )
+            },
+            row(
                 "code 11",
-                Box::new(|j| generator(j).topology_order_digest = digest_of(&reordered)),
-                Some(&sparse_cache),
-                true,
                 RejectReason::TopologyMismatch,
-            ),
-            (
-                "code 12",
-                Box::new(|j| {
-                    generator(j).topology_order_digest = digest_of(&doubled);
-                    set_params(j, &UNIFORM_V1, &P_L3_F0);
+                Box::new(move |j| {
+                    generator(j)
+                        .topology_order_digest
+                        .clone_from(&reordered_digest);
                 }),
-                Some(&doubled_cache),
-                true,
-                RejectReason::FamilyUnsupported,
             ),
-            (
+            Case {
+                topology: Some(&doubled_cache),
+                ..row(
+                    "code 12",
+                    RejectReason::FamilyUnsupported,
+                    Box::new(move |j| {
+                        generator(j)
+                            .topology_order_digest
+                            .clone_from(&doubled_digest);
+                        set_params(j, &UNIFORM_V1, &P_L3_F0);
+                    }),
+                )
+            },
+            row(
                 "code 13",
-                Box::new(|j| set_params(j, &UNIFORM_V1, &P_L3_F0)),
-                Some(&sparse_cache),
-                true,
                 RejectReason::TooLarge,
+                Box::new(|j| set_params(j, &UNIFORM_V1, &P_L3_F0)),
             ),
         ];
-        for (name, mutate, topology, with_target, expected) in cases {
+        for case in cases {
             let mut job = family_job(&UNIFORM_V1, &P_SPEC);
-            mutate(&mut job);
-            let target = with_target.then_some(&TARGET);
-            let got = run_prepare(&job, topology, target, &families, 512).map(|_| ());
-            assert_eq!(got, Err(expected), "{name}");
+            (case.mutate)(&mut job);
+            let target = case.target.then_some(&TARGET);
+            let got = run_prepare(&job, case.topology, target, &families, 512).map(|_| ());
+            assert_eq!(got, Err(case.expected), "{}", case.name);
         }
         let job = family_job(&UNIFORM_V1, &P_SPEC);
         assert_eq!(

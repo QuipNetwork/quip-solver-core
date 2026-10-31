@@ -3501,29 +3501,21 @@ mod tests {
     }
 
     #[test]
-    fn plain_and_legacy_entries_add_no_offset() {
-        let read = || crate::SamplerResult {
-            spins: vec![1],
-            energy_milli: -1000,
-        };
+    fn plain_entries_add_no_offset() {
         let plain = PendingJob {
             offset_milli: 500,
             ..pending_job(None)
         };
-        let (link, _state) = lease::test_link();
-        let legacy = PendingJob {
-            lease: Some(link),
-            ..pending_job(None)
+        let mut result = completed_result(1);
+        result.outcome = StreamOutcome::Completed(Ok(vec![crate::SamplerResult {
+            spins: vec![1],
+            energy_milli: -1000,
+        }]));
+        add_offset(&mut result, Some(&plain));
+        let StreamOutcome::Completed(Ok(reads)) = result.outcome else {
+            panic!("valid result must remain successful");
         };
-        for entry in [plain, legacy] {
-            let mut result = completed_result(1);
-            result.outcome = StreamOutcome::Completed(Ok(vec![read()]));
-            add_offset(&mut result, Some(&entry));
-            let StreamOutcome::Completed(Ok(reads)) = result.outcome else {
-                panic!("valid result must remain successful");
-            };
-            assert_eq!(reads.first().map(|r| r.energy_milli), Some(-1000));
-        }
+        assert_eq!(reads.first().map(|r| r.energy_milli), Some(-1000));
         let mut orphan = completed_result(1);
         add_offset(&mut orphan, None);
         assert!(matches!(orphan.outcome, StreamOutcome::Completed(Ok(_))));
@@ -3537,55 +3529,15 @@ mod tests {
     mod families {
         use super::*;
         use crate::families::FamilyClaim;
-        use crate::ising_generators::descriptor::{
-            params_digest, Contract, FieldSpec, Params, SizeBounds, TopologyStats,
-            Value as ParamValue, ValueType,
-        };
+        use crate::ising_generators::descriptor::{params_digest, Contract, Params};
         use crate::ising_generators::family::{BaseTopology, Construction, InstanceBody, Streams};
         use crate::ising_generators::instance::{Instance, InstanceLimits};
         use crate::ising_generators::Code;
+        use crate::layered::{example_size_bounds, UNIFORM_FIELD};
         use std::sync::atomic::AtomicBool;
 
-        const UNIFORM_FIELD: &[FieldSpec] = &[
-            FieldSpec {
-                tag: 1,
-                kind: ValueType::U16,
-                min: 1,
-                max: 16,
-            },
-            FieldSpec {
-                tag: 2,
-                kind: ValueType::I32,
-                min: -4000,
-                max: 4000,
-            },
-        ];
         const ZERO_FIELD_PARAMS: [u8; 19] =
             [0x01, 1, 0, 2, 0, 0, 0, 2, 0, 2, 0, 4, 0, 0, 0, 0, 0, 0, 0];
-
-        fn example_size_bounds(
-            params: &Params<'_>,
-            stats: &TopologyStats,
-        ) -> Result<SizeBounds, Code> {
-            let Some(ParamValue::Unsigned(layers)) = params.get(1) else {
-                return Err(Code::ParamsMalformed);
-            };
-            let overflow = || Code::BoundsExceeded;
-            let nodes = layers.checked_mul(stats.n_nodes).ok_or_else(overflow)?;
-            let edges = layers
-                .checked_mul(stats.n_edges)
-                .and_then(|e| e.checked_add(layers.saturating_sub(1).checked_mul(stats.n_nodes)?))
-                .ok_or_else(overflow)?;
-            let degree = stats
-                .max_degree
-                .checked_add(layers.saturating_sub(1).min(2))
-                .ok_or_else(overflow)?;
-            Ok(SizeBounds {
-                nodes,
-                edges,
-                degree,
-            })
-        }
 
         const fn contract(revision: u32) -> Contract {
             Contract {
