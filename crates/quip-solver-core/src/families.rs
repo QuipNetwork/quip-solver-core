@@ -529,3 +529,85 @@ impl fmt::Display for DeclarationError {
 }
 
 impl std::error::Error for DeclarationError {}
+
+#[cfg(test)]
+mod context_tests {
+    use super::*;
+    use ising_generators::instance::{InstanceLimits, InstanceParts};
+
+    static CONTRACT: Contract = Contract {
+        family_id: "vectors/uniform-field",
+        revision: 1,
+        schema: crate::layered::UNIFORM_FIELD,
+        metadata_kinds: &[1, 3],
+        limits: InstanceLimits::FAM_37,
+        size_bounds: crate::layered::example_size_bounds,
+        construction: Some(&crate::layered::LAYERED),
+    };
+
+    /// Two sections: kind 1 with `[7, 8, 9]` and kind 3 with `[5]`.
+    const REGION: [u8; 18] = [2, 0, 1, 0, 3, 0, 0, 0, 7, 8, 9, 3, 0, 1, 0, 0, 0, 5];
+
+    fn context() -> FamilyContext {
+        let instance = Instance::new(
+            InstanceParts {
+                descriptor_digest: [0; 32],
+                topology_order_digest: [0; 32],
+                nonce: None,
+                node_ids: vec![0, 1],
+                edges: vec![(0, 1)],
+                h: vec![0, 0],
+                j: vec![0],
+                offset_milli: 750,
+                metadata: REGION.to_vec(),
+            },
+            &InstanceLimits::FAM_37,
+            &[1, 3],
+            None,
+        )
+        .expect("valid instance");
+        FamilyContext::new(
+            &CONTRACT,
+            Arc::from(vec![1u8, 2, 3]),
+            Arc::new(instance),
+            FamilySource::Lease { salt_index: 4 },
+        )
+    }
+
+    #[test]
+    fn accessors_report_what_the_constructor_got() {
+        let c = context();
+        assert_eq!(c.offset_milli(), 750);
+        assert_eq!(c.params(), &[1, 2, 3]);
+        assert_eq!(c.instance().node_ids(), &[0, 1]);
+        assert_eq!(c.source(), FamilySource::Lease { salt_index: 4 });
+        assert_eq!((c.family_id(), c.revision()), ("vectors/uniform-field", 1));
+    }
+
+    #[test]
+    fn section_returns_the_payload_of_a_present_kind() {
+        let c = context();
+        assert_eq!(c.section(1), Some(&[7u8, 8, 9][..]));
+        assert_eq!(c.section(3), Some(&[5u8][..]));
+    }
+
+    #[test]
+    fn section_of_an_absent_kind_is_none() {
+        assert_eq!(context().section(2), None);
+    }
+
+    #[test]
+    fn a_truncated_region_gives_none_without_panicking() {
+        for len in 0..REGION.len() {
+            let cut = REGION.get(..len).unwrap_or_default();
+            // A cut inside the second section must not hide the intact first one.
+            let first = metadata_section(cut, 1);
+            if len >= 11 {
+                assert_eq!(first, Some(&[7u8, 8, 9][..]), "len {len}");
+            } else {
+                assert_eq!(first, None, "len {len}");
+            }
+            assert_eq!(metadata_section(cut, 3), None, "len {len}");
+        }
+    }
+}

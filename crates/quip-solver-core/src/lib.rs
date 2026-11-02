@@ -301,7 +301,8 @@ pub trait Sampler<C: Coefficient = f64>: Send + Sync + 'static {
 
     /// The warm-start form of [`sample_stream`](Sampler::sample_stream), with
     /// the same contract. Called instead of `sample_stream` only when
-    /// [`accepts_warm_start`](Sampler::accepts_warm_start) is `true`.
+    /// [`accepts_warm_start`](Sampler::accepts_warm_start) or
+    /// [`accepts_family_metadata`](Sampler::accepts_family_metadata) is `true`.
     /// Default: serial loop over [`sample_warm`](Sampler::sample_warm) for a
     /// seeded job and [`sample`](Sampler::sample) for a cold one.
     fn sample_stream_warm(
@@ -322,6 +323,11 @@ pub trait Sampler<C: Coefficient = f64>: Send + Sync + 'static {
     /// the session feeds [`sample_stream_warm`](Sampler::sample_stream_warm)
     /// and a job that carries a [`FamilyContext`](families::FamilyContext)
     /// reaches [`sample_family`](Sampler::sample_family).
+    ///
+    /// A backend that overrides [`sample_stream`](Sampler::sample_stream) must
+    /// also override `sample_stream_warm` and route each job with
+    /// `family: Some(..)` to `sample_family`. Without that override, its
+    /// family jobs run through the default serial loop.
     #[must_use]
     fn accepts_family_metadata() -> bool
     where
