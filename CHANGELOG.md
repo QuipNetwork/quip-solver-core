@@ -40,8 +40,7 @@ not change. `protocol_version` stays 2, and old encodings do not change.
   `VerifyError::FamilyLease`.
 - `FamilyContext`, `FamilySource`, `Sampler::accepts_family_metadata`, and
   `Sampler::sample_family`. A sampler that opts in gets the validated family
-  structure of a lease salt or an explicit job. The `--mode aware` example
-  shows it.
+  structure of a lease salt or an explicit job.
 - `WarmStreamJob.family`. It holds the context for an opted-in sampler.
 - `InstanceParts::check_bounds`, the bounds step of `Instance::new`.
 
@@ -54,7 +53,6 @@ not change. `protocol_version` stays 2, and old encodings do not change.
 - A sampler that overrides `sample_stream` and returns `true` from
   `accepts_family_metadata` must also override `sample_stream_warm`.
 - `Instance::new` calls `check_bounds` for its bounds step. Its results do not change.
-
 - A lease with generator value 2 gets the FAM-47 admission codes (FAM-54). A solver
   that lists no generated family answers with `FAMILY_UNSUPPORTED`, where it answered
   `MALFORMED` before.
