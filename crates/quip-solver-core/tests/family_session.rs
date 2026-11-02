@@ -1264,3 +1264,345 @@ async fn release(stream: &mut tokio::net::UnixStream) {
     use tokio::io::AsyncWriteExt as _;
     stream.write_all(&[1]).await.unwrap();
 }
+
+// Explicit family jobs (FAM-64 to FAM-69). The instance is a regenerated
+// lease salt, sent as a plain model with a `FamilyBinding`.
+
+use quip_solver_core::ising_generators::{
+    descriptor::{Descriptor, IdContext},
+    instance::InstanceParts,
+};
+
+/// One layer, field 0.
+const P_L1_F0: [u8; 19] = [0x01, 1, 0, 2, 0, 0, 0, 1, 0, 2, 0, 4, 0, 0, 0, 0, 0, 0, 0];
+/// `P_F5000`: two layers, field 5000, over the schema bound (code 9).
+const P_F5000: [u8; 19] = [
+    0x01, 1, 0, 2, 0, 0, 0, 2, 0, 2, 0, 4, 0, 0, 0, 0x88, 0x13, 0, 0,
+];
+
+/// The instance of the first salt of `family-small` that `P_SPEC` does not skip.
+#[expect(clippy::unwrap_used, reason = "the fixture lease has unskipped salts")]
+fn explicit_instance() -> Instance {
+    let j = family_job(64, &UNIFORM_V1, &P_SPEC);
+    let spec = spec(&j).unwrap();
+    let index = (0..64).find(|i| !SKIPPED_64.contains(i)).unwrap();
+    regenerate(
+        &UNIFORM_V1,
+        &P_SPEC,
+        &topology(),
+        spec.nonce(index).unwrap(),
+    )
+    .unwrap()
+}
+
+/// The parts of an instance, for rebuilding a changed one.
+fn parts_of(instance: &Instance) -> InstanceParts {
+    InstanceParts {
+        descriptor_digest: *instance.descriptor_digest(),
+        topology_order_digest: *instance.topology_order_digest(),
+        nonce: instance.nonce().copied(),
+        node_ids: instance.node_ids().to_vec(),
+        edges: instance.edges().to_vec(),
+        h: instance.h().to_vec(),
+        j: instance.j().to_vec(),
+        offset_milli: instance.offset_milli(),
+        metadata: instance.metadata().to_vec(),
+    }
+}
+
+/// An explicit job carrying `parts` as a plain model, bound to `contract` and
+/// `params`, with the FAM-68 digest of `parts`.
+#[expect(clippy::unwrap_used, reason = "fixture instances are valid")]
+fn explicit_job(parts: &InstanceParts, contract: &Contract, params: &[u8]) -> wire::Job {
+    let digest = Instance::new(parts.clone(), &InstanceLimits::FAM_37, &[1], None)
+        .unwrap()
+        .digest();
+    wire::Job {
+        job_id: b"explicit".to_vec(),
+        kind: wire::JobKind::IsingSample as i32,
+        ising: Some(wire::IsingProblem {
+            graph: Some(wire::ising_problem::Graph::Edges(wire::EdgeList {
+                u: parts.edges.iter().map(|e| e.0).collect(),
+                v: parts.edges.iter().map(|e| e.1).collect(),
+            })),
+            encoding: wire::CoefficientEncoding::I32 as i32,
+            scale: 1000,
+            h: quip_protocol::wire::encode_i32_le(&parts.h),
+            j: quip_protocol::wire::encode_i32_le(&parts.j),
+            num_reads: 1,
+            family: Some(wire::FamilyBinding {
+                family: Some(wire::FamilyDescriptor {
+                    family_id: contract.family_id.into(),
+                    revision: contract.revision,
+                    params: params.to_vec(),
+                    params_digest: params_digest(params).to_vec(),
+                }),
+                nonce: parts.nonce.map(|n| n.to_vec()).unwrap_or_default(),
+                instance_digest: digest.to_vec(),
+                metadata: parts.metadata.clone(),
+                topology_order_digest: parts.topology_order_digest.to_vec(),
+                node_ids: parts.node_ids.clone(),
+                offset_milli: parts.offset_milli,
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+/// The binding of an explicit job.
+#[expect(clippy::unwrap_used, reason = "every explicit job has a binding")]
+fn binding(j: &mut wire::Job) -> &mut wire::FamilyBinding {
+    j.ising.as_mut().unwrap().family.as_mut().unwrap()
+}
+
+/// The plain-model energy of `spin` everywhere, without the offset (FAM-64).
+fn plain_energy(instance: &Instance, spin: i8) -> i64 {
+    let edges = instance
+        .edges()
+        .iter()
+        .map(|&(u, v)| (u as usize, v as usize))
+        .collect::<Vec<_>>();
+    let spins = vec![spin; instance.node_ids().len()];
+    quip_protocol::scoring::energy_from_milli(&spins, instance.h(), instance.j(), &edges)
+}
+
+/// Read one solved explicit job and its refund. Returns its one solution.
+#[expect(
+    clippy::panic,
+    clippy::unwrap_used,
+    reason = "a missing Result is a test failure"
+)]
+async fn expect_solved(s: &mut Session, what: &str) -> wire::Solution {
+    let solution = match s.recv().await {
+        miner_msg::Msg::Result(r) => {
+            assert_eq!(r.job_id, b"explicit", "{what}");
+            assert_eq!(r.solutions.len(), 1, "{what}");
+            r.solutions.into_iter().next().unwrap()
+        }
+        other => panic!("{what}: expected a Result, got {other:?}"),
+    };
+    s.refund().await;
+    solution
+}
+
+/// The layered region for `layers` layers of `n` nodes.
+fn layered_region(layers: u16, n: u32) -> Vec<u8> {
+    let mut region = vec![1, 0, 1, 0, 6, 0, 0, 0];
+    region.extend_from_slice(&layers.to_le_bytes());
+    region.extend_from_slice(&n.to_le_bytes());
+    region
+}
+
+#[tokio::test]
+async fn explicit_job_vectors_hold_in_the_session() {
+    let core = core();
+    let instance = explicit_instance();
+    let mut s = Session::start("mock_sampler_family_lease").await;
+    s.setup(i64::MAX).await;
+    let mut cases_run = 0;
+    for case in cases(&core, "explicit_job") {
+        let name = case["name"].as_str().unwrap();
+        let faults = case["faults"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f.as_str().unwrap())
+            .collect::<Vec<_>>();
+        let mut parts = parts_of(&instance);
+        let mut contract = &UNIFORM_V1;
+        let mut params = P_SPEC.to_vec();
+        // Faults that change the instance come first, so the digest is sealed
+        // over them; code 15 then breaks the sealed digest.
+        for fault in &faults {
+            match *fault {
+                "code:13" => parts.offset_milli = (1 << 56) + 1,
+                "code:16" => parts.metadata = layered_region(3, 6),
+                "code:10" => {
+                    contract = &RESTRICTED_V1;
+                    params = P_L2_F0.to_vec();
+                }
+                "code:9" => params = P_F5000.to_vec(),
+                _ => {}
+            }
+        }
+        let mut j = if parts.offset_milli.unsigned_abs() > InstanceLimits::FAM_37.max_offset() {
+            // Beyond FAM-37 there is no digest to seal: send the valid one.
+            let mut j = explicit_job(&parts_of(&instance), contract, &params);
+            binding(&mut j).offset_milli = parts.offset_milli;
+            j
+        } else {
+            explicit_job(&parts, contract, &params)
+        };
+        for fault in &faults {
+            match *fault {
+                "tier:not-listed" => {
+                    let b = binding(&mut j);
+                    "vectors/other".clone_into(&mut b.family.as_mut().unwrap().family_id);
+                }
+                "code:8" => binding(&mut j).family.as_mut().unwrap().params_digest = vec![0; 32],
+                "code:15" if name == "topology-hash-form" => {
+                    let ising = j.ising.as_mut().unwrap();
+                    ising.graph = Some(wire::ising_problem::Graph::TopologyHash(vec![7; 32]));
+                    ising.h = quip_protocol::wire::encode_i32_le(&[0; 6]);
+                    ising.j = quip_protocol::wire::encode_i32_le(&[1000; 7]);
+                }
+                "code:15" => {
+                    if let Some(first) = binding(&mut j).instance_digest.first_mut() {
+                        *first ^= 1;
+                    }
+                }
+                "code:9" | "code:10" | "code:13" | "code:16" => {}
+                other => panic!("{name}: no mutation for {other}"),
+            }
+        }
+        s.send(coord_msg::Msg::Job(j)).await;
+        if case["expected_wire"].is_null() {
+            let solution = expect_solved(&mut s, name).await;
+            assert_eq!(solution.energy_milli, plain_energy(&instance, 1), "{name}");
+        } else {
+            let expected = wire_reason(&core, case["expected_wire"].as_str().unwrap());
+            expect_reject(&mut s, expected, name).await;
+        }
+        cases_run += 1;
+    }
+    assert_eq!(cases_run, 6);
+    s.finish().await;
+}
+
+#[tokio::test]
+async fn binding_field_lengths_follow_the_vectors() {
+    let core = core();
+    // A five-node, one-layer instance, so the node count case of the vectors
+    // (`plain_node_count` 5) applies as written.
+    let five = InstanceParts {
+        descriptor_digest: Descriptor::new(
+            UNIFORM_V1.family_id.as_bytes(),
+            1,
+            &P_L1_F0,
+            IdContext::Lease,
+        )
+        .unwrap()
+        .digest(),
+        topology_order_digest: [5; 32],
+        nonce: Some([6; 32]),
+        node_ids: vec![20, 21, 22, 23, 24],
+        edges: vec![(0, 1), (1, 2), (2, 3), (3, 4)],
+        h: vec![0; 5],
+        j: vec![1000, -1000, 1000, -1000],
+        offset_milli: 250,
+        metadata: layered_region(1, 5),
+    };
+    let mut s = Session::start("mock_sampler_family_lease").await;
+    s.setup(i64::MAX).await;
+    let mut solved = 0;
+    for case in cases(&core, "field_lengths") {
+        let field = case["field"].as_str().unwrap();
+        let name = case["name"].as_str().unwrap();
+        let length = usize::try_from(case["length"].as_u64().unwrap()).unwrap();
+        let mut parts = five.clone();
+        let j = match field {
+            "FamilyBinding.nonce" if length == 0 => {
+                parts.nonce = None;
+                explicit_job(&parts, &UNIFORM_V1, &P_L1_F0)
+            }
+            "FamilyBinding.nonce" => {
+                let mut j = explicit_job(&parts, &UNIFORM_V1, &P_L1_F0);
+                binding(&mut j).nonce.resize(length, 6);
+                j
+            }
+            "FamilyBinding.instance_digest" => {
+                let mut j = explicit_job(&parts, &UNIFORM_V1, &P_L1_F0);
+                binding(&mut j).instance_digest.resize(length, 0);
+                j
+            }
+            "FamilyBinding.topology_order_digest" => {
+                let mut j = explicit_job(&parts, &UNIFORM_V1, &P_L1_F0);
+                binding(&mut j).topology_order_digest.resize(length, 5);
+                j
+            }
+            "FamilyBinding.node_ids" => {
+                assert_eq!(case["plain_node_count"].as_u64(), Some(5), "{name}");
+                let mut j = explicit_job(&parts, &UNIFORM_V1, &P_L1_F0);
+                binding(&mut j).node_ids.resize(length, 99);
+                j
+            }
+            _ => continue,
+        };
+        s.send(coord_msg::Msg::Job(j)).await;
+        if case["expected_code"].is_null() {
+            let solution = expect_solved(&mut s, name).await;
+            assert_eq!(solution.energy_milli, 0, "{name}: h 0, J sums to 0");
+            solved += 1;
+        } else {
+            assert_eq!(case["expected_code"].as_u64(), Some(15), "{name}");
+            expect_reject(&mut s, wire::RejectReason::Malformed as i32, name).await;
+        }
+    }
+    assert_eq!(solved, 5, "one solved case per binding field");
+    s.finish().await;
+}
+
+#[tokio::test]
+async fn an_accepted_job_with_a_valid_binding_is_solved() {
+    let instance = explicit_instance();
+    let j = explicit_job(&parts_of(&instance), &UNIFORM_V1, &P_SPEC);
+    assert_ne!(instance.offset_milli(), 0);
+    let packed = |spin: i8| quip_protocol::wire::encode_spins_packed(&[spin; 12]);
+
+    let mut s = Session::start("mock_sampler_family_lease").await;
+    s.setup(i64::MAX).await;
+    s.send(coord_msg::Msg::Job(j.clone())).await;
+    let solution = expect_solved(&mut s, "default").await;
+    assert_eq!(solution.spins, packed(1));
+    assert_eq!(
+        solution.energy_milli,
+        plain_energy(&instance, 1),
+        "no offset"
+    );
+    s.finish().await;
+
+    let mut s = Session::start_with("mock_sampler_family_lease", false, &["--mode", "aware"]).await;
+    s.setup(i64::MAX).await;
+    s.send(coord_msg::Msg::Job(j)).await;
+    let solution = expect_solved(&mut s, "aware").await;
+    assert_eq!(solution.spins, packed(-1), "sample_family got the context");
+    assert_eq!(
+        solution.energy_milli,
+        plain_energy(&instance, -1),
+        "no offset"
+    );
+    s.finish().await;
+}
+
+#[tokio::test]
+async fn metadata_that_contradicts_the_instance_is_code_16() {
+    let instance = explicit_instance();
+    let mut parts = parts_of(&instance);
+    // Three layers of six nodes: a valid layout, sealed into the digest, that
+    // contradicts the twelve-node instance and the two-layer parameters.
+    parts.metadata = layered_region(3, 6);
+    let mut s = Session::start("mock_sampler_family_lease").await;
+    s.setup(i64::MAX).await;
+    s.send(coord_msg::Msg::Job(explicit_job(
+        &parts,
+        &UNIFORM_V1,
+        &P_SPEC,
+    )))
+    .await;
+    expect_reject(&mut s, wire::RejectReason::Malformed as i32, "FAM-67").await;
+    s.finish().await;
+}
+
+#[tokio::test]
+async fn a_generic_solver_ignores_the_binding() {
+    let instance = explicit_instance();
+    let mut j = explicit_job(&parts_of(&instance), &UNIFORM_V1, &P_SPEC);
+    binding(&mut j).instance_digest = vec![0; 32];
+    let mut s = Session::start("mock_sampler_lease").await;
+    s.setup(i64::MAX).await;
+    s.send(coord_msg::Msg::Job(j)).await;
+    let solution = expect_solved(&mut s, "FAM-69").await;
+    assert_eq!(solution.energy_milli, plain_energy(&instance, 1));
+    s.finish().await;
+}

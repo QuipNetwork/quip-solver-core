@@ -3,6 +3,7 @@
 
 use crate::adapt::adapt_params;
 use crate::coefficient::Coefficient;
+use crate::families::{FamilyContext, FamilyTable};
 use crate::ising::{IsingGraph, SampleParams, WarmStart};
 use crate::session::BackendIdentity;
 use crate::Sampler;
@@ -11,6 +12,7 @@ use quip_proto::v1::{
     ising_problem, miner_msg, Fatal, IsingProblem, Job, JobKind, JobRequest, MinerMsg, Reject,
     RejectReason, Result as JobResult, SamplerMeta, Solution, Status, Topology,
 };
+use quip_protocol::family::{reject_reason, CodePhase};
 use quip_protocol::session::ExitCode;
 use quip_protocol::wire::{decode_spins_packed, encode_spins_packed};
 use std::collections::HashMap;
@@ -514,18 +516,44 @@ pub(crate) enum Prepared<C: Coefficient> {
         warm_start: Option<WarmStart>,
         /// Original coefficients when sampler conversion loses information.
         exact_energy: Option<ExactEnergy>,
+        /// The validated family structure of an explicit job, `Some` only
+        /// for a binding that passed FAM-65 and a sampler whose
+        /// `accepts_family_metadata` is true.
+        family: Option<FamilyContext>,
         num_reads: u32,
         num_sweeps: u32,
     },
 }
 
+/// The FAM-65 checks of an explicit family job, as a wire reason (FAM-42).
+/// The context is kept only for a sampler that opts in.
+fn check_family<S: Sampler<C>, C: Coefficient>(
+    families: &FamilyTable,
+    ising: &IsingProblem,
+    edges: &[(usize, usize)],
+) -> Result<Option<FamilyContext>, RejectReason> {
+    match crate::families::check_binding(families, ising, edges) {
+        Ok(context) => Ok(context.filter(|_| S::accepts_family_metadata())),
+        Err(code) => {
+            tracing::debug!(code = code.value(), "explicit family job rejected");
+            Err(reject_reason(code, CodePhase::ExplicitJob).unwrap_or(RejectReason::Malformed))
+        }
+    }
+}
+
 /// Validate + resolve one job: reject reasons short-circuit; otherwise resolve
 /// the sampling budget (per-job override > `SetTarget` override > adapt > default)
-/// and return a [`StreamJob`] for the streaming sampler.
+/// and return a [`StreamJob`] for the streaming sampler. An explicit family
+/// job for an accepted revision is checked after every plain-job check (G9).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the session state one job is validated against"
+)]
 pub(crate) fn prepare_job<S: Sampler<C>, C: Coefficient>(
     job: Job,
     sampler: &S,
     id: &BackendIdentity,
+    families: &FamilyTable,
     default_sweeps: usize,
     sweeps_per_beta: Option<usize>,
     cache: Option<&TopologyCache>,
@@ -613,6 +641,12 @@ pub(crate) fn prepare_job<S: Sampler<C>, C: Coefficient>(
         Err(reason) => return Prepared::Reject(reject(job_id, reason)),
     };
 
+    // No offset is added for an explicit job (FAM-64).
+    let family = match check_family::<S, C>(families, &ising, &graph.edges) {
+        Ok(family) => family,
+        Err(reason) => return Prepared::Reject(reject(job_id, reason)),
+    };
+
     if num_reads > sampler.max_reads() {
         return Prepared::Reject(reject(job_id, RejectReason::TooLarge));
     }
@@ -643,6 +677,7 @@ pub(crate) fn prepare_job<S: Sampler<C>, C: Coefficient>(
         },
         warm_start,
         exact_energy,
+        family,
         num_reads,
         num_sweeps,
     }
@@ -725,7 +760,11 @@ pub(crate) fn finalize_result(
 mod tests {
     use super::*;
     use crate::adapt::AdaptBounds;
+    use crate::families::{Declaration, FamilyClaim, FamilySource};
     use crate::ising::{IsingGraph, SamplerResult};
+    use ising_generators::descriptor::{params_digest, Contract, Descriptor, IdContext};
+    use ising_generators::instance::{Instance, InstanceLimits, InstanceParts};
+    use ising_generators::Code;
     use quip_proto::v1::{ising_problem::Graph, EdgeList, Topology};
     use quip_protocol::wire::encode_i32_le;
 
@@ -739,6 +778,13 @@ mod tests {
         ) -> Result<Vec<SamplerResult>, crate::SampleError> {
             Ok(vec![])
         }
+    }
+
+    /// The family table of a solver with no family declaration.
+    fn generic() -> FamilyTable {
+        Declaration::GENERIC
+            .validate()
+            .expect("the generic declaration is valid")
     }
 
     const TEST_ADAPT: AdaptBounds = AdaptBounds {
@@ -836,7 +882,17 @@ mod tests {
         sampler: &S,
         id: &BackendIdentity,
     ) -> Option<i32> {
-        match prepare_job::<S, C>(job, sampler, id, 64, None, None, None) {
+        reject_reason_for_with(job, sampler, id, &generic())
+    }
+
+    /// `reject_reason_for` with the family table of the solver.
+    fn reject_reason_for_with<C: Coefficient, S: Sampler<C>>(
+        job: Job,
+        sampler: &S,
+        id: &BackendIdentity,
+        families: &FamilyTable,
+    ) -> Option<i32> {
+        match prepare_job::<S, C>(job, sampler, id, families, 64, None, None, None) {
             Prepared::Reject(message) => match message.msg {
                 Some(miner_msg::Msg::Reject(reject)) => Some(reject.reason),
                 _ => panic!("expected a Reject message"),
@@ -1042,9 +1098,16 @@ mod tests {
     fn generator_jobs_are_not_accepted_before_lease_support() {
         let mut job = edges_job(1);
         job.kind = JobKind::IsingGenerate as i32;
-        let Prepared::Reject(message) =
-            prepare_job(job, &StubSampler, &identity("sa"), 64, None, None, None)
-        else {
+        let Prepared::Reject(message) = prepare_job(
+            job,
+            &StubSampler,
+            &identity("sa"),
+            &generic(),
+            64,
+            None,
+            None,
+            None,
+        ) else {
             panic!("generator job must be rejected");
         };
         let Some(miner_msg::Msg::Reject(reject)) = message.msg else {
@@ -1462,6 +1525,7 @@ mod tests {
             edges_job(1),
             &sampler,
             &sa_id,
+            &generic(),
             default_sweeps,
             None,
             None,
@@ -1479,6 +1543,7 @@ mod tests {
             edges_job(2),
             &sampler,
             &gibbs_id,
+            &generic(),
             default_sweeps,
             None,
             None,
@@ -1509,7 +1574,16 @@ mod tests {
             num_reads,
             num_sweeps,
             ..
-        } = prepare_job(edges_job(1), &sampler, &gibbs_id, 64, None, None, None)
+        } = prepare_job(
+            edges_job(1),
+            &sampler,
+            &gibbs_id,
+            &generic(),
+            64,
+            None,
+            None,
+            None,
+        )
         else {
             panic!("expected Sample");
         };
@@ -1547,14 +1621,28 @@ mod tests {
         let sampler = StubSampler;
         let id = identity("sa");
 
-        let Prepared::Sample { job: job1, .. } =
-            prepare_job(edges_job(1), &sampler, &id, 64, None, None, None)
-        else {
+        let Prepared::Sample { job: job1, .. } = prepare_job(
+            edges_job(1),
+            &sampler,
+            &id,
+            &generic(),
+            64,
+            None,
+            None,
+            None,
+        ) else {
             panic!("expected Sample");
         };
-        let Prepared::Sample { job: job2, .. } =
-            prepare_job(edges_job(2), &sampler, &id, 64, None, None, None)
-        else {
+        let Prepared::Sample { job: job2, .. } = prepare_job(
+            edges_job(2),
+            &sampler,
+            &id,
+            &generic(),
+            64,
+            None,
+            None,
+            None,
+        ) else {
             panic!("expected Sample");
         };
 
@@ -1567,17 +1655,31 @@ mod tests {
         let id = identity("sa");
 
         // The miner-local CLI value threads through to SampleParams.
-        let Prepared::Sample { job, .. } =
-            prepare_job(edges_job(1), &sampler, &id, 64, Some(3), None, None)
-        else {
+        let Prepared::Sample { job, .. } = prepare_job(
+            edges_job(1),
+            &sampler,
+            &id,
+            &generic(),
+            64,
+            Some(3),
+            None,
+            None,
+        ) else {
             panic!("expected Sample");
         };
         assert_eq!(job.params.sweeps_per_beta, 3);
 
         // Unset falls back to the default of 1.
-        let Prepared::Sample { job, .. } =
-            prepare_job(edges_job(2), &sampler, &id, 64, None, None, None)
-        else {
+        let Prepared::Sample { job, .. } = prepare_job(
+            edges_job(2),
+            &sampler,
+            &id,
+            &generic(),
+            64,
+            None,
+            None,
+            None,
+        ) else {
             panic!("expected Sample");
         };
         assert_eq!(job.params.sweeps_per_beta, 1);
@@ -1596,6 +1698,7 @@ mod tests {
             edges_job_at_generation(1, 0),
             &sampler,
             &id,
+            &generic(),
             64,
             None,
             None,
@@ -1618,6 +1721,7 @@ mod tests {
                 edges_job_at_generation(1, generation),
                 &sampler,
                 &id,
+                &generic(),
                 64,
                 None,
                 None,
@@ -1688,7 +1792,16 @@ mod tests {
         job: Job,
         sampler: &S,
     ) -> Result<Option<WarmStart>, i32> {
-        match prepare_job(job, sampler, &identity("sa"), 64, None, None, None) {
+        match prepare_job(
+            job,
+            sampler,
+            &identity("sa"),
+            &generic(),
+            64,
+            None,
+            None,
+            None,
+        ) {
             Prepared::Sample { warm_start, .. } => Ok(warm_start),
             Prepared::Reject(MinerMsg {
                 msg: Some(miner_msg::Msg::Reject(r)),
@@ -1805,5 +1918,321 @@ mod tests {
         assert_eq!(bound.graph.edges, plain.graph.edges);
         assert_eq!(bound.graph.h, plain.graph.h);
         assert_eq!(bound.graph.j, plain.graph.j);
+    }
+
+    // Explicit family jobs (FAM-64 to FAM-69) on the one-edge model of
+    // `edges_job`, bound to the layered construction with one layer.
+
+    const ONE_EDGE: Contract = Contract {
+        family_id: "vectors/uniform-field",
+        revision: 1,
+        schema: crate::layered::UNIFORM_FIELD,
+        metadata_kinds: &[1],
+        limits: InstanceLimits::FAM_37,
+        size_bounds: crate::layered::example_size_bounds,
+        construction: Some(&crate::layered::LAYERED),
+    };
+    const RESTRICTED: Contract = Contract {
+        family_id: "vectors/restricted-field",
+        ..ONE_EDGE
+    };
+    /// One layer, field 0.
+    const P_L1: [u8; 19] = [0x01, 1, 0, 2, 0, 0, 0, 1, 0, 2, 0, 4, 0, 0, 0, 0, 0, 0, 0];
+    /// Two layers, field 0.
+    const P_L2: [u8; 19] = [0x01, 1, 0, 2, 0, 0, 0, 2, 0, 2, 0, 4, 0, 0, 0, 0, 0, 0, 0];
+    /// Two layers, field 5000: over the schema bound (code 9).
+    const P_F5000: [u8; 19] = [
+        0x01, 1, 0, 2, 0, 0, 0, 2, 0, 2, 0, 4, 0, 0, 0, 0x88, 0x13, 0, 0,
+    ];
+    const P_MALFORMED: [u8; 1] = [0x02];
+    const ACCEPTED: &[FamilyClaim] = &[
+        FamilyClaim {
+            revisions: &[ONE_EDGE],
+            only_params: &[],
+        },
+        FamilyClaim {
+            revisions: &[RESTRICTED],
+            only_params: &[&P_L2],
+        },
+    ];
+    /// The layered metadata region for `layers` layers of two nodes.
+    fn region(layers: u8) -> Vec<u8> {
+        vec![1, 0, 1, 0, 6, 0, 0, 0, layers, 0, 2, 0, 0, 0]
+    }
+
+    fn accepted() -> FamilyTable {
+        Declaration {
+            solver_id: "quip-test/one-edge",
+            generated: &[],
+            accepted: ACCEPTED,
+        }
+        .validate()
+        .expect("the test declaration is valid")
+    }
+
+    /// Set `instance_digest` to the FAM-68 digest of the job as it stands,
+    /// when the job is within the FAM-37 bounds.
+    fn seal(job: &mut Job) {
+        let ising = job.ising.as_mut().expect("job has a model");
+        let (h, j) = crate::encoding::decode_milli(ising).expect("model decodes");
+        let binding = ising.family.as_mut().expect("job has a binding");
+        let family = binding.family.as_ref().expect("binding has a descriptor");
+        let descriptor = Descriptor::new(
+            family.family_id.as_bytes(),
+            family.revision,
+            &family.params,
+            IdContext::Lease,
+        )
+        .expect("valid id");
+        let parts = InstanceParts {
+            descriptor_digest: descriptor.digest(),
+            topology_order_digest: [3; 32],
+            nonce: Some([4; 32]),
+            node_ids: binding.node_ids.clone(),
+            edges: vec![(0, 1)],
+            h,
+            j,
+            offset_milli: binding.offset_milli,
+            metadata: binding.metadata.clone(),
+        };
+        // An instance beyond a bound has no digest to seal; code 13 wins first.
+        if let Ok(instance) = Instance::new(parts, &InstanceLimits::FAM_37, &[1], None) {
+            binding.instance_digest = instance.digest().to_vec();
+        }
+    }
+
+    /// `edges_job` with a valid binding for `P_L1` on `vectors/uniform-field`.
+    fn bound_job() -> Job {
+        let mut job = edges_job(1);
+        if let Some(ising) = job.ising.as_mut() {
+            ising.family = Some(quip_proto::v1::FamilyBinding {
+                family: Some(quip_proto::v1::FamilyDescriptor {
+                    family_id: ONE_EDGE.family_id.into(),
+                    revision: 1,
+                    params: P_L1.to_vec(),
+                    params_digest: params_digest(&P_L1).to_vec(),
+                }),
+                nonce: vec![4; 32],
+                instance_digest: vec![],
+                metadata: region(1),
+                topology_order_digest: vec![3; 32],
+                node_ids: vec![10, 11],
+                offset_milli: 250,
+            });
+        }
+        seal(&mut job);
+        job
+    }
+
+    /// `bound_job` with the FAM-65 faults in `faults`, each by its code.
+    fn faulty_job(faults: &[u8]) -> Job {
+        let mut job = bound_job();
+        let has = |code| faults.contains(&code);
+        {
+            let binding = job
+                .ising
+                .as_mut()
+                .and_then(|i| i.family.as_mut())
+                .expect("bound");
+            let family = binding.family.as_mut().expect("descriptor");
+            let set_params = |family: &mut quip_proto::v1::FamilyDescriptor, p: &[u8]| {
+                family.params = p.to_vec();
+                family.params_digest = params_digest(p).to_vec();
+            };
+            if has(10) {
+                RESTRICTED.family_id.clone_into(&mut family.family_id);
+            }
+            if has(9) {
+                set_params(family, &P_F5000);
+            }
+            if has(7) {
+                set_params(family, &P_MALFORMED);
+            }
+            if has(8) {
+                family.params_digest = vec![0; 32];
+            }
+            if has(13) {
+                binding.offset_milli = (1 << 56) + 1;
+            }
+            if has(16) {
+                binding.metadata = region(3);
+            }
+        }
+        seal(&mut job);
+        if has(15) {
+            let binding = job
+                .ising
+                .as_mut()
+                .and_then(|i| i.family.as_mut())
+                .expect("bound");
+            if let Some(first) = binding.instance_digest.first_mut() {
+                *first ^= 1;
+            }
+        }
+        job
+    }
+
+    fn binding_code(job: &Job) -> Result<Option<FamilyContext>, Code> {
+        let ising = job.ising.as_ref().expect("job has a model");
+        crate::families::check_binding(&accepted(), ising, &[(0, 1)])
+    }
+
+    /// FAM-65: with every fault present the lowest code wins; removing the
+    /// winner each time exposes the next code in order.
+    #[test]
+    fn binding_checks_run_in_fam_65_order() {
+        let ladder: [(u8, Code); 7] = [
+            (7, Code::ParamsMalformed),
+            (8, Code::ParamsDigestMismatch),
+            (9, Code::ParamsOutOfBounds),
+            (10, Code::ParamsRestricted),
+            (13, Code::BoundsExceeded),
+            (15, Code::InstanceDigestMismatch),
+            (16, Code::MetadataInvalid),
+        ];
+        for (at, (_, expected)) in ladder.iter().enumerate() {
+            let faults = ladder
+                .iter()
+                .skip(at)
+                .map(|(code, _)| *code)
+                .collect::<Vec<_>>();
+            let got = binding_code(&faulty_job(&faults)).map(|c| c.is_some());
+            assert_eq!(got, Err(*expected), "faults {faults:?}");
+        }
+        let context = binding_code(&bound_job())
+            .expect("a valid binding passes")
+            .expect("an accepted family gives a context");
+        assert_eq!(context.source(), FamilySource::ExplicitJob);
+        assert_eq!(context.offset_milli(), 250);
+        assert_eq!(context.params(), &P_L1);
+        assert_eq!(context.instance().node_ids(), &[10, 11]);
+
+        // FAM-42 wire reasons for the explicit-job phase.
+        let wire = |faults: &[u8]| {
+            reject_reason_for_with(
+                faulty_job(faults),
+                &StubSampler,
+                &identity("sa"),
+                &accepted(),
+            )
+        };
+        let malformed = Some(RejectReason::Malformed as i32);
+        assert_eq!(wire(&[9, 10]), malformed, "code 9 beats code 10");
+        assert_eq!(wire(&[10]), Some(RejectReason::FamilyUnsupported as i32));
+        assert_eq!(wire(&[13, 15]), Some(RejectReason::TooLarge as i32));
+        assert_eq!(wire(&[15, 16]), malformed);
+        assert_eq!(wire(&[16]), malformed);
+        assert_eq!(wire(&[]), None);
+    }
+
+    /// FAM-65, FAM-69, G12: an unlisted pair, a binding without a descriptor,
+    /// and a generic table all solve the plain model, faults and all.
+    #[test]
+    fn unlisted_bindings_are_solved_as_plain_models() {
+        let mut unlisted = faulty_job(&[15, 16]);
+        if let Some(family) = unlisted
+            .ising
+            .as_mut()
+            .and_then(|i| i.family.as_mut())
+            .and_then(|b| b.family.as_mut())
+        {
+            "vectors/other".clone_into(&mut family.family_id);
+        }
+        assert!(matches!(binding_code(&unlisted), Ok(None)));
+        let mut no_descriptor = faulty_job(&[15]);
+        if let Some(binding) = no_descriptor.ising.as_mut().and_then(|i| i.family.as_mut()) {
+            binding.family = None;
+        }
+        assert!(matches!(binding_code(&no_descriptor), Ok(None)));
+        assert_eq!(
+            reject_reason_for_with(faulty_job(&[15]), &StubSampler, &identity("sa"), &generic()),
+            None
+        );
+    }
+
+    /// G9: the parse, shape, size, model-limit and warm-start checks of a
+    /// plain job run before any binding check.
+    #[test]
+    fn plain_checks_come_before_binding_checks() {
+        let table = accepted();
+        let over_field = BackendIdentity {
+            limits: crate::limits::ModelLimits {
+                max_local_field_milli: Some(1999),
+                ..crate::limits::ModelLimits::UNSTATED
+            },
+            ..identity("sa")
+        };
+        assert_eq!(
+            reject_reason_for_with(faulty_job(&[15]), &StubSampler, &over_field, &table),
+            Some(RejectReason::TooLarge as i32),
+            "model limits before code 15"
+        );
+        let mut bad_start = faulty_job(&[13]);
+        if let Some(ising) = bad_start.ising.as_mut() {
+            ising.initial_spins = vec![vec![1]];
+            ising.reversal_s_milli = 1000;
+        }
+        assert_eq!(
+            reject_reason_for_with(bad_start, &StubSampler, &identity("sa"), &table),
+            Some(RejectReason::Malformed as i32),
+            "warm-start shape before code 13"
+        );
+        let mut small = identity("sa");
+        small.max_nodes = 1;
+        assert_eq!(
+            reject_reason_for_with(faulty_job(&[15]), &StubSampler, &small, &table),
+            Some(RejectReason::TooLarge as i32),
+            "max_nodes before code 15"
+        );
+    }
+
+    /// An opted-in sampler gets the context of a passing binding; any other
+    /// sampler gets none. Neither job carries an offset (FAM-64).
+    #[test]
+    fn only_an_opted_in_sampler_gets_the_explicit_job_context() {
+        let table = accepted();
+        let family_of = |prepared: Prepared<f64>| match prepared {
+            Prepared::Sample { family, .. } => family,
+            Prepared::Reject(_) => panic!("a valid binding must prepare"),
+        };
+        let plain = family_of(prepare_job(
+            bound_job(),
+            &StubSampler,
+            &identity("sa"),
+            &table,
+            64,
+            None,
+            None,
+            None,
+        ));
+        assert!(plain.is_none());
+        let aware = family_of(prepare_job(
+            bound_job(),
+            &AwareStub,
+            &identity("sa"),
+            &table,
+            64,
+            None,
+            None,
+            None,
+        ))
+        .expect("an opted-in sampler gets the context");
+        assert_eq!(aware.source(), FamilySource::ExplicitJob);
+    }
+
+    struct AwareStub;
+
+    impl Sampler for AwareStub {
+        fn sample(
+            &self,
+            _graph: &IsingGraph,
+            _params: &SampleParams,
+        ) -> Result<Vec<SamplerResult>, crate::SampleError> {
+            Ok(vec![])
+        }
+
+        fn accepts_family_metadata() -> bool {
+            true
+        }
     }
 }

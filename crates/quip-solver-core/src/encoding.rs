@@ -1,6 +1,6 @@
 //! Validated coefficient decoding and per-problem exactness.
 
-use crate::coefficient::{Coefficient, WireForm};
+use crate::coefficient::{Coefficient, Milli, WireForm};
 use quip_proto::v1::{CoefficientEncoding, IsingProblem, RejectReason};
 
 type MilliPair = (Vec<i32>, Vec<i32>);
@@ -183,6 +183,14 @@ pub(crate) fn decode_problem<C: Coefficient>(
     Ok(Decoded { h, j, exact_milli })
 }
 
+/// The coefficients of `ising` in milli, whatever the sampler's coefficient
+/// type: the values a `FamilyBinding` is checked against (FAM-64, FAM-68).
+pub(crate) fn decode_milli(ising: &IsingProblem) -> Result<MilliPair, RejectReason> {
+    let decoded = decode_problem::<Milli>(ising)?;
+    let milli = |values: Vec<Milli>| values.into_iter().map(|v| v.0).collect();
+    Ok((milli(decoded.h), milli(decoded.j)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -310,5 +318,25 @@ mod tests {
             .err(),
             Some(RejectReason::Malformed)
         );
+    }
+
+    #[test]
+    fn decode_milli_reads_every_encoding_as_milli() {
+        let i8_units = problem(CoefficientEncoding::I8, 1, vec![1, 0xFF]);
+        assert_eq!(
+            decode_milli(&i8_units),
+            Ok((vec![1000, -1000], vec![1000, -1000]))
+        );
+        let halves = [0.5_f64, -1.5]
+            .into_iter()
+            .flat_map(f64::to_le_bytes)
+            .collect();
+        let floats = problem(CoefficientEncoding::F64, 0, halves);
+        assert_eq!(
+            decode_milli(&floats),
+            Ok((vec![500, -1500], vec![500, -1500]))
+        );
+        let bad = problem(CoefficientEncoding::I8, 3, vec![1]);
+        assert_eq!(decode_milli(&bad), Err(RejectReason::Malformed));
     }
 }

@@ -1535,6 +1535,7 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
                         job,
                         &*sampler,
                         id,
+                        families,
                         num_sweeps,
                         sweeps_per_beta,
                         topology.as_ref(),
@@ -1565,6 +1566,7 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
                             num_reads,
                             num_sweeps: ns,
                             exact_energy,
+                            family,
                         } => {
                             tracing::debug!(
                                 "{} received job {}: {} nodes, {} edges | reads={num_reads} sweeps={ns}",
@@ -1612,7 +1614,7 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
                                     },
                                 );
                             }
-                            if job_tx.send(job, warm_start, None).await.is_err() {
+                            if job_tx.send(job, warm_start, family).await.is_err() {
                                 break;
                             }
                         }
@@ -3273,7 +3275,16 @@ mod tests {
                 warm_start,
                 exact_energy,
                 ..
-            } = prepare_job(incoming, &WrongNarrow, &id, 1, None, None, None)
+            } = prepare_job(
+                incoming,
+                &WrongNarrow,
+                &id,
+                &Declaration::GENERIC.validate()?,
+                1,
+                None,
+                None,
+                None,
+            )
             else {
                 return Err("valid fixture must prepare".into());
             };

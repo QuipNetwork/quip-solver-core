@@ -5,12 +5,12 @@
 use std::fmt;
 use std::sync::Arc;
 
-use ising_generators::descriptor::{params_digest, Contract, Params};
+use ising_generators::descriptor::{admit, params_digest, Contract, Params};
 use ising_generators::family::Construction;
-use ising_generators::instance::Instance;
+use ising_generators::instance::{Instance, InstanceLimits, InstanceParts};
 use ising_generators::Code;
-use quip_proto::v1::FamilySupport;
-use quip_protocol::family::{entry_claims, solver_id_class, SolverIdClass};
+use quip_proto::v1::{ising_problem, FamilySupport, IsingProblem};
+use quip_protocol::family::{entry_claims, solver_id_class, support_code, SolverIdClass};
 
 /// One `FamilySupport` entry as a binary declares it.
 #[derive(Clone, Copy, Debug)]
@@ -51,10 +51,11 @@ impl FamilyList {
 /// the generic tier: the plain model is solved and the coordinator decides
 /// acceptance (FAM-55, FAM-69).
 ///
-/// The session admits family leases for the `generated` revisions. It does
-/// not yet check `FamilyBinding`s for the `accepted` revisions (FAM-65 to
-/// FAM-68): every explicit family job is solved as a plain model. Every
-/// claimed contract needs a [`Construction`].
+/// The session admits family leases for the `generated` revisions. It checks
+/// the `FamilyBinding` of an explicit job for an `accepted` revision in the
+/// FAM-65 order before the sampler sees it, and solves every other explicit
+/// family job as a plain model. Every claimed contract needs a
+/// [`Construction`].
 #[derive(Clone, Copy, Debug)]
 pub struct Declaration {
     /// Stable id across releases (FAM-60), or `""` for no pin target.
@@ -365,6 +366,113 @@ impl FamilyContext {
     pub const fn source(&self) -> FamilySource {
         self.source
     }
+}
+
+/// FAM-65 on an explicit job whose plain model passed every plain-job check
+/// (G9). `edges` are the resolved dense edges of the plain model.
+///
+/// `Ok(None)` is the generic tier: no binding, a binding without a
+/// descriptor (G12), or a `(family_id, revision)` that `accepted_families`
+/// does not list (FAM-69). `Ok(Some)` is a binding that passed every check.
+///
+/// # Errors
+///
+/// The first failing code, in the FAM-65 order: 7, 8, 9, then 10 from the
+/// accepted entry; 13 for a FAM-37 bound (G10); 15 for the `topology_hash`
+/// graph form (FAM-64), a FAM-46 field length, an edge fault or a digest
+/// mismatch; 16 for the metadata layout or the construction's metadata check.
+pub(crate) fn check_binding(
+    table: &FamilyTable,
+    ising: &IsingProblem,
+    edges: &[(usize, usize)],
+) -> Result<Option<FamilyContext>, Code> {
+    let Some(binding) = ising.family.as_ref() else {
+        return Ok(None);
+    };
+    let Some(family) = binding.family.as_ref() else {
+        return Ok(None);
+    };
+    // Codes 5 and 6 from the accepted list make this solver generic for the
+    // job. A held code 10 loses to codes 7 to 9.
+    let restricted = match support_code(
+        table.accepted(),
+        &family.family_id,
+        family.revision,
+        &family.params_digest,
+    ) {
+        Some(Code::ParamsRestricted) => true,
+        Some(_) => return Ok(None),
+        None => false,
+    };
+    let Some(contract) = table.accepted_contract(&family.family_id, family.revision) else {
+        return Ok(None);
+    };
+    let Some(construction) = contract.construction else {
+        return Ok(None);
+    };
+
+    // Step 1: the descriptor.
+    let admitted = admit(
+        std::slice::from_ref(contract),
+        family.family_id.as_bytes(),
+        family.revision,
+        &family.params,
+        &family.params_digest,
+    )?;
+    if restricted {
+        return Err(Code::ParamsRestricted);
+    }
+
+    // Step 2: the FAM-37 bounds on the rebuilt instance. A field of the wrong
+    // length is read as zeros here; step 3 rejects it.
+    let mismatch = Code::InstanceDigestMismatch;
+    // The plain model already decoded, so a failure here is a value that does
+    // not decode to the canonical milli coefficient (FAM-64).
+    let (h, j) = crate::encoding::decode_milli(ising).map_err(|_| mismatch)?;
+    let digest = |bytes: &[u8]| <[u8; 32]>::try_from(bytes).ok();
+    let position = |p: usize| u32::try_from(p).map_err(|_| mismatch);
+    let parts = InstanceParts {
+        descriptor_digest: admitted.descriptor().digest(),
+        topology_order_digest: digest(&binding.topology_order_digest).unwrap_or([0; 32]),
+        nonce: digest(&binding.nonce),
+        node_ids: binding.node_ids.clone(),
+        edges: edges
+            .iter()
+            .map(|&(u, v)| Ok((position(u)?, position(v)?)))
+            .collect::<Result<_, Code>>()?,
+        h,
+        j,
+        offset_milli: binding.offset_milli,
+        metadata: binding.metadata.clone(),
+    };
+    parts.check_bounds(&InstanceLimits::FAM_37)?;
+
+    // Step 3: the graph form, the FAM-46 lengths, then the edges and the
+    // digest inside `Instance::new`, which also runs the step 4 layout check.
+    let edges_form = matches!(ising.graph, Some(ising_problem::Graph::Edges(_)));
+    let lengths_ok = (binding.nonce.is_empty() || binding.nonce.len() == 32)
+        && binding.topology_order_digest.len() == 32
+        && binding.node_ids.len() == parts.h.len();
+    let sent_digest = digest(&binding.instance_digest)
+        .filter(|_| edges_form && lengths_ok)
+        .ok_or(mismatch)?;
+    let instance = Instance::new(
+        parts,
+        &InstanceLimits::FAM_37,
+        contract.metadata_kinds,
+        Some(&sent_digest),
+    )?;
+
+    // Step 4: the metadata against the instance (FAM-36, FAM-67).
+    if !(construction.check_metadata)(admitted.params(), &instance) {
+        return Err(Code::MetadataInvalid);
+    }
+    Ok(Some(FamilyContext::new(
+        contract,
+        Arc::from(family.params.as_slice()),
+        Arc::new(instance),
+        FamilySource::ExplicitJob,
+    )))
 }
 
 /// The payload of section `kind` in a metadata region that passed
