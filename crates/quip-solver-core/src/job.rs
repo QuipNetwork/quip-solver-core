@@ -2150,6 +2150,49 @@ mod tests {
         );
     }
 
+    /// FAM-64: the `topology_hash` graph form is code 15 for an accepted
+    /// family, even when the cached graph resolves to the bound instance and
+    /// every other check would pass.
+    #[test]
+    fn a_topology_hash_form_binding_is_code_15() {
+        let cache = TopologyCache::from_proto(&Topology {
+            hash: vec![9; 32],
+            nodes: vec![10, 11],
+            edges: Some(EdgeList {
+                u: vec![10],
+                v: vec![11],
+            }),
+            allowed_h_milli: vec![],
+            allowed_j_milli: vec![],
+        });
+        let mut job = bound_job();
+        if let Some(ising) = job.ising.as_mut() {
+            ising.graph = Some(Graph::TopologyHash(vec![9; 32]));
+        }
+        assert_eq!(
+            binding_code(&job).map(|c| c.is_some()),
+            Err(Code::InstanceDigestMismatch)
+        );
+        let reason = match prepare_job(
+            job,
+            &StubSampler,
+            &identity("sa"),
+            &accepted(),
+            64,
+            None,
+            Some(&cache),
+            None,
+        ) {
+            Prepared::Reject(MinerMsg {
+                msg: Some(miner_msg::Msg::Reject(r)),
+            }) => Some(r.reason),
+            _ => None,
+        };
+        assert_eq!(reason, Some(RejectReason::Malformed as i32));
+        // The same model in the edges form passes, so only the form differs.
+        assert!(matches!(binding_code(&bound_job()), Ok(Some(_))));
+    }
+
     /// G9: the parse, shape, size, model-limit and warm-start checks of a
     /// plain job run before any binding check.
     #[test]
