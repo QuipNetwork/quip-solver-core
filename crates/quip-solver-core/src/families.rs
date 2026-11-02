@@ -3,9 +3,11 @@
 //! (docs/problem-families.md, FAM-56 to FAM-63). Answered without a device.
 
 use std::fmt;
+use std::sync::Arc;
 
 use ising_generators::descriptor::{params_digest, Contract, Params};
 use ising_generators::family::Construction;
+use ising_generators::instance::Instance;
 use ising_generators::Code;
 use quip_proto::v1::FamilySupport;
 use quip_protocol::family::{entry_claims, solver_id_class, SolverIdClass};
@@ -273,6 +275,121 @@ impl FamilyTable {
     pub fn accepted_contract(&self, family_id: &str, revision: u32) -> Option<&'static Contract> {
         find_contract(&self.accepted_contracts, family_id, revision)
     }
+}
+
+/// Validated family structure for one job. Only the session builds one, and
+/// only after the instance passed every check (FAM-36, FAM-65 to FAM-68).
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct FamilyContext {
+    contract: &'static Contract,
+    params: Arc<[u8]>,
+    instance: Arc<Instance>,
+    source: FamilySource,
+}
+
+/// Where a [`FamilyContext`] came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum FamilySource {
+    /// The session regenerated the instance of one lease salt.
+    Lease {
+        /// The salt index within the lease.
+        salt_index: u64,
+    },
+    /// The coordinator sent the instance with a `FamilyBinding`.
+    ExplicitJob,
+}
+
+impl FamilyContext {
+    /// Wrap an instance the session has validated against `contract`.
+    pub(crate) fn new(
+        contract: &'static Contract,
+        params: Arc<[u8]>,
+        instance: Arc<Instance>,
+        source: FamilySource,
+    ) -> Self {
+        Self {
+            contract,
+            params,
+            instance,
+            source,
+        }
+    }
+
+    /// The contract the instance was validated against.
+    #[must_use]
+    pub const fn contract(&self) -> &'static Contract {
+        self.contract
+    }
+
+    /// The family id of the contract.
+    #[must_use]
+    pub const fn family_id(&self) -> &'static str {
+        self.contract.family_id
+    }
+
+    /// The revision of the contract.
+    #[must_use]
+    pub const fn revision(&self) -> u32 {
+        self.contract.revision
+    }
+
+    /// The canonical parameter bytes of the descriptor.
+    #[must_use]
+    pub fn params(&self) -> &[u8] {
+        &self.params
+    }
+
+    /// The validated instance.
+    #[must_use]
+    pub fn instance(&self) -> &Instance {
+        &self.instance
+    }
+
+    /// The offset of the instance, in milli. The session adds it to the energy
+    /// of a lease salt (FAM-52) and never to an explicit job (FAM-64).
+    #[must_use]
+    pub fn offset_milli(&self) -> i64 {
+        self.instance.offset_milli()
+    }
+
+    /// The payload of metadata section `kind`, from the validated region.
+    #[must_use]
+    pub fn section(&self, kind: u16) -> Option<&[u8]> {
+        metadata_section(self.instance.metadata(), kind)
+    }
+
+    /// Where this context came from.
+    #[must_use]
+    pub const fn source(&self) -> FamilySource {
+        self.source
+    }
+}
+
+/// The payload of section `kind` in a metadata region that passed
+/// `validate_metadata`. Returns `None` for a kind that is absent, and for a
+/// region that is not well formed.
+fn metadata_section(region: &[u8], kind: u16) -> Option<&[u8]> {
+    let count = u16::from_le_bytes(region.get(..2)?.try_into().ok()?);
+    let mut pos: usize = 2;
+    for _ in 0..count {
+        let found = u16::from_le_bytes(region.get(pos..pos.checked_add(2)?)?.try_into().ok()?);
+        let len_at = pos.checked_add(2)?;
+        let length = u32::from_le_bytes(
+            region
+                .get(len_at..len_at.checked_add(4)?)?
+                .try_into()
+                .ok()?,
+        );
+        let start = pos.checked_add(6)?;
+        let end = start.checked_add(usize::try_from(length).ok()?)?;
+        if found == kind {
+            return region.get(start..end);
+        }
+        pos = end;
+    }
+    None
 }
 
 /// Why a [`Declaration`] cannot be advertised (FAM-62: a solver must not

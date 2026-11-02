@@ -7,7 +7,7 @@
 use crate::cli::CommonArgs;
 use crate::coefficient::Coefficient;
 use crate::display::{energy_units, format_duration_ms};
-use crate::families::{DeclarationError, FamilyTable};
+use crate::families::{DeclarationError, FamilyContext, FamilyTable};
 use crate::job::ExactEnergy;
 use crate::job::{
     finalize_result, miner, num_sweeps_from_toml, prepare_job, status_msg, Prepared, SessionTarget,
@@ -309,10 +309,12 @@ enum JobReceiver<C: Coefficient> {
 }
 
 /// The sending half of the channel into the sampler thread. Which one depends
-/// on [`Sampler::accepts_warm_start`], fixed for the session.
+/// on [`Sampler::accepts_warm_start`] and [`Sampler::accepts_family_metadata`],
+/// fixed for the session.
 #[derive(Clone)]
 pub(crate) enum JobSender<C: Coefficient> {
-    /// Feeds [`Sampler::sample_stream`]; warm starts are dropped.
+    /// Feeds [`Sampler::sample_stream`]; warm starts and family contexts are
+    /// dropped.
     Plain(mpsc::Sender<StreamJob<C>>),
     /// Feeds [`Sampler::sample_stream_warm`].
     Warm(mpsc::Sender<WarmStreamJob<C>>),
@@ -324,11 +326,16 @@ impl<C: Coefficient> JobSender<C> {
         &self,
         job: StreamJob<C>,
         warm_start: Option<WarmStart>,
+        family: Option<FamilyContext>,
     ) -> Result<(), ()> {
         match self {
             Self::Plain(tx) => tx.send(job).await.map_err(|_| ()),
             Self::Warm(tx) => tx
-                .send(WarmStreamJob { job, warm_start })
+                .send(WarmStreamJob {
+                    job,
+                    warm_start,
+                    family,
+                })
                 .await
                 .map_err(|_| ()),
         }
@@ -1154,7 +1161,7 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
     let lease_depth = prefetch;
     // Credited jobs occupy at most cap slots. The lease semaphore bounds salts
     // to lease_depth additional slots, so accepting a credited job never blocks.
-    let (job_tx, job_rx) = if S::accepts_warm_start() {
+    let (job_tx, job_rx) = if S::accepts_warm_start() || S::accepts_family_metadata() {
         let (tx, rx) = mpsc::channel::<WarmStreamJob<C>>(cap + lease_depth);
         (JobSender::Warm(tx), JobReceiver::Warm(rx))
     } else {
@@ -1495,6 +1502,7 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
                                         cancel: cancel.clone(),
                                         shutdown: shutdown_rx.clone(),
                                         ctrl: ctrl_tx.clone(),
+                                        family_context: S::accepts_family_metadata(),
                                     };
                                     let _ = expanders.spawn(expander.run(state, params));
                                 }
@@ -1604,7 +1612,7 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
                                     },
                                 );
                             }
-                            if job_tx.send(job, warm_start).await.is_err() {
+                            if job_tx.send(job, warm_start, None).await.is_err() {
                                 break;
                             }
                         }
@@ -3285,9 +3293,13 @@ mod tests {
             let out = res_tx.clone();
             if warm {
                 let (tx, rx) = mpsc::channel(1);
-                tx.send(WarmStreamJob { job, warm_start })
-                    .await
-                    .expect("warm job");
+                tx.send(WarmStreamJob {
+                    job,
+                    warm_start,
+                    family: None,
+                })
+                .await
+                .expect("warm job");
                 drop(tx);
                 tokio::task::spawn_blocking(move || {
                     WrongNarrow.sample_stream_warm(rx, out, CancelToken::default());

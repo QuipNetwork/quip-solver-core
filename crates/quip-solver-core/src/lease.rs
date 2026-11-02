@@ -1,6 +1,6 @@
 //! Default salt expansion and lease completion accounting.
 use crate::coefficient::Coefficient;
-use crate::families::FamilyTable;
+use crate::families::{FamilyContext, FamilySource, FamilyTable};
 use crate::job::{miner, now_unix_ms, os_seed, pick_param, ExactEnergy, SessionTarget};
 use crate::session::{BackendIdentity, Control, JobSender, PendingJob, PendingParams};
 use crate::{
@@ -84,7 +84,7 @@ impl Lease {
 #[derive(Debug)]
 pub struct FamilyLease {
     contract: &'static Contract,
-    params: Vec<u8>,
+    params: Arc<[u8]>,
     params_digest: [u8; 32],
     descriptor_digest: [u8; 32],
     topology: Arc<BaseTopology>,
@@ -356,6 +356,8 @@ pub(crate) struct Expander<C: Coefficient> {
     pub(crate) cancel: CancelToken,
     pub(crate) shutdown: watch::Receiver<Option<ShutdownDeadlines>>,
     pub(crate) ctrl: mpsc::Sender<Control>,
+    /// Whether the sampler takes a [`FamilyContext`] with each family salt.
+    pub(crate) family_context: bool,
 }
 
 /// The session's cached `Topology`, as a lease reads it at admission.
@@ -449,7 +451,7 @@ fn admit_family(
         .map_err(admission_reject)?;
     Ok(FamilyLease {
         contract,
-        params: admitted.descriptor().params().to_vec(),
+        params: Arc::from(admitted.descriptor().params()),
         params_digest: admitted.descriptor().params_digest(),
         descriptor_digest: admitted.descriptor().digest(),
         topology,
@@ -613,15 +615,23 @@ fn draw_graph<C: Coefficient>(
     Ok((graph, exact))
 }
 
-/// A salt's graph, its exact coefficients when `C` loses precision, and its
-/// instance offset (zero on a legacy lease).
-type SaltGraph<C> = (IsingGraph<C>, Option<ExactEnergy>, i64);
+/// A salt's graph, its exact coefficients when `C` loses precision, its
+/// instance offset (zero on a legacy lease), and its family context when the
+/// sampler asked for one.
+type SaltGraph<C> = (
+    IsingGraph<C>,
+    Option<ExactEnergy>,
+    i64,
+    Option<FamilyContext>,
+);
 
 /// The canonical instance of the salt at `index` as an [`IsingGraph`], with
 /// its exact coefficients when `C` loses precision, and its offset.
 fn family_graph<C: Coefficient>(
     family: &FamilyLease,
+    index: u64,
     nonce: [u8; 32],
+    with_context: bool,
 ) -> Result<SaltGraph<C>, SaltFault> {
     let instance = family.generate(nonce)?;
     let edges: Arc<[(usize, usize)]> = instance
@@ -632,7 +642,16 @@ fn family_graph<C: Coefficient>(
     let (h, j, exact_milli) =
         crate::encoding::convert_milli::<C>(instance.h().to_vec(), instance.j().to_vec());
     let exact = exact_milli.map(|(h, j)| ExactEnergy::new(h, j, Arc::clone(&edges)));
-    Ok((IsingGraph { h, j, edges }, exact, instance.offset_milli()))
+    let offset_milli = instance.offset_milli();
+    let context = with_context.then(|| {
+        FamilyContext::new(
+            family.contract,
+            Arc::clone(&family.params),
+            Arc::new(instance),
+            FamilySource::Lease { salt_index: index },
+        )
+    });
+    Ok((IsingGraph { h, j, edges }, exact, offset_milli, context))
 }
 
 /// The graph, exact coefficients, and offset of the salt at `index`.
@@ -641,11 +660,12 @@ fn family_graph<C: Coefficient>(
 fn salt_graph<C: Coefficient>(
     state: &LeaseState,
     index: u64,
+    with_context: bool,
 ) -> Result<Option<SaltGraph<C>>, quip_protocol::chacha8::DrawError> {
     let Some(family) = state.lease.family() else {
-        return draw_graph::<C>(state, index).map(|(graph, exact)| Some((graph, exact, 0)));
+        return draw_graph::<C>(state, index).map(|(graph, exact)| Some((graph, exact, 0, None)));
     };
-    match family_graph::<C>(family, state.lease.nonce(index)) {
+    match family_graph::<C>(family, index, state.lease.nonce(index), with_context) {
         Ok(drawn) => Ok(Some(drawn)),
         Err(SaltFault::Skip(_)) => Ok(None),
         Err(SaltFault::Defect(defect)) => {
@@ -684,18 +704,19 @@ impl<C: Coefficient> Expander<C> {
             if state.stopped(&self.cancel) || self.shutdown.borrow().is_some() {
                 break;
             }
-            let (graph, exact_energy, offset_milli) = match salt_graph::<C>(&state, index) {
-                Ok(Some(drawn)) => drawn,
-                Ok(None) => {
-                    drop(permit);
-                    state.skip_salt();
-                    continue;
-                }
-                Err(error) => {
-                    tracing::error!(%error, "validated lease could not draw");
-                    break;
-                }
-            };
+            let (graph, exact_energy, offset_milli, family) =
+                match salt_graph::<C>(&state, index, self.family_context) {
+                    Ok(Some(drawn)) => drawn,
+                    Ok(None) => {
+                        drop(permit);
+                        state.skip_salt();
+                        continue;
+                    }
+                    Err(error) => {
+                        tracing::error!(%error, "validated lease could not draw");
+                        break;
+                    }
+                };
             let Some(seed) = os_seed() else {
                 break;
             };
@@ -734,6 +755,7 @@ impl<C: Coefficient> Expander<C> {
                         watermark: state.watermark,
                     },
                     None,
+                    family,
                 )
                 .await
                 .is_err()
@@ -1408,6 +1430,7 @@ mod tests {
             cancel: CancelToken::default(),
             shutdown,
             ctrl,
+            family_context: false,
         };
         let run = tokio::spawn(expander.run(Arc::clone(&state), SampleParams::default()));
         tokio::task::yield_now().await;
@@ -1549,6 +1572,7 @@ mod tests {
             }))
             .1,
             ctrl: ctrl.clone(),
+            family_context: false,
         };
         let mut expanders = tokio::task::JoinSet::new();
         let _ = expanders.spawn(expander.run(Arc::clone(&state), SampleParams::default()));

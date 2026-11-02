@@ -912,6 +912,64 @@ async fn run_64(mode: &str) -> (Vec<wire::Result>, wire::LeaseDone) {
     (results, done)
 }
 
+/// The FAM-33 energy of the all-`-1` spins, `offset` included.
+fn all_down_energy(instance: &Instance) -> i64 {
+    let edges = instance
+        .edges()
+        .iter()
+        .map(|&(u, v)| (u as usize, v as usize))
+        .collect::<Vec<_>>();
+    let spins = vec![-1i8; instance.node_ids().len()];
+    instance.offset_milli()
+        + quip_protocol::scoring::energy_from_milli(&spins, instance.h(), instance.j(), &edges)
+}
+
+#[tokio::test]
+async fn an_aware_sampler_gets_the_context_for_each_family_salt() {
+    let (results, done) = run_64("aware").await;
+    assert_eq!(results.len(), 64 - SKIPPED_64.len());
+    for r in &results {
+        let nonce: [u8; 32] = r.nonce.as_slice().try_into().unwrap();
+        let instance = regenerate(&UNIFORM_V1, &P_SPEC, &topology(), nonce).unwrap();
+        let n = instance.node_ids().len();
+        let packed = quip_protocol::wire::encode_spins_packed(&vec![-1i8; n]);
+        assert_eq!(r.solutions.len(), 1);
+        for solution in &r.solutions {
+            assert_eq!(solution.spins, packed, "nonce {}", hex(&r.nonce));
+            assert_eq!(
+                solution.energy_milli,
+                all_down_energy(&instance),
+                "nonce {}",
+                hex(&r.nonce)
+            );
+        }
+    }
+    assert_eq!(done.salts_done, 64);
+}
+
+#[tokio::test]
+async fn a_sampler_that_does_not_opt_in_gets_the_plain_graph() {
+    let (results, done) = run_64("default").await;
+    assert_eq!(results.len(), 64 - SKIPPED_64.len());
+    for r in &results {
+        let _ = check_result(r, &UNIFORM_V1, &P_SPEC, &topology());
+    }
+    assert_eq!(done.salts_done, 64);
+}
+
+#[tokio::test]
+async fn legacy_leases_carry_no_context() {
+    let mut s = Session::start_with("mock_sampler_family_lease", false, &["--mode", "aware"]).await;
+    s.setup(i64::MAX).await;
+    s.send(coord_msg::Msg::Job(job(3))).await;
+    let (results, done) = drain_lease(&mut s).await;
+    assert_eq!(results.len(), 3);
+    results.iter().for_each(verify);
+    assert_eq!(done.best_energy_milli, PINNED_BEST_ENERGY_MILLI);
+    s.refund().await;
+    s.finish().await;
+}
+
 #[tokio::test]
 async fn a_local_family_generator_matches_the_session_path() {
     let (local, local_done) = run_64("local").await;
