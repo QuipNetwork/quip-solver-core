@@ -1107,6 +1107,7 @@ const VECTOR_CONTRACT: Contract = Contract {
     metadata_kinds: &[1, 3],
     limits: InstanceLimits::FAM_37,
     size_bounds: example_size_bounds,
+    construction: None,
 };
 
 /// Canonical `UNIFORM_FIELD` bytes for `layers` and `field_milli`.

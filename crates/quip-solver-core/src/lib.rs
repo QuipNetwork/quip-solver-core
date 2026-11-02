@@ -24,11 +24,19 @@ pub mod limits;
 pub mod logging;
 mod session;
 
+// The layered test construction, shared with the examples and the session
+// tests. The shared file names this crate by its package name.
+#[cfg(test)]
+extern crate self as quip_solver_core;
+#[cfg(test)]
+#[path = "../examples/support/layered_family.rs"]
+mod layered;
+
 pub use cli::CommonArgs;
 pub use csr::CsrGraph;
 pub use error::SampleError;
 pub use ising::{Algorithm, BetaSchedule, IsingGraph, SampleParams, SamplerResult, WarmStart};
-pub use lease::{Lease, LeaseSink, LeaseStopped};
+pub use lease::{FamilyLease, Lease, LeaseSink, LeaseStopped};
 pub use limits::ModelLimits;
 pub use quip_protocol::lease::TopologyView;
 pub use session::{
@@ -198,7 +206,11 @@ pub trait Sampler<C: Coefficient = f64>: Send + Sync + 'static {
 
     /// Work a lease on a dedicated thread. Poll the sink to observe stops.
     /// Report each salt once, with `LeaseSink::push` for its reads or
-    /// `LeaseSink::screen` when the backend screened it out.
+    /// `LeaseSink::screen` when the backend screened it out. For a family
+    /// lease, read the admitted inputs with `Lease::family` and generate each
+    /// instance from `FamilyLease::generate`. Count a salt that generation
+    /// skipped with `LeaseSink::skip`, and report energies with the instance
+    /// offset included.
     ///
     /// # Errors
     /// Returns a device condition, or a device fault if local generation is unsupported.

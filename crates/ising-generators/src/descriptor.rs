@@ -501,6 +501,9 @@ pub struct Contract {
     pub limits: InstanceLimits,
     /// The size bound function of the revision.
     pub size_bounds: SizeBoundsFn,
+    /// How the revision builds an instance, or `None` for a contract that only
+    /// describes parameters and bounds. A solver lists a revision only with one.
+    pub construction: Option<&'static crate::family::Construction>,
 }
 
 /// A descriptor that passed admission, with its parsed parameters and the

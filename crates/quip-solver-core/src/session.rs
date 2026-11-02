@@ -508,6 +508,9 @@ pub(crate) struct PendingJob {
     pub(crate) lease: Option<LeaseLink>,
     /// Original wire graph, present only for lossy coefficient types.
     pub(crate) exact_energy: Option<ExactEnergy>,
+    /// The instance offset of a family lease salt, added after rescoring.
+    /// Zero for every other job.
+    pub(crate) offset_milli: i64,
     pub(crate) num_reads: u32,
     pub(crate) num_sweeps: u32,
     pub(crate) started: std::time::Instant,
@@ -802,6 +805,20 @@ fn rescore_result(sr: &mut StreamResult, entry: Option<&PendingJob>, required: b
     }
 }
 
+/// Add a family lease salt's instance offset to each read (FAM-33, D4-A).
+/// FAM-37 bounds keep the sampled energy below 2^57 and the offset at most
+/// 2^56, so the sum never saturates on a valid instance.
+fn add_offset(sr: &mut StreamResult, entry: Option<&PendingJob>) {
+    let Some(job) = entry.filter(|job| job.lease.is_some()) else {
+        return;
+    };
+    if let StreamOutcome::Completed(Ok(reads)) = &mut sr.outcome {
+        for read in reads {
+            read.energy_milli = read.energy_milli.saturating_add(job.offset_milli);
+        }
+    }
+}
+
 /// Outbound half of a session.
 ///
 /// Reading the inbound stream and writing to the outbound one must not live in
@@ -925,6 +942,7 @@ async fn outbound_writer<C: Coefficient>(
                     _ => sr,
                 };
                 rescore_result(&mut sr, entry.as_ref(), entry.as_ref().map_or(!C::EXACT, |job| job.exact_energy.is_some()));
+                add_offset(&mut sr, entry.as_ref());
                 if let Some(link) = entry.as_ref().and_then(|e| e.lease.as_ref()) {
                     if let StreamOutcome::Completed(Err(error)) = &sr.outcome {
                         if error.is_fatal() {
@@ -1380,12 +1398,7 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
                 }
                 Some(coord_msg::Msg::Topology(t)) => {
                     topology = Some(TopologyCache::from_proto(&t));
-                    lease_topology = Some((
-                        t.hash.clone(),
-                        quip_protocol::lease::TopologyView::from_proto(&t)
-                            .map(Arc::new)
-                            .map_err(|_| quip_proto::v1::RejectReason::Malformed),
-                    ));
+                    lease_topology = Some(Arc::new(lease::LeaseTopology::new(&t, families)));
                 }
                 Some(coord_msg::Msg::SetTarget(s)) => {
                     let _ = target_tx.send_replace(Some(SessionTarget::from_proto(&s)));
@@ -1398,6 +1411,7 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
                             lease_topology.as_ref(),
                             target.as_ref(),
                             id,
+                            families,
                             sampler.max_reads(),
                             num_sweeps,
                             sweeps_per_beta,
@@ -1574,6 +1588,7 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
                                         num_reads,
                                         num_sweeps: ns,
                                         exact_energy,
+                                        offset_milli: 0,
                                         started: std::time::Instant::now(),
                                         watermark: job.watermark,
                                         // `drive` mode sets no real threshold
@@ -2088,6 +2103,7 @@ mod tests {
             PendingJob {
                 lease: Some(link),
                 exact_energy: None,
+                offset_milli: 0,
                 num_reads: 1,
                 num_sweeps: 1,
                 started: std::time::Instant::now(),
@@ -2623,6 +2639,7 @@ mod tests {
         PendingJob {
             lease: None,
             exact_energy: None,
+            offset_milli: 0,
             num_reads: 1,
             num_sweeps: 1,
             started: std::time::Instant::now(),
@@ -3436,6 +3453,74 @@ mod tests {
         assert!(matches!(exact.outcome, StreamOutcome::Completed(Ok(_))));
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn the_offset_is_added_after_exact_rescoring() {
+        let mut harness = spawn_writer(4);
+        let (link, _state) = lease::test_link();
+        let internal_id = pending_id(b"lease", Some(0));
+        let _ = harness.pending.lock().unwrap().insert(
+            internal_id.clone(),
+            PendingJob {
+                lease: Some(link),
+                exact_energy: Some(ExactEnergy::new(vec![-700], vec![], Arc::new([]))),
+                offset_milli: 500,
+                ..pending_job(None)
+            },
+        );
+        harness
+            .res_tx
+            .send(StreamResult {
+                job_id: internal_id,
+                outcome: StreamOutcome::Completed(Ok(vec![crate::SamplerResult {
+                    spins: vec![1],
+                    energy_milli: 12_345,
+                }])),
+                device_access_time_us: 0,
+            })
+            .await
+            .unwrap();
+        let Some(miner_msg::Msg::Result(result)) = harness.out_rx.recv().await.unwrap().msg else {
+            panic!("expected the salt's Result");
+        };
+        assert_eq!(
+            result
+                .solutions
+                .iter()
+                .map(|s| s.energy_milli)
+                .collect::<Vec<_>>(),
+            vec![-700 + 500],
+            "rescore, then the offset"
+        );
+        assert!(matches!(
+            harness.out_rx.recv().await.unwrap().msg,
+            Some(miner_msg::Msg::LeaseDone(done)) if done.best_energy_milli == -200
+        ));
+        drop(harness.res_tx);
+        drop(harness.ctrl_tx);
+        harness.writer.await.unwrap();
+    }
+
+    #[test]
+    fn plain_entries_add_no_offset() {
+        let plain = PendingJob {
+            offset_milli: 500,
+            ..pending_job(None)
+        };
+        let mut result = completed_result(1);
+        result.outcome = StreamOutcome::Completed(Ok(vec![crate::SamplerResult {
+            spins: vec![1],
+            energy_milli: -1000,
+        }]));
+        add_offset(&mut result, Some(&plain));
+        let StreamOutcome::Completed(Ok(reads)) = result.outcome else {
+            panic!("valid result must remain successful");
+        };
+        assert_eq!(reads.first().map(|r| r.energy_milli), Some(-1000));
+        let mut orphan = completed_result(1);
+        add_offset(&mut orphan, None);
+        assert!(matches!(orphan.outcome, StreamOutcome::Completed(Ok(_))));
+    }
+
     // Family declarations. Constants as in `tests/family_capabilities.rs`.
     #[expect(
         clippy::indexing_slicing,
@@ -3444,54 +3529,15 @@ mod tests {
     mod families {
         use super::*;
         use crate::families::FamilyClaim;
-        use crate::ising_generators::descriptor::{
-            params_digest, Contract, FieldSpec, Params, SizeBounds, TopologyStats,
-            Value as ParamValue, ValueType,
-        };
-        use crate::ising_generators::instance::InstanceLimits;
+        use crate::ising_generators::descriptor::{params_digest, Contract, Params};
+        use crate::ising_generators::family::{BaseTopology, Construction, InstanceBody, Streams};
+        use crate::ising_generators::instance::{Instance, InstanceLimits};
         use crate::ising_generators::Code;
+        use crate::layered::{example_size_bounds, UNIFORM_FIELD};
         use std::sync::atomic::AtomicBool;
 
-        const UNIFORM_FIELD: &[FieldSpec] = &[
-            FieldSpec {
-                tag: 1,
-                kind: ValueType::U16,
-                min: 1,
-                max: 16,
-            },
-            FieldSpec {
-                tag: 2,
-                kind: ValueType::I32,
-                min: -4000,
-                max: 4000,
-            },
-        ];
         const ZERO_FIELD_PARAMS: [u8; 19] =
             [0x01, 1, 0, 2, 0, 0, 0, 2, 0, 2, 0, 4, 0, 0, 0, 0, 0, 0, 0];
-
-        fn example_size_bounds(
-            params: &Params<'_>,
-            stats: &TopologyStats,
-        ) -> Result<SizeBounds, Code> {
-            let Some(ParamValue::Unsigned(layers)) = params.get(1) else {
-                return Err(Code::ParamsMalformed);
-            };
-            let overflow = || Code::BoundsExceeded;
-            let nodes = layers.checked_mul(stats.n_nodes).ok_or_else(overflow)?;
-            let edges = layers
-                .checked_mul(stats.n_edges)
-                .and_then(|e| e.checked_add(layers.saturating_sub(1).checked_mul(stats.n_nodes)?))
-                .ok_or_else(overflow)?;
-            let degree = stats
-                .max_degree
-                .checked_add(layers.saturating_sub(1).min(2))
-                .ok_or_else(overflow)?;
-            Ok(SizeBounds {
-                nodes,
-                edges,
-                degree,
-            })
-        }
 
         const fn contract(revision: u32) -> Contract {
             Contract {
@@ -3501,8 +3547,32 @@ mod tests {
                 metadata_kinds: &[],
                 limits: InstanceLimits::FAM_37,
                 size_bounds: example_size_bounds,
+                construction: Some(&TRIVIAL),
             }
         }
+
+        fn accept_topology(_: &Params<'_>, _: &BaseTopology) -> bool {
+            true
+        }
+
+        fn no_instance(
+            _: &Params<'_>,
+            _: &BaseTopology,
+            _: &mut Streams<'_>,
+        ) -> Result<InstanceBody, Code> {
+            Err(Code::NoInstance)
+        }
+
+        fn accept_metadata(_: &Params<'_>, _: &Instance) -> bool {
+            true
+        }
+
+        static TRIVIAL: Construction = Construction {
+            labels: &[],
+            check_topology: accept_topology,
+            generate: no_instance,
+            check_metadata: accept_metadata,
+        };
 
         const UNIFORM_V1: Contract = contract(1);
 
