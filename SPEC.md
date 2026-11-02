@@ -480,9 +480,9 @@ The session validates the declaration before it runs any mode.
 An invalid declaration logs an error and exits 70 in every mode, before the device opens.
 `capabilities_for::<S, C>(&id)` builds the advertised `Capabilities` and returns `DeclarationError` for an invalid declaration.
 
-A sampler that returns `true` from `accepts_family_metadata` receives each family job through `sample_stream_warm`.
+A sampler that returns `true` from `accepts_family_metadata` receives every job through `sample_stream_warm`, and never through `sample_stream`.
 `WarmStreamJob.family` holds `Some(FamilyContext)` for a job that passed the checks, and `None` for any other job.
-A backend that overrides `sample_stream` must also override `sample_stream_warm`. That override must route each job that has a family context to `sample_family`.
+A backend that overrides `sample_stream` must also override `sample_stream_warm`. That override must route each job that has a family context to `sample_family`. Without it, all jobs of that backend run through the default serial loop.
 `FamilyContext` gives `contract()`, `family_id()`, `revision()`, `params()`, `instance()`, `offset_milli()`, `section(kind)`, and `source()`.
 `section(kind)` returns the payload of one metadata section from the validated region.
 `FamilySource` is `Lease { salt_index }` or `ExplicitJob`.

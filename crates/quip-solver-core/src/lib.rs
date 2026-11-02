@@ -160,7 +160,8 @@ pub struct StreamJob<C: Coefficient = f64> {
 }
 
 /// One job entering [`Sampler::sample_stream_warm`]: the plain job, plus its
-/// warm start when the coordinator sent one.
+/// warm start when the coordinator sent one and its family context when the
+/// sampler opted in and the job carries one.
 #[non_exhaustive]
 pub struct WarmStreamJob<C: Coefficient = f64> {
     /// The job, exactly as [`Sampler::sample_stream`] would receive it.
@@ -270,7 +271,7 @@ pub trait Sampler<C: Coefficient = f64>: Send + Sync + 'static {
     ///
     /// Default `false`: the session feeds [`sample_stream`](Sampler::sample_stream)
     /// and the states never reach the backend. When `true`, the session
-    /// advertises the `initial-spins` feature and feeds
+    /// advertises the `initial-spins` feature and feeds every job through
     /// [`sample_stream_warm`](Sampler::sample_stream_warm) instead. Override it
     /// together with [`sample_warm`](Sampler::sample_warm), or with
     /// `sample_stream_warm` for a backend that keeps several models in flight.
@@ -320,14 +321,16 @@ pub trait Sampler<C: Coefficient = f64>: Send + Sync + 'static {
     /// Answered without a device.
     ///
     /// Default `false`: the backend sees the plain model only. When `true`,
-    /// the session feeds [`sample_stream_warm`](Sampler::sample_stream_warm)
-    /// and a job that carries a [`FamilyContext`](families::FamilyContext)
-    /// reaches [`sample_family`](Sampler::sample_family).
+    /// the session calls [`sample_stream_warm`](Sampler::sample_stream_warm)
+    /// for every job (plain jobs, legacy lease salts, and family jobs) and
+    /// never calls [`sample_stream`](Sampler::sample_stream). A job that
+    /// carries a [`FamilyContext`](families::FamilyContext) reaches
+    /// [`sample_family`](Sampler::sample_family) through the default loop.
     ///
-    /// A backend that overrides [`sample_stream`](Sampler::sample_stream) must
-    /// also override `sample_stream_warm` and route each job with
-    /// `family: Some(..)` to `sample_family`. Without that override, its
-    /// family jobs run through the default serial loop.
+    /// A backend that overrides `sample_stream` must also override
+    /// `sample_stream_warm` and route each job with `family: Some(..)` to
+    /// `sample_family`. Without that override, all of its jobs run through the
+    /// default serial loop.
     #[must_use]
     fn accepts_family_metadata() -> bool
     where
