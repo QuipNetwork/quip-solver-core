@@ -2263,6 +2263,56 @@ mod tests {
         assert_eq!(aware.source(), FamilySource::ExplicitJob);
     }
 
+    /// A seeded explicit job with a valid binding gives a sampler that opts in
+    /// to both features its start states and its family context.
+    #[test]
+    fn a_seeded_explicit_job_keeps_both_warm_start_and_family() {
+        let mut job = bound_job();
+        if let Some(ising) = job.ising.as_mut() {
+            ising.initial_spins = vec![vec![0b01]];
+            ising.num_reads = 1;
+        }
+        seal(&mut job);
+        let prepared = prepare_job(
+            job,
+            &WarmAwareStub,
+            &identity("sa"),
+            &accepted(),
+            64,
+            None,
+            None,
+            None,
+        );
+        let Prepared::Sample {
+            warm_start, family, ..
+        } = prepared
+        else {
+            panic!("a valid seeded binding must prepare");
+        };
+        assert!(warm_start.is_some());
+        assert!(family.is_some());
+    }
+
+    struct WarmAwareStub;
+
+    impl Sampler for WarmAwareStub {
+        fn sample(
+            &self,
+            _graph: &IsingGraph,
+            _params: &SampleParams,
+        ) -> Result<Vec<SamplerResult>, crate::SampleError> {
+            Ok(vec![])
+        }
+
+        fn accepts_warm_start() -> bool {
+            true
+        }
+
+        fn accepts_family_metadata() -> bool {
+            true
+        }
+    }
+
     struct AwareStub;
 
     impl Sampler for AwareStub {

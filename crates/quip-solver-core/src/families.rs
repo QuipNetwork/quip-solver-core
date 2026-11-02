@@ -404,10 +404,17 @@ pub(crate) fn check_binding(
         Some(_) => return Ok(None),
         None => false,
     };
+    // Declaration::validate makes both lookups below unreachable. The release
+    // build falls back to the generic tier.
     let Some(contract) = table.accepted_contract(&family.family_id, family.revision) else {
+        debug_assert!(
+            false,
+            "support_code admitted a pair with no accepted contract"
+        );
         return Ok(None);
     };
     let Some(construction) = contract.construction else {
+        debug_assert!(false, "an accepted contract has no construction");
         return Ok(None);
     };
 
