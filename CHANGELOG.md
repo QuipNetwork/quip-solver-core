@@ -38,8 +38,22 @@ not change. `protocol_version` stays 2, and old encodings do not change.
   family inputs of a lease and reports a skipped salt.
 - `Generator::FamilyChacha8V1`, `LeaseError::DescriptorMissing`, and
   `VerifyError::FamilyLease`.
+- `FamilyContext`, `FamilySource`, `Sampler::accepts_family_metadata`, and
+  `Sampler::sample_family`. A sampler that opts in gets the validated family
+  structure of a lease salt or an explicit job. The `--mode aware` example
+  shows it.
+- `WarmStreamJob.family`. It holds the context for an opted-in sampler.
+- `InstanceParts::check_bounds`, the bounds step of `Instance::new`.
 
 ### Changed
+
+- A solver that lists a pair in `accepted_families` gets the binding of an explicit
+  job checked in FAM-65 order, after the plain checks and before `max_reads`. A
+  failure maps to a wire reject reason. A job that passes reaches an opted-in
+  sampler with its `FamilyContext`. A generic solver is not affected.
+- A sampler that overrides `sample_stream` and returns `true` from
+  `accepts_family_metadata` must also override `sample_stream_warm`.
+- `Instance::new` calls `check_bounds` for its bounds step. Its results do not change.
 
 - A lease with generator value 2 gets the FAM-47 admission codes (FAM-54). A solver
   that lists no generated family answers with `FAMILY_UNSUPPORTED`, where it answered
