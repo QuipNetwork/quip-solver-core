@@ -3530,11 +3530,11 @@
       "path": "conformance/family_oracle/__init__.py"
     },
     {
-      "blake3": "d884518385621def2a5bd67f38a0720bff74070a901bee9dfa3a4f1d13c92e7a",
+      "blake3": "d38dbbd0df36100ab7c77eca5a7db1ce12dc99496d25574fc8f07a939c689546",
       "path": "conformance/family_oracle/__main__.py"
     },
     {
-      "blake3": "5d6e46466cfa1bc9789d8e27c13bc3f8814dd8aed27ca0472a4183d63a1579be",
+      "blake3": "0c16ff430c108400b10d6742d71a397cadaa564e0fcb19e256e9f48acfe84d2b",
       "path": "conformance/family_oracle/build.py"
     },
     {
@@ -3548,6 +3548,10 @@
     {
       "blake3": "fedb48e9646e86a33af1eabe12ff194267f133c7c7899066de9f3c360c33d3be",
       "path": "conformance/family_oracle/digests.py"
+    },
+    {
+      "blake3": "d64345b96eb37dd77b8f29b7d14be89119f4ff8a67587537d077d0bd1066336c",
+      "path": "conformance/family_oracle/ice.py"
     },
     {
       "blake3": "3e21fb7e7efe2d6d391a207b161e34f80f682d6adaa70101beea3b330b444b67",

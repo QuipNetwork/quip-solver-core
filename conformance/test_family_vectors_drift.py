@@ -41,6 +41,24 @@ def test_layered_fixture_matches_oracle():
     assert build.render(build.build_layered()) == build.LAYERED_PATH.read_text()
 
 
+def _ice_doc() -> dict:
+    return json.loads(build.ICE_STRUCTURE_PATH.read_text())
+
+
+def test_ice_structure_fixture_matches_oracle():
+    text = build.render(build.build_ice_structure())
+    assert text == build.ICE_STRUCTURE_PATH.read_text()
+
+
+def test_ice_structure_evidence_is_sc8():
+    doc = _ice_doc()
+    tagged = [
+        tag for key in ("structure", "live") for c in doc[key] for tag in c["evidence"]
+    ]
+    assert tagged
+    assert set(tagged) == {"SC-8:ice-structure-vectors"}
+
+
 def test_canonical_json_is_sorted_compact_and_rejects_floats():
     assert build.canonical_json({"b": [1, "x"], "a": None}) == '{"a":null,"b":[1,"x"]}'
     with pytest.raises(TypeError):
@@ -77,7 +95,7 @@ def test_every_provided_id_has_a_case():
         assert tag.startswith("SC-2:")
 
 
-@pytest.mark.parametrize("load", [_core_doc, _legacy_doc, _layered_doc])
+@pytest.mark.parametrize("load", [_core_doc, _legacy_doc, _layered_doc, _ice_doc])
 def test_sources_hash_spec_and_oracle(load):
     doc = load()
     root = build.SPEC_PATH.parents[1]

@@ -4,6 +4,7 @@
     clippy::expect_used,
     clippy::indexing_slicing,
     clippy::many_single_char_names,
+    clippy::panic,
     reason = "test code: a failed lookup is a test failure"
 )]
 
@@ -14,6 +15,11 @@ use ising_generators::ice::{
     candidates, select, sides, zephyr_coordinates, zephyr_coupler, zephyr_lattice, Candidates,
     Lattice, Sides, StructureError, Tile, MAX_DEGREE,
 };
+use ising_generators::rng::{shuffle, ChaCha8Rng};
+use serde_json::Value;
+
+mod common;
+use common::{array, field, number, pairs, text, u32s};
 
 fn topology(nodes: Vec<u32>, edges: &[(u32, u32)]) -> BaseTopology {
     BaseTopology::new(nodes, edges).expect("test topology is valid")
@@ -471,4 +477,236 @@ fn zephyr_sides_split_vertical_and_horizontal() {
         &identity(split.right.len()),
     );
     assert!(chosen.expect("select").len() <= split.left.len().min(split.right.len()));
+}
+
+// ---- fixtures: the live topology, archived tiles, and structure vectors ----
+
+/// The orders of a selection: the identity of each side shuffled from one
+/// stream, left first.
+fn seeded_orders(seed: &str, left: usize, right: usize) -> (Vec<u32>, Vec<u32>) {
+    let mut rng = ChaCha8Rng::from_seed(common::seed(seed));
+    let mut left_order = identity(left);
+    shuffle(&mut rng, &mut left_order).expect("shuffle left");
+    let mut right_order = identity(right);
+    shuffle(&mut rng, &mut right_order).expect("shuffle right");
+    (left_order, right_order)
+}
+
+fn live_lattice(mode: &str) -> Lattice {
+    match mode {
+        "adjacency" => Lattice::Adjacency,
+        "zephyr" => Lattice::Zephyr { m: 12, t: 4 },
+        other => panic!("unknown mode {other}"),
+    }
+}
+
+/// The tiles as `u32` little-endian words, four per tile.
+fn tile_bytes(tiles: &[Tile]) -> Vec<u8> {
+    tiles
+        .iter()
+        .flat_map(|tile| tile.nodes)
+        .flat_map(u32::to_le_bytes)
+        .collect()
+}
+
+fn tiles_of(value: &Value) -> Vec<Tile> {
+    value
+        .as_array()
+        .expect("tiles")
+        .iter()
+        .map(|tile| {
+            let nodes: [u32; 4] = u32s(tile).try_into().expect("four nodes");
+            Tile { nodes }
+        })
+        .collect()
+}
+
+#[test]
+fn live_topology_rebuilds_with_the_pinned_digest() {
+    let fixture = common::parse(common::LIVE_JSON);
+    let base = common::live_topology();
+    assert_eq!(base.node_ids().len() as u64, number(&fixture, "nodes"));
+    assert_eq!(base.edges().len() as u64, number(&fixture, "edges"));
+    assert_eq!(base.node_ids().len(), 4575);
+    assert_eq!(base.edges().len(), 41474);
+    assert_eq!(
+        common::hex(base.order_digest()),
+        text(&fixture, "order_digest")
+    );
+    assert!(base.node_ids().windows(2).all(|w| w[0] < w[1]));
+    assert_eq!(text(&fixture, "provenance"), "archived-research");
+}
+
+#[test]
+fn live_candidates_match_the_research_counts() {
+    let base = common::live_topology();
+    let adjacency = candidates(Lattice::Adjacency, &base).expect("adjacency");
+    let zephyr = candidates(live_lattice("zephyr"), &base).expect("zephyr");
+    assert_eq!(adjacency.tiles.len(), 6822);
+    assert_eq!(zephyr.tiles.len(), 6822);
+    assert_eq!(adjacency.tiles, zephyr.tiles);
+}
+
+#[test]
+fn live_selection_has_1785_tiles() {
+    let base = common::live_topology();
+    let doc = common::parse(common::STRUCTURE_JSON);
+    for case in array(&doc, "live") {
+        let lattice = live_lattice(text(case, "name"));
+        let found = candidates(lattice, &base).expect("candidates");
+        let split = sides(lattice, &base, &found).expect("sides");
+        assert_eq!(found.tiles.len() as u64, number(case, "candidates"));
+        assert_eq!(
+            found.spines.iter().filter(|s| s.is_none()).count() as u64,
+            number(case, "free")
+        );
+        assert_eq!(split.left.len() as u64, number(case, "left"));
+        assert_eq!(split.right.len() as u64, number(case, "right"));
+        assert_eq!(array(case, "selections").len(), 2);
+        for selection in array(case, "selections") {
+            let (left, right) =
+                seeded_orders(text(selection, "seed"), split.left.len(), split.right.len());
+            let chosen = select(&found, &split, &left, &right).expect("select");
+            assert_eq!(chosen.len(), 1785);
+            assert_eq!(chosen.len() as u64, number(selection, "selected"));
+            let digest = blake3::hash(&tile_bytes(&chosen));
+            assert_eq!(digest.to_hex().as_str(), text(selection, "tiles_blake3"));
+        }
+    }
+}
+
+#[test]
+fn archived_tiles_are_valid_candidates() {
+    let sidecar = common::parse(common::ARCHIVED_JSON);
+    assert_eq!(text(&sidecar, "provenance"), "archived-research");
+    assert_eq!(
+        blake3::hash(common::ARCHIVED_BIN).to_hex().as_str(),
+        text(&sidecar, "bin_blake3")
+    );
+    let base = common::live_topology();
+    let found = candidates(live_lattice("zephyr"), &base).expect("candidates");
+    let models = common::archived_models();
+    assert_eq!(models.len(), 2);
+    let total: u64 = array(&sidecar, "models")
+        .iter()
+        .map(|m| number(m, "length_bytes"))
+        .sum();
+    assert_eq!(total, common::ARCHIVED_BIN.len() as u64);
+    for model in &models {
+        assert_eq!(model.tiles.len(), 1785, "{}", model.nonce);
+        let mut used = BTreeSet::new();
+        for nodes in &model.tiles {
+            assert!(nodes.windows(2).all(|w| w[0] < w[1]), "ascending");
+            let tile = Tile { nodes: *nodes };
+            assert!(found.tiles.binary_search(&tile).is_ok(), "{nodes:?}");
+            for edge in clique(*nodes) {
+                assert!(used.insert(edge), "edge {edge:?} used twice");
+            }
+        }
+    }
+}
+
+/// Check one structure case against the library.
+fn check_structure_case(case: &Value) {
+    let name = text(case, "name");
+    let lattice = field(case, "lattice");
+    let shape = Lattice::from_shape(
+        u16::try_from(number(lattice, "m")).expect("m"),
+        u8::try_from(number(lattice, "t")).expect("t"),
+    );
+    let topology_json = field(case, "topology");
+    let base = topology(
+        u32s(field(topology_json, "nodes")),
+        &pairs(field(topology_json, "edges")),
+    );
+    let result = shape.and_then(|lattice| {
+        let found = candidates(lattice, &base)?;
+        let split = sides(lattice, &base, &found)?;
+        Ok((lattice, found, split))
+    });
+    if let Some(error) = case.get("error") {
+        let got = result.expect_err(name);
+        assert_eq!(got.name(), error.as_str().expect("error name"), "{name}");
+        return;
+    }
+    let (_, found, split) = result.unwrap_or_else(|e| panic!("{name}: {e:?}"));
+    assert_eq!(found.tiles, tiles_of(field(case, "tiles")), "{name}: tiles");
+    let spines: Vec<Option<[(u32, u32); 2]>> = array(case, "spines")
+        .iter()
+        .map(|spine| {
+            (!spine.is_null()).then(|| {
+                let two = pairs(spine);
+                [two[0], two[1]]
+            })
+        })
+        .collect();
+    assert_eq!(found.spines, spines, "{name}: spines");
+    assert_eq!(split.left, pairs(field(case, "left")), "{name}: left");
+    assert_eq!(split.right, pairs(field(case, "right")), "{name}: right");
+    let selections = array(case, "selections");
+    assert_eq!(selections.len(), 2, "{name}: two seeds");
+    for selection in selections {
+        let seed = text(selection, "seed");
+        let (left, right) = seeded_orders(seed, split.left.len(), split.right.len());
+        assert_eq!(
+            left,
+            u32s(field(selection, "left_order")),
+            "{name}: left order"
+        );
+        assert_eq!(
+            right,
+            u32s(field(selection, "right_order")),
+            "{name}: right order"
+        );
+        let chosen = select(&found, &split, &left, &right).expect("select");
+        assert_eq!(
+            chosen,
+            tiles_of(field(selection, "tiles")),
+            "{name}: {seed}"
+        );
+    }
+}
+
+#[test]
+fn structure_vectors_match() {
+    let doc = common::parse(common::STRUCTURE_JSON);
+    let cases = array(&doc, "structure");
+    assert!(cases.len() >= 18, "every planned case is present");
+    let errors: BTreeSet<&str> = cases
+        .iter()
+        .filter_map(|c| c.get("error").and_then(Value::as_str))
+        .collect();
+    for name in [
+        "mixed-shape",
+        "degree-above-limit",
+        "duplicate-edge",
+        "not-zephyr-node",
+        "not-zephyr-coupler",
+        "no-candidates",
+        "spine-conflict",
+        "membership-above-two",
+        "not-bipartite",
+    ] {
+        assert!(errors.contains(name), "missing error case {name}");
+    }
+    for case in cases {
+        check_structure_case(case);
+    }
+}
+
+#[test]
+fn repeated_structure_is_identical() {
+    let base = common::live_topology();
+    for mode in ["adjacency", "zephyr"] {
+        let lattice = live_lattice(mode);
+        let run = || {
+            let found = candidates(lattice, &base).expect("candidates");
+            let split = sides(lattice, &base, &found).expect("sides");
+            let (left, right) =
+                seeded_orders(&common::hex(&[7; 32]), split.left.len(), split.right.len());
+            let chosen = select(&found, &split, &left, &right).expect("select");
+            (found, split, chosen)
+        };
+        assert_eq!(run(), run(), "{mode}");
+    }
 }

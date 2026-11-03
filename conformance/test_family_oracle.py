@@ -5,7 +5,7 @@ from pathlib import Path
 
 import blake3
 import pytest
-from family_oracle import decisions
+from family_oracle import build, decisions, ice
 from family_oracle.chacha8 import ChaCha8, shuffle, uniform
 from family_oracle.digests import (
     derive_key,
@@ -13,6 +13,7 @@ from family_oracle.digests import (
     descriptor_material,
     lease_salts,
     params_digest,
+    topology_order_digest,
 )
 from family_oracle.instance import (
     bound_code,
@@ -628,3 +629,64 @@ def test_layered_p_spec_skips_match_the_session_capture():
         else:
             assert instance is not None
     assert skipped == {0, 3, 9, 13}
+
+
+# ---- ice structure oracle ----
+
+
+@pytest.mark.parametrize("m", [1, 2, 3])
+@pytest.mark.parametrize("t", [1, 2, 3, 4])
+def test_ice_lattice_counts(m, t):
+    nodes, edges = ice.lattice(m, t)
+    assert len(nodes) == 4 * t * m * (2 * m + 1)
+    expected = (
+        2 * t * (8 * t + 3) if m == 1 else 2 * t * ((8 * t + 8) * m * m - 2 * m - 3)
+    )
+    assert len(edges) == expected
+    assert edges == sorted(set(edges))
+    assert all(a < b for a, b in edges)
+
+
+def test_ice_coordinates_invert_the_linear_id():
+    m, t = 2, 3
+    for q in range(ice.node_count(m, t)):
+        assert ice.linear_id(m, t, *ice.zephyr_coordinates(m, t, q)) == q
+    assert ice.zephyr_coordinates(m, t, ice.node_count(m, t)) is None
+
+
+def test_ice_live_rebuild_matches_the_fixture_digest():
+    spec = json.loads(build.ICE_LIVE_PATH.read_text())
+    nodes, edges = ice.live_topology(spec["removed_nodes"], spec["removed_edges"])
+    assert (len(nodes), len(edges)) == (4575, 41474)
+    assert topology_order_digest(nodes, edges).hex() == spec["order_digest"]
+    assert spec["provenance"] == "archived-research"
+
+
+def test_ice_both_modes_agree_and_select_is_a_matching():
+    nodes, edges = ice.lattice(2, 2)
+    zephyr = ice.candidates(2, 2, nodes, edges)
+    assert zephyr == ice.candidates(0, 0, nodes, edges)
+    tiles, spines = zephyr
+    coords = [ice.zephyr_coordinates(2, 2, n) for n in nodes]
+    left, right = ice.sides(2, 2, coords, spines)
+    for seed in (bytes(range(32)), bytes(range(32, 64))):
+        orders = ice.seeded_orders(seed, len(left), len(right))
+        chosen = ice.select(tiles, spines, left, right, *orders)
+        used = [e for tile in chosen for e in ice._tile_edges(tile)]
+        assert len(used) == len(set(used))
+        assert len(chosen) == min(len(left), len(right))
+
+
+def test_ice_ties_follow_the_orders():
+    nodes, edges = build._graph(build._tile_ring(4))
+    tiles, spines = ice.candidates(0, 0, nodes, edges)
+    left, right = ice.sides(0, 0, [], spines)
+    assert left == [(0, 1), (4, 5)] and right == [(2, 3), (6, 7)]
+    assert ice.select(tiles, spines, left, right, [0, 1], [0, 1]) == [
+        (0, 1, 6, 7),
+        (2, 3, 4, 5),
+    ]
+    assert ice.select(tiles, spines, left, right, [1, 0], [0, 1]) == [
+        (0, 1, 2, 3),
+        (4, 5, 6, 7),
+    ]

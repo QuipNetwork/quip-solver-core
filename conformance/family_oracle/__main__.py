@@ -10,6 +10,7 @@ def _targets() -> dict:
         build.CORE_PATH: build.render(build.build_core()),
         build.LEGACY_PATH: build.render(build.build_legacy()),
         build.LAYERED_PATH: build.render(build.build_layered()),
+        build.ICE_STRUCTURE_PATH: build.render(build.build_ice_structure()),
     }
 
 

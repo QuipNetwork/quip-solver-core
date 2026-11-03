@@ -361,6 +361,211 @@
       "pattern": "^(0|-?[1-9][0-9]*)$",
       "type": "string"
     },
+    "ice_live_case": {
+      "additionalProperties": false,
+      "properties": {
+        "candidates": {
+          "type": "integer"
+        },
+        "evidence": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "free": {
+          "type": "integer"
+        },
+        "left": {
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "right": {
+          "type": "integer"
+        },
+        "selections": {
+          "items": {
+            "$ref": "#/$defs/ice_live_selection"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "name",
+        "evidence",
+        "candidates",
+        "free",
+        "left",
+        "right",
+        "selections"
+      ],
+      "type": "object"
+    },
+    "ice_live_selection": {
+      "additionalProperties": false,
+      "properties": {
+        "seed": {
+          "$ref": "#/$defs/hex32"
+        },
+        "selected": {
+          "type": "integer"
+        },
+        "tiles_blake3": {
+          "$ref": "#/$defs/hex32"
+        }
+      },
+      "required": [
+        "seed",
+        "selected",
+        "tiles_blake3"
+      ],
+      "type": "object"
+    },
+    "ice_selection": {
+      "additionalProperties": false,
+      "properties": {
+        "left_order": {
+          "items": {
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "right_order": {
+          "items": {
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "seed": {
+          "$ref": "#/$defs/hex32"
+        },
+        "tiles": {
+          "items": {
+            "items": {
+              "type": "integer"
+            },
+            "maxItems": 4,
+            "minItems": 4,
+            "type": "array"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "seed",
+        "left_order",
+        "right_order",
+        "tiles"
+      ],
+      "type": "object"
+    },
+    "ice_structure_case": {
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "type": "string"
+        },
+        "evidence": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "lattice": {
+          "additionalProperties": false,
+          "properties": {
+            "m": {
+              "type": "integer"
+            },
+            "t": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "m",
+            "t"
+          ],
+          "type": "object"
+        },
+        "left": {
+          "items": {
+            "$ref": "#/$defs/int_pair"
+          },
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        },
+        "right": {
+          "items": {
+            "$ref": "#/$defs/int_pair"
+          },
+          "type": "array"
+        },
+        "selections": {
+          "items": {
+            "$ref": "#/$defs/ice_selection"
+          },
+          "type": "array"
+        },
+        "spines": {
+          "items": {
+            "items": {
+              "$ref": "#/$defs/int_pair"
+            },
+            "maxItems": 2,
+            "minItems": 2,
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "type": "array"
+        },
+        "tiles": {
+          "items": {
+            "items": {
+              "type": "integer"
+            },
+            "maxItems": 4,
+            "minItems": 4,
+            "type": "array"
+          },
+          "type": "array"
+        },
+        "topology": {
+          "additionalProperties": false,
+          "properties": {
+            "edges": {
+              "items": {
+                "$ref": "#/$defs/int_pair"
+              },
+              "type": "array"
+            },
+            "nodes": {
+              "items": {
+                "type": "integer"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "nodes",
+            "edges"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "name",
+        "evidence",
+        "lattice",
+        "topology"
+      ],
+      "type": "object"
+    },
     "instance_bound_case": {
       "additionalProperties": false,
       "properties": {
@@ -560,6 +765,14 @@
         "expected_code"
       ],
       "type": "object"
+    },
+    "int_pair": {
+      "items": {
+        "type": "integer"
+      },
+      "maxItems": 2,
+      "minItems": 2,
+      "type": "array"
     },
     "label_case": {
       "additionalProperties": false,
@@ -1774,6 +1987,12 @@
       },
       "type": "array"
     },
+    "live": {
+      "items": {
+        "$ref": "#/$defs/ice_live_case"
+      },
+      "type": "array"
+    },
     "metadata": {
       "items": {
         "$ref": "#/$defs/metadata_case"
@@ -1855,6 +2074,12 @@
     "streams": {
       "items": {
         "$ref": "#/$defs/stream_case"
+      },
+      "type": "array"
+    },
+    "structure": {
+      "items": {
+        "$ref": "#/$defs/ice_structure_case"
       },
       "type": "array"
     },

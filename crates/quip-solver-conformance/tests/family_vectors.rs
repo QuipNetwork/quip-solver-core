@@ -2611,3 +2611,20 @@ fn changed_registered_case_fails_the_pin() -> Result<(), String> {
     }
     Ok(())
 }
+
+// ---- ice structure vectors (ice_structure.json) ----
+
+#[test]
+fn ice_structure_fixture_matches_schema() -> Result<(), String> {
+    let doc: Value = serde_json::from_str(include_str!("../vectors/families/ice_structure.json"))
+        .map_err(|e| e.to_string())?;
+    validate(&schema()?, &doc)?;
+    match doc.get("provenance").and_then(Value::as_str) {
+        Some("specified") => {}
+        other => return Err(format!("provenance is {other:?}, expected specified")),
+    }
+    check_names_unique(&doc)?;
+    section(&doc, "structure").map(|_| ())?;
+    section(&doc, "live").map(|_| ())?;
+    Ok(())
+}

@@ -1,0 +1,23 @@
+{
+  "about": "Tiles from the research generator (NumPy PCG64 permutations, SciPy matching). Not output of quip/ice-glass. Valid-candidate evidence only, no parity.",
+  "bin_blake3": "335064ea3b092c6cd736d188f6c7dac99b03c6260f3c82b7a5d17c39401a0843",
+  "models": [
+    {
+      "cell": "ice-glass-r8",
+      "length_bytes": 14280,
+      "nonce": "e971748565fb320b36858afdf73fc91779d020cf04b15f789388b0f25b98615f",
+      "npz_blake3": "48c238ebc9d189fc742be7908293de5e717c3800351af81e55afe55feb522354",
+      "offset_bytes": 0,
+      "tiles": 1785
+    },
+    {
+      "cell": "ice-glass-r8",
+      "length_bytes": 14280,
+      "nonce": "f9b13936a44a41eb3e03e9e3655300c8e963984fc07c68981ae88f56987e243f",
+      "npz_blake3": "5f52419f6e50838978a8efd0bc13b18749aa7bfdb917afd20ce1455a07f90dce",
+      "offset_bytes": 14280,
+      "tiles": 1785
+    }
+  ],
+  "provenance": "archived-research"
+}
