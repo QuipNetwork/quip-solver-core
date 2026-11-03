@@ -2433,7 +2433,7 @@ fn check_layered_case(case: &Value) -> Result<(), String> {
 fn check_layered(doc: &Value) -> Result<(), String> {
     validate(&schema()?, doc)?;
     check_names_unique(doc)?;
-    for case in section(doc, "layered")? {
+    for case in section(doc, "cases")? {
         check_layered_case(case)?;
     }
     Ok(())
@@ -2533,7 +2533,7 @@ fn layered_vectors_recompute() -> Result<(), String> {
 
 #[test]
 fn layered_vectors_match_the_rust_construction() -> Result<(), String> {
-    for case in section(&layered_doc()?, "layered")? {
+    for case in section(&layered_doc()?, "cases")? {
         check_layered_against_rust(case)?;
     }
     Ok(())
@@ -2542,7 +2542,7 @@ fn layered_vectors_match_the_rust_construction() -> Result<(), String> {
 #[test]
 fn uniform_p_spec_skips_match_the_session_capture() -> Result<(), String> {
     let doc = layered_doc()?;
-    let case = find_named(&doc, "layered", "uniform-p-spec-sparse")?;
+    let case = find_named(&doc, "cases", "uniform-p-spec-sparse")?;
     let mut skipped = Vec::new();
     for entry in entries_of(case, "skipped")? {
         skipped.push(u64_decimal(entry, "index")?);
@@ -2554,7 +2554,7 @@ fn uniform_p_spec_skips_match_the_session_capture() -> Result<(), String> {
 #[test]
 fn changed_layered_coupling_fails() -> Result<(), String> {
     let doc = layered_doc()?;
-    let pointer = "/layered/0/instances/0/j/0";
+    let pointer = "/cases/0/instances/0/j/0";
     let was = doc
         .pointer(pointer)
         .and_then(Value::as_i64)
@@ -2579,7 +2579,7 @@ fn registered_cases(
         .map_err(|e| format!("{}: {e}", entry.vectors))?;
     let doc: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
     let mut cases = Vec::new();
-    for case in section(&doc, "layered")? {
+    for case in section(&doc, "cases")? {
         if str_field(case, "family_id")? == entry.family_id
             && u32_field(case, "revision")? == entry.revision
         {

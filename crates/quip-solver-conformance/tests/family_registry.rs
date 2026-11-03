@@ -42,7 +42,7 @@ fn registered_vector_docs(registry: &[RegistryEntry]) -> Result<Vec<Value>, Stri
 /// not in the registry.
 fn check_cases_are_registered(registry: &[RegistryEntry], docs: &[Value]) -> Result<(), String> {
     for doc in docs {
-        for case in layered_cases(doc)? {
+        for case in registered_section(doc)? {
             let (id, revision) = case_key(case)?;
             if !registry
                 .iter()
@@ -57,10 +57,10 @@ fn check_cases_are_registered(registry: &[RegistryEntry], docs: &[Value]) -> Res
     Ok(())
 }
 
-fn layered_cases(doc: &Value) -> Result<&Vec<Value>, String> {
-    doc.get("layered")
+fn registered_section(doc: &Value) -> Result<&Vec<Value>, String> {
+    doc.get("cases")
         .and_then(Value::as_array)
-        .ok_or_else(|| "no layered section".to_owned())
+        .ok_or_else(|| "no cases section".to_owned())
 }
 
 fn case_key(case: &Value) -> Result<(String, u32), String> {
@@ -140,7 +140,7 @@ fn every_registered_revision_has_vectors() -> Result<(), String> {
     for entry in &registry {
         let doc = vectors_of(entry)?;
         let mut found = false;
-        for case in layered_cases(&doc)? {
+        for case in registered_section(&doc)? {
             found |= case_key(case)? == (entry.family_id.clone(), entry.revision);
         }
         if !found {
@@ -167,7 +167,7 @@ fn an_unregistered_revision_in_a_registered_vectors_file_fails() -> Result<(), S
 fn status_does_not_change_the_descriptor_digest() -> Result<(), String> {
     for entry in &registry()? {
         let doc = vectors_of(entry)?;
-        for case in layered_cases(&doc)? {
+        for case in registered_section(&doc)? {
             if case_key(case)? != (entry.family_id.clone(), entry.revision) {
                 continue;
             }
@@ -696,7 +696,7 @@ fn quip_ids_in_vectors_and_contracts_are_registered() -> Result<(), String> {
         ids.push(first_value(&doc, "ID")?);
     }
     for doc in registered_vector_docs(&registry)? {
-        for case in layered_cases(&doc)? {
+        for case in registered_section(&doc)? {
             ids.push(case_key(case)?.0);
         }
     }

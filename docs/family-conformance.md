@@ -117,7 +117,7 @@ The checker lives in `quip_solver_conformance::families`.
 
 | Item | Use |
 |---|---|
-| `parse_vector_cases` | Reads the `layered` section of a vector file into `VectorCase` values |
+| `parse_vector_cases` | Reads the `cases` section of a vector file into `VectorCase` values |
 | `export_instances` | Generates the canonical instance of each nonce with a `Contract`, without sampling |
 | `check_case` | Exports every salt of a case and compares each salt in index order. It returns the first `CaseMismatch`. |
 | `compare` | Compares one generated salt with its `ExpectedSalt` by outcome, then bytes, then digest |
@@ -148,10 +148,10 @@ The tests in step 4 are in `crates/quip-solver-core/tests/family_registry_declar
    - `vectors_blake3`, the BLAKE3 of the canonical JSON of the array of the cases of the revision.
    Keep the entries sorted by `family_id` and then `revision`, with no repeat.
 
-   Put the cases of the revision in a top-level `layered` array of the vectors file.
+   Put the cases of the revision in a top-level `cases` array of the vectors file.
    Each case uses the case format of `layered.json`, including `params_hex` and `descriptor_digest`.
-   The checker, the `--family` gate, and the tests read only that section (`families::parse_vector_cases`, `layered_cases`, `registered_cases`).
-   A file with another section name fails with `no layered section`.
+   The checker, the `--family` gate, and the tests read only that section (`families::parse_vector_cases`, `registered_section`, `registered_cases`).
+   A file with another section name fails with `no cases section`.
    A different section name needs a change to all three functions together.
 
    To get the pin, run `registered_vectors_are_frozen` with a placeholder pin and copy the found value from the failure.

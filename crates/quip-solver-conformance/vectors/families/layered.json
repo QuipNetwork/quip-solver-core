@@ -4,7 +4,7 @@
     "The layered construction is a test construction. Both revisions are registered with status research, and neither is a production family. It checks generators and the conformance checker.",
     "Each instance is the Python port of LAYERED for one lease nonce. Rust tests regenerate it with ising-generators and compare the bytes."
   ],
-  "layered": [
+  "cases": [
     {
       "coefficient_bound_milli": 2000,
       "descriptor_digest": "37247f5b30fdb14a9ed73a6c30a748df0a7fe43b4f574c7d743c473bffcedaa3",
@@ -3423,7 +3423,7 @@
       "path": "conformance/family_oracle/__main__.py"
     },
     {
-      "blake3": "65f3753d9431171093a123c31e92ff568809b9af8a6ff91fcfd39bb9d261b379",
+      "blake3": "8a97327a79c40bcefc009904959ab077cebd1cbe2aa727191e99afbc289db023",
       "path": "conformance/family_oracle/build.py"
     },
     {

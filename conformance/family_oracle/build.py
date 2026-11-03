@@ -1699,7 +1699,7 @@ def build_layered() -> dict:
         "provenance": "test-construction",
         "about": _LAYERED_ABOUT,
         "sources": _sources(),
-        "layered": [
+        "cases": [
             _layered_case(
                 "uniform-p-spec-sparse", "vectors/uniform-field", _P_SPEC, 16
             ),

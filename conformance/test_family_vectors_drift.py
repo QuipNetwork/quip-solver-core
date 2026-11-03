@@ -191,7 +191,7 @@ def test_no_evidence_item_waits_for_a_finished_ticket():
 def test_layered_evidence_is_sc7():
     text = build.SPEC_PATH.read_text()
     table = set(re.findall(r"SC-7:([a-z0-9-]+)", text.split("## Traceability", 1)[1]))
-    tagged = [tag for case in _layered_doc()["layered"] for tag in case["evidence"]]
+    tagged = [tag for case in _layered_doc()["cases"] for tag in case["evidence"]]
     assert tagged
     for tag in tagged:
         assert tag.startswith("SC-7:")

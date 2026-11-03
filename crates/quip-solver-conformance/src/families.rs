@@ -235,7 +235,7 @@ fn parse_case(case: &Value, path: &str) -> Result<VectorCase, String> {
     })
 }
 
-/// Parse the `layered` section of a vector file such as `FAMILY_LAYERED`.
+/// Parse the `cases` section of a vector file such as `FAMILY_LAYERED`.
 ///
 /// # Errors
 ///
@@ -243,12 +243,12 @@ fn parse_case(case: &Value, path: &str) -> Result<VectorCase, String> {
 pub fn parse_vector_cases(json: &str) -> Result<Vec<VectorCase>, String> {
     let root: Value = serde_json::from_str(json).map_err(|e| format!("$: {e}"))?;
     let cases = root
-        .get("layered")
+        .get("cases")
         .and_then(Value::as_array)
-        .ok_or_else(|| "$.layered: missing array".to_owned())?;
+        .ok_or_else(|| "$.cases: missing array".to_owned())?;
     let mut parsed = Vec::new();
     for (i, case) in cases.iter().enumerate() {
-        parsed.push(parse_case(case, &format!("layered[{i}]"))?);
+        parsed.push(parse_case(case, &format!("cases[{i}]"))?);
     }
     Ok(parsed)
 }
