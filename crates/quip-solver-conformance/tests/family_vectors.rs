@@ -2754,7 +2754,7 @@ fn ice_glass_params_constants_match_the_vectors() -> Result<(), String> {
             &codec::hex_encode(&want),
         )?;
     }
-    compare(&doc, "case count", &cases.len(), &3)
+    compare(&doc, "case count", &cases.len(), &4)
 }
 
 #[test]

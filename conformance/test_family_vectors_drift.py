@@ -132,6 +132,16 @@ def test_ice_structure_evidence_is_sc8():
     assert set(tagged) == {"SC-8:ice-structure-vectors"}
 
 
+def test_ice_glass_cases_evidence_matches_the_registry():
+    registry = json.loads((build.FAMILIES_DIR / "registry.json").read_text())[
+        "registry"
+    ]
+    entry = next(e for e in registry if e["name"] == "quip/ice-glass@1")
+    tagged = {tag for case in _ice_doc()["cases"] for tag in case["evidence"]}
+    assert tagged
+    assert tagged == set(entry["evidence"])
+
+
 def test_canonical_json_is_sorted_compact_and_rejects_floats():
     assert build.canonical_json({"b": [1, "x"], "a": None}) == '{"a":null,"b":[1,"x"]}'
     with pytest.raises(TypeError):

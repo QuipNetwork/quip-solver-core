@@ -353,7 +353,7 @@ fn check_instance(params: &Params<'_>, instance: &Instance) -> Option<()> {
     let gauge = parse_gauge(gauge_payload, n)?;
     let edges = instance.edges();
 
-    let mut strong: BTreeSet<(u32, u32)> = BTreeSet::new();
+    let mut strong = vec![false; edges.len()];
     let mut slots = vec![0u8; n];
     for tile in &tiles {
         for pos in *tile {
@@ -361,9 +361,12 @@ fn check_instance(params: &Params<'_>, instance: &Instance) -> Option<()> {
             *slot = slot.checked_add(1).filter(|count| *count <= 2)?;
         }
         for pair in tile_edges(*tile) {
-            if edges.binary_search(&pair).is_err() || !strong.insert(pair) {
+            let at = edges.binary_search(&pair).ok()?;
+            let seen = strong.get_mut(at)?;
+            if *seen {
                 return None;
             }
+            *seen = true;
         }
     }
 
@@ -371,12 +374,12 @@ fn check_instance(params: &Params<'_>, instance: &Instance) -> Option<()> {
     if !all_zero || instance.j().len() != edges.len() {
         return None;
     }
-    for (edge, &coupling) in edges.iter().zip(instance.j()) {
+    for ((edge, &coupling), &is_strong) in edges.iter().zip(instance.j()).zip(&strong) {
         let (u, v) = *edge;
         let hidden = i64::from(coupling)
             .checked_mul(*gauge.get(usize::try_from(u).ok()?)?)?
             .checked_mul(*gauge.get(usize::try_from(v).ok()?)?)?;
-        let fits = if strong.contains(edge) {
+        let fits = if is_strong {
             hidden == i64::from(STRONG_MILLI)
         } else {
             hidden == glass || hidden == -glass

@@ -1994,11 +1994,15 @@ def _ice_glass_case(
 def _ice_glass_cases() -> list[dict]:
     z12 = ice.lattice(1, 2)
     damaged = _cut_edge(2, 2)
+    permuted = _permuted(*ice.lattice(2, 2))
     return [
         _ice_glass_case("ice-glass-adjacency-z12", (0, 0), 125, 4, *z12, "z12"),
         _ice_glass_case("ice-glass-zephyr-z12", (1, 2), 200, 4, *z12, "z12"),
         _ice_glass_case(
             "ice-glass-zephyr-z22-damaged", (2, 2), 125, 2, *damaged, "z22-cut-edge"
+        ),
+        _ice_glass_case(
+            "ice-glass-zephyr-z22-permuted", (2, 2), 125, 2, *permuted, "z22-permuted"
         ),
     ]
 

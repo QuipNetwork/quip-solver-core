@@ -201,6 +201,100 @@ fn admission_codes_follow_fam_47() {
     );
 }
 
+fn small_topology(nodes: Vec<u32>, edges: &[(u32, u32)]) -> BaseTopology {
+    BaseTopology::new(nodes, edges).expect("test topology is valid")
+}
+
+fn clique(nodes: [u32; 4]) -> Vec<(u32, u32)> {
+    let mut out = Vec::new();
+    for (i, &a) in nodes.iter().enumerate() {
+        for &b in &nodes[i + 1..] {
+            out.push((a, b));
+        }
+    }
+    out
+}
+
+fn union(parts: &[Vec<(u32, u32)>]) -> Vec<(u32, u32)> {
+    let set: BTreeSet<_> = parts.iter().flatten().copied().collect();
+    set.into_iter().collect()
+}
+
+fn adjacency_graph(edges: &[(u32, u32)]) -> BaseTopology {
+    let n = edges
+        .iter()
+        .map(|&(a, b)| a.max(b))
+        .max()
+        .map_or(0, |x| x + 1);
+    small_topology((0..n).collect(), edges)
+}
+
+#[test]
+fn every_structure_fault_is_code_12_and_a_wide_node_wins_with_13() {
+    // A node on three spine edges.
+    let mut around = Vec::new();
+    let mut next = 4;
+    for p in 1..=3 {
+        for _ in 0..2 {
+            around.push(clique([0, p, next, next + 1]));
+            next += 2;
+        }
+    }
+    // Two shared edges of one clique meet at node 0.
+    let conflict = union(&[
+        clique([0, 1, 2, 3]),
+        clique([0, 1, 4, 5]),
+        clique([0, 2, 6, 7]),
+    ]);
+    // A ring of five tiles: the spine graph is an odd cycle.
+    let ring: Vec<_> = (0..5u32)
+        .map(|i| {
+            let next = (i + 1) % 5;
+            clique([2 * i, 2 * i + 1, 2 * next, 2 * next + 1])
+        })
+        .collect();
+    let adjacency = params(0, 0, 125);
+    let zephyr = params(1, 1, 125);
+    let faults: Vec<(&str, &[u8], BaseTopology)> = vec![
+        (
+            "duplicate-edge",
+            &adjacency,
+            adjacency_graph(&[(0, 1), (1, 0)]),
+        ),
+        (
+            "not-zephyr-node",
+            &zephyr,
+            small_topology(vec![0, 12], &[(0, 12)]),
+        ),
+        (
+            "not-zephyr-coupler",
+            &zephyr,
+            small_topology(vec![0, 3], &[(3, 0)]),
+        ),
+        ("spine-conflict", &adjacency, adjacency_graph(&conflict)),
+        (
+            "membership-above-two",
+            &adjacency,
+            adjacency_graph(&union(&around)),
+        ),
+        ("not-bipartite", &adjacency, adjacency_graph(&union(&ring))),
+    ];
+    for (name, bytes, topology) in &faults {
+        assert_eq!(
+            bounds(&admitted(bytes).expect("admit"), topology),
+            Err(Code::TopologyIncompatible),
+            "{name}"
+        );
+    }
+    let mut wide: Vec<(u32, u32)> = (1..=33).map(|leaf| (0, leaf)).collect();
+    wide.push((1, 0));
+    let star = adjacency_graph(&wide);
+    assert_eq!(
+        bounds(&admitted(&adjacency).expect("admit"), &star),
+        Err(Code::BoundsExceeded)
+    );
+}
+
 #[test]
 fn gauge_hides_and_metadata_recovers_the_ice() {
     let topology = lattice_topology(2, 2);
