@@ -192,6 +192,16 @@ fn vector_cases_parse() -> Result<(), String> {
     if sizes != [16, 8, 8] {
         return Err(format!("salt counts {sizes:?}"));
     }
+    let names: Vec<&str> = cases.iter().map(|case| case.name.as_str()).collect();
+    if names
+        != [
+            "uniform-p-spec-sparse",
+            "uniform-l2-f0-sparse",
+            "restricted-p-spec-sparse",
+        ]
+    {
+        return Err(format!("case names {names:?}"));
+    }
     let sparse = case_named(&cases, "uniform-p-spec-sparse")?;
     if skipped_indexes(sparse) != [0, 3, 9, 13] {
         return Err(format!("skips {:?}", skipped_indexes(sparse)));
@@ -348,6 +358,7 @@ fn first_diff_names_each_component_in_fam_30_order() -> Result<(), String> {
         (365, Component::J, Some(1)),
         (441, Component::Offset, None),
         (449, Component::MetadataSectionCount, None),
+        (453, Component::MetadataSection, Some(0)),
         (457, Component::MetadataSection, Some(0)),
     ];
     for (offset, component, index) in rows {
@@ -500,5 +511,34 @@ fn faulty_oversize_fails_at_the_outcome() -> Result<(), String> {
         Ok(())
     } else {
         Err(format!("{:?} {}", mismatch.salt_index, mismatch.diff))
+    }
+}
+
+#[test]
+fn first_diff_survives_absurd_counts_and_lengths() -> Result<(), String> {
+    // Equal node counts of u32::MAX over a short input: the walk ends at Length.
+    let mut huge = vec![0_u8; 97];
+    huge.extend_from_slice(&u32::MAX.to_le_bytes());
+    let mut other = huge.clone();
+    other.push(1);
+    match first_diff(&huge, &other) {
+        Some(diff) if diff.component == Component::Length => {}
+        other => return Err(format!("absurd node count: {other:?}")),
+    }
+    // A metadata section length near u32::MAX on both sides.
+    let (_, canonical) = slot_one(&cases()?)?;
+    let mut long = canonical.clone();
+    long.get_mut(453..457)
+        .ok_or("no section length")?
+        .copy_from_slice(&(u32::MAX - 1).to_le_bytes());
+    match first_diff(&long, &long.clone()) {
+        Some(diff) if diff.component == Component::Length => {}
+        other => return Err(format!("equal absurd length: {other:?}")),
+    }
+    match first_diff(&canonical, &long) {
+        Some(diff) if diff.component == Component::MetadataSection && diff.index == Some(0) => {
+            Ok(())
+        }
+        other => Err(format!("absurd section length: {other:?}")),
     }
 }

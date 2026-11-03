@@ -4,7 +4,6 @@
 //! the first differing FAM-30 component.
 
 use core::fmt;
-use core::ops::Range;
 
 use ising_generators::descriptor::{admit, params_digest, AdvertisedLimits, Contract};
 use ising_generators::family::{admit_topology, generate_instance, BaseTopology, SaltFault};
@@ -319,6 +318,10 @@ fn le_u32(bytes: &[u8]) -> Option<u32> {
     bytes.first_chunk::<4>().map(|b| u32::from_le_bytes(*b))
 }
 
+fn show_u8(bytes: &[u8]) -> String {
+    bytes.first().map_or_else(String::new, u8::to_string)
+}
+
 fn show_u32(bytes: &[u8]) -> String {
     le_u32(bytes).map_or_else(|| hex(bytes), |v| v.to_string())
 }
@@ -358,15 +361,25 @@ impl Walk<'_> {
         }
     }
 
-    /// Compare `range` on both sides. A side too short for `range` is a
+    /// `a + b * c`, with an overflow reported as a `Length` difference. The
+    /// bytes are not trusted, so a count can name an offset beyond `usize`.
+    fn offset(&self, a: usize, b: usize, c: usize) -> Result<usize, FirstDiff> {
+        b.checked_mul(c)
+            .and_then(|product| a.checked_add(product))
+            .ok_or_else(|| self.length_diff())
+    }
+
+    /// Compare `width` bytes at `start` on both sides. A side too short is a
     /// `Length` difference.
     fn step(
         &self,
         component: Component,
         index: Option<usize>,
-        range: Range<usize>,
+        start: usize,
+        width: usize,
         show: fn(&[u8]) -> String,
     ) -> Result<(), FirstDiff> {
+        let range = start..self.offset(start, width, 1)?;
         let (Some(expected), Some(got)) = (self.expected.get(range.clone()), self.got.get(range))
         else {
             return Err(self.length_diff());
@@ -384,7 +397,7 @@ impl Walk<'_> {
 
     /// Compare a count at `at`, then return its value from the expected side.
     fn count(&self, component: Component, at: usize) -> Result<usize, FirstDiff> {
-        self.step(component, None, at..at + 4, show_u32)?;
+        self.step(component, None, at, 4, show_u32)?;
         self.expected
             .get(at..)
             .and_then(le_u32)
@@ -402,49 +415,45 @@ impl Walk<'_> {
         show: fn(&[u8]) -> String,
     ) -> Result<(), FirstDiff> {
         for i in 0..count {
-            let at = start + i * width;
-            self.step(component, Some(i), at..at + width, show)?;
+            self.step(
+                component,
+                Some(i),
+                self.offset(start, i, width)?,
+                width,
+                show,
+            )?;
         }
         Ok(())
     }
 
     fn metadata(&self, start: usize) -> Result<(), FirstDiff> {
-        self.step(
-            Component::MetadataSectionCount,
-            None,
-            start..start + 2,
-            |b| le_u16(b).map_or_else(|| hex(b), |v| v.to_string()),
-        )?;
+        self.step(Component::MetadataSectionCount, None, start, 2, |b| {
+            le_u16(b).map_or_else(|| hex(b), |v| v.to_string())
+        })?;
         let sections = self
             .expected
             .get(start..)
             .and_then(le_u16)
             .ok_or_else(|| self.length_diff())?;
-        let mut at = start + 2;
+        let mut at = self.offset(start, 2, 1)?;
         for section in 0..usize::from(sections) {
-            let span = |bytes: &[u8]| -> Option<usize> {
-                let length = le_u32(bytes.get(at + 2..)?)?;
-                at.checked_add(6)?
-                    .checked_add(usize::try_from(length).ok()?)
-            };
-            let (Some(expected_end), Some(got_end)) = (span(self.expected), span(self.got)) else {
-                return Err(self.length_diff());
-            };
-            let (Some(expected), Some(got)) = (
-                self.expected.get(at..expected_end),
-                self.got.get(at..got_end),
-            ) else {
-                return Err(self.length_diff());
-            };
-            if expected != got {
-                return Err(FirstDiff {
-                    component: Component::MetadataSection,
-                    index: Some(section),
-                    expected: hex(expected),
-                    got: hex(got),
-                });
-            }
-            at = expected_end;
+            // The header (kind, then length) is compared before the payload.
+            self.step(Component::MetadataSection, Some(section), at, 6, hex)?;
+            let length = self
+                .expected
+                .get(self.offset(at, 2, 1)?..)
+                .and_then(le_u32)
+                .and_then(|length| usize::try_from(length).ok())
+                .ok_or_else(|| self.length_diff())?;
+            let payload_at = self.offset(at, 6, 1)?;
+            self.step(
+                Component::MetadataSection,
+                Some(section),
+                payload_at,
+                length,
+                hex,
+            )?;
+            at = self.offset(payload_at, length, 1)?;
         }
         if self.expected.len() != at || self.got.len() != at {
             return Err(self.length_diff());
@@ -453,23 +462,23 @@ impl Walk<'_> {
     }
 
     fn run(&self) -> Result<(), FirstDiff> {
-        self.step(Component::Format, None, 0..1, hex)?;
-        self.step(Component::DescriptorDigest, None, 1..33, hex)?;
-        self.step(Component::TopologyOrderDigest, None, 33..65, hex)?;
-        self.step(Component::Nonce, None, 65..97, hex)?;
+        self.step(Component::Format, None, 0, 1, show_u8)?;
+        self.step(Component::DescriptorDigest, None, 1, 32, hex)?;
+        self.step(Component::TopologyOrderDigest, None, 33, 32, hex)?;
+        self.step(Component::Nonce, None, 65, 32, hex)?;
         let nodes = self.count(Component::NodeCount, 97)?;
         self.elements(Component::NodeIds, 101, nodes, 4, show_u32)?;
-        let edge_count_at = 101 + 4 * nodes;
+        let edge_count_at = self.offset(101, nodes, 4)?;
         let edges = self.count(Component::EdgeCount, edge_count_at)?;
-        let edges_at = edge_count_at + 4;
+        let edges_at = self.offset(edge_count_at, 1, 4)?;
         self.elements(Component::Edges, edges_at, edges, 8, show_edge)?;
-        let h_at = edges_at + 8 * edges;
+        let h_at = self.offset(edges_at, edges, 8)?;
         self.elements(Component::H, h_at, nodes, 4, show_i32)?;
-        let j_at = h_at + 4 * nodes;
+        let j_at = self.offset(h_at, nodes, 4)?;
         self.elements(Component::J, j_at, edges, 4, show_i32)?;
-        let offset_at = j_at + 4 * edges;
-        self.step(Component::Offset, None, offset_at..offset_at + 8, show_i64)?;
-        self.metadata(offset_at + 8)
+        let offset_at = self.offset(j_at, edges, 4)?;
+        self.step(Component::Offset, None, offset_at, 8, show_i64)?;
+        self.metadata(self.offset(offset_at, 8, 1)?)
     }
 }
 
