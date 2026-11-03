@@ -129,34 +129,61 @@ The third fault exceeds the declared size bounds.
 Each fault must fail at the component it changes.
 The first two faults keep the all-up energy of the honest instance, so a reported energy alone cannot expose them.
 
+## Registering a family
+
+SC-8 and later family tickets follow these steps for each revision.
+Each step names the tests that check it.
+
+1. Add one entry to `crates/quip-solver-conformance/vectors/families/registry.json`.
+   Set `status` to `research` (FAM-76). No other status exists for a new family.
+   Set `adapted_from` to the original family name, or to `null` if the family is not adapted.
+   Set `contract` to the path of the contract document and `vectors` to the path of the vectors file.
+   Set `vectors_blake3` to the BLAKE3 of the canonical JSON of the array of the cases of the revision in the vectors file.
+   `check_pin` in `family_vectors.rs` shows the computation.
+   `registered_vectors_are_frozen` checks the pin, and `registry_fixture_matches_schema` checks the entry shape.
+   A later change to those cases fails the pin and needs a new revision (FAM-08).
+2. Copy a contract from `docs/families/` and fill every FAM-38 item in the machine format.
+   `every_contract_has_every_fam_38_item`, `contracts_state_max_retries`, and `contracts_declare_a_constraint_class` check the items.
+   The Status item must equal the registry status.
+3. Add a `ReferenceRevision` for every revision that a solver lists in `generated_families`.
+   The gate cannot drive a listed revision that has none, so the `supported-revision` case fails (FAM-57).
+   `contract_tables_agree_with_the_reference_contracts` checks that the contract tables match the reference contract.
+4. Declare the registered contract in each solver example.
+   `every_advertised_quip_family_is_registered` and `no_example_generates_an_archived_revision` check the declarations.
+5. Run `make family-vectors` and commit the regenerated vectors with the reason for each changed value.
+
+All tests in steps 1 to 3 are in `crates/quip-solver-conformance/tests/family_registry.rs` and `family_vectors.rs`.
+The tests in step 4 are in `crates/quip-solver-core/tests/family_registry_declarations.rs`.
+
 ## Coverage
 
 Each row is one SC-7 check id from the Traceability section of the problem families contract.
-Status is `covered` or `not covered`.
-Coverage is `host-only` for a covered row and `none` for a row that is not covered.
+Status is `covered`, `review only`, or `not covered`.
+Coverage is `host-only` for a covered row and `none` for the other two.
 Evidence for a covered row lists tests as `path::test`.
+Evidence for a `review only` row starts with `review:` and names the document item that a reviewer reads. No test checks the rule.
 Evidence for a row that is not covered starts with `needs` and names the missing piece.
 Tests in `family_conformance.rs` keep this table equal to the contract.
 
 | Check id | Rule | Status | Coverage | Evidence |
 |---|---|---|---|---|
-| `quip-namespace-registry-only` | FAM-04 | not covered | none | needs the family registry and contracts (QUI-2019 MR3) |
+| `quip-namespace-registry-only` | FAM-04 | covered | host-only | `crates/quip-solver-conformance/tests/family_registry.rs::quip_ids_in_vectors_and_contracts_are_registered`, `crates/quip-solver-core/tests/family_registry_declarations.rs::every_advertised_quip_family_is_registered`. Scope: ids that claim a family. SC-2 vectors use `quip/*` ids as abstract identifiers. |
 | `capabilities-exact-revisions-only` | FAM-07 | covered | host-only | `crates/quip-solver-core/tests/family_drive.rs::the_default_path_passes_the_family_gate`, `crates/quip-solver-core/tests/family_drive.rs::the_local_path_passes_the_family_gate` (case `revision-plus-one`) |
-| `revision-vectors-frozen` | FAM-08 | not covered | none | needs the family registry and contracts (QUI-2019 MR3) |
-| `status-change-keeps-descriptor-digest` | FAM-09 | not covered | none | needs the family registry and contracts (QUI-2019 MR3) |
-| `schema-has-no-float-type` | FAM-14 | not covered | none | needs the family registry and contracts (QUI-2019 MR3) |
-| `schema-lists-tag-name-type-scale-bounds` | FAM-15 | not covered | none | needs the family registry and contracts (QUI-2019 MR3) |
-| `schema-holds-generator-inputs-only` | FAM-17 | not covered | none | needs the family registry and contracts (QUI-2019 MR3) |
+| `revision-vectors-frozen` | FAM-08 | covered | host-only | `crates/quip-solver-conformance/tests/family_vectors.rs::registered_vectors_are_frozen`, `crates/quip-solver-conformance/tests/family_vectors.rs::changed_registered_case_fails_the_pin` |
+| `status-change-keeps-descriptor-digest` | FAM-09 | covered | host-only | `crates/quip-solver-conformance/tests/family_registry.rs::status_does_not_change_the_descriptor_digest` |
+| `schema-has-no-float-type` | FAM-14 | covered | host-only | `crates/quip-solver-conformance/tests/family_registry.rs::parameter_schemas_use_no_float_type`, `crates/quip-solver-conformance/tests/family_registry.rs::a_float_schema_type_fails` |
+| `schema-lists-tag-name-type-scale-bounds` | FAM-15 | covered | host-only | `crates/quip-solver-conformance/tests/family_registry.rs::parameter_schemas_list_tag_name_type_scale_bounds`, `crates/quip-solver-conformance/tests/family_registry.rs::contract_tables_agree_with_the_reference_contracts` |
+| `schema-holds-generator-inputs-only` | FAM-17 | review only | none | review: the Parameter schema item of each contract in `docs/families/` (FAM-17) |
 | `contract-lists-substream-labels` | FAM-22 | covered | host-only | `crates/quip-solver-conformance/tests/family_conformance.rs::no_vector_nonce_opens_an_unlisted_label` |
-| `contract-states-max-retries` | FAM-25 | not covered | none | needs the family registry and contracts (QUI-2019 MR3) |
+| `contract-states-max-retries` | FAM-25 | covered | host-only | `crates/quip-solver-conformance/tests/family_registry.rs::contracts_state_max_retries` |
 | `verifier-rejects-no-instance-result` | FAM-26 | not covered | none | needs CO-2 and VAL-1 |
 | `verifier-rejects-overflow-salt-result` | FAM-27 | not covered | none | needs CO-2 and VAL-1 |
 | `generator-output-independent-of-host` | FAM-28 | covered | host-only | `crates/quip-solver-conformance/tests/family_conformance.rs::exported_instances_do_not_depend_on_thread_count` (thread count on one host) |
-| `contract-has-every-item` | FAM-38 | not covered | none | needs the family registry and contracts (QUI-2019 MR3) |
+| `contract-has-every-item` | FAM-38 | covered | host-only | `crates/quip-solver-conformance/tests/family_registry.rs::every_contract_has_every_fam_38_item`, `crates/quip-solver-conformance/tests/family_registry.rs::a_contract_missing_an_item_fails` |
 | `instance-within-declared-size-bounds` | FAM-38 | covered | host-only | `crates/quip-solver-conformance/tests/family_conformance.rs::generated_instances_stay_within_size_bounds`, `crates/quip-solver-conformance/tests/family_conformance.rs::faulty_oversize_fails_at_the_outcome` |
-| `contract-declares-constraint-class` | FAM-39 | not covered | none | needs the family registry and contracts (QUI-2019 MR3) |
-| `soft-defect-counter-diagnostic-only` | FAM-40 | not covered | none | needs the family registry and contracts (QUI-2019 MR3) |
-| `adapted-families-hard-separate-ids` | FAM-41 | not covered | none | needs the family registry and contracts (QUI-2019 MR3) |
+| `contract-declares-constraint-class` | FAM-39 | covered | host-only | `crates/quip-solver-conformance/tests/family_registry.rs::contracts_declare_a_constraint_class`, `crates/quip-solver-conformance/tests/family_registry.rs::a_hard_contract_without_constraints_fails` |
+| `soft-defect-counter-diagnostic-only` | FAM-40 | review only | none | review: the Constraint class item of each `soft` contract (FAM-40) |
+| `adapted-families-hard-separate-ids` | FAM-41 | covered | host-only | `crates/quip-solver-conformance/tests/family_registry.rs::adapted_families_are_hard_with_separate_ids`, `crates/quip-solver-conformance/tests/family_registry.rs::an_adapted_soft_family_fails`, `crates/quip-solver-conformance/tests/family_registry.rs::an_adapted_family_sharing_an_original_id_fails` |
 | `proto-existing-tags-unchanged` | FAM-44 | covered | host-only | `crates/quip-solver-conformance/tests/golden_wire.rs::canonical_encodings_match_the_fixture`, `crates/quip-solver-conformance/tests/golden_wire.rs::enum_numbers_match_the_fixture` |
 | `protocol-version-stays-2-with-families` | FAM-45 | covered | host-only | `crates/quip-solver-conformance/tests/golden_wire.rs::protocol_version_stays_two`, `crates/quip-solver-core/tests/family_drive.rs::the_default_path_passes_the_family_gate` (case `hello-protocol-version-2`) |
 | `lease-admission-degree-bound-too-large` | FAM-47 | covered | host-only | `crates/quip-solver-core/tests/family_drive.rs::the_default_path_passes_the_family_gate` (case `degree-bound-too-large`) |
@@ -167,7 +194,7 @@ Tests in `family_conformance.rs` keep this table equal to the contract.
 | `capability-tier-per-revision` | FAM-56 | covered | host-only | `crates/quip-solver-core/tests/family_session.rs::a_tier_applies_per_revision` |
 | `generated-family-passes-conformance` | FAM-57 | covered | host-only | `crates/quip-solver-conformance/tests/family_conformance.rs::reference_layered_passes_every_vector_case`, `crates/quip-solver-core/tests/family_drive.rs::the_default_path_passes_the_family_gate`, `crates/quip-solver-core/tests/family_drive.rs::the_local_path_passes_the_family_gate` |
 | `generators-lists-family-algorithm-iff-generated` | FAM-58 | covered | host-only | `crates/quip-solver-core/tests/family_capabilities.rs::generic_sampler_advertises_no_family`, `crates/quip-solver-core/tests/family_capabilities.rs::restricted_family_sampler_advertises_its_declaration`, `crates/quip-solver-core/tests/family_drive.rs::the_default_path_passes_the_family_gate` |
-| `archived-revision-not-generated` | FAM-59 | not covered | none | needs the family registry and contracts (QUI-2019 MR3) |
+| `archived-revision-not-generated` | FAM-59 | covered | host-only | `crates/quip-solver-core/tests/family_registry_declarations.rs::no_example_generates_an_archived_revision` |
 | `capabilities-json-family-fields` | FAM-63 | covered | host-only | `crates/quip-solver-core/tests/family_capabilities.rs::cli_prints_the_family_fields`, `crates/quip-solver-core/tests/family_capabilities.rs::cli_and_session_answers_agree` |
 | `coordinator-empty-nonce-only-archived` | FAM-66 | not covered | none | needs CO-2 |
 | `accepted-solver-checks-instance-digest-before-structure` | FAM-68 | covered | host-only | `crates/quip-solver-core/tests/family_session.rs::explicit_job_vectors_hold_in_the_session`, `crates/quip-solver-core/tests/family_session.rs::binding_field_lengths_follow_the_vectors` |
@@ -181,7 +208,7 @@ Tests in `family_conformance.rs` keep this table equal to the contract.
 | `pin-failure-reasons-no-fallback` | FAM-75 | not covered | none | needs CO-2 |
 | `pin-limits-exceeded-size-bounds` | FAM-75 | not covered | none | needs CO-2 |
 | `research-family-never-in-pow-lease` | FAM-76 | not covered | none | needs CO-2 |
-| `adapted-families-research-status` | FAM-77 | not covered | none | needs the family registry and contracts (QUI-2019 MR3) |
+| `adapted-families-research-status` | FAM-77 | covered | host-only | `crates/quip-solver-conformance/tests/family_registry.rs::adapted_families_have_research_status`, `crates/quip-solver-conformance/tests/family_registry.rs::an_adapted_family_outside_research_fails` |
 | `archived-revision-explicit-jobs-only` | FAM-78 | not covered | none | needs CO-2 |
 | `pow-descriptor-from-chain-state` | FAM-79 | not covered | none | needs VAL-2 |
 
@@ -192,3 +219,6 @@ This repository has no device generator.
 The gate sees the wire only.
 It cannot see the instance a local generator built, so condition 2 checks bytes through the library.
 `exported_instances_do_not_depend_on_thread_count` varies the thread count on one host only.
+`quip-namespace-registry-only` checks the ids that claim a family.
+The SC-2 vectors use `quip/*` ids as abstract identifiers, and the check does not apply to them.
+Two rows are `review only`. A reviewer reads the contract item that each row names, because no test can judge it.

@@ -757,7 +757,11 @@ fn coverage_rows_follow_the_status_rules() -> Result<(), String> {
     let rows = coverage_rows()?;
     for row in &rows {
         let (coverage, evidence_ok) = match row.status.as_str() {
-            "covered" => ("host-only", !row.evidence.starts_with("needs ")),
+            "covered" => (
+                "host-only",
+                !row.evidence.starts_with("needs ") && !row.evidence.starts_with("review: "),
+            ),
+            "review only" => ("none", row.evidence.starts_with("review: ")),
             "not covered" => ("none", row.evidence.starts_with("needs ")),
             other => return Err(format!("{}: unknown status `{other}`", row.id)),
         };
@@ -774,11 +778,11 @@ fn coverage_rows_follow_the_status_rules() -> Result<(), String> {
             ));
         }
     }
-    let covered = rows.iter().filter(|row| row.status == "covered").count();
-    if covered != 14 || rows.len() - covered != 30 {
+    let count = |status: &str| rows.iter().filter(|row| row.status == status).count();
+    let (covered, review, missing) = (count("covered"), count("review only"), count("not covered"));
+    if (covered, review, missing) != (25, 2, 17) {
         return Err(format!(
-            "expected 14 covered and 30 not covered, found {covered} and {}",
-            rows.len() - covered
+            "expected 25 covered, 2 review only, and 17 not covered, found {covered}, {review}, and {missing}"
         ));
     }
     Ok(())

@@ -62,9 +62,15 @@ encodings do not change.
 - `families::layered::{P_SPEC, P_L2_F0, P_L3_F0, P_F5000}`.
 - `docs/family-conformance.md`. It defines the FAM-57 gate and the coverage of
   the 44 SC-7 check ids.
+- `vectors/families/registry.json` and `FAMILY_REGISTRY`, the family registry. Each
+  entry pins the vectors of a revision with a BLAKE3 hash.
+- `families::registry::{Status, RegistryEntry, parse_registry, unregistered_quip_ids,
+  archived_among}`.
+- The contracts in `docs/families/`, one for each registered revision.
 
 ### Changed
 
+- `mock_sampler_families` declares the registered `vectors/uniform-field` contract.
 - Section 6 of `SPEC.md` adds the family gate to the conformance definition.
 - A solver that lists a pair in `accepted_families` gets the binding of an explicit
   job checked in FAM-65 order, after the plain checks and before `max_reads`. A
