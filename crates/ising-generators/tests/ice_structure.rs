@@ -664,6 +664,27 @@ fn check_structure_case(case: &Value) {
     }
 }
 
+/// Forty disjoint complete graphs on 33 nodes (degree 32) hold 21120 edges and
+/// far more than 5280 four-cliques, so the tile count is above `edges / 4` and
+/// the search stops with a spine conflict.
+#[test]
+fn dense_cliques_fail_fast_with_spine_conflict() {
+    let mut edges = Vec::new();
+    for copy in 0..40u32 {
+        let base = 33 * copy;
+        for a in 0..33 {
+            for b in (a + 1)..33 {
+                edges.push((base + a, base + b));
+            }
+        }
+    }
+    let base = adjacency_graph(&edges);
+    assert_eq!(
+        candidates(Lattice::Adjacency, &base).unwrap_err(),
+        StructureError::SpineConflict
+    );
+}
+
 #[test]
 fn structure_vectors_match() {
     let doc = common::parse(common::STRUCTURE_JSON);

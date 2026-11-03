@@ -294,7 +294,15 @@ fn zephyr_tiles(
 }
 
 /// Adjacency mode: every 4-clique `a < b < c < d`.
-fn adjacency_tiles(lists: &[Vec<u32>]) -> Vec<Tile> {
+///
+/// The search stops with [`StructureError::SpineConflict`] once it has found
+/// more than `edge_count / 4` tiles. Without a spine conflict, each tile
+/// shares at most its 2 spine edges with other tiles, so it owns at least 4 of
+/// its 6 edges alone and `4 * tiles <= edges`. A larger count must therefore
+/// end in a spine conflict, and the order of checks makes `NoCandidates`
+/// impossible here.
+fn adjacency_tiles(lists: &[Vec<u32>], edge_count: usize) -> Result<Vec<Tile>, StructureError> {
+    let cap = edge_count / 4;
     let mut tiles = Vec::new();
     for (a, na) in (0u32..).zip(lists) {
         for &b in na.iter().filter(|&&b| b > a) {
@@ -306,6 +314,9 @@ fn adjacency_tiles(lists: &[Vec<u32>]) -> Vec<Tile> {
             for (i, &c) in above.iter().enumerate() {
                 for &d in above.iter().skip(i + 1) {
                     if neighbours(lists, c).binary_search(&d).is_ok() {
+                        if tiles.len() >= cap {
+                            return Err(StructureError::SpineConflict);
+                        }
                         tiles.push(Tile {
                             nodes: [a, b, c, d],
                         });
@@ -314,7 +325,7 @@ fn adjacency_tiles(lists: &[Vec<u32>]) -> Vec<Tile> {
             }
         }
     }
-    tiles
+    Ok(tiles)
 }
 
 /// The six edges of a tile and its three perfect matchings.
@@ -380,7 +391,7 @@ pub fn candidates(lattice: Lattice, topology: &BaseTopology) -> Result<Candidate
     let lists = neighbour_lists(topology.node_ids().len(), &edges)?;
     let mut found: Found = match &coordinates {
         Some(coordinates) => zephyr_tiles(coordinates, &edges, &lists)?,
-        None => adjacency_tiles(&lists)
+        None => adjacency_tiles(&lists, edges.len())?
             .into_iter()
             .map(|tile| (tile, None))
             .collect(),
