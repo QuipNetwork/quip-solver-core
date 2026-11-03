@@ -4,10 +4,45 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
+use crate::descriptor::{Params, SizeBounds, TopologyStats, Value};
 use crate::family::{BaseTopology, Streams};
-use crate::ice::{candidates, select, sides, Lattice, Tile};
+use crate::ice::{candidates, select, sides, Lattice, StructureError, Tile, MAX_DEGREE};
 use crate::rng::shuffle;
 use crate::Code;
+
+/// Tag of the Zephyr grid size parameter.
+const TAG_M: u16 = 1;
+/// Tag of the Zephyr tile size parameter.
+const TAG_T: u16 = 2;
+
+/// The lattice the parameters name.
+pub(crate) fn lattice(params: &Params<'_>) -> Result<Lattice, StructureError> {
+    let m = match params.get(TAG_M) {
+        Some(Value::Unsigned(m)) => u16::try_from(m).ok(),
+        _ => None,
+    };
+    let t = match params.get(TAG_T) {
+        Some(Value::Unsigned(t)) => u8::try_from(t).ok(),
+        _ => None,
+    };
+    match (m, t) {
+        (Some(m), Some(t)) => Lattice::from_shape(m, t),
+        _ => Err(StructureError::Overflow),
+    }
+}
+
+/// The sizes of an instance: the topology itself. A degree above the limit
+/// gives [`Code::BoundsExceeded`].
+pub(crate) fn topology_bounds(stats: &TopologyStats) -> Result<SizeBounds, Code> {
+    if stats.max_degree > MAX_DEGREE {
+        return Err(Code::BoundsExceeded);
+    }
+    Ok(SizeBounds {
+        nodes: stats.n_nodes,
+        edges: stats.n_edges,
+        degree: stats.max_degree,
+    })
+}
 
 /// A shuffled `0..len`, drawn from the stream `label`.
 pub(crate) fn shuffled_order(

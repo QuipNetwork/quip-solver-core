@@ -14,10 +14,10 @@ use core::num::NonZeroU32;
 use crate::descriptor::{Contract, FieldSpec, Params, SizeBounds, TopologyStats, Value, ValueType};
 use crate::family::{BaseTopology, Construction, InstanceBody, Streams};
 use crate::ice::build::{
-    mark_tiles, parse_tiles, region, sections, select_tiles, sorted_edges, tile_edges,
-    tiles_payload, Reader,
+    lattice, mark_tiles, parse_tiles, region, sections, select_tiles, sorted_edges, tile_edges,
+    tiles_payload, topology_bounds, Reader,
 };
-use crate::ice::{candidates, Lattice, StructureError, Tile, MAX_DEGREE};
+use crate::ice::{candidates, StructureError, Tile};
 use crate::instance::{Instance, InstanceLimits};
 use crate::rng::uniform;
 use crate::Code;
@@ -47,10 +47,6 @@ pub const ICE_GLASS_SCHEMA: &[FieldSpec] = &[
     },
 ];
 
-/// Tag of the Zephyr grid size parameter.
-const TAG_M: u16 = 1;
-/// Tag of the Zephyr tile size parameter.
-const TAG_T: u16 = 2;
 /// Tag of the glass coupling magnitude parameter.
 const TAG_GLASS: u16 = 3;
 /// Metadata kind of the tile list.
@@ -94,30 +90,7 @@ pub const ICE_GLASS_V1: Contract = Contract {
 
 /// The sizes of an instance: the topology itself.
 fn ice_glass_size_bounds(_: &Params<'_>, stats: &TopologyStats) -> Result<SizeBounds, Code> {
-    if stats.max_degree > MAX_DEGREE {
-        return Err(Code::BoundsExceeded);
-    }
-    Ok(SizeBounds {
-        nodes: stats.n_nodes,
-        edges: stats.n_edges,
-        degree: stats.max_degree,
-    })
-}
-
-/// The lattice the parameters name.
-fn lattice(params: &Params<'_>) -> Result<Lattice, StructureError> {
-    let m = match params.get(TAG_M) {
-        Some(Value::Unsigned(m)) => u16::try_from(m).ok(),
-        _ => None,
-    };
-    let t = match params.get(TAG_T) {
-        Some(Value::Unsigned(t)) => u8::try_from(t).ok(),
-        _ => None,
-    };
-    match (m, t) {
-        (Some(m), Some(t)) => Lattice::from_shape(m, t),
-        _ => Err(StructureError::Overflow),
-    }
+    topology_bounds(stats)
 }
 
 /// The glass magnitude, `None` when the parameter is missing or out of range.

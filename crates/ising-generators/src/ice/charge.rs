@@ -18,11 +18,11 @@ use core::num::NonZeroU32;
 use crate::descriptor::{Contract, FieldSpec, Params, SizeBounds, TopologyStats, Value, ValueType};
 use crate::family::{BaseTopology, Construction, InstanceBody, Streams};
 use crate::ice::build::{
-    gauges_payload, mark_tiles, parse_gauges, parse_tiles, region, sections, select_tiles,
-    sorted_edges, tiles_payload, Reader,
+    gauges_payload, lattice, mark_tiles, parse_gauges, parse_tiles, region, sections, select_tiles,
+    sorted_edges, tiles_payload, topology_bounds, Reader,
 };
 use crate::ice::twisted_dimer::Recipe;
-use crate::ice::{candidates, Lattice, StructureError, MAX_DEGREE};
+use crate::ice::{candidates, StructureError};
 use crate::instance::{Instance, InstanceLimits};
 use crate::rng::uniform;
 use crate::Code;
@@ -64,10 +64,6 @@ pub const CHARGED_ICE_SCHEMA: &[FieldSpec] = &[
     },
 ];
 
-/// Tag of the Zephyr grid size parameter.
-const TAG_M: u16 = 1;
-/// Tag of the Zephyr tile size parameter.
-const TAG_T: u16 = 2;
 /// Tag of the penalty scale parameter.
 const TAG_SCALE: u16 = 3;
 /// Tag of the background magnitude parameter.
@@ -135,30 +131,7 @@ pub const ICE_CHARGE_RECIPE: Recipe = Recipe {
 
 /// The sizes of an instance: the topology itself.
 fn charged_ice_size_bounds(_: &Params<'_>, stats: &TopologyStats) -> Result<SizeBounds, Code> {
-    if stats.max_degree > MAX_DEGREE {
-        return Err(Code::BoundsExceeded);
-    }
-    Ok(SizeBounds {
-        nodes: stats.n_nodes,
-        edges: stats.n_edges,
-        degree: stats.max_degree,
-    })
-}
-
-/// The lattice the parameters name.
-fn lattice(params: &Params<'_>) -> Result<Lattice, StructureError> {
-    let m = match params.get(TAG_M) {
-        Some(Value::Unsigned(m)) => u16::try_from(m).ok(),
-        _ => None,
-    };
-    let t = match params.get(TAG_T) {
-        Some(Value::Unsigned(t)) => u8::try_from(t).ok(),
-        _ => None,
-    };
-    match (m, t) {
-        (Some(m), Some(t)) => Lattice::from_shape(m, t),
-        _ => Err(StructureError::Overflow),
-    }
+    topology_bounds(stats)
 }
 
 /// An unsigned parameter as an `i32`, `None` when missing or out of range.
@@ -362,17 +335,15 @@ fn check_metadata(params: &Params<'_>, instance: &Instance) -> bool {
     check_instance(params, instance).is_some()
 }
 
-/// `Some` when the instance is a valid charged-ice instance.
-fn check_instance(params: &Params<'_>, instance: &Instance) -> Option<()> {
+/// The decoded tiles, gauges, and charges when the instance is a valid
+/// charged-ice instance, `None` otherwise.
+fn check_instance(params: &Params<'_>, instance: &Instance) -> Option<Decoded> {
     let scale = milli(params, TAG_SCALE)?;
     let background = milli(params, TAG_BACKGROUND)?;
     let n = instance.node_ids().len();
     let (tiles, gauges, charges) = decode(instance)?;
     let edges = instance.edges();
     let js = instance.j();
-    if js.len() != edges.len() {
-        return None;
-    }
 
     let (want_h, want_offset) = expected_fields(&tiles, &gauges, &charges, scale, n)?;
     if instance.h() != want_h.as_slice() || instance.offset_milli() != want_offset {
@@ -393,17 +364,16 @@ fn check_instance(params: &Params<'_>, instance: &Instance) -> Option<()> {
             return None;
         }
     }
-    Some(())
+    Some((tiles, gauges, charges))
 }
 
 /// Tiles whose charge `sum g_i s_i` differs from `q_t`, for a spin state of the
-/// instance. `None` for a malformed instance or a state of the wrong length or
+/// instance. `None` for an instance that fails the family validation or a state of the wrong length or
 /// with a value other than `+1` or `-1`. This is information only and never
 /// part of acceptance.
 #[must_use]
 pub fn charge_defects(params: &Params<'_>, instance: &Instance, spins: &[i8]) -> Option<u32> {
-    let _scale = milli(params, TAG_SCALE)?;
-    let (tiles, gauges, charges) = decode(instance)?;
+    let (tiles, gauges, charges) = check_instance(params, instance)?;
     if spins.len() != instance.node_ids().len() || spins.iter().any(|&s| s != 1 && s != -1) {
         return None;
     }

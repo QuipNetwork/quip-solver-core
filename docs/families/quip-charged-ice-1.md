@@ -114,7 +114,7 @@ The recipe has `zephyr_m` 12 and `zephyr_t` 4.
 
 The function `ising_generators::ice::charge_defects` counts the tiles whose charge `sum_i g_i s_i` differs from `q_t` for a spin state of the instance.
 The result is information only. It never decides acceptance, and no check in this contract uses it.
-The function gives no value for a malformed instance, for a state of the wrong length, or for a state with a value other than `+1` or `-1`.
+The function runs `check_metadata` on the instance first. It gives no value for an instance that fails that check, for a state of the wrong length, or for a state with a value other than `+1` or `-1`.
 The vectors record the count for each of the four spin states of every salt.
 
 ### Tile structure
@@ -171,12 +171,13 @@ This family has no feasibility constraints. Every spin assignment is a valid ans
 |---|---|
 | each `\|h\|` | 1000 milli |
 | each `\|J\|` | 250 milli for a tile edge and 999 milli for a background edge |
-| the offset | 1000 milli for each tile |
+| the offset | 1073741824 milli (2^30) in total |
 | nodes | 131072 |
 | edges | 2097152 |
 | metadata bytes | 8388608 |
 | max degree of the base topology | 32 |
 
+The total offset limit is the bound that a verifier applies. A tile adds at most `4 A`, which is 1000 milli at `A = 250`, to the offset. This per-tile size follows from the offset formula and is not a separate limit.
 A node is in at most 2 tiles. Each tile adds at most `2 * A` to `|h|` of its node, so `|h|` is at most `4 * A`, which is 1000 at `A = 250`.
 The instance limits are 1000 for each coefficient. The largest coupling has a size of 999, so no product overflows `i32`.
 A base topology with a degree of more than 32 returns code 13 at size bounds. This keeps the tile search bounded (FAM-38).
