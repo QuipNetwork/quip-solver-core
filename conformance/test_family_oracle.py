@@ -659,7 +659,10 @@ def test_ice_coordinates_invert_the_linear_id():
 
 
 def test_ice_live_blob_gives_the_pinned_counts_and_digest():
-    body = topology_blob.decode(build.LIVE_BLOB_PATH.read_bytes())
+    live_cases = json.loads(build.ICE_STRUCTURE_PATH.read_text())["live"]
+    paths = {(build.FAMILIES_DIR / case["topology"]).resolve() for case in live_cases}
+    assert paths == {build.LIVE_BLOB_PATH.resolve()}
+    body = topology_blob.decode(paths.pop().read_bytes())
     assert body["kind"] == "zephyr-removed"
     live = topology_blob.expand(body)
     nodes, edges = live["nodes"], live["edges"]

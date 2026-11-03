@@ -9,9 +9,6 @@
 use ising_generators::family::BaseTopology;
 use serde_json::Value;
 
-/// The reference to the live topology file, as a vectors file holds it.
-pub(crate) const LIVE_REFERENCE: &str = "../topologies/zephyr-z12t4-live.bin.gz";
-
 /// The sidecar of the archived tiles: provenance, digest, and per-model offsets.
 pub(crate) const ARCHIVED_JSON: &str =
     include_str!("../../../quip-solver-conformance/vectors/families/ice/archived-tiles.json");
@@ -152,14 +149,36 @@ pub(crate) fn seed(text: &str) -> [u8; 32] {
 ///
 /// When the index has no live entry.
 pub(crate) fn live_entry() -> Value {
-    let index = parse(quip_solver_conformance::vectors::TOPOLOGY_INDEX);
+    let file = live_reference()
+        .rsplit('/')
+        .next()
+        .expect("a file name")
+        .to_owned();
+    let index = parse(quip_solver_conformance::TOPOLOGY_INDEX);
     index
         .as_array()
         .expect("the index is an array")
         .iter()
-        .find(|entry| text(entry, "file") == "zephyr-z12t4-live.bin.gz")
+        .find(|entry| text(entry, "file") == file)
         .expect("the index lists the live topology")
         .clone()
+}
+
+/// The reference to the live topology file, read from the `live` cases of the
+/// structure vectors. Both cases name the same file.
+///
+/// # Panics
+///
+/// When the live cases are missing or name different files.
+pub(crate) fn live_reference() -> String {
+    let doc = parse(STRUCTURE_JSON);
+    let references: Vec<&str> = array(&doc, "live")
+        .iter()
+        .map(|case| text(case, "topology"))
+        .collect();
+    let first = *references.first().expect("a live case");
+    assert!(references.iter().all(|r| *r == first), "one live file");
+    first.to_owned()
 }
 
 /// The live z(12, 4) topology, decoded from its file (kind 1).
@@ -168,7 +187,7 @@ pub(crate) fn live_entry() -> Value {
 ///
 /// When the file does not decode or the topology is invalid.
 pub(crate) fn live_topology() -> BaseTopology {
-    let stored = quip_solver_conformance::vectors::topology(LIVE_REFERENCE).expect("live file");
+    let stored = quip_solver_conformance::topology(&live_reference()).expect("live file");
     BaseTopology::new(stored.nodes, &stored.edges).expect("live topology")
 }
 

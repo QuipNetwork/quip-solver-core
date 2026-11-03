@@ -55,11 +55,38 @@ def test_topology_index_matches_oracle():
     assert text == build.INDEX_PATH.read_text()
 
 
+def test_file_matches_compares_payloads_not_compressed_bytes(tmp_path):
+    data = build.topology_blob.encode(
+        {"kind": "explicit", "nodes": [1, 2], "edges": [[1, 2]]}
+    )
+    path = tmp_path / "x.bin.gz"
+    path.write_bytes(data)
+    assert build.file_matches(path, data)
+    # The same payload in another DEFLATE stream (stored, not compressed).
+    payload = build.topology_blob.decompress(data)
+    stored = (
+        data[:10]
+        + b"\x01"
+        + len(payload).to_bytes(2, "little")
+        + (len(payload) ^ 0xFFFF).to_bytes(2, "little")
+        + payload
+        + data[-8:]
+    )
+    assert stored != data
+    path.write_bytes(stored)
+    assert build.file_matches(path, data)
+    path.write_bytes(data[:-1])
+    assert not build.file_matches(path, data)
+    other = build.topology_blob.encode({"kind": "explicit", "nodes": [1], "edges": []})
+    assert not build.file_matches(path, other)
+
+
 def test_topology_blobs_match_oracle():
     blobs = build.topology_blobs()
     assert blobs
     for path, data in blobs.items():
-        assert path.read_bytes() == data, path.name
+        # Payloads, not compressed bytes: another zlib build gives other DEFLATE bytes.
+        assert build.file_matches(path, data), path.name
 
 
 def test_topology_directory_holds_only_known_files():
@@ -86,6 +113,9 @@ def test_every_json_topology_reference_names_an_indexed_file():
     for load in (_core_doc, _layered_doc, _ice_doc):
         walk(load())
     assert refs
+    # Every topology file is referenced by a JSON file and indexed.
+    names = {(build.FAMILIES_DIR / ref).resolve().name for ref in refs}
+    assert names == index == {p.name for p in build.TOPOLOGIES_DIR.glob("*.bin.gz")}
     for ref in refs:
         target = (build.FAMILIES_DIR / ref).resolve()
         assert target.parent == build.TOPOLOGIES_DIR.resolve(), ref

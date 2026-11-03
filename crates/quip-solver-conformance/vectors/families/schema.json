@@ -390,6 +390,9 @@
             "$ref": "#/$defs/ice_live_selection"
           },
           "type": "array"
+        },
+        "topology": {
+          "$ref": "#/$defs/topology_ref"
         }
       },
       "required": [
@@ -399,7 +402,8 @@
         "free",
         "left",
         "right",
-        "selections"
+        "selections",
+        "topology"
       ],
       "type": "object"
     },
@@ -1776,8 +1780,8 @@
       "type": "object"
     },
     "topology_ref": {
-      "$comment": "A path to a topology file, relative to the directory of the referencing JSON file.",
-      "minLength": 1,
+      "$comment": "A path to a topology file, relative to vectors/families/, the only directory that references topologies.",
+      "pattern": "^\\.\\./topologies/[a-z0-9-]+\\.bin\\.gz$",
       "type": "string"
     },
     "u64s": {

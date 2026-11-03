@@ -620,8 +620,8 @@ fn check_structure_case(case: &Value) {
         u16::try_from(number(lattice, "m")).expect("m"),
         u8::try_from(number(lattice, "t")).expect("t"),
     );
-    let stored = quip_solver_conformance::vectors::topology(text(case, "topology"))
-        .expect("the case topology file");
+    let stored =
+        quip_solver_conformance::topology(text(case, "topology")).expect("the case topology file");
     let base = topology(stored.nodes, &stored.edges);
     let result = shape.and_then(|lattice| {
         let found = candidates(lattice, &base)?;

@@ -713,7 +713,7 @@ fn topology_vectors() -> Result<(), String> {
     let mut sparse = Vec::new();
     for case in section(&doc, "topologies")? {
         let name = str_field(case, "name")?;
-        let stored = quip_solver_conformance::vectors::topology(str_field(case, "topology")?)
+        let stored = quip_solver_conformance::topology(str_field(case, "topology")?)
             .map_err(|e| e.to_string())?;
         let (nodes, edges) = (stored.nodes, stored.edges);
         let got = topology_order_digest(&nodes, &edges).ok_or_else(|| format!("{name}: None"))?;

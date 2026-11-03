@@ -755,6 +755,26 @@ def build_topology_index() -> dict:
     return sorted(entries, key=lambda entry: entry["name"])
 
 
+def file_matches(path: Path, data: bytes) -> bool:
+    """Whether the file at `path` holds `data`.
+
+    A topology file matches when its payload matches. Other zlib builds give
+    other DEFLATE bytes for the same payload, so compressed bytes never decide.
+    The committed file must also pass the reader rules.
+    """
+    if not path.exists():
+        return False
+    current = path.read_bytes()
+    if path.name.endswith(".bin.gz"):
+        try:
+            payload = topology_blob.decompress(current)
+            topology_blob.decode_payload(payload)
+        except topology_blob.BlobError:
+            return False
+        return payload == topology_blob.decompress(data)
+    return current == data
+
+
 def targets() -> dict[Path, bytes]:
     """Every file `write` produces, by path. The live topology file is an input."""
     texts = {
@@ -1885,6 +1905,7 @@ def _live_case(mode: str, nodes: list[int], edges: list[tuple[int, int]]) -> dic
     return _case(
         mode,
         _sc8(*_SC8_EVIDENCE),
+        topology=f"../topologies/{_topology_file(LIVE_NAME)}",
         candidates=len(tiles),
         free=sum(1 for s in spines if s is None),
         left=len(left),

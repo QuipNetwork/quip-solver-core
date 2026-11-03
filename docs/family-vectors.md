@@ -45,6 +45,8 @@ Each one is a file under `crates/quip-solver-conformance/vectors/topologies/`, i
 A topology field in a vectors file holds a string path that starts at the directory of that file. One path is `../topologies/t-sparse.bin.gz`.
 A file takes the name of the first case that uses it, in the order `core.json`, `layered.json`, `ice_structure.json`.
 The T_SPARSE file is `t-sparse.bin.gz`.
+A path starts at `vectors/families/`, the only directory with topology references today.
+Each file in `topologies/` has an index entry. A vectors file refers to it.
 The index entry of the live topology also holds `sources`, with the SHA-256 of the external specification file that the rebuild matches.
 The oracle writes every topology file except the live one, and it writes `index.json`.
 The live file holds archived research data, and the oracle reads it.

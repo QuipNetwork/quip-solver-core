@@ -4,14 +4,15 @@
 //! `description`), `$defs`, `$ref` to `#/$defs/<name>`, `type`, `properties`,
 //! `required`, `additionalProperties: false`, `items`, `minItems`, `maxItems`,
 //! `enum`, `const`, `minLength`, `maxLength`, `minimum`, `maximum`,
-//! `contentEncoding: "base16"`, and the two `pattern` strings for decimal
-//! `u64` and `i64` values. `check_keywords` rejects everything else, so a new
+//! `contentEncoding: "base16"`, and the three `pattern` strings for decimal
+//! `u64` and `i64` values and for topology file references. `check_keywords` rejects everything else, so a new
 //! keyword cannot pass through this validator unchecked.
 
 use serde_json::{Map, Value};
 
 const U64_PATTERN: &str = "^(0|[1-9][0-9]*)$";
 const I64_PATTERN: &str = "^(0|-?[1-9][0-9]*)$";
+const TOPOLOGY_PATTERN: &str = r"^\.\./topologies/[a-z0-9-]+\.bin\.gz$";
 const TYPE_NAMES: [&str; 6] = ["object", "array", "string", "integer", "boolean", "null"];
 const DEFS_PREFIX: &str = "#/$defs/";
 
@@ -128,7 +129,7 @@ fn walk_schema(node: &Value, at: &str, defs: Option<&Map<String, Value>>) -> Che
                 }
             }
             "pattern" => {
-                if value != U64_PATTERN && value != I64_PATTERN {
+                if value != U64_PATTERN && value != I64_PATTERN && value != TOPOLOGY_PATTERN {
                     return Err(format!("{here}: unsupported pattern"));
                 }
             }
@@ -231,8 +232,21 @@ fn check_string(map: &Map<String, Value>, text: &str, at: &str) -> Check {
     match map.get("pattern").and_then(Value::as_str) {
         Some(U64_PATTERN) if !is_decimal(text, false) => fail(at, "not a decimal u64 string"),
         Some(I64_PATTERN) if !is_decimal(text, true) => fail(at, "not a decimal i64 string"),
+        Some(TOPOLOGY_PATTERN) if !is_topology_ref(text) => fail(at, "not a topology reference"),
         _ => Ok(()),
     }
+}
+
+/// Matches `^\.\./topologies/[a-z0-9-]+\.bin\.gz$`.
+fn is_topology_ref(text: &str) -> bool {
+    text.strip_prefix("../topologies/")
+        .and_then(|rest| rest.strip_suffix(".bin.gz"))
+        .is_some_and(|name| {
+            !name.is_empty()
+                && name
+                    .bytes()
+                    .all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'-'))
+        })
 }
 
 /// Matches `^(0|[1-9][0-9]*)$`, or with `signed`, `^(0|-?[1-9][0-9]*)$`.

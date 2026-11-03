@@ -505,8 +505,7 @@ fn wire_reason(core: &Value, name: &str) -> i32 {
 fn vector_topology(name: &str) -> wire::Topology {
     let core = core();
     let t = case(&core, "topologies", name);
-    let stored =
-        quip_solver_conformance::vectors::topology(t["topology"].as_str().unwrap()).unwrap();
+    let stored = quip_solver_conformance::topology(t["topology"].as_str().unwrap()).unwrap();
     wire::Topology {
         nodes: stored.nodes,
         edges: Some(wire::EdgeList {

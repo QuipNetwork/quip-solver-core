@@ -50,6 +50,8 @@ def main(argv: list[str]) -> int:
     targets = build.targets()
     if argv[0] == "write":
         for path, data in targets.items():
+            if build.file_matches(path, data):
+                continue
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(data)
             print(f"wrote {path}")
@@ -60,9 +62,7 @@ def main(argv: list[str]) -> int:
         if path not in targets and path != build.LIVE_BLOB_PATH
     ]
     differs = [
-        path
-        for path, data in targets.items()
-        if not path.exists() or path.read_bytes() != data
+        path for path, data in targets.items() if not build.file_matches(path, data)
     ]
     for path in [*differs, *stale]:
         print(f"differs: {path}", file=sys.stderr)

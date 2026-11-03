@@ -547,7 +547,7 @@ fn an_unlisted_label_is_a_defect() -> Result<(), String> {
 fn base_topologies_match_the_topology_vectors() -> Result<(), String> {
     let doc = core()?;
     for case in section(&doc, "topologies")? {
-        let stored = quip_solver_conformance::vectors::topology(str_field(case, "topology")?)
+        let stored = quip_solver_conformance::topology(str_field(case, "topology")?)
             .map_err(|e| e.to_string())?;
         let (nodes, edges) = (stored.nodes, stored.edges);
         let topology = BaseTopology::new(nodes.clone(), &edges).map_err(|e| format!("{e:?}"))?;

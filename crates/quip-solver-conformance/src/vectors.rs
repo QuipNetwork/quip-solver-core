@@ -258,8 +258,9 @@ impl std::error::Error for TopologyError {}
 /// The bytes of the topology file that `reference` names.
 ///
 /// `reference` is the string a JSON file under `vectors/families/` holds, for
-/// example `../topologies/t-sparse.bin.gz`. It is resolved against
-/// `vectors/families/`, and only a file in `vectors/topologies/` is found.
+/// example `../topologies/t-sparse.bin.gz`. It is resolved from
+/// `vectors/families/`, the only directory that references topologies today,
+/// and only a file in `vectors/topologies/` is found.
 ///
 /// # Errors
 ///
