@@ -139,6 +139,8 @@ test:
 	cargo clippy --workspace --exclude quip-protocol-py --all-targets -- -D warnings
 	cargo clippy -p quip-protocol-py --all-targets -- -D warnings
 	cargo test --workspace --exclude quip-protocol-py
+	cargo clippy -p ising-generators --all-targets --features cli -- -D warnings
+	cargo test -p ising-generators --features cli
 
 # -- Lint -------------------------------------------------------------------
 
