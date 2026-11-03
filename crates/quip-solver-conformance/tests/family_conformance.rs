@@ -500,7 +500,10 @@ fn faulty_j_fails_at_the_j_component_with_equal_energy() -> Result<(), String> {
 #[test]
 fn faulty_metadata_fails_at_metadata_section_0() -> Result<(), String> {
     let mismatch = mismatch_of(&FAULTY_METADATA_V1)?;
-    if mismatch.diff.component == Component::MetadataSection && mismatch.diff.index == Some(0) {
+    if mismatch.salt_index == Some(1)
+        && mismatch.diff.component == Component::MetadataSection
+        && mismatch.diff.index == Some(0)
+    {
         Ok(())
     } else {
         Err(format!("{:?} {}", mismatch.salt_index, mismatch.diff))
@@ -757,7 +760,11 @@ fn coverage_rows_follow_the_status_rules() -> Result<(), String> {
     let rows = coverage_rows()?;
     for row in &rows {
         let (coverage, evidence_ok) = match row.status.as_str() {
-            "covered" => ("host-only", !row.evidence.starts_with("needs ")),
+            "covered" => (
+                "host-only",
+                !row.evidence.starts_with("needs ") && !row.evidence.starts_with("review: "),
+            ),
+            "review only" => ("none", row.evidence.starts_with("review: ")),
             "not covered" => ("none", row.evidence.starts_with("needs ")),
             other => return Err(format!("{}: unknown status `{other}`", row.id)),
         };
@@ -774,14 +781,25 @@ fn coverage_rows_follow_the_status_rules() -> Result<(), String> {
             ));
         }
     }
-    let covered = rows.iter().filter(|row| row.status == "covered").count();
-    if covered != 14 || rows.len() - covered != 30 {
+    let count = |status: &str| rows.iter().filter(|row| row.status == status).count();
+    let (covered, review, missing) = (count("covered"), count("review only"), count("not covered"));
+    if (covered, review, missing) != (25, 2, 17) {
         return Err(format!(
-            "expected 14 covered and 30 not covered, found {covered} and {}",
-            rows.len() - covered
+            "expected 25 covered, 2 review only, and 17 not covered, found {covered}, {review}, and {missing}"
         ));
     }
     Ok(())
+}
+
+/// Whether `source` has `fn name(` directly after a `#[test]` or
+/// `#[tokio::test]` attribute line.
+fn is_test_fn(source: &str, name: &str) -> bool {
+    let signature = format!("fn {name}(");
+    let lines: Vec<&str> = source.lines().map(str::trim).collect();
+    lines.windows(2).any(|pair| {
+        matches!(pair, [attr, def]
+            if matches!(*attr, "#[test]" | "#[tokio::test]") && def.contains(&signature))
+    })
 }
 
 #[test]
@@ -805,8 +823,8 @@ fn covered_rows_cite_tests_that_exist() -> Result<(), String> {
                 .split_once("::")
                 .ok_or_else(|| format!("{}: bad item {item}", row.id))?;
             let source = read_repo_file(path).map_err(|e| format!("{}: {e}", row.id))?;
-            if !source.contains(&format!("fn {name}(")) {
-                return Err(format!("{}: {path} has no `fn {name}(`", row.id));
+            if !is_test_fn(&source, name) {
+                return Err(format!("{}: {path} has no test `fn {name}(`", row.id));
             }
         }
     }

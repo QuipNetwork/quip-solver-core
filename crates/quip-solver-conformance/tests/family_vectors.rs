@@ -2517,3 +2517,97 @@ fn changed_layered_coupling_fails() -> Result<(), String> {
     let broken = mutate(&doc, pointer, json!(was + 1000));
     expect_err(&check_layered(&broken), "a changed coupling")
 }
+
+// ---- family registry (registry.json) ----
+
+fn registry_doc() -> Result<Value, String> {
+    serde_json::from_str(quip_solver_conformance::FAMILY_REGISTRY).map_err(|e| e.to_string())
+}
+
+/// The cases of one revision in its vectors file, read from the repository
+/// root at run time, in file order.
+fn registered_cases(
+    entry: &quip_solver_conformance::families::registry::RegistryEntry,
+) -> Result<Vec<Value>, String> {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let text = std::fs::read_to_string(root.join(&entry.vectors))
+        .map_err(|e| format!("{}: {e}", entry.vectors))?;
+    let doc: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    let mut cases = Vec::new();
+    for case in section(&doc, "layered")? {
+        if str_field(case, "family_id")? == entry.family_id
+            && u32_field(case, "revision")? == entry.revision
+        {
+            cases.push(case.clone());
+        }
+    }
+    Ok(cases)
+}
+
+/// FAM-08: the BLAKE3 of the canonical JSON of the cases equals the pin.
+fn check_pin(
+    entry: &quip_solver_conformance::families::registry::RegistryEntry,
+    cases: &[Value],
+) -> Result<(), String> {
+    let got = legacy::case_blake3(&Value::Array(cases.to_vec()))?;
+    let want = codec::hex_encode(&entry.vectors_blake3);
+    if got == want {
+        Ok(())
+    } else {
+        Err(format!(
+            "{}@{}: vectors changed, pin {want}, found {got}",
+            entry.family_id, entry.revision
+        ))
+    }
+}
+
+#[test]
+fn registry_fixture_matches_schema() -> Result<(), String> {
+    let doc = registry_doc()?;
+    validate(&schema()?, &doc)?;
+    match doc.get("provenance").and_then(Value::as_str) {
+        Some("specified") => {}
+        other => return Err(format!("provenance is {other:?}, expected specified")),
+    }
+    if doc.get("sources") != Some(&json!([])) {
+        return Err("sources must be empty: the registry is written by hand".to_owned());
+    }
+    check_names_unique(&doc)
+}
+
+#[test]
+fn registered_vectors_are_frozen() -> Result<(), String> {
+    let registry = quip_solver_conformance::families::registry::parse_registry(
+        quip_solver_conformance::FAMILY_REGISTRY,
+    )?;
+    if registry.is_empty() {
+        return Err("empty registry".to_owned());
+    }
+    for entry in &registry {
+        check_pin(entry, &registered_cases(entry)?)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn changed_registered_case_fails_the_pin() -> Result<(), String> {
+    let registry = quip_solver_conformance::families::registry::parse_registry(
+        quip_solver_conformance::FAMILY_REGISTRY,
+    )?;
+    if registry.is_empty() {
+        return Err("empty registry".to_owned());
+    }
+    for entry in &registry {
+        let mut cases = registered_cases(entry)?;
+        let pointer = "/instances/0/j/0";
+        let first = cases.first().ok_or("no cases")?.clone();
+        let was = first
+            .pointer(pointer)
+            .and_then(Value::as_i64)
+            .ok_or("no coupling")?;
+        let slot = cases.first_mut().ok_or("no cases")?;
+        *slot = mutate(&first, pointer, json!(was + 1000));
+        expect_err(&check_pin(entry, &cases), "a changed registered case")?;
+    }
+    Ok(())
+}

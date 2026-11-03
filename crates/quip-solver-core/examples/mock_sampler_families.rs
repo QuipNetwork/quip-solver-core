@@ -7,26 +7,14 @@
 use clap::Parser;
 use quip_protocol::scoring::energy_milli;
 use quip_solver_core::families::{Declaration, FamilyClaim};
-use quip_solver_core::ising_generators::descriptor::Contract;
-use quip_solver_core::ising_generators::instance::InstanceLimits;
 use quip_solver_core::{
     run, BackendIdentity, CommonArgs, IsingGraph, SampleError, SampleParams, Sampler, SamplerResult,
 };
 use std::process::ExitCode;
 
-use quip_solver_conformance::families::layered::{self, example_size_bounds, UNIFORM_FIELD};
+use quip_solver_conformance::families::layered::UNIFORM_V1;
 
 const ZERO_FIELD_PARAMS: [u8; 19] = [0x01, 1, 0, 2, 0, 0, 0, 2, 0, 2, 0, 4, 0, 0, 0, 0, 0, 0, 0];
-
-const UNIFORM_V1: Contract = Contract {
-    family_id: "vectors/uniform-field",
-    revision: 1,
-    schema: UNIFORM_FIELD,
-    metadata_kinds: &[],
-    limits: InstanceLimits::FAM_37,
-    size_bounds: example_size_bounds,
-    construction: Some(&layered::LAYERED),
-};
 
 struct MockSampler;
 
