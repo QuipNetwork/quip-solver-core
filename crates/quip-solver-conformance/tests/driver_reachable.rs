@@ -82,3 +82,21 @@ fn the_family_checker_is_exported() {
         VectorCase,
     )> = None;
 }
+
+#[test]
+fn the_family_gate_surface_is_exported() {
+    use quip_solver_conformance::families::{reference_revision, FamilyCase, FamilyReport};
+    use quip_solver_conformance::solve::CaseOutcome;
+
+    let _ = FamilyReport::is_conformant;
+    let _ = FamilyReport::outcome;
+    let _ = FamilyReport::summary;
+    let case = FamilyCase {
+        name: "revision-plus-one",
+        subject: None,
+        outcome: CaseOutcome::Passed,
+    };
+    assert_eq!(case.name, "revision-plus-one");
+    assert!(reference_revision("vectors/uniform-field", 1).is_some());
+    assert!(reference_revision("vectors/uniform-field", 2).is_none());
+}
