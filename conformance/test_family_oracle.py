@@ -1246,3 +1246,27 @@ def test_charged_direct_energy_ignores_the_encoded_background_couplings():
     broken["j"][at] = -broken["j"][at]
     assert charge.direct_energy(broken, spins) == direct
     assert charge.encoded_energy(broken, spins) != direct
+
+
+_K4 = [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)]
+
+
+def _ice_admission_codes(nodes, edges):
+    from family_oracle import charge, twisted
+
+    return (
+        charge.admission_code(build._charge_params(0, 0, 250, 31, 128), nodes, edges),
+        twisted.admission_code(build._twisted_params(0, 0, 62, 8), nodes, edges),
+    )
+
+
+def test_ice_admission_node_limit_boundary():
+    assert _ice_admission_codes(list(range(131_072)), _K4) == (None, None)
+    assert _ice_admission_codes(list(range(131_073)), _K4) == (13, 13)
+
+
+def test_ice_admission_self_loop_wins_over_degree():
+    star = [(0, leaf) for leaf in range(1, 34)]
+    nodes = list(range(34))
+    assert _ice_admission_codes(nodes, star) == (13, 13)
+    assert _ice_admission_codes(nodes, [*star, (0, 0)]) == (12, 12)

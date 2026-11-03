@@ -27,11 +27,12 @@ from .digests import (
     topology_order_digest,
 )
 from .ice import (
-    MAX_DEGREE,
     StructureError,
     candidates,
+    has_self_loop,
     select,
     sides,
+    size_code,
     zephyr_coordinates,
 )
 from .instance import canonical_bytes, energy_plain
@@ -42,7 +43,6 @@ ENERGY_STATE_LABEL = b"energy-state"
 CHARGE_UNIT = 2
 COEFFICIENT_BOUND = 1000
 CODE_TOPOLOGY_INCOMPATIBLE = 12
-CODE_BOUNDS_EXCEEDED = 13
 _KIND_TILES = 1
 _KIND_GAUGES = 2
 _KIND_CHARGES = 6
@@ -78,26 +78,22 @@ def admission_code(
 ) -> int | None:
     """The admission code of a request, or None when it is admitted.
 
-    Params faults (codes 7 and 9) come first. A lattice or structure error
-    other than a degree above the limit gives code 12. The size bounds give
-    code 13 for a degree above 32.
+    Params faults (codes 7 and 9) come first. A self-loop, a lattice error, or a
+    structure error other than a degree above the limit gives code 12. The size
+    bounds then give code 13 for a degree above 32 and for a node or edge count
+    above the limit.
     """
     code, values = decode_params(CHARGED_ICE, params)
     if values is None:
         return code
+    if has_self_loop(native_edges):
+        return CODE_TOPOLOGY_INCOMPATIBLE
     try:
         candidates(values["zephyr_m"], values["zephyr_t"], nodes, native_edges)
     except StructureError as err:
         if err.name != "degree-above-limit":
             return CODE_TOPOLOGY_INCOMPATIBLE
-    degree = [0] * len(nodes)
-    position = {node: i for i, node in enumerate(nodes)}
-    for a, b in native_edges:
-        degree[position[a]] += 1
-        degree[position[b]] += 1
-    if max(degree, default=0) > MAX_DEGREE:
-        return CODE_BOUNDS_EXCEEDED
-    return None
+    return size_code(nodes, native_edges)
 
 
 def generate(
