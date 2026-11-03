@@ -1545,7 +1545,16 @@ fn topology_order_digests_recompute() -> Result<(), String> {
 #[test]
 fn t_sparse_loads_from_the_shared_blob() -> Result<(), String> {
     let stored = quip_solver_conformance::t_sparse().map_err(|e| e.to_string())?;
-    if stored.nodes != [907, 41, 0, u32::MAX, 12, 3] || stored.edges.len() != 7 {
+    let edges = [
+        (907, 41),
+        (41, 0),
+        (0, u32::MAX),
+        (u32::MAX, 12),
+        (12, 3),
+        (3, 907),
+        (41, 12),
+    ];
+    if stored.nodes != [907, 41, 0, u32::MAX, 12, 3] || stored.edges != edges {
         return Err(format!("unexpected T_SPARSE: {stored:?}"));
     }
     Ok(())

@@ -753,8 +753,9 @@ fn admission_runs_11_then_12_then_13() -> Result<(), String> {
     );
 
     // 12 beats 13: a repeated edge, then a self-loop.
-    let sparse_nodes = sparse_ids()?.nodes;
-    let mut doubled_edges = sparse_ids()?.edges;
+    let stored = sparse_ids()?;
+    let sparse_nodes = stored.nodes.clone();
+    let mut doubled_edges = stored.edges.clone();
     doubled_edges.push((41, 907));
     let doubled =
         BaseTopology::new(sparse_nodes.clone(), &doubled_edges).map_err(|e| format!("{e:?}"))?;
@@ -762,7 +763,7 @@ fn admission_runs_11_then_12_then_13() -> Result<(), String> {
         admit_topology(&admitted_l2, &doubled, doubled.order_digest(), &tiny),
         Err(Code::TopologyIncompatible)
     );
-    let mut looped_edges = sparse_ids()?.edges;
+    let mut looped_edges = stored.edges;
     looped_edges.push((907, 907));
     let looped = BaseTopology::new(sparse_nodes, &looped_edges).map_err(|e| format!("{e:?}"))?;
     let accepting = [contract(Some(&HONEST), example_size_bounds)];
