@@ -1,0 +1,14 @@
+{
+  "kind": "zephyr-removed",
+  "m": 2,
+  "removed_edges": [
+    [
+      1,
+      2
+    ]
+  ],
+  "removed_nodes": [
+    5
+  ],
+  "t": 2
+}

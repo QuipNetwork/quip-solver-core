@@ -5,6 +5,7 @@
 //! wrote. Exit 0 is success, 1 is a format or file error (the `BlobError` name
 //! goes to stderr), and 2 is a usage error.
 
+use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
 use std::io::Write as _;
 use std::path::Path;
@@ -39,19 +40,19 @@ fn shape(what: &str) -> Failure {
 }
 
 fn main() -> ExitCode {
-    let mut expand = false;
-    let args: Vec<String> = std::env::args()
-        .skip(1)
-        .filter(|arg| {
-            expand |= arg == "--expand";
-            arg != "--expand"
-        })
+    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+    let expand = args.iter().any(|arg| arg == "--expand");
+    let args: Vec<&OsStr> = args
+        .iter()
+        .map(OsString::as_os_str)
+        .filter(|arg| *arg != "--expand")
         .collect();
-    let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let result = match (args.as_slice(), expand) {
-        (["encode", input, output], false) => run_encode(Path::new(input), Path::new(output)),
-        (["decode", input], _) => run_decode(Path::new(input), None, expand),
-        (["decode", input, output], _) => {
+        ([command, input, output], false) if *command == "encode" => {
+            run_encode(Path::new(input), Path::new(output))
+        }
+        ([command, input], _) if *command == "decode" => run_decode(Path::new(input), None, expand),
+        ([command, input, output], _) if *command == "decode" => {
             run_decode(Path::new(input), Some(Path::new(output)), expand)
         }
         _ => {

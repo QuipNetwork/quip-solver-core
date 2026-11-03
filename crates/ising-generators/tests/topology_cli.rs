@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use ising_generators::blob::{decode, decompress, Body};
+use ising_generators::blob::{decode, decompress};
 use serde_json::{json, Value};
 
 const T_SPARSE: &str = "tests/data/python-t-sparse.bin.gz";
@@ -20,15 +20,33 @@ const Z22: &str = "tests/data/python-z22-removed.bin.gz";
 
 static NEXT: AtomicU32 = AtomicU32::new(0);
 
-/// A unique, empty directory under the system temp dir.
-fn scratch() -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "quip-topology-cli-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    std::fs::create_dir_all(&dir).expect("create scratch dir");
-    dir
+/// A unique, empty directory that is removed when the guard drops.
+struct Scratch(PathBuf);
+
+impl Scratch {
+    fn new() -> Self {
+        let dir = std::env::temp_dir().join(format!(
+            "quip-topology-cli-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+        Self(dir)
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+impl std::ops::Deref for Scratch {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        &self.0
+    }
 }
 
 fn data(name: &str) -> PathBuf {
@@ -72,7 +90,7 @@ fn round_trip(dir: &Path, name: &str, value: &Value) {
 
 #[test]
 fn explicit_round_trip_keeps_order_and_extremes() {
-    let dir = scratch();
+    let dir = Scratch::new();
     let value = json!({
         "kind": "explicit",
         "nodes": [4_294_967_295_u32, 0, 7],
@@ -85,7 +103,7 @@ fn explicit_round_trip_keeps_order_and_extremes() {
 
 #[test]
 fn zephyr_round_trip_and_expand() {
-    let dir = scratch();
+    let dir = Scratch::new();
     let value = json!({
         "kind": "zephyr-removed",
         "m": 1,
@@ -98,22 +116,18 @@ fn zephyr_round_trip_and_expand() {
     let out = run(&[Path::new("decode"), Path::new("--expand"), &blob]);
     assert_eq!(code(&out), Some(0));
     let expanded: Value = serde_json::from_slice(&out.stdout).expect("stdout is JSON");
-    assert_eq!(expanded["kind"], "explicit");
     let body = decode(&std::fs::read(&blob).expect("read blob")).expect("decode blob");
     let topology = body.topology().expect("expand");
-    assert_eq!(
-        expanded["nodes"].as_array().map(Vec::len),
-        Some(topology.nodes.len())
-    );
-    assert_eq!(
-        expanded["edges"].as_array().map(Vec::len),
-        Some(topology.edges.len())
-    );
+    let nodes: Vec<Value> = topology.nodes.iter().map(|n| json!(n)).collect();
+    let edges: Vec<Value> = topology.edges.iter().map(|&(u, v)| json!([u, v])).collect();
+    assert_eq!(expanded["kind"], "explicit");
+    assert_eq!(expanded["nodes"], Value::Array(nodes));
+    assert_eq!(expanded["edges"], Value::Array(edges));
 }
 
 #[test]
 fn decodes_the_python_written_blobs() {
-    let dir = scratch();
+    let dir = Scratch::new();
     for (file, name) in [(T_SPARSE, "sparse"), (Z22, "z22")] {
         let blob = data(file);
         let json_path = dir.join(format!("{name}.json"));
@@ -134,23 +148,6 @@ fn decodes_the_python_written_blobs() {
 }
 
 #[test]
-fn python_blob_decodes_to_the_library_body() {
-    let dir = scratch();
-    let out = dir.join("z22.json");
-    assert_eq!(
-        code(&run(&[Path::new("decode"), &data(Z22), &out])),
-        Some(0)
-    );
-    let value = read_json(&out);
-    let body = decode(&std::fs::read(data(Z22)).expect("read")).expect("decode");
-    let Body::ZephyrRemoved { m, t, .. } = body else {
-        panic!("z22 blob is not zephyr-removed");
-    };
-    assert_eq!(value["m"], json!(m));
-    assert_eq!(value["t"], json!(t));
-}
-
-#[test]
 fn decode_prints_sorted_two_space_json_to_stdout() {
     let out = run(&[Path::new("decode"), &data(T_SPARSE)]);
     assert_eq!(code(&out), Some(0));
@@ -161,7 +158,7 @@ fn decode_prints_sorted_two_space_json_to_stdout() {
 
 #[test]
 fn corrupt_file_exits_1() {
-    let dir = scratch();
+    let dir = Scratch::new();
     let mut bytes = std::fs::read(data(T_SPARSE)).expect("read");
     let last = bytes.len() - 1;
     bytes[last] ^= 0xff;
@@ -176,7 +173,7 @@ fn corrupt_file_exits_1() {
 
 #[test]
 fn bad_json_exits_1() {
-    let dir = scratch();
+    let dir = Scratch::new();
     let out_path = dir.join("out.bin.gz");
     for value in [
         json!({"kind": "nope"}),
@@ -200,4 +197,37 @@ fn usage_errors_exit_2() {
     assert_eq!(code(&run_str(&["encode", "--expand", "a", "b"])), Some(2));
     assert_eq!(code(&run_str(&["decode"])), Some(2));
     assert_eq!(code(&run_str(&["frobnicate", "a"])), Some(2));
+}
+
+#[test]
+fn stdout_matches_the_python_cli_byte_for_byte() {
+    let cases: [(&str, &str, bool); 4] = [
+        (T_SPARSE, "tests/data/python-t-sparse.json", false),
+        (T_SPARSE, "tests/data/python-t-sparse.json", true),
+        (Z22, "tests/data/python-z22-removed.json", false),
+        (Z22, "tests/data/python-z22-removed.expanded.json", true),
+    ];
+    for (blob, golden, expand) in cases {
+        let blob = data(blob);
+        let mut args: Vec<&Path> = vec![Path::new("decode")];
+        if expand {
+            args.push(Path::new("--expand"));
+        }
+        args.push(&blob);
+        let out = run(&args);
+        assert_eq!(code(&out), Some(0));
+        let want = std::fs::read(data(golden)).expect("read golden");
+        assert_eq!(out.stdout, want, "{golden} expand={expand}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn non_utf8_arguments_do_not_panic() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let bad = Path::new(OsStr::from_bytes(b"\xff"));
+    assert_eq!(code(&run(&[Path::new("decode"), bad])), Some(1));
+    assert_eq!(code(&run(&[bad, Path::new("x")])), Some(2));
 }
