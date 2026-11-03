@@ -17411,12 +17411,16 @@
       "path": "conformance/family_oracle/__main__.py"
     },
     {
-      "blake3": "100fe2ece1b71285a6cab280f5c4635f6bc2961f4789c3dfd15be6e57726dd9f",
+      "blake3": "688ad5022f33d78b290253993e2098c5241539317ecd21f39f883610abbf1227",
       "path": "conformance/family_oracle/build.py"
     },
     {
       "blake3": "4795384476baa0cce2cc1c38c7d647e3c96ce3324e38803d22d0af9ab74c8fad",
       "path": "conformance/family_oracle/chacha8.py"
+    },
+    {
+      "blake3": "0c759294cd3b1526ee75ad5a63c4de5f9efa1d0e895547313655745d230a05ff",
+      "path": "conformance/family_oracle/charge.py"
     },
     {
       "blake3": "807e3ed3db9ca03717672ba7fa85becd2d53f4e7895a0ba17580e1b407c96d5b",
@@ -17443,7 +17447,7 @@
       "path": "conformance/family_oracle/layered.py"
     },
     {
-      "blake3": "3b26016ad598231417d7445c00ea40f1b9e8754e456167e5229101f85f7430b7",
+      "blake3": "7bf57e98c9dca7b53e5c2879240961f701fdae4d76156ca2f66a02ea71842d4e",
       "path": "conformance/family_oracle/params.py"
     },
     {

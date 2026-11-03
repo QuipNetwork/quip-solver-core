@@ -8,6 +8,19 @@
   "registry": [
     {
       "adapted_from": null,
+      "contract": "docs/families/quip-charged-ice-1.md",
+      "evidence": [
+        "SC-10:charged-ice-vectors-frozen"
+      ],
+      "family_id": "quip/charged-ice",
+      "name": "quip/charged-ice@1",
+      "revision": 1,
+      "status": "research",
+      "vectors": "crates/quip-solver-conformance/vectors/families/ice_charge.json",
+      "vectors_blake3": "1096452a74b91006f432c1411892cb67ff09ad5a4355ef25c1bddcf118f777ce"
+    },
+    {
+      "adapted_from": null,
       "contract": "docs/families/quip-ice-glass-1.md",
       "evidence": [
         "SC-8:ice-glass-vectors-frozen"

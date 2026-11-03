@@ -96,6 +96,17 @@ encodings do not change.
   and the Rust contract is `ising_generators::ice::TWISTED_DIMER_V1`. The gauge
   obstruction diagnostic `gauge_obstructions` describes an instance and never
   decides acceptance. The research cohort is not regenerated.
+- `quip/charged-ice@1`, a registered family with status `research`. It gives each
+  ice tile a local gauge and a prescribed synthetic charge of `0`, `+2`, or `-2`, writes
+  the squared charge penalty into the couplings, the fields, and the offset, and
+  adds a weak signed background. The parameters are the Zephyr shape,
+  `scale_milli`, `background_milli`, and `charged_per_256`. The metadata holds the
+  tiles, the local gauges, and the tile charges (kind 6). The contract registers
+  one parameter set on z(12, 4) as a recipe. The contract is
+  `docs/families/quip-charged-ice-1.md`, the vectors are `ice_charge.json`, and the
+  Rust contract is `ising_generators::ice::CHARGED_ICE_V1`. The tile charges are
+  synthetic and the family is not adapted. The diagnostic `charge_defects` never
+  decides acceptance. The research cohort is not regenerated.
 
 ### Changed
 

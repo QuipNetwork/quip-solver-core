@@ -7,11 +7,12 @@ use core::fmt;
 
 use ising_generators::descriptor::{admit, params_digest, AdvertisedLimits, Contract};
 use ising_generators::family::{admit_topology, generate_instance, BaseTopology, SaltFault};
-use ising_generators::ice::{ICE_GLASS_V1, TWISTED_DIMER_V1};
+use ising_generators::ice::{CHARGED_ICE_V1, ICE_GLASS_V1, TWISTED_DIMER_V1};
 use ising_generators::instance::Instance;
 use ising_generators::Code;
 use serde_json::Value;
 
+pub mod charge;
 mod drive;
 pub mod ice;
 pub mod layered;
@@ -21,6 +22,7 @@ pub mod twisted;
 pub(crate) use drive::run_family_script;
 pub use drive::{drive_miner_family, FamilyCase, FamilyReport};
 
+use charge::{P_CHARGED_A251, P_CHARGED_ADJ_A100_B45_C256, P_CHARGED_Z22_A250_B31_C128};
 use ice::{P_ICE_ADJ_125, P_ICE_GLASS_1000, P_ICE_Z12_200};
 use layered::{P_F5000, P_L2_F0, P_L3_F0, P_SPEC, RESTRICTED_V1, UNIFORM_V1};
 use twisted::{P_TWISTED_ADJ_W45_P6, P_TWISTED_W1000, P_TWISTED_Z22_W62_P8};
@@ -42,10 +44,13 @@ pub struct ReferenceRevision {
 /// `P_F5000`, `ICE_GLASS_V1` with params `[P_ICE_ADJ_125, P_ICE_Z12_200]`
 /// and `out_of_bounds_params` `P_ICE_GLASS_1000`, and `TWISTED_DIMER_V1` with
 /// params `[P_TWISTED_Z22_W62_P8, P_TWISTED_ADJ_W45_P6]` and
-/// `out_of_bounds_params` `P_TWISTED_W1000`.
+/// `out_of_bounds_params` `P_TWISTED_W1000`, and `CHARGED_ICE_V1` with params
+/// `[P_CHARGED_Z22_A250_B31_C128, P_CHARGED_ADJ_A100_B45_C256]` and
+/// `out_of_bounds_params` `P_CHARGED_A251`.
 ///
 /// The gate sends its fixed topology `T_SPARSE`, which carries no ice tiles.
-/// A solver that lists `quip/ice-glass` or `quip/twisted-ice-dimer` therefore
+/// A solver that lists `quip/ice-glass`, `quip/twisted-ice-dimer`, or
+/// `quip/charged-ice` therefore
 /// fails `supported-revision` with the admission code 12
 /// (`TopologyIncompatible`), because no params set admits.
 pub static REFERENCE_REVISIONS: &[ReferenceRevision] = &[
@@ -68,6 +73,11 @@ pub static REFERENCE_REVISIONS: &[ReferenceRevision] = &[
         contract: &TWISTED_DIMER_V1,
         params: &[&P_TWISTED_Z22_W62_P8, &P_TWISTED_ADJ_W45_P6],
         out_of_bounds_params: &P_TWISTED_W1000,
+    },
+    ReferenceRevision {
+        contract: &CHARGED_ICE_V1,
+        params: &[&P_CHARGED_Z22_A250_B31_C128, &P_CHARGED_ADJ_A100_B45_C256],
+        out_of_bounds_params: &P_CHARGED_A251,
     },
 ];
 

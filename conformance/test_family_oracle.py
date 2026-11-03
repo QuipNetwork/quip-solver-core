@@ -1131,3 +1131,99 @@ def test_twisted_obstructions_ring_and_errors():
     assert (err.value.name, err.value.detail) == ("membership-above-two", [3])
     with pytest.raises(ice.StructureError, match="overflow"):
         twisted.gauge_obstructions(ring, ones[:2], 9)
+
+
+# ---- quip/charged-ice ----
+
+
+def _charged(m, t, scale, background, charged, nodes, edges, nonce=bytes(range(32))):
+    from family_oracle import charge
+
+    params = build._charge_params(m, t, scale, background, charged)
+    return charge.generate(b"quip/charged-ice", 1, params, nodes, edges, nonce)
+
+
+def test_charged_instance_follows_the_contract_rules():
+    nodes, edges = ice.lattice(2, 2)
+    inst = _charged(2, 2, 250, 31, 128, nodes, edges)
+    in_tile = {e for tile in inst["tiles"] for e in ice._tile_edges(tile)}
+    at = {e: i for i, e in enumerate(inst["edges"])}
+    expected_h = [0] * len(nodes)
+    for tile, gauge, q in zip(
+        inst["tiles"], inst["gauges"], inst["charges"], strict=True
+    ):
+        local = dict(zip(tile, gauge, strict=True))
+        assert q in (0, 2, -2)
+        for a, b in ice._tile_edges(tile):
+            assert inst["j"][at[(a, b)]] == 250 * local[a] * local[b]
+        for node in tile:
+            expected_h[node] += -250 * q * local[node]
+    assert inst["h"] == expected_h
+    assert inst["offset_milli"] == sum(125 * (4 + q * q) for q in inst["charges"])
+    for edge, value in zip(inst["edges"], inst["j"], strict=True):
+        if edge not in in_tile:
+            assert abs(value) == 31
+
+
+def test_charged_extremes_and_encoded_equals_direct_for_every_charge():
+    from family_oracle import charge
+
+    nodes, edges = ice.lattice(1, 2)
+    none = _charged(1, 2, 250, 31, 0, nodes, edges)
+    assert set(none["charges"]) == {0}
+    full = _charged(0, 0, 100, 45, 256, nodes, edges)
+    assert 0 not in full["charges"]
+    assert set(full["charges"]) <= {2, -2}
+    for inst in (none, full):
+        for _, spins in charge.energy_states(bytes(range(32)), len(nodes)):
+            assert charge.encoded_energy(inst, spins) == charge.direct_energy(
+                inst, spins
+            )
+
+
+def test_charged_single_tile_penalty_for_all_sixteen_states():
+    from itertools import product
+
+    from family_oracle import charge
+
+    for q in (0, 2, -2):
+        for gauge in ([1, 1, 1, 1], [1, -1, 1, -1]):
+            inst = {
+                "tiles": [(0, 1, 2, 3)],
+                "gauges": [gauge],
+                "charges": [q],
+                "scale": 250,
+                "edges": [(a, b) for a in range(4) for b in range(a + 1, 4)],
+                "j": [
+                    250 * gauge[a] * gauge[b] for a in range(4) for b in range(a + 1, 4)
+                ],
+                "h": [-250 * q * g for g in gauge],
+                "offset_milli": 125 * (4 + q * q),
+            }
+            for spins in product((1, -1), repeat=4):
+                assert charge.encoded_energy(inst, list(spins)) == charge.direct_energy(
+                    inst, list(spins)
+                )
+
+
+def test_charged_admission_codes():
+    from family_oracle import charge
+
+    nodes, edges = ice.lattice(2, 2)
+    assert (
+        charge.admission_code(build._charge_params(2, 2, 250, 31, 128), nodes, edges)
+        is None
+    )
+    assert (
+        charge.admission_code(build._charge_params(0, 0, 251, 45, 128), nodes, edges)
+        == 9
+    )
+    assert (
+        charge.admission_code(build._charge_params(2, 2, 250, 31, 257), nodes, edges)
+        == 9
+    )
+    assert (
+        charge.admission_code(build._charge_params(2, 0, 250, 31, 128), nodes, edges)
+        == 12
+    )
+    assert charge.admission_code(b"\x01", nodes, edges) == 7

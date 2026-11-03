@@ -74,6 +74,18 @@ TWISTED_DIMER = Schema(
     ),
 )
 
+CHARGED_ICE = Schema(
+    "quip/charged-ice",
+    1,
+    (
+        Field(1, "zephyr_m", "u16", 1, 0, 32),
+        Field(2, "zephyr_t", "u8", 1, 0, 8),
+        Field(3, "scale_milli", "u16", 1, 1, 250),
+        Field(4, "background_milli", "u16", 1, 1, 999),
+        Field(5, "charged_per_256", "u16", 1, 0, 256),
+    ),
+)
+
 ALL_TYPES = Schema(
     "example/all-types",
     1,

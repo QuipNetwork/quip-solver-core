@@ -2477,7 +2477,7 @@ fn check_layered(doc: &Value) -> Result<(), String> {
 fn check_layered_against_rust(case: &Value) -> Result<(), String> {
     use ising_generators::descriptor::{admit, params_digest};
     use ising_generators::family::{admit_topology, generate_instance, BaseTopology, SaltFault};
-    use ising_generators::ice::{ICE_GLASS_V1, TWISTED_DIMER_V1};
+    use ising_generators::ice::{CHARGED_ICE_V1, ICE_GLASS_V1, TWISTED_DIMER_V1};
     use quip_solver_conformance::families::layered::{RESTRICTED_V1, UNIFORM_V1};
     let family = str_field(case, "family_id")?;
     let contract = match family {
@@ -2485,6 +2485,7 @@ fn check_layered_against_rust(case: &Value) -> Result<(), String> {
         "vectors/restricted-field" => RESTRICTED_V1,
         "quip/ice-glass" => ICE_GLASS_V1,
         "quip/twisted-ice-dimer" => TWISTED_DIMER_V1,
+        "quip/charged-ice" => CHARGED_ICE_V1,
         other => return Err(format!("{}: unknown family {other}", case_name(case))),
     };
     let params = codec::hex_decode(str_field(case, "params_hex")?)?;
@@ -3181,6 +3182,425 @@ fn a_changed_obstruction_value_fails_the_check() -> Result<(), String> {
         .ok_or("no value")?;
     let broken = mutate(&doc, pointer, json!(was + 1));
     expect_err(&check_obstructions(&broken), "a changed obstruction value")
+}
+
+// ---- charged ice vectors (ice_charge.json) ----
+
+fn charge_doc() -> Result<Value, String> {
+    serde_json::from_str(include_str!("../vectors/families/ice_charge.json"))
+        .map_err(|e| e.to_string())
+}
+
+/// Recompute the digests, nonces, and instance bytes of every registered
+/// `quip/charged-ice` case with Rust code that does not call the construction.
+fn check_charge(doc: &Value) -> Result<(), String> {
+    validate(&schema()?, doc)?;
+    check_names_unique(doc)?;
+    for case in section(doc, "cases")? {
+        check_layered_case(case, ice_glass_size_bounds)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn charge_fixture_matches_schema() -> Result<(), String> {
+    let doc = charge_doc()?;
+    validate(&schema()?, &doc)?;
+    match doc.get("provenance").and_then(Value::as_str) {
+        Some("specified") => {}
+        other => return Err(format!("provenance is {other:?}, expected specified")),
+    }
+    check_names_unique(&doc)?;
+    for name in ["cases", "energies", "recipe", "admission"] {
+        section(&doc, name).map(|_| ())?;
+    }
+    Ok(())
+}
+
+#[test]
+fn charge_cases_recompute() -> Result<(), String> {
+    check_charge(&charge_doc()?)
+}
+
+#[test]
+fn charge_cases_match_the_rust_construction() -> Result<(), String> {
+    for case in section(&charge_doc()?, "cases")? {
+        check_layered_against_rust(case)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn charge_params_constants_match_the_vectors() -> Result<(), String> {
+    use quip_solver_conformance::families::charge::{
+        P_CHARGED_A251, P_CHARGED_ADJ_A100_B45_C256, P_CHARGED_Z22_A250_B31_C128,
+    };
+    let doc = charge_doc()?;
+    for (section_name, name, want) in [
+        (
+            "cases",
+            "charged-ice-zephyr-z22",
+            P_CHARGED_Z22_A250_B31_C128,
+        ),
+        (
+            "cases",
+            "charged-ice-adjacency-z12",
+            P_CHARGED_ADJ_A100_B45_C256,
+        ),
+        ("admission", "scale-251-is-out-of-bounds", P_CHARGED_A251),
+    ] {
+        let case = find_named(&doc, section_name, name)?;
+        compare(
+            case,
+            "params_hex",
+            &str_field(case, "params_hex")?.to_owned(),
+            &codec::hex_encode(&want),
+        )?;
+    }
+    compare(&doc, "case count", &section(&doc, "cases")?.len(), &4)
+}
+
+/// Build the instance of one lease slot of a case or recipe with the Rust
+/// construction, and give it to `check` together with the admitted params.
+fn with_charge_instance<T>(
+    case: &Value,
+    slot: u64,
+    check: impl FnOnce(
+        &ising_generators::descriptor::Params<'_>,
+        &ising_generators::instance::Instance,
+    ) -> Result<T, String>,
+) -> Result<T, String> {
+    use ising_generators::descriptor::{admit, params_digest, AdvertisedLimits};
+    use ising_generators::family::{admit_topology, generate_instance, BaseTopology};
+    use ising_generators::ice::CHARGED_ICE_V1;
+    let params = codec::hex_decode(str_field(case, "params_hex")?)?;
+    let contracts = [CHARGED_ICE_V1];
+    let admitted = admit(
+        &contracts,
+        str_field(case, "family_id")?.as_bytes(),
+        u32_field(case, "revision")?,
+        &params,
+        &params_digest(&params),
+    )
+    .map_err(|c| format!("{}: admit failed with {c}", case_name(case)))?;
+    let (nodes, edges) = topology_inputs(object_field(case, "topology")?)?;
+    let topology = BaseTopology::new(nodes, &edges).map_err(|e| format!("{e:?}"))?;
+    let bounds = admit_topology(
+        &admitted,
+        &topology,
+        topology.order_digest(),
+        &AdvertisedLimits {
+            max_nodes: 0,
+            max_edges: 0,
+            max_degree: 0,
+        },
+    )
+    .map_err(|c| format!("{}: admit_topology failed with {c}", case_name(case)))?;
+    let nonce = codec::hex32(&lease_nonce(case, slot)?)?;
+    let instance = generate_instance(&admitted, &topology, &bounds, nonce)
+        .map_err(|fault| format!("{}: generation gave {fault:?}", case_name(case)))?;
+    check(admitted.params(), &instance)
+}
+
+/// `sum h s + sum J s s + offset` of an instance, in `i128`.
+fn encoded_energy(
+    instance: &ising_generators::instance::Instance,
+    spins: &[i8],
+) -> Result<i128, String> {
+    let spin = |at: usize| -> Result<i128, String> {
+        spins
+            .get(at)
+            .map(|&s| i128::from(s))
+            .ok_or_else(|| "a position outside the spins".to_owned())
+    };
+    let mut total = i128::from(instance.offset_milli());
+    for (at, &h) in instance.h().iter().enumerate() {
+        total += i128::from(h) * spin(at)?;
+    }
+    for (&(u, v), &j) in instance.edges().iter().zip(instance.j()) {
+        let u = usize::try_from(u).map_err(|e| e.to_string())?;
+        let v = usize::try_from(v).map_err(|e| e.to_string())?;
+        total += i128::from(j) * spin(u)? * spin(v)?;
+    }
+    Ok(total)
+}
+
+/// The spins of a `spins_hex` value: one byte per node, `01` for +1 and `ff`
+/// for -1.
+fn spins_of_hex(hex: &str) -> Result<Vec<i8>, String> {
+    codec::hex_decode(hex)?
+        .into_iter()
+        .map(|byte| match byte {
+            0x01 => Ok(1),
+            0xff => Ok(-1),
+            other => Err(format!("spin byte {other:#04x} is not 01 or ff")),
+        })
+        .collect()
+}
+
+/// Rebuild every salt of every energy entry with the Rust construction.
+/// Recompute the encoded energy and the charge defects from the instance, and
+/// compare them with the recorded values. The encoded and direct energies in
+/// the file must be equal.
+fn check_charge_energies(doc: &Value) -> Result<(), String> {
+    use ising_generators::ice::charge_defects;
+    for entry in section(doc, "energies")? {
+        let case = find_named(doc, "cases", str_field(entry, "case")?)?;
+        let slot = u64_decimal(entry, "index")?;
+        compare(
+            entry,
+            "nonce",
+            &lease_nonce(case, slot)?,
+            &str_field(entry, "nonce")?.to_owned(),
+        )?;
+        for state in entries_of(entry, "states")? {
+            let spins = spins_of_hex(str_field(state, "spins_hex")?)?;
+            let encoded = with_charge_instance(case, slot, |params, built| {
+                let defects =
+                    charge_defects(params, built, &spins).ok_or("charge_defects gave None")?;
+                Ok((encoded_energy(built, &spins)?, defects))
+            })?;
+            let want_encoded = i128::from(i64_decimal(state, "encoded_milli")?);
+            let want_direct = i128::from(i64_decimal(state, "direct_milli")?);
+            compare(state, "encoded energy", &encoded.0, &want_encoded)?;
+            compare(state, "encoded equals direct", &want_direct, &want_encoded)?;
+            compare(
+                state,
+                "charge_defects",
+                &u64::from(encoded.1),
+                &state
+                    .get("charge_defects")
+                    .and_then(Value::as_u64)
+                    .ok_or("no charge_defects")?,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn charge_energies_match_the_rust_construction() -> Result<(), String> {
+    check_charge_energies(&charge_doc()?)
+}
+
+/// The count of charged tiles and the largest `|h|` of a built instance.
+fn charge_counts(built: &ising_generators::instance::Instance) -> Result<(u64, u64, u64), String> {
+    let metadata = built.metadata();
+    let mut rest = metadata.get(2..).ok_or("no metadata")?;
+    let (mut tiles, mut charged) = (None, None);
+    while let (Some(kind), Some(len)) = (rest.get(0..2), rest.get(2..6)) {
+        let len = usize::try_from(u32::from_le_bytes(len.try_into().map_err(|_| "len")?))
+            .map_err(|e| e.to_string())?;
+        let end = 6_usize.checked_add(len).ok_or("overflow")?;
+        let payload = rest.get(6..end).ok_or("short payload")?;
+        let count = u32::from_le_bytes(
+            payload
+                .get(0..4)
+                .ok_or("short count")?
+                .try_into()
+                .map_err(|_| "count")?,
+        );
+        match kind {
+            [1, 0] => tiles = Some(u64::from(count)),
+            [6, 0] => {
+                let bytes = payload.get(4..).ok_or("short charges")?;
+                let nonzero = bytes.iter().filter(|&&b| b != 0).count();
+                charged = Some(u64::try_from(nonzero).map_err(|e| e.to_string())?);
+            }
+            _ => {}
+        }
+        rest = rest.get(end..).ok_or("short region")?;
+    }
+    let max_h = built
+        .h()
+        .iter()
+        .map(|h| u64::from(h.unsigned_abs()))
+        .max()
+        .unwrap_or(0);
+    Ok((
+        tiles.ok_or("no tile section")?,
+        charged.ok_or("no charge section")?,
+        max_h,
+    ))
+}
+
+/// Rebuild every salt of the recipe with the Rust construction and compare the
+/// hash and the counts.
+fn check_charge_recipe(recipe: &Value) -> Result<(), String> {
+    use ising_generators::descriptor::params_digest;
+    let params = codec::hex_decode(str_field(recipe, "params_hex")?)?;
+    compare(
+        recipe,
+        "params_digest",
+        &codec::hex_encode(&params_digest(&params)),
+        &str_field(recipe, "params_digest")?.to_owned(),
+    )?;
+    let salts = entries_of(recipe, "salts")?;
+    compare(
+        recipe,
+        "salts",
+        &u64::try_from(salts.len()).map_err(|e| e.to_string())?,
+        &u64_decimal(object_field(recipe, "lease")?, "salt_count")?,
+    )?;
+    for salt in salts {
+        let slot = u64_decimal(salt, "index")?;
+        compare(
+            recipe,
+            "nonce",
+            &lease_nonce(recipe, slot)?,
+            &str_field(salt, "nonce")?.to_owned(),
+        )?;
+        let (hash, counts) = with_charge_instance(recipe, slot, |_, built| {
+            let canonical = built.canonical_bytes().map_err(|e| e.to_string())?;
+            Ok((
+                blake3::hash(&canonical).to_hex().to_string(),
+                charge_counts(built)?,
+            ))
+        })?;
+        compare(
+            recipe,
+            "canonical_blake3",
+            &hash,
+            &str_field(salt, "canonical_blake3")?.to_owned(),
+        )?;
+        let field = |key: &str| {
+            salt.get(key)
+                .and_then(Value::as_u64)
+                .ok_or_else(|| format!("no {key}"))
+        };
+        compare(recipe, "tiles", &counts.0, &field("tiles")?)?;
+        compare(recipe, "charged_tiles", &counts.1, &field("charged_tiles")?)?;
+        compare(recipe, "max_abs_h", &counts.2, &field("max_abs_h")?)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn charge_recipe_matches_the_rust_construction() -> Result<(), String> {
+    let doc = charge_doc()?;
+    for recipe in section(&doc, "recipe")? {
+        check_charge_recipe(recipe)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn charge_recipe_matches_the_rust_constant() -> Result<(), String> {
+    use ising_generators::descriptor::params_digest;
+    use ising_generators::ice::ICE_CHARGE_RECIPE;
+    let doc = charge_doc()?;
+    let recipes = section(&doc, "recipe")?;
+    compare(&doc, "recipe count", &recipes.len(), &1)?;
+    for recipe in recipes {
+        let want = ICE_CHARGE_RECIPE;
+        compare(recipe, "alias", &str_field(recipe, "alias")?, &want.alias)?;
+        compare(recipe, "cell", &str_field(recipe, "cell")?, &want.cell)?;
+        compare(
+            recipe,
+            "params_hex",
+            &str_field(recipe, "params_hex")?.to_owned(),
+            &codec::hex_encode(want.params),
+        )?;
+        compare(
+            recipe,
+            "params_digest",
+            &str_field(recipe, "params_digest")?.to_owned(),
+            &codec::hex_encode(&params_digest(want.params)),
+        )?;
+    }
+    Ok(())
+}
+
+#[test]
+fn charge_admission_codes_match_the_rust_admission() -> Result<(), String> {
+    use ising_generators::descriptor::{admit, params_digest, AdvertisedLimits};
+    use ising_generators::family::{admit_topology, BaseTopology};
+    use ising_generators::ice::CHARGED_ICE_V1;
+    let doc = charge_doc()?;
+    let contracts = [CHARGED_ICE_V1];
+    for case in section(&doc, "admission")? {
+        let params = codec::hex_decode(str_field(case, "params_hex")?)?;
+        let (nodes, edges) = topology_inputs(object_field(case, "topology")?)?;
+        let topology = BaseTopology::new(nodes, &edges).map_err(|e| format!("{e:?}"))?;
+        let got = admit(
+            &contracts,
+            str_field(case, "family_id")?.as_bytes(),
+            u32_field(case, "revision")?,
+            &params,
+            &params_digest(&params),
+        )
+        .and_then(|admitted| {
+            admit_topology(
+                &admitted,
+                &topology,
+                topology.order_digest(),
+                &AdvertisedLimits {
+                    max_nodes: 0,
+                    max_edges: 0,
+                    max_degree: 0,
+                },
+            )
+        });
+        let got = got.err().map(ising_generators::Code::value);
+        compare(case, "admission code", &got, &expected_code(case)?)?;
+        compare(case, "code is 9", &got, &Some(9))?;
+    }
+    compare(
+        &doc,
+        "admission count",
+        &section(&doc, "admission")?.len(),
+        &2,
+    )
+}
+
+#[test]
+fn a_changed_charge_coupling_fails_the_recompute() -> Result<(), String> {
+    let doc = charge_doc()?;
+    let pointer = "/cases/0/instances/0/j/0";
+    let was = doc
+        .pointer(pointer)
+        .and_then(Value::as_i64)
+        .ok_or("no coupling")?;
+    let broken = mutate(&doc, pointer, json!(was + 1000));
+    expect_err(&check_charge(&broken), "a changed coupling")
+}
+
+#[test]
+fn a_changed_charge_energy_fails_the_check() -> Result<(), String> {
+    let doc = charge_doc()?;
+    let pointer = "/energies/0/states/3/encoded_milli";
+    let was = doc
+        .pointer(pointer)
+        .and_then(Value::as_str)
+        .ok_or("no energy")?
+        .parse::<i64>()
+        .map_err(|e| e.to_string())?;
+    let broken = mutate(&doc, pointer, json!((was + 1).to_string()));
+    expect_err(&check_charge_energies(&broken), "a changed encoded energy")?;
+    let pointer = "/energies/0/states/3/charge_defects";
+    let was = doc
+        .pointer(pointer)
+        .and_then(Value::as_u64)
+        .ok_or("no defect count")?;
+    let broken = mutate(&doc, pointer, json!(was + 1));
+    expect_err(&check_charge_energies(&broken), "a changed defect count")
+}
+
+#[test]
+fn a_changed_charge_recipe_hash_fails_the_recompute() -> Result<(), String> {
+    let doc = charge_doc()?;
+    let recipe = section(&doc, "recipe")?.first().ok_or("no recipe")?;
+    let was = str_field(
+        recipe.pointer("/salts/0").ok_or("no salt")?,
+        "canonical_blake3",
+    )?;
+    let broken = mutate(
+        &doc,
+        "/recipe/0/salts/0/canonical_blake3",
+        json!(flip_last_hex_digit(was)),
+    );
+    let recipe = section(&broken, "recipe")?.first().ok_or("no recipe")?;
+    expect_err(&check_charge_recipe(recipe), "a changed recipe hash")
 }
 
 // ---- topology files (vectors/topologies/) ----
