@@ -79,7 +79,7 @@ encodings do not change.
 - `quip_solver_conformance::{topology, topology_bytes, t_sparse, TopologyError,
   TOPOLOGY_FILES, TOPOLOGY_INDEX}`. They decode the embedded topology files.
 - SC-8 ice structure in `ising-generators`: the FAM-24 shuffle, ice tile candidates
-  from Zephyr coordinates or adjacency, a largest edge-disjoint tile selection in a
+  from Zephyr coordinates or adjacency, a maximum edge-disjoint tile selection in a
   fixed order, and the vectors `ice_structure.json` with the archived tile fixtures.
 
 ### Changed
