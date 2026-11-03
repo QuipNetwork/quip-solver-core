@@ -3412,11 +3412,11 @@
       "path": "conformance/family_oracle/__init__.py"
     },
     {
-      "blake3": "e18a7c719cd8f78823432dcc45c6df0d865d0e30d6e914a613e8ef3f53834121",
+      "blake3": "fb8243632352bfd9301c07cf0507416393f30069157fac1f0305b09775cb5006",
       "path": "conformance/family_oracle/__main__.py"
     },
     {
-      "blake3": "03add6400aa1ed8e792902a7d2f2a18a4ea02b8b898a189d0dab6e25c614343e",
+      "blake3": "a5b51ab9a5492c7aebd508fcd1313a0942bbb0bc689b22770519d474df5ed3ab",
       "path": "conformance/family_oracle/build.py"
     },
     {
@@ -3448,7 +3448,7 @@
       "path": "conformance/family_oracle/params.py"
     },
     {
-      "blake3": "c8329cce3e8cb7d3d0ee42611e5c0d5655b6a27934548ee131c17434c5aaa036",
+      "blake3": "e5d251c6ed3daaef2cb55a8a5d7357690cd6197773a68dcfc21630f1b837dfee",
       "path": "conformance/family_oracle/topology_blob.py"
     },
     {
@@ -3669,251 +3669,54 @@
   ],
   "topologies": [
     {
-      "edges": [
-        [
-          907,
-          41
-        ],
-        [
-          41,
-          0
-        ],
-        [
-          0,
-          4294967295
-        ],
-        [
-          4294967295,
-          12
-        ],
-        [
-          12,
-          3
-        ],
-        [
-          3,
-          907
-        ],
-        [
-          41,
-          12
-        ]
-      ],
       "evidence": [
         "SC-2:digest-derive-key-contexts",
         "SC-2:topology-order-digest-reordered-edges"
       ],
       "material_hex": "060000008b0300002900000000000000ffffffff0c00000003000000070000008b03000029000000290000000000000000000000ffffffffffffffff0c0000000c00000003000000030000008b030000290000000c000000",
       "name": "sparse",
-      "nodes": [
-        907,
-        41,
-        0,
-        4294967295,
-        12,
-        3
-      ],
-      "order_digest": "07551e6f3010a65652a4099c85f3c5f5c9b784abaceddfd33b3dacf39f76fb79"
+      "order_digest": "07551e6f3010a65652a4099c85f3c5f5c9b784abaceddfd33b3dacf39f76fb79",
+      "topology": "../topologies/t-sparse.bin.gz"
     },
     {
-      "edges": [
-        [
-          907,
-          41
-        ],
-        [
-          41,
-          0
-        ],
-        [
-          0,
-          4294967295
-        ],
-        [
-          4294967295,
-          12
-        ],
-        [
-          12,
-          3
-        ],
-        [
-          3,
-          907
-        ],
-        [
-          41,
-          12
-        ]
-      ],
       "evidence": [
         "SC-2:digest-derive-key-contexts",
         "SC-2:topology-order-digest-reordered-edges"
       ],
       "material_hex": "06000000290000008b03000000000000ffffffff0c00000003000000070000008b03000029000000290000000000000000000000ffffffffffffffff0c0000000c00000003000000030000008b030000290000000c000000",
       "name": "sparse-nodes-reordered",
-      "nodes": [
-        41,
-        907,
-        0,
-        4294967295,
-        12,
-        3
-      ],
-      "order_digest": "1144b7187dd24a76a584998a9320dd99ae23c2fba7f0ddd2e252033e895eb51b"
+      "order_digest": "1144b7187dd24a76a584998a9320dd99ae23c2fba7f0ddd2e252033e895eb51b",
+      "topology": "../topologies/sparse-nodes-reordered.bin.gz"
     },
     {
-      "edges": [
-        [
-          41,
-          0
-        ],
-        [
-          907,
-          41
-        ],
-        [
-          0,
-          4294967295
-        ],
-        [
-          4294967295,
-          12
-        ],
-        [
-          12,
-          3
-        ],
-        [
-          3,
-          907
-        ],
-        [
-          41,
-          12
-        ]
-      ],
       "evidence": [
         "SC-2:digest-derive-key-contexts",
         "SC-2:topology-order-digest-reordered-edges"
       ],
       "material_hex": "060000008b0300002900000000000000ffffffff0c000000030000000700000029000000000000008b0300002900000000000000ffffffffffffffff0c0000000c00000003000000030000008b030000290000000c000000",
       "name": "sparse-edges-reordered",
-      "nodes": [
-        907,
-        41,
-        0,
-        4294967295,
-        12,
-        3
-      ],
-      "order_digest": "66fccc2038544fe27a27625de90b96e36c7fc169975d8d030930ea1f44ba5bba"
+      "order_digest": "66fccc2038544fe27a27625de90b96e36c7fc169975d8d030930ea1f44ba5bba",
+      "topology": "../topologies/sparse-edges-reordered.bin.gz"
     },
     {
-      "edges": [
-        [
-          41,
-          907
-        ],
-        [
-          41,
-          0
-        ],
-        [
-          0,
-          4294967295
-        ],
-        [
-          4294967295,
-          12
-        ],
-        [
-          12,
-          3
-        ],
-        [
-          3,
-          907
-        ],
-        [
-          41,
-          12
-        ]
-      ],
       "evidence": [
         "SC-2:digest-derive-key-contexts",
         "SC-2:topology-order-digest-reordered-edges"
       ],
       "material_hex": "060000008b0300002900000000000000ffffffff0c0000000300000007000000290000008b030000290000000000000000000000ffffffffffffffff0c0000000c00000003000000030000008b030000290000000c000000",
       "name": "sparse-edge-flipped",
-      "nodes": [
-        907,
-        41,
-        0,
-        4294967295,
-        12,
-        3
-      ],
-      "order_digest": "a71a4d5a7476717cb5c003eec147d973bb593c82fdb4a236dd285e7b13db4036"
+      "order_digest": "a71a4d5a7476717cb5c003eec147d973bb593c82fdb4a236dd285e7b13db4036",
+      "topology": "../topologies/sparse-edge-flipped.bin.gz"
     },
     {
-      "edges": [
-        [
-          9,
-          8
-        ],
-        [
-          8,
-          7
-        ],
-        [
-          7,
-          6
-        ],
-        [
-          6,
-          5
-        ],
-        [
-          5,
-          4
-        ],
-        [
-          4,
-          3
-        ],
-        [
-          3,
-          2
-        ],
-        [
-          2,
-          1
-        ],
-        [
-          1,
-          0
-        ]
-      ],
       "evidence": [
         "SC-2:digest-derive-key-contexts",
         "SC-2:topology-order-digest-reordered-edges"
       ],
       "material_hex": "0a0000000900000008000000070000000600000005000000040000000300000002000000010000000000000009000000090000000800000008000000070000000700000006000000060000000500000005000000040000000400000003000000030000000200000002000000010000000100000000000000",
       "name": "reverse-ten",
-      "nodes": [
-        9,
-        8,
-        7,
-        6,
-        5,
-        4,
-        3,
-        2,
-        1,
-        0
-      ],
-      "order_digest": "0c38bd8ddc15bb093b1181ce5009a341ae0c731dac30f70d03ede7479f5b06fd"
+      "order_digest": "0c38bd8ddc15bb093b1181ce5009a341ae0c731dac30f70d03ede7479f5b06fd",
+      "topology": "../topologies/reverse-ten.bin.gz"
     }
   ],
   "uniform": [

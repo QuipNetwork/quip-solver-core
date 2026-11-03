@@ -17,7 +17,7 @@
       "revision": 1,
       "status": "research",
       "vectors": "crates/quip-solver-conformance/vectors/families/layered.json",
-      "vectors_blake3": "d9b3a89d5ad120221c51691faf44edaa7fb699c2b809c9aeadecd793dfe6cc08"
+      "vectors_blake3": "3f7adf7f3de08ef65a09cd0b583df2d518620d646c312c31b4009b3e8e5aca2a"
     },
     {
       "adapted_from": null,
@@ -30,7 +30,7 @@
       "revision": 1,
       "status": "research",
       "vectors": "crates/quip-solver-conformance/vectors/families/layered.json",
-      "vectors_blake3": "67fa9cabe7c28c258ae001304573f1f98d6876a7d8fe0f2b4f33567f87dbbcf1"
+      "vectors_blake3": "fe0205ba0ed2c88eb71d1ddac6388228235751c60fd728c2fead935c8431d45a"
     }
   ],
   "schema_revision": 1,

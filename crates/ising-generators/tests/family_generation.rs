@@ -124,36 +124,6 @@ fn str_field<'a>(case: &'a Value, key: &str) -> Result<&'a str, String> {
         .ok_or_else(|| format!("missing string {key}"))
 }
 
-fn u32_of(v: &Value) -> Result<u32, String> {
-    v.as_u64()
-        .and_then(|n| u32::try_from(n).ok())
-        .ok_or_else(|| format!("not a u32: {v}"))
-}
-
-fn pairs_of(case: &Value, key: &str) -> Result<Vec<(u32, u32)>, String> {
-    case.get(key)
-        .and_then(Value::as_array)
-        .ok_or_else(|| format!("missing {key}"))?
-        .iter()
-        .map(|e| {
-            let pair = e.as_array().ok_or("edge is not an array")?;
-            match pair.as_slice() {
-                [u, v] => Ok((u32_of(u)?, u32_of(v)?)),
-                _ => Err("edge is not a pair".to_string()),
-            }
-        })
-        .collect()
-}
-
-fn nodes_of(case: &Value) -> Result<Vec<u32>, String> {
-    case.get("nodes")
-        .and_then(Value::as_array)
-        .ok_or("missing nodes")?
-        .iter()
-        .map(u32_of)
-        .collect()
-}
-
 fn nz(n: u32) -> Result<NonZeroU32, String> {
     NonZeroU32::new(n).ok_or_else(|| "zero".to_string())
 }
@@ -577,8 +547,9 @@ fn an_unlisted_label_is_a_defect() -> Result<(), String> {
 fn base_topologies_match_the_topology_vectors() -> Result<(), String> {
     let doc = core()?;
     for case in section(&doc, "topologies")? {
-        let nodes = nodes_of(case)?;
-        let edges = pairs_of(case, "edges")?;
+        let stored = quip_solver_conformance::vectors::topology(str_field(case, "topology")?)
+            .map_err(|e| e.to_string())?;
+        let (nodes, edges) = (stored.nodes, stored.edges);
         let topology = BaseTopology::new(nodes.clone(), &edges).map_err(|e| format!("{e:?}"))?;
         let want = hex32(str_field(case, "order_digest")?)?;
         ensure_eq!(topology.order_digest(), &want, str_field(case, "name")?);

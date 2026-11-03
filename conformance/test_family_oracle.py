@@ -658,12 +658,20 @@ def test_ice_coordinates_invert_the_linear_id():
     assert ice.zephyr_coordinates(m, t, ice.node_count(m, t)) is None
 
 
-def test_ice_live_rebuild_matches_the_fixture_digest():
-    spec = json.loads(build.ICE_LIVE_PATH.read_text())
-    nodes, edges = ice.live_topology(spec["removed_nodes"], spec["removed_edges"])
+def test_ice_live_blob_gives_the_pinned_counts_and_digest():
+    body = topology_blob.decode(build.LIVE_BLOB_PATH.read_bytes())
+    assert body["kind"] == "zephyr-removed"
+    live = topology_blob.expand(body)
+    nodes, edges = live["nodes"], live["edges"]
     assert (len(nodes), len(edges)) == (4575, 41474)
-    assert topology_order_digest(nodes, edges).hex() == spec["order_digest"]
-    assert spec["provenance"] == "archived-research"
+    assert topology_order_digest(nodes, edges).hex() == (
+        "e12cffc9392cc502c5d065d6e1a3e2eabcc08247ffd55d2fe1b41988d2bc37e3"
+    )
+    rebuilt_nodes, rebuilt_edges = ice.live_topology(
+        body["removed_nodes"], body["removed_edges"]
+    )
+    assert nodes == rebuilt_nodes
+    assert edges == [list(edge) for edge in rebuilt_edges]
 
 
 def test_ice_both_modes_agree_and_select_is_a_matching():
@@ -906,7 +914,8 @@ def test_blob_zephyr_lattice_errors():
     head = b"QTOP\x01\x01\x01\x01\x00"
     # (0, 2) is not a coupler of z(1, 1), (0, 1) is.
     assert _payload_error(head + b"\x01\x00\x02") == "not-a-coupler"
-    assert _payload_error(head + b"\x01\x00\x0c") == "not-a-coupler"
+    # The lattice has 12 nodes, so an edge end of 12 is not a node.
+    assert _payload_error(head + b"\x01\x00\x0c") == "not-a-node"
     assert topology_blob.decode_payload(head + b"\x01\x00\x01")["removed_edges"] == [
         [0, 1]
     ]
@@ -915,6 +924,14 @@ def test_blob_zephyr_lattice_errors():
     assert _payload_error(both) == "edge-at-removed-node"
     both = b"QTOP\x01\x01\x01\x01\x01\x00\x01\x00\x01"
     assert _payload_error(both) == "edge-at-removed-node"
+
+
+def test_blob_zephyr_edge_end_beyond_the_lattice_stops_the_loop():
+    head = b"QTOP\x01\x01\x01\x01\x00"
+    # Two edges. The first end is above the 12 lattice nodes.
+    assert _payload_error(head + b"\x02\x00" + _varint(2**40) + b"\x00\x01") == (
+        "not-a-node"
+    )
 
 
 def test_blob_encoder_rejects_what_the_decoder_rejects():
@@ -969,3 +986,8 @@ def test_blob_cli_round_trip(tmp_path):
     failed = run("decode", str(blob))
     assert failed.returncode == 1 and "gzip" in failed.stderr
     assert run("topology").returncode == 2
+    for text in ("[1, 2]", "3", "null", '"x"'):
+        source.write_text(text)
+        failed = run("encode", str(source), str(blob))
+        assert failed.returncode == 1, text
+        assert "shape" in failed.stderr and "Traceback" not in failed.stderr, text

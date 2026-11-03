@@ -520,7 +520,7 @@ fn tiles_of(value: &Value) -> Vec<Tile> {
 
 #[test]
 fn live_topology_rebuilds_with_the_pinned_digest() {
-    let fixture = common::parse(common::LIVE_JSON);
+    let fixture = common::live_entry();
     let base = common::live_topology();
     assert_eq!(base.node_ids().len() as u64, number(&fixture, "nodes"));
     assert_eq!(base.edges().len() as u64, number(&fixture, "edges"));
@@ -620,11 +620,9 @@ fn check_structure_case(case: &Value) {
         u16::try_from(number(lattice, "m")).expect("m"),
         u8::try_from(number(lattice, "t")).expect("t"),
     );
-    let topology_json = field(case, "topology");
-    let base = topology(
-        u32s(field(topology_json, "nodes")),
-        &pairs(field(topology_json, "edges")),
-    );
+    let stored = quip_solver_conformance::vectors::topology(text(case, "topology"))
+        .expect("the case topology file");
+    let base = topology(stored.nodes, &stored.edges);
     let result = shape.and_then(|lattice| {
         let found = candidates(lattice, &base)?;
         let split = sides(lattice, &base, &found)?;

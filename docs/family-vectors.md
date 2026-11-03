@@ -30,9 +30,25 @@ All files are under `crates/quip-solver-conformance/vectors/families/`.
 | `legacy.json` | `legacy-production` | References to the production legacy draw vectors, by case hash |
 | `layered.json` | `test-construction` | Generated instances of the layered test construction for fixed lease nonces |
 | `ice_structure.json` | `specified` | The ice tile structure (Zephyr lattice, candidate tiles, spines, sides, and the order-driven selection) on small topologies and on the live topology |
-| `ice/zephyr-z12t4-live.json` | `archived-research` | The recipe that rebuilds the live z(12, 4) topology and its counts and order digest |
 | `ice/archived-tiles.bin` and `ice/archived-tiles.json` | `archived-research` | Tiles of two archived research models, and their sidecar |
 | `registry.json` | `specified` | The family registry, maintained by hand |
+
+The topologies that the vectors use are not inline.
+Each one is a file under `crates/quip-solver-conformance/vectors/topologies/`, in the format of `docs/topology-format.md`.
+
+| File | Content |
+|---|---|
+| `topologies/index.json` | One entry per topology file: name, file, kind, node and edge counts, order digest, BLAKE3 of the payload, provenance, and a description |
+| `topologies/<name>.bin.gz` | One topology. Each distinct topology has one file. Two topologies are the same when the node list and the edge list match in the same order |
+| `topologies/zephyr-z12t4-live.bin.gz` | `archived-research`. The live z(12, 4) topology as the lattice minus its removed nodes and removed edges (kind 1) |
+
+A topology field in a vectors file holds a string path that starts at the directory of that file. One path is `../topologies/t-sparse.bin.gz`.
+A file takes the name of the first case that uses it, in the order `core.json`, `layered.json`, `ice_structure.json`.
+The T_SPARSE file is `t-sparse.bin.gz`.
+The index entry of the live topology also holds `sources`, with the SHA-256 of the external specification file that the rebuild matches.
+The oracle writes every topology file except the live one, and it writes `index.json`.
+The live file holds archived research data, and the oracle reads it.
+The Rust function `quip_solver_conformance::vectors::topology` decodes a reference.
 
 The `provenance` field has four values.
 
@@ -41,15 +57,15 @@ The `provenance` field has four values.
 | `specified` | The vector follows from `docs/problem-families.md` |
 | `legacy-production` | The vector pins a production legacy draw |
 | `test-construction` | The vector follows a test construction that only the tests and the conformance crate use |
-| `archived-research` | Reserved for later files that hold archived research instances |
+| `archived-research` | Archived research data: the live topology file and the archived tiles |
 
-Only the files under `ice/` use `archived-research`.
-They are fixtures and have no `sources` pins or schema.
+Only the live topology file and the files under `ice/` use `archived-research`.
+The files under `ice/` are fixtures and have no `sources` pins or schema.
 
 The live topology file records the removed nodes and removed edges of the research topology.
 The rebuild takes the z(12, 4) lattice without them.
 It has 4575 nodes and 41474 edges.
-The file pins the SHA-256 of the external specification file that the rebuild matches.
+Its index entry pins the SHA-256 of the external specification file that the rebuild matches.
 
 The archived tiles come from the research generator, which used NumPy PCG64 permutations and SciPy matching.
 They are not output of `quip/ice-glass`.

@@ -16,15 +16,6 @@ USAGE = (
 )
 
 
-def _targets() -> dict:
-    return {
-        build.CORE_PATH: build.render(build.build_core()),
-        build.LEGACY_PATH: build.render(build.build_legacy()),
-        build.LAYERED_PATH: build.render(build.build_layered()),
-        build.ICE_STRUCTURE_PATH: build.render(build.build_ice_structure()),
-    }
-
-
 def _topology(args: list[str]) -> int:
     expand = "--expand" in args
     args = [arg for arg in args if arg != "--expand"]
@@ -56,18 +47,26 @@ def main(argv: list[str]) -> int:
     if len(argv) != 1 or argv[0] not in ("write", "check"):
         print(USAGE, file=sys.stderr)
         return 2
-    targets = _targets()
+    targets = build.targets()
     if argv[0] == "write":
-        for path, text in targets.items():
+        for path, data in targets.items():
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(text)
+            path.write_bytes(data)
             print(f"wrote {path}")
         return 0
-    for path, text in targets.items():
-        if not path.exists() or path.read_text() != text:
-            print(f"differs: {path}", file=sys.stderr)
-            return 1
-    return 0
+    stale = [
+        path
+        for path in build.TOPOLOGIES_DIR.glob("*.bin.gz")
+        if path not in targets and path != build.LIVE_BLOB_PATH
+    ]
+    differs = [
+        path
+        for path, data in targets.items()
+        if not path.exists() or path.read_bytes() != data
+    ]
+    for path in [*differs, *stale]:
+        print(f"differs: {path}", file=sys.stderr)
+    return 1 if differs or stale else 0
 
 
 if __name__ == "__main__":

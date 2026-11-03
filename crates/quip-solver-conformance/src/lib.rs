@@ -17,7 +17,8 @@ pub mod solve;
 /// Generated family instances: the layered test construction.
 pub mod families;
 
-mod vectors;
+/// Golden vector files and the topology loader.
+pub mod vectors;
 
 pub use vectors::{
     adapt_cases, adapt_params_cases, golden_wire, AdaptParamsCase, EnergyToDifficultyCase,

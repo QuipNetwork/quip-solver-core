@@ -4,6 +4,7 @@
 //! is what lets a solver repository delete its vendored copy. The bytes travel
 //! with the version pin.
 
+use ising_generators::blob;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 
@@ -184,3 +185,118 @@ pub const FAMILY_REGISTRY: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/vectors/families/registry.json"
 ));
+
+/// The topology index: every file under `vectors/topologies/` with its name,
+/// kind, counts, digests, provenance, and source (`docs/topology-format.md`).
+pub const TOPOLOGY_INDEX: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/vectors/topologies/index.json"
+));
+
+macro_rules! topology_files {
+    ($($name:literal),* $(,)?) => {
+        &[$((
+            $name,
+            include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/vectors/topologies/",
+                $name
+            )),
+        )),*]
+    };
+}
+
+/// Every topology file under `vectors/topologies/` as `(file name, bytes)`,
+/// sorted by name. A test checks that this list matches the directory.
+pub const TOPOLOGY_FILES: &[(&str, &[u8])] = topology_files![
+    "error-degree-above-limit.bin.gz",
+    "error-duplicate-edge.bin.gz",
+    "error-membership-above-two.bin.gz",
+    "error-mixed-shape.bin.gz",
+    "error-not-bipartite.bin.gz",
+    "error-not-zephyr-coupler.bin.gz",
+    "error-not-zephyr-node.bin.gz",
+    "error-spine-conflict.bin.gz",
+    "first-check-duplicate-before-coupler.bin.gz",
+    "first-check-node-before-coupler.bin.gz",
+    "reverse-ten.bin.gz",
+    "sparse-edge-flipped.bin.gz",
+    "sparse-edges-reordered.bin.gz",
+    "sparse-nodes-reordered.bin.gz",
+    "t-sparse.bin.gz",
+    "tie-ring-4.bin.gz",
+    "z12-zephyr.bin.gz",
+    "z22-cut-edge-zephyr.bin.gz",
+    "z22-permuted-order-zephyr.bin.gz",
+    "z22-zephyr.bin.gz",
+    "zephyr-z12t4-live.bin.gz",
+];
+
+/// Why [`topology`] failed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TopologyError {
+    /// The reference does not name a file under `vectors/topologies/`.
+    NotFound(String),
+    /// The file is not a valid topology blob.
+    Blob(blob::BlobError),
+}
+
+impl core::fmt::Display for TopologyError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::NotFound(reference) => {
+                write!(f, "no topology file for the reference {reference}")
+            }
+            Self::Blob(error) => write!(f, "invalid topology file: {error:?}"),
+        }
+    }
+}
+
+impl std::error::Error for TopologyError {}
+
+/// The bytes of the topology file that `reference` names.
+///
+/// `reference` is the string a JSON file under `vectors/families/` holds, for
+/// example `../topologies/t-sparse.bin.gz`. It is resolved against
+/// `vectors/families/`, and only a file in `vectors/topologies/` is found.
+///
+/// # Errors
+///
+/// [`TopologyError::NotFound`] when the reference names no embedded file.
+pub fn topology_bytes(reference: &str) -> Result<&'static [u8], TopologyError> {
+    let not_found = || TopologyError::NotFound(reference.to_owned());
+    let mut at = vec!["families"];
+    for part in reference.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                if at.pop().is_none() {
+                    return Err(not_found());
+                }
+            }
+            name => at.push(name),
+        }
+    }
+    let ["topologies", file] = at.as_slice() else {
+        return Err(not_found());
+    };
+    TOPOLOGY_FILES
+        .iter()
+        .find(|(name, _)| name == file)
+        .map(|&(_, bytes)| bytes)
+        .ok_or_else(not_found)
+}
+
+/// Decodes the topology file that `reference` names into native ids, in
+/// stored order. See [`topology_bytes`] for the form of `reference`.
+///
+/// # Errors
+///
+/// [`TopologyError::NotFound`] for an unknown reference, and
+/// [`TopologyError::Blob`] when the file does not decode.
+pub fn topology(reference: &str) -> Result<blob::Topology, TopologyError> {
+    blob::decode(topology_bytes(reference)?)
+        .and_then(|body| body.topology())
+        .map_err(TopologyError::Blob)
+}

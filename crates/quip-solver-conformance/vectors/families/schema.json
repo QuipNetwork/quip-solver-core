@@ -543,26 +543,7 @@
           "type": "array"
         },
         "topology": {
-          "additionalProperties": false,
-          "properties": {
-            "edges": {
-              "items": {
-                "$ref": "#/$defs/int_pair"
-              },
-              "type": "array"
-            },
-            "nodes": {
-              "items": {
-                "type": "integer"
-              },
-              "type": "array"
-            }
-          },
-          "required": [
-            "nodes",
-            "edges"
-          ],
-          "type": "object"
+          "$ref": "#/$defs/topology_ref"
         }
       },
       "required": [
@@ -907,34 +888,19 @@
         "topology": {
           "additionalProperties": false,
           "properties": {
-            "edges": {
-              "items": {
-                "items": {
-                  "type": "integer"
-                },
-                "maxItems": 2,
-                "minItems": 2,
-                "type": "array"
-              },
-              "type": "array"
-            },
             "name": {
               "type": "string"
             },
-            "nodes": {
-              "items": {
-                "type": "integer"
-              },
-              "type": "array"
-            },
             "order_digest": {
               "$ref": "#/$defs/hex32"
+            },
+            "topology": {
+              "$ref": "#/$defs/topology_ref"
             }
           },
           "required": [
             "name",
-            "nodes",
-            "edges",
+            "topology",
             "order_digest"
           ],
           "type": "object"
@@ -1708,17 +1674,6 @@
     "topology_case": {
       "additionalProperties": false,
       "properties": {
-        "edges": {
-          "items": {
-            "items": {
-              "type": "integer"
-            },
-            "maxItems": 2,
-            "minItems": 2,
-            "type": "array"
-          },
-          "type": "array"
-        },
         "evidence": {
           "items": {
             "type": "string"
@@ -1731,25 +1686,99 @@
         "name": {
           "type": "string"
         },
-        "nodes": {
-          "items": {
-            "type": "integer"
-          },
-          "type": "array"
-        },
         "order_digest": {
           "$ref": "#/$defs/hex32"
+        },
+        "topology": {
+          "$ref": "#/$defs/topology_ref"
         }
       },
       "required": [
         "name",
         "evidence",
-        "nodes",
-        "edges",
+        "topology",
         "material_hex",
         "order_digest"
       ],
       "type": "object"
+    },
+    "topology_index_entry": {
+      "additionalProperties": false,
+      "properties": {
+        "about": {
+          "type": "string"
+        },
+        "edges": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "file": {
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "explicit",
+            "zephyr-removed"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "nodes": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "order_digest": {
+          "$ref": "#/$defs/hex32"
+        },
+        "payload_blake3": {
+          "$ref": "#/$defs/hex32"
+        },
+        "provenance": {
+          "enum": [
+            "specified",
+            "legacy-production",
+            "archived-research",
+            "test-construction"
+          ]
+        },
+        "sources": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "sha256": {
+                "$ref": "#/$defs/hex32"
+              }
+            },
+            "required": [
+              "path",
+              "sha256"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "name",
+        "file",
+        "kind",
+        "nodes",
+        "edges",
+        "order_digest",
+        "payload_blake3",
+        "provenance",
+        "about"
+      ],
+      "type": "object"
+    },
+    "topology_ref": {
+      "$comment": "A path to a topology file, relative to the directory of the referencing JSON file.",
+      "minLength": 1,
+      "type": "string"
     },
     "u64s": {
       "pattern": "^(0|[1-9][0-9]*)$",

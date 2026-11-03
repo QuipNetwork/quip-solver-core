@@ -50,6 +50,49 @@ def test_ice_structure_fixture_matches_oracle():
     assert text == build.ICE_STRUCTURE_PATH.read_text()
 
 
+def test_topology_index_matches_oracle():
+    text = build.render(build.build_topology_index())
+    assert text == build.INDEX_PATH.read_text()
+
+
+def test_topology_blobs_match_oracle():
+    blobs = build.topology_blobs()
+    assert blobs
+    for path, data in blobs.items():
+        assert path.read_bytes() == data, path.name
+
+
+def test_topology_directory_holds_only_known_files():
+    on_disk = {path.name for path in build.TOPOLOGIES_DIR.iterdir()}
+    expected = {path.name for path in build.topology_blobs()}
+    expected |= {build.INDEX_PATH.name, build.LIVE_BLOB_PATH.name}
+    assert on_disk == expected
+
+
+def test_every_json_topology_reference_names_an_indexed_file():
+    index = {entry["file"] for entry in json.loads(build.INDEX_PATH.read_text())}
+    refs: list[str] = []
+
+    def walk(value):
+        if isinstance(value, str) and value.endswith(".bin.gz"):
+            refs.append(value)
+        elif isinstance(value, list):
+            for item in value:
+                walk(item)
+        elif isinstance(value, dict):
+            for item in value.values():
+                walk(item)
+
+    for load in (_core_doc, _layered_doc, _ice_doc):
+        walk(load())
+    assert refs
+    for ref in refs:
+        target = (build.FAMILIES_DIR / ref).resolve()
+        assert target.parent == build.TOPOLOGIES_DIR.resolve(), ref
+        assert target.name in index, ref
+        assert target.exists(), ref
+
+
 def test_ice_structure_evidence_is_sc8():
     doc = _ice_doc()
     tagged = [

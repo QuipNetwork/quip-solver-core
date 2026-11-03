@@ -111,6 +111,8 @@ def _check_lattice(m: int, t: int) -> None:
 
 
 def encode_payload(body: Body) -> bytes:
+    if not isinstance(body, dict):
+        raise BlobError("shape", "the topology must be a JSON object")
     out = bytearray(MAGIC)
     out.append(VERSION)
     kind = body.get("kind")
@@ -241,6 +243,8 @@ def _decode_zephyr(reader: _Reader) -> Body:
         if gap == 0:
             raise BlobError("order", "removed edge needs b > a")
         b = a + gap
+        if b >= count:
+            raise BlobError("not-a-node", f"removed edge end {b}")
         if removed_edges and (a, b) <= tuple(removed_edges[-1]):
             raise BlobError("order", "removed edges must be strictly ascending")
         removed_edges.append([a, b])

@@ -1,17 +1,16 @@
 //! Shared test loaders for the committed ice fixtures: the live topology, the
 //! archived tiles, and small hex helpers.
 //!
-//! The fixtures live in `quip-solver-conformance/vectors/families/ice/`. They
-//! are read with `include_str!` and `include_bytes!`, so a test never touches
-//! the file system at run time.
+//! The archived tiles live in `quip-solver-conformance/vectors/families/ice/`.
+//! They are read with `include_str!` and `include_bytes!`, so a test never
+//! touches the file system at run time. The live topology comes from the
+//! topology files that `quip_solver_conformance::vectors` embeds.
 
 use ising_generators::family::BaseTopology;
-use ising_generators::ice::zephyr_lattice;
 use serde_json::Value;
 
-/// The live topology fixture: the rebuild recipe and its pinned counts.
-pub(crate) const LIVE_JSON: &str =
-    include_str!("../../../quip-solver-conformance/vectors/families/ice/zephyr-z12t4-live.json");
+/// The reference to the live topology file, as a vectors file holds it.
+pub(crate) const LIVE_REFERENCE: &str = "../topologies/zephyr-z12t4-live.bin.gz";
 
 /// The sidecar of the archived tiles: provenance, digest, and per-model offsets.
 pub(crate) const ARCHIVED_JSON: &str =
@@ -147,37 +146,30 @@ pub(crate) fn seed(text: &str) -> [u8; 32] {
     unhex(text).try_into().expect("a 32-byte seed")
 }
 
-/// The live z(12, 4) topology: the lattice without `removed_nodes`, with nodes
-/// ascending, and without `removed_edges` or any edge at a removed node, with
-/// edges ascending.
+/// The index entry of the live topology: counts, order digest, provenance.
 ///
 /// # Panics
 ///
-/// When the fixture and the lattice disagree.
+/// When the index has no live entry.
+pub(crate) fn live_entry() -> Value {
+    let index = parse(quip_solver_conformance::vectors::TOPOLOGY_INDEX);
+    index
+        .as_array()
+        .expect("the index is an array")
+        .iter()
+        .find(|entry| text(entry, "file") == "zephyr-z12t4-live.bin.gz")
+        .expect("the index lists the live topology")
+        .clone()
+}
+
+/// The live z(12, 4) topology, decoded from its file (kind 1).
+///
+/// # Panics
+///
+/// When the file does not decode or the topology is invalid.
 pub(crate) fn live_topology() -> BaseTopology {
-    let fixture = parse(LIVE_JSON);
-    let zephyr = field(&fixture, "zephyr");
-    let (m, t) = (number(zephyr, "m"), number(zephyr, "t"));
-    let (nodes, edges) = zephyr_lattice(
-        u16::try_from(m).expect("m fits u16"),
-        u8::try_from(t).expect("t fits u8"),
-    )
-    .expect("lattice");
-    let removed_nodes = u32s(field(&fixture, "removed_nodes"));
-    let removed_edges = pairs(field(&fixture, "removed_edges"));
-    let nodes: Vec<u32> = nodes
-        .into_iter()
-        .filter(|n| !removed_nodes.contains(n))
-        .collect();
-    let edges: Vec<(u32, u32)> = edges
-        .into_iter()
-        .filter(|e| {
-            !removed_nodes.contains(&e.0)
-                && !removed_nodes.contains(&e.1)
-                && !removed_edges.contains(e)
-        })
-        .collect();
-    BaseTopology::new(nodes, &edges).expect("live topology")
+    let stored = quip_solver_conformance::vectors::topology(LIVE_REFERENCE).expect("live file");
+    BaseTopology::new(stored.nodes, &stored.edges).expect("live topology")
 }
 
 /// One archived model: its nonce and its tiles in dense positions.

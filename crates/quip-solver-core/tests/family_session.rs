@@ -505,13 +505,13 @@ fn wire_reason(core: &Value, name: &str) -> i32 {
 fn vector_topology(name: &str) -> wire::Topology {
     let core = core();
     let t = case(&core, "topologies", name);
-    let id = |v: &Value| u32::try_from(v.as_u64().unwrap()).unwrap();
-    let edges = t["edges"].as_array().unwrap();
+    let stored =
+        quip_solver_conformance::vectors::topology(t["topology"].as_str().unwrap()).unwrap();
     wire::Topology {
-        nodes: t["nodes"].as_array().unwrap().iter().map(id).collect(),
+        nodes: stored.nodes,
         edges: Some(wire::EdgeList {
-            u: edges.iter().map(|e| id(&e[0])).collect(),
-            v: edges.iter().map(|e| id(&e[1])).collect(),
+            u: stored.edges.iter().map(|e| e.0).collect(),
+            v: stored.edges.iter().map(|e| e.1).collect(),
         }),
         ..topology()
     }
