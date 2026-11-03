@@ -40,7 +40,7 @@ Let `L` be `n_layers`, `f` be `field_milli`, and `n` be the base node count.
 Check every operation. An overflow returns code 13, `BoundsExceeded`.
 
 1. Draw `w = uniform(salt, 8)`. If `w = 0`, return code 14, `NoInstance`.
-2. If `w = 2`, compute `f * 2^21` in `i32`. An overflow returns code 13. The value is not used.
+2. If `w = 2`, compute `f * 2^21` in `i32`. The product overflows when `f >= 1024` or `f <= -1025`, and an overflow returns code 13. The value is not used.
 3. Set `scale = 2` if `w = 1`, else `scale = 1`. Set `h = f * scale` for every node.
 4. Number the nodes `k * n + pos` for `k` in `0..L` and `pos` in `0..n`.
 5. For each layer `k`, add each base edge `(a, b)` as `(k * n + min(a, b), k * n + max(a, b))`. For `k` in `0..L-1`, add `(k * n + pos, (k + 1) * n + pos)` for each `pos`. Sort the edges in ascending order.
@@ -86,7 +86,7 @@ This family has no feasibility constraints.
 
 Every other bound is the FAM-37 bound.
 
-Step 2 overflows by design when `|field_milli| >= 1024`. This exercises generation code 13 (FAM-27).
+Step 2 runs only when `w = 2`. It overflows `i32` by design when `field_milli >= 1024` or `field_milli <= -1025`. This exercises generation code 13 (FAM-27).
 This breaks the FAM-38 Bounds rule, which requires bounds that make overflow impossible.
 A production family must not copy step 2.
 
