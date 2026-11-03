@@ -8,7 +8,9 @@ use std::fmt::Write as _;
 use std::slice::from_ref;
 use std::time::Duration;
 
-use ising_generators::descriptor::{admit, params_digest, AdvertisedLimits, SizeBounds};
+use ising_generators::descriptor::{
+    admit, check_family_id, params_digest, AdvertisedLimits, IdContext, SizeBounds,
+};
 use ising_generators::family::{admit_topology, BaseTopology, SaltFault};
 use ising_generators::instance::Instance;
 use ising_generators::Code;
@@ -858,6 +860,118 @@ fn first_params_with(
     ))
 }
 
+/// The supported lease at the next revision.
+///
+/// # Errors
+///
+/// The skip reason when the binary lists the next revision, because it then
+/// may generate it.
+fn next_revision_lease(
+    caps: &Capabilities,
+    supported: &FamilyLease,
+) -> Result<FamilyLease, String> {
+    let next = supported.revision.saturating_add(1);
+    let listed = caps
+        .generated_families
+        .iter()
+        .any(|entry| entry.family_id == supported.family_id && entry.revisions.contains(&next));
+    if listed {
+        return Err(format!("the binary lists revision {next}"));
+    }
+    Ok(FamilyLease {
+        revision: next,
+        ..supported.clone()
+    })
+}
+
+/// The FAM-61 rule that the `generated_families` entry of `family_id`
+/// breaks, if any. An entry that breaks FAM-61 claims nothing.
+fn fam61_fault(caps: &Capabilities, family_id: &str) -> Option<String> {
+    let entries: Vec<_> = caps
+        .generated_families
+        .iter()
+        .filter(|entry| entry.family_id == family_id)
+        .collect();
+    let [entry] = entries.as_slice() else {
+        return Some(format!(
+            "generated_families lists {family_id} {} times, so the list claims nothing for it (FAM-61)",
+            entries.len()
+        ));
+    };
+    if check_family_id(family_id.as_bytes(), IdContext::Lease).is_err() {
+        return Some(format!(
+            "the family_id {family_id} breaks FAM-01 or FAM-02 or uses the example namespace (FAM-61)"
+        ));
+    }
+    if entry.revisions.is_empty() {
+        return Some(format!(
+            "the entry for {family_id} lists no revision (FAM-61)"
+        ));
+    }
+    if entry.revisions.contains(&0) {
+        return Some(format!(
+            "the entry for {family_id} lists revision 0 (FAM-61)"
+        ));
+    }
+    if entry.params_digests.iter().any(|digest| digest.len() != 32) {
+        return Some(format!(
+            "the entry for {family_id} has a params digest that is not 32 bytes (FAM-61)"
+        ));
+    }
+    None
+}
+
+/// The supported lease of a listed subject, or the cases to record when the
+/// gate cannot drive it. A listed revision that the gate cannot drive fails
+/// `supported-revision` (FAM-57). The other cases of a revision with a
+/// reference are skipped with the same reason.
+fn select_supported<'r>(
+    caps: &Capabilities,
+    subject: &str,
+    reference: Option<&'r ReferenceRevision>,
+    topology: &BaseTopology,
+) -> Result<(FamilyLease, &'r ReferenceRevision), Vec<(&'static str, CaseOutcome)>> {
+    let family_id = subject.rsplit_once('@').map_or(subject, |(id, _)| id);
+    let cases_for = |why: String| {
+        let mut cases = vec![("supported-revision", CaseOutcome::Failed(why.clone()))];
+        if reference.is_some() {
+            for name in REVISION_CASES.iter().skip(1) {
+                cases.push((*name, CaseOutcome::Skipped(why.clone())));
+            }
+        }
+        cases
+    };
+    if let Some(fault) = fam61_fault(caps, family_id) {
+        return Err(cases_for(fault));
+    }
+    let Some(reference) = reference else {
+        return Err(cases_for("no reference contract".to_owned()));
+    };
+    let contract = reference.contract;
+    let mut tried = Vec::new();
+    for params in reference.params {
+        let lease = FamilyLease::new(
+            contract.family_id,
+            contract.revision,
+            params,
+            topology.order_digest(),
+        );
+        let admission = lease.admission(caps, reference, topology);
+        if admission.is_ok() {
+            return Ok((lease, reference));
+        }
+        tried.push(format!(
+            "{} gives {}",
+            params_name(params),
+            show_admission(&admission)
+        ));
+    }
+    Err(cases_for(format!(
+        "no reference params set admits under the advertised limits ({})",
+        tried.join(", ")
+    )))
+}
+
 /// The ten per-revision cases of one subject, built from its supported lease.
 fn revision_cases(
     caps: &Capabilities,
@@ -884,10 +998,7 @@ fn revision_cases(
         },
         JobCase {
             name: "revision-plus-one",
-            lease: Ok(FamilyLease {
-                revision: supported.revision.saturating_add(1),
-                ..supported.clone()
-            }),
+            lease: next_revision_lease(caps, supported),
             needs: Some(Code::RevisionUnsupported),
             grade: reject(Code::RevisionUnsupported),
         },
@@ -965,38 +1076,16 @@ async fn run_subject(
     subject: &str,
     reference: Option<&ReferenceRevision>,
 ) {
-    let Some(reference) = reference else {
-        let skipped = CaseOutcome::Skipped("no reference contract".to_owned());
-        push_case(outcome, "supported-revision", Some(subject), skipped);
-        return;
-    };
     let topology = base_topology(false);
     let reordered = base_topology(true);
-    let contract = reference.contract;
-    let supported_with = |params: &[u8]| {
-        FamilyLease::new(
-            contract.family_id,
-            contract.revision,
-            params,
-            topology.order_digest(),
-        )
-    };
-    let Some(supported) = reference
-        .params
-        .iter()
-        .map(|params| supported_with(params))
-        .find(|lease| lease.admission(caps, reference, &topology).is_ok())
-    else {
-        for name in REVISION_CASES {
-            let why = "no reference params set admits under the advertised limits";
-            push_case(
-                outcome,
-                name,
-                Some(subject),
-                CaseOutcome::Skipped(why.to_owned()),
-            );
+    let (supported, reference) = match select_supported(caps, subject, reference, &topology) {
+        Ok(selected) => selected,
+        Err(cases) => {
+            for (name, case_outcome) in cases {
+                push_case(outcome, name, Some(subject), case_outcome);
+            }
+            return;
         }
-        return;
     };
     let cases = revision_cases(
         caps,
@@ -1576,7 +1665,7 @@ mod tests {
     }
 
     #[test]
-    fn advertised_revisions_without_a_reference_are_skipped() {
+    fn advertised_revisions_without_a_reference_fail_supported_revision() {
         let mut caps = mock_caps();
         caps.generated_families.push(FamilySupport {
             family_id: "vectors/other".to_owned(),
@@ -1595,6 +1684,112 @@ mod tests {
         );
         let references: Vec<bool> = subjects.iter().map(|(_, r)| r.is_some()).collect();
         assert_eq!(references, [true, true, false]);
+        let cases = select_supported(&caps, "vectors/other@1", None, &t_sparse(false))
+            .expect_err("the gate cannot drive vectors/other@1");
+        assert_eq!(
+            cases,
+            [(
+                "supported-revision",
+                CaseOutcome::Failed("no reference contract".to_owned())
+            )]
+        );
+    }
+
+    fn uniform_reference() -> &'static ReferenceRevision {
+        reference_revision("vectors/uniform-field", 1).expect("a reference revision exists")
+    }
+
+    #[test]
+    fn no_admitting_params_set_fails_supported_revision() {
+        let caps = Capabilities {
+            max_nodes: 1,
+            ..mock_caps()
+        };
+        let subject = "vectors/uniform-field@1";
+        let cases = select_supported(&caps, subject, Some(uniform_reference()), &t_sparse(false))
+            .expect_err("no params set admits with max_nodes 1");
+        let why = "no reference params set admits under the advertised limits \
+                   (P_SPEC gives code 13, P_L2_F0 gives code 13, P_L3_F0 gives code 13)";
+        assert_eq!(cases.len(), 10);
+        assert_eq!(
+            cases.first(),
+            Some(&("supported-revision", CaseOutcome::Failed(why.to_owned())))
+        );
+        for (_, outcome) in cases.iter().skip(1) {
+            assert_eq!(outcome, &CaseOutcome::Skipped(why.to_owned()));
+        }
+    }
+
+    #[test]
+    fn a_list_that_breaks_fam_61_fails_supported_revision_with_the_rule() {
+        let mut caps = mock_caps();
+        let repeat = caps.generated_families.first().cloned().expect("an entry");
+        caps.generated_families.push(repeat);
+        let subject = "vectors/uniform-field@1";
+        let cases = select_supported(&caps, subject, Some(uniform_reference()), &t_sparse(false))
+            .expect_err("the list claims nothing for the family");
+        let why = "generated_families lists vectors/uniform-field 2 times, \
+                   so the list claims nothing for it (FAM-61)";
+        assert_eq!(
+            cases.first(),
+            Some(&("supported-revision", CaseOutcome::Failed(why.to_owned())))
+        );
+        let _ = caps.generated_families.pop();
+        if let Some(entry) = caps.generated_families.first_mut() {
+            entry.revisions = vec![0, 1];
+        }
+        let cases = select_supported(&caps, subject, Some(uniform_reference()), &t_sparse(false))
+            .expect_err("the entry claims nothing");
+        let why = "the entry for vectors/uniform-field lists revision 0 (FAM-61)";
+        assert_eq!(
+            cases.first(),
+            Some(&("supported-revision", CaseOutcome::Failed(why.to_owned())))
+        );
+    }
+
+    #[test]
+    fn revision_plus_one_is_skipped_when_the_binary_lists_it() {
+        let mut caps = mock_caps();
+        if let Some(entry) = caps.generated_families.first_mut() {
+            entry.revisions = vec![1, 2];
+        }
+        let topology = t_sparse(false);
+        let reordered = t_sparse(true);
+        let (supported, reference) = select_supported(
+            &caps,
+            "vectors/uniform-field@1",
+            Some(uniform_reference()),
+            &topology,
+        )
+        .expect("revision 1 admits");
+        let cases = revision_cases(
+            &caps,
+            reference,
+            &supported,
+            &topology,
+            reordered.order_digest(),
+        );
+        let next = cases
+            .iter()
+            .find(|case| case.name == "revision-plus-one")
+            .expect("the case exists");
+        assert_eq!(
+            next.lease.as_ref().err().map(String::as_str),
+            Some("the binary lists revision 2")
+        );
+        let listed_once = mock_caps();
+        let cases = revision_cases(
+            &listed_once,
+            reference,
+            &supported,
+            &topology,
+            reordered.order_digest(),
+        );
+        let next = cases
+            .iter()
+            .find(|case| case.name == "revision-plus-one")
+            .expect("the case exists");
+        assert_eq!(next.lease.as_ref().map(|lease| lease.revision), Ok(2));
     }
 
     fn case(name: &'static str, outcome: CaseOutcome) -> FamilyCase {

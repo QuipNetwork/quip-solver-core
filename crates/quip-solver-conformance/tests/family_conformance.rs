@@ -608,6 +608,7 @@ fn read_repo_file(relative: &str) -> Result<String, String> {
 /// One row of the `## Coverage` table of `docs/family-conformance.md`.
 struct CoverageRow {
     id: String,
+    rule: String,
     status: String,
     coverage: String,
     evidence: String,
@@ -629,11 +630,12 @@ fn coverage_rows() -> Result<Vec<CoverageRow>, String> {
             .split('|')
             .map(str::trim)
             .collect();
-        let [id, _rule, status, coverage, evidence] = cells[..] else {
+        let [id, rule, status, coverage, evidence] = cells[..] else {
             return Err(format!("expected 5 cells: {line}"));
         };
         rows.push(CoverageRow {
             id: id.trim_matches('`').to_owned(),
+            rule: rule.to_owned(),
             status: status.to_owned(),
             coverage: coverage.to_owned(),
             evidence: evidence.to_owned(),
@@ -654,6 +656,71 @@ fn spec_sc7_ids() -> Result<Vec<String>, String> {
         ids.push(id.to_owned());
     }
     Ok(ids)
+}
+
+/// `(SC-7 id, FAM rule)` for each SC-7 id in the rows of the Traceability
+/// table of `docs/problem-families.md`.
+fn spec_sc7_rules() -> Result<Vec<(String, String)>, String> {
+    let spec = read_repo_file("docs/problem-families.md")?;
+    let (_, trace) = spec
+        .split_once("\n## Traceability\n")
+        .ok_or("no `## Traceability` section")?;
+    let mut rules = Vec::new();
+    for line in trace.lines().filter(|line| line.starts_with("| FAM-")) {
+        let rule = line
+            .trim_matches('|')
+            .split('|')
+            .next()
+            .map(str::trim)
+            .ok_or_else(|| format!("no rule cell: {line}"))?;
+        for piece in line.split("`SC-7:").skip(1) {
+            let id = piece.split('`').next().unwrap_or(piece);
+            rules.push((id.to_owned(), rule.to_owned()));
+        }
+    }
+    Ok(rules)
+}
+
+/// Each `(id, rule)` of `table` whose rule differs from the rule of that id
+/// in `spec`, or that `spec` does not list.
+fn rule_mismatches(table: &[(String, String)], spec: &[(String, String)]) -> Vec<String> {
+    let mut wrong = Vec::new();
+    for (id, rule) in table {
+        match spec.iter().find(|(spec_id, _)| spec_id == id) {
+            Some((_, spec_rule)) if spec_rule == rule => {}
+            Some((_, spec_rule)) => wrong.push(format!("{id}: table {rule}, spec {spec_rule}")),
+            None => wrong.push(format!("{id}: not in the spec")),
+        }
+    }
+    wrong
+}
+
+#[test]
+fn coverage_rules_equal_the_traceability_rules() -> Result<(), String> {
+    let table: Vec<(String, String)> = coverage_rows()?
+        .into_iter()
+        .map(|row| (row.id, row.rule))
+        .collect();
+    let spec = spec_sc7_rules()?;
+    if spec.len() != 44 {
+        return Err(format!(
+            "expected 44 SC-7 ids in the spec, found {}",
+            spec.len()
+        ));
+    }
+    let wrong = rule_mismatches(&table, &spec);
+    if !wrong.is_empty() {
+        return Err(format!("the Rule column differs from the spec: {wrong:?}"));
+    }
+    // A wrong FAM number must be caught.
+    let mut broken = table;
+    if let Some((_, rule)) = broken.first_mut() {
+        *rule = "FAM-99".to_owned();
+    }
+    if rule_mismatches(&broken, &spec).len() != 1 {
+        return Err("a wrong FAM number was not caught".to_owned());
+    }
+    Ok(())
 }
 
 #[test]
