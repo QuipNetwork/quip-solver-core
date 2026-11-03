@@ -5,7 +5,7 @@ This file documents changes to the Quip solver contract.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## 0.0.5
 
 The wire fields for problem families, and the declaration that advertises
 them. A solver session admits and expands family leases for the revisions that
