@@ -31,8 +31,10 @@ cargo build -p quip-solver-conformance --bin quip-solver-drive --release
 ./target/release/quip-solver-drive --family <solver-binary> unix:///tmp/quip-family.sock
 ```
 
-Exit code 0 means no case failed.
-The driver prints one line per case, then the exit code and the miner log if the miner wrote one.
+Exit status 0 means no case failed.
+The driver prints the header `--family conformance report for <solver-binary>:` and one line per case on standard output.
+It prints the miner log on standard error if the miner wrote one.
+If a case failed, it also prints `conformance failed for <solver-binary>` on standard error and exits with status 1.
 The driver starts the solver binary with no extra arguments.
 A solver whose local path needs a flag must start in that path from a wrapper script.
 A Rust test may call `families::drive_miner_family(bin, args, socket)` and pass the flags in `args`.
