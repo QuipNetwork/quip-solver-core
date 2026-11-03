@@ -1055,3 +1055,79 @@ def test_glass_rejects_a_tile_pair_that_is_not_an_edge(monkeypatch):
     )
     with pytest.raises(ValueError, match="not topology edges"):
         glass.generate(b"quip/ice-glass", 1, params, nodes, edges, bytes(32))
+
+
+# ---- quip/twisted-ice-dimer ----
+
+
+def _twisted(m, t, weak, pairs, nodes, edges, nonce=bytes(range(32))):
+    from family_oracle import twisted
+
+    params = build._twisted_params(m, t, weak, pairs)
+    return twisted.generate(b"quip/twisted-ice-dimer", 1, params, nodes, edges, nonce)
+
+
+def test_twisted_instance_follows_the_contract_rules():
+    nodes, edges = ice.lattice(2, 2)
+    code, inst = _twisted(2, 2, 62, 8, nodes, edges)
+    assert code is None
+    in_tile = {e for tile in inst["tiles"] for e in ice._tile_edges(tile)}
+    at = {e: i for i, e in enumerate(inst["edges"])}
+    assert len(inst["pairs"]) == 8
+    ends = [x for pair in inst["pairs"] for x in pair]
+    assert len(set(ends)) == 16
+    for pair in inst["pairs"]:
+        assert pair not in in_tile
+        assert inst["j"][at[pair]] == -1000
+    for tile, gauge in zip(inst["tiles"], inst["gauges"], strict=True):
+        local = dict(zip(tile, gauge, strict=True))
+        for a, b in ice._tile_edges(tile):
+            assert inst["j"][at[(a, b)]] == 1000 * local[a] * local[b]
+    for edge, value in zip(inst["edges"], inst["j"], strict=True):
+        if edge not in in_tile and edge not in inst["pairs"]:
+            assert abs(value) == 62
+
+
+def test_twisted_zero_pairs_and_shortfall():
+    nodes, edges = ice.lattice(2, 2)
+    code, inst = _twisted(2, 2, 62, 0, nodes, edges)
+    assert code is None and inst["pairs"] == []
+    code, inst = _twisted(2, 2, 62, len(nodes) // 2, nodes, edges)
+    assert (code, inst) == (14, None)
+
+
+def test_twisted_admission_codes():
+    from family_oracle import twisted
+
+    nodes, edges = ice.lattice(2, 2)
+    half = len(nodes) // 2
+    assert (
+        twisted.admission_code(build._twisted_params(2, 2, 62, half), nodes, edges)
+        is None
+    )
+    assert (
+        twisted.admission_code(build._twisted_params(2, 2, 62, half + 1), nodes, edges)
+        == 12
+    )
+    assert (
+        twisted.admission_code(build._twisted_params(2, 2, 1000, 8), nodes, edges) == 9
+    )
+    assert (
+        twisted.admission_code(build._twisted_params(2, 0, 62, 8), nodes, edges) == 12
+    )
+    assert twisted.admission_code(b"\x01", nodes, edges) == 7
+
+
+def test_twisted_obstructions_ring_and_errors():
+    from family_oracle import twisted
+
+    ring = [[0, 1, 2, 3], [3, 4, 5, 6], [6, 7, 8, 0]]
+    ones = [[1] * 4] * 3
+    assert twisted.gauge_obstructions(ring, ones, 9)["gauge_equivalent"]
+    flipped = [[1, 1, 1, -1], [1] * 4, [1] * 4]
+    assert twisted.gauge_obstructions(ring, flipped, 9)["frustrated_cycles"] == 1
+    with pytest.raises(ice.StructureError) as err:
+        twisted.gauge_obstructions([[0, 1, 2, 3], [3, 4, 5, 6], [3, 7, 8, 9]], ones, 10)
+    assert (err.value.name, err.value.detail) == ("membership-above-two", [3])
+    with pytest.raises(ice.StructureError, match="overflow"):
+        twisted.gauge_obstructions(ring, ones[:2], 9)

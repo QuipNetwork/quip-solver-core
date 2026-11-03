@@ -13,9 +13,13 @@ use core::num::NonZeroU32;
 
 use crate::descriptor::{Contract, FieldSpec, Params, SizeBounds, TopologyStats, Value, ValueType};
 use crate::family::{BaseTopology, Construction, InstanceBody, Streams};
-use crate::ice::{candidates, select, sides, Lattice, StructureError, MAX_DEGREE};
+use crate::ice::build::{
+    mark_tiles, parse_tiles, region, sections, select_tiles, sorted_edges, tile_edges,
+    tiles_payload, Reader,
+};
+use crate::ice::{candidates, Lattice, StructureError, Tile, MAX_DEGREE};
 use crate::instance::{Instance, InstanceLimits};
-use crate::rng::{shuffle, uniform};
+use crate::rng::uniform;
 use crate::Code;
 
 /// The strong tile coupling, in milli.
@@ -136,21 +140,6 @@ fn check_topology(params: &Params<'_>, topology: &BaseTopology) -> bool {
     }
 }
 
-/// A shuffled `0..len`.
-fn shuffled_order(streams: &mut Streams<'_>, label: &str, len: usize) -> Result<Vec<u32>, Code> {
-    let len = u32::try_from(len).map_err(|_| Code::BoundsExceeded)?;
-    let mut order: Vec<u32> = (0..len).collect();
-    let mut rng = streams.open(label).ok_or(Code::NoInstance)?;
-    shuffle(&mut rng, &mut order)?;
-    Ok(order)
-}
-
-/// The six edges of a tile, ascending pairs.
-const fn tile_edges(nodes: [u32; 4]) -> [(u32, u32); 6] {
-    let [a, b, c, d] = nodes;
-    [(a, b), (a, c), (a, d), (b, c), (b, d), (c, d)]
-}
-
 /// The sign of the gauge at `pos`: `1` or `-1`.
 fn gauge_at(gauge: &[i64], pos: u32) -> Result<i64, Code> {
     usize::try_from(pos)
@@ -168,20 +157,11 @@ fn generate(
     let defect = Code::TopologyIncompatible;
     let glass_value = glass_milli(params).ok_or(Code::ParamsMalformed)?;
     let lattice = lattice(params).map_err(|_| defect)?;
-    let found = candidates(lattice, topology).map_err(|_| defect)?;
-    let split = sides(lattice, topology, &found).map_err(|_| defect)?;
-    let left_order = shuffled_order(streams, LEFT, split.left.len())?;
-    let right_order = shuffled_order(streams, RIGHT, split.right.len())?;
-    let tiles = select(&found, &split, &left_order, &right_order).map_err(|_| defect)?;
+    let tiles = select_tiles(lattice, topology, streams, LEFT, RIGHT)?;
 
     let n = u32::try_from(topology.node_ids().len()).map_err(|_| Code::BoundsExceeded)?;
     let node_ids = topology.node_ids().to_vec();
-    let mut edges: Vec<(u32, u32)> = topology
-        .edges()
-        .iter()
-        .map(|&(u, v)| (u.min(v), u.max(v)))
-        .collect();
-    edges.sort_unstable();
+    let edges = sorted_edges(topology);
     let strong: BTreeSet<(u32, u32)> = tiles
         .iter()
         .flat_map(|tile| tile_edges(tile.nodes))
@@ -232,105 +212,26 @@ fn generate(
 }
 
 /// The metadata region: tiles (kind 1) then gauge (kind 2).
-fn metadata_region(tiles: &[crate::ice::Tile], gauge: &[i64]) -> Result<Vec<u8>, Code> {
-    let overflow = Code::BoundsExceeded;
-    let mut tile_payload = u32::try_from(tiles.len())
-        .map_err(|_| overflow)?
-        .to_le_bytes()
-        .to_vec();
-    for tile in tiles {
-        for pos in tile.nodes {
-            tile_payload.extend_from_slice(&pos.to_le_bytes());
-        }
-    }
+fn metadata_region(tiles: &[Tile], gauge: &[i64]) -> Result<Vec<u8>, Code> {
     let mut gauge_payload = u32::try_from(gauge.len())
-        .map_err(|_| overflow)?
+        .map_err(|_| Code::BoundsExceeded)?
         .to_le_bytes()
         .to_vec();
     gauge_payload.extend(gauge.iter().map(|&g| u8::from(g < 0)));
-    let mut region = 2u16.to_le_bytes().to_vec();
-    for (kind, payload) in [(KIND_TILES, tile_payload), (KIND_GAUGE, gauge_payload)] {
-        region.extend_from_slice(&kind.to_le_bytes());
-        region.extend_from_slice(
-            &u32::try_from(payload.len())
-                .map_err(|_| overflow)?
-                .to_le_bytes(),
-        );
-        region.extend_from_slice(&payload);
-    }
-    Ok(region)
-}
-
-/// A reader over a byte slice that never panics.
-struct Reader<'a> {
-    bytes: &'a [u8],
-}
-
-impl<'a> Reader<'a> {
-    fn take(&mut self, len: usize) -> Option<&'a [u8]> {
-        let head = self.bytes.get(..len)?;
-        self.bytes = self.bytes.get(len..)?;
-        Some(head)
-    }
-
-    fn u16(&mut self) -> Option<u16> {
-        Some(u16::from_le_bytes(self.take(2)?.try_into().ok()?))
-    }
-
-    fn u32(&mut self) -> Option<u32> {
-        Some(u32::from_le_bytes(self.take(4)?.try_into().ok()?))
-    }
-}
-
-/// The two payloads of the region: tiles and gauge. `None` unless the region
-/// holds exactly the kinds 1 and 2 in that order.
-fn sections(region: &[u8]) -> Option<(&[u8], &[u8])> {
-    let mut reader = Reader { bytes: region };
-    if reader.u16()? != 2 {
-        return None;
-    }
-    let mut payloads = [&[][..]; 2];
-    for (slot, kind) in payloads.iter_mut().zip([KIND_TILES, KIND_GAUGE]) {
-        if reader.u16()? != kind {
-            return None;
-        }
-        let len = usize::try_from(reader.u32()?).ok()?;
-        *slot = reader.take(len)?;
-    }
-    reader.bytes.is_empty().then_some(())?;
-    let [tiles, gauge] = payloads;
-    Some((tiles, gauge))
-}
-
-/// The tiles of a kind 1 payload: four positions each, ascending, tiles
-/// ascending and distinct.
-fn parse_tiles(payload: &[u8], n: usize) -> Option<Vec<[u32; 4]>> {
-    let mut reader = Reader { bytes: payload };
-    let count = usize::try_from(reader.u32()?).ok()?;
-    if reader.bytes.len() != count.checked_mul(16)? {
-        return None;
-    }
-    let mut tiles: Vec<[u32; 4]> = Vec::with_capacity(count);
-    for _ in 0..count {
-        let tile = [reader.u32()?, reader.u32()?, reader.u32()?, reader.u32()?];
-        let ascending = tile.windows(2).all(|w| matches!(w, [a, b] if a < b));
-        let last = usize::try_from(tile[3]).ok()?;
-        if !ascending || last >= n || tiles.last().is_some_and(|prev| *prev >= tile) {
-            return None;
-        }
-        tiles.push(tile);
-    }
-    Some(tiles)
+    region(&[
+        (KIND_TILES, tiles_payload(tiles)?),
+        (KIND_GAUGE, gauge_payload),
+    ])
 }
 
 /// The gauge of a kind 2 payload: one sign per node.
 fn parse_gauge(payload: &[u8], n: usize) -> Option<Vec<i64>> {
-    let mut reader = Reader { bytes: payload };
-    if usize::try_from(reader.u32()?).ok()? != n || reader.bytes.len() != n {
+    let mut reader = Reader::new(payload);
+    if usize::try_from(reader.u32()?).ok()? != n || reader.rest().len() != n {
         return None;
     }
     reader
-        .bytes
+        .rest()
         .iter()
         .map(|byte| match byte {
             0 => Some(1),
@@ -348,27 +249,12 @@ fn check_metadata(params: &Params<'_>, instance: &Instance) -> bool {
 fn check_instance(params: &Params<'_>, instance: &Instance) -> Option<()> {
     let glass = i64::from(glass_milli(params)?);
     let n = instance.node_ids().len();
-    let (tile_payload, gauge_payload) = sections(instance.metadata())?;
+    let [tile_payload, gauge_payload] = sections(instance.metadata(), [KIND_TILES, KIND_GAUGE])?;
     let tiles = parse_tiles(tile_payload, n)?;
     let gauge = parse_gauge(gauge_payload, n)?;
     let edges = instance.edges();
 
-    let mut strong = vec![false; edges.len()];
-    let mut slots = vec![0u8; n];
-    for tile in &tiles {
-        for pos in *tile {
-            let slot = slots.get_mut(usize::try_from(pos).ok()?)?;
-            *slot = slot.checked_add(1).filter(|count| *count <= 2)?;
-        }
-        for pair in tile_edges(*tile) {
-            let at = edges.binary_search(&pair).ok()?;
-            let seen = strong.get_mut(at)?;
-            if *seen {
-                return None;
-            }
-            *seen = true;
-        }
-    }
+    let strong = mark_tiles(&tiles, edges, n)?;
 
     let all_zero = instance.h().iter().all(|&h| h == 0) && instance.offset_milli() == 0;
     if !all_zero || instance.j().len() != edges.len() {

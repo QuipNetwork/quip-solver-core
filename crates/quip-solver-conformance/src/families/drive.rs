@@ -29,6 +29,7 @@ use tonic::{Status, Streaming};
 use super::ice::{P_ICE_ADJ_125, P_ICE_GLASS_1000, P_ICE_Z12_200};
 use super::layered::P_L2_F0;
 use super::layered::{P_F5000, P_L3_F0, P_SPEC};
+use super::twisted::{P_TWISTED_ADJ_W45_P6, P_TWISTED_W1000, P_TWISTED_Z22_W62_P8};
 use super::{export_instances, reference_revision, ReferenceRevision, REFERENCE_REVISIONS};
 use crate::driver::{
     configure, dispatch, drain_to_end, read_hello, read_until, run_miner, send, ScriptKind,
@@ -460,8 +461,8 @@ const SESSION_BARRIERS: u32 = 1 + 2 + 2 * 2 + 1;
 /// barrier times out must still finish, so the report names every case.
 ///
 /// Each reference revision runs at most `REVISION_CASES.len()` cases of two
-/// barriers each. With 10 cases and 3 reference revisions the budget is
-/// `(8 + 3 * 20 + 1) * 10 s = 690 s`, the `+ 1` being one phase of slack so
+/// barriers each. With 10 cases and 4 reference revisions the budget is
+/// `(8 + 4 * 20 + 1) * 10 s = 890 s`, the `+ 1` being one phase of slack so
 /// the script ends before the child is killed.
 fn family_child_timeout() -> Duration {
     let per_revision = u32::try_from(REVISION_CASES.len() * 2).unwrap_or(u32::MAX);
@@ -801,6 +802,9 @@ fn params_name(params: &[u8]) -> String {
         ("P_ICE_ADJ_125", &P_ICE_ADJ_125[..]),
         ("P_ICE_Z12_200", &P_ICE_Z12_200[..]),
         ("P_ICE_GLASS_1000", &P_ICE_GLASS_1000[..]),
+        ("P_TWISTED_Z22_W62_P8", &P_TWISTED_Z22_W62_P8[..]),
+        ("P_TWISTED_ADJ_W45_P6", &P_TWISTED_ADJ_W45_P6[..]),
+        ("P_TWISTED_W1000", &P_TWISTED_W1000[..]),
     ] {
         if params == known {
             return name.to_owned();
@@ -1763,6 +1767,32 @@ mod tests {
             .expect_err("T_SPARSE carries no ice tiles");
         let why = "no reference params set admits under the advertised limits \
                    (P_ICE_ADJ_125 gives code 12, P_ICE_Z12_200 gives code 12)";
+        assert_eq!(cases.len(), 10);
+        assert_eq!(
+            cases.first(),
+            Some(&("supported-revision", CaseOutcome::Failed(why.to_owned())))
+        );
+    }
+
+    #[test]
+    fn twisted_ice_dimer_on_t_sparse_fails_supported_revision_with_code_12() {
+        let mut caps = mock_caps();
+        caps.generated_families.push(FamilySupport {
+            family_id: "quip/twisted-ice-dimer".to_owned(),
+            revisions: vec![1],
+            params_digests: vec![],
+        });
+        let reference =
+            reference_revision("quip/twisted-ice-dimer", 1).expect("a reference revision");
+        let cases = select_supported(
+            &caps,
+            "quip/twisted-ice-dimer@1",
+            Some(reference),
+            &t_sparse(false),
+        )
+        .expect_err("T_SPARSE carries no ice tiles");
+        let why = "no reference params set admits under the advertised limits \
+                   (P_TWISTED_Z22_W62_P8 gives code 12, P_TWISTED_ADJ_W45_P6 gives code 12)";
         assert_eq!(cases.len(), 10);
         assert_eq!(
             cases.first(),

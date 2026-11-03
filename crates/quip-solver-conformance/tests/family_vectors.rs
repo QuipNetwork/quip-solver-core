@@ -2335,7 +2335,8 @@ fn layered_size_bounds(
     ))
 }
 
-/// The bounds of `quip/ice-glass`: the topology itself.
+/// The bounds of `quip/ice-glass` and `quip/twisted-ice-dimer`: the topology
+/// itself.
 fn ice_glass_size_bounds(
     _: &Value,
     _: &[u8],
@@ -2476,13 +2477,14 @@ fn check_layered(doc: &Value) -> Result<(), String> {
 fn check_layered_against_rust(case: &Value) -> Result<(), String> {
     use ising_generators::descriptor::{admit, params_digest};
     use ising_generators::family::{admit_topology, generate_instance, BaseTopology, SaltFault};
-    use ising_generators::ice::ICE_GLASS_V1;
+    use ising_generators::ice::{ICE_GLASS_V1, TWISTED_DIMER_V1};
     use quip_solver_conformance::families::layered::{RESTRICTED_V1, UNIFORM_V1};
     let family = str_field(case, "family_id")?;
     let contract = match family {
         "vectors/uniform-field" => UNIFORM_V1,
         "vectors/restricted-field" => RESTRICTED_V1,
         "quip/ice-glass" => ICE_GLASS_V1,
+        "quip/twisted-ice-dimer" => TWISTED_DIMER_V1,
         other => return Err(format!("{}: unknown family {other}", case_name(case))),
     };
     let params = codec::hex_decode(str_field(case, "params_hex")?)?;
@@ -2767,6 +2769,418 @@ fn a_changed_ice_glass_coupling_fails_the_recompute() -> Result<(), String> {
         .ok_or("no coupling")?;
     let broken = mutate(&doc, pointer, json!(was + 1000));
     expect_err(&check_ice_glass(&broken), "a changed coupling")
+}
+
+// ---- twisted ice dimer vectors (twisted_dimer.json) ----
+
+fn twisted_doc() -> Result<Value, String> {
+    serde_json::from_str(include_str!("../vectors/families/twisted_dimer.json"))
+        .map_err(|e| e.to_string())
+}
+
+/// Recompute the digests, nonces, and instance bytes of every registered
+/// `quip/twisted-ice-dimer` case with Rust code that does not call the
+/// construction.
+fn check_twisted(doc: &Value) -> Result<(), String> {
+    validate(&schema()?, doc)?;
+    check_names_unique(doc)?;
+    for case in section(doc, "cases")? {
+        check_layered_case(case, ice_glass_size_bounds)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn twisted_fixture_matches_schema() -> Result<(), String> {
+    let doc = twisted_doc()?;
+    validate(&schema()?, &doc)?;
+    match doc.get("provenance").and_then(Value::as_str) {
+        Some("specified") => {}
+        other => return Err(format!("provenance is {other:?}, expected specified")),
+    }
+    check_names_unique(&doc)?;
+    for name in ["cases", "recipes", "obstructions", "admission"] {
+        section(&doc, name).map(|_| ())?;
+    }
+    Ok(())
+}
+
+#[test]
+fn twisted_cases_recompute() -> Result<(), String> {
+    check_twisted(&twisted_doc()?)
+}
+
+#[test]
+fn twisted_cases_match_the_rust_construction() -> Result<(), String> {
+    for case in section(&twisted_doc()?, "cases")? {
+        check_layered_against_rust(case)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn twisted_params_constants_match_the_vectors() -> Result<(), String> {
+    use quip_solver_conformance::families::twisted::{
+        P_TWISTED_ADJ_W45_P6, P_TWISTED_W1000, P_TWISTED_Z22_W62_P8,
+    };
+    let doc = twisted_doc()?;
+    for (section_name, name, want) in [
+        ("cases", "twisted-dimer-zephyr-z22", P_TWISTED_Z22_W62_P8),
+        (
+            "cases",
+            "twisted-dimer-adjacency-z22-sparse",
+            P_TWISTED_ADJ_W45_P6,
+        ),
+        (
+            "admission",
+            "weak-milli-1000-is-out-of-bounds",
+            P_TWISTED_W1000,
+        ),
+    ] {
+        let case = find_named(&doc, section_name, name)?;
+        compare(
+            case,
+            "params_hex",
+            &str_field(case, "params_hex")?.to_owned(),
+            &codec::hex_encode(&want),
+        )?;
+    }
+    compare(&doc, "case count", &section(&doc, "cases")?.len(), &5)
+}
+
+#[test]
+fn the_twisted_shortfall_case_skips_with_code_14() -> Result<(), String> {
+    let doc = twisted_doc()?;
+    let case = find_named(&doc, "cases", "twisted-dimer-shortfall")?;
+    let skipped = entries_of(case, "skipped")?;
+    compare(case, "a skipped salt exists", &skipped.is_empty(), &false)?;
+    for entry in skipped {
+        compare(
+            case,
+            "skip code",
+            &entry.get("skip_code"),
+            &Some(&json!(14)),
+        )?;
+    }
+    Ok(())
+}
+
+/// The nonce of one lease slot, derived from the lease fields.
+fn lease_nonce(case: &Value, slot: u64) -> Result<String, String> {
+    use quip_protocol::lease::{Generator, LeaseSpec};
+    let lease = object_field(case, "lease")?;
+    let spec = LeaseSpec::new(
+        Generator::Blake3Chacha8V1,
+        codec::hex32(str_field(lease, "last_proof_block_hash")?)?,
+        codec::hex32(str_field(lease, "miner_account")?)?,
+        codec::hex32(str_field(lease, "base_salt")?)?,
+        u64_decimal(lease, "salt_start")?,
+        u64_decimal(lease, "salt_count")?,
+    )
+    .map_err(|e| format!("{}: lease: {e:?}", case_name(case)))?;
+    let salt = spec.salt(slot).ok_or("slot outside the lease")?;
+    Ok(codec::hex_encode(&ising_generators::random::derive_nonce(
+        spec.last_proof_block_hash,
+        spec.miner_account,
+        salt,
+    )))
+}
+
+/// The pair count of a generated instance, read from its kind 3 section.
+fn pair_count_of(metadata: &[u8]) -> Option<u32> {
+    let mut rest = metadata.get(2..)?;
+    while let (Some(kind), Some(len)) = (rest.get(0..2), rest.get(2..6)) {
+        let len = usize::try_from(u32::from_le_bytes(len.try_into().ok()?)).ok()?;
+        let payload = rest.get(6..6_usize.checked_add(len)?)?;
+        if kind == [3, 0] {
+            return Some(u32::from_le_bytes(payload.get(0..4)?.try_into().ok()?));
+        }
+        rest = rest.get(6_usize.checked_add(len)?..)?;
+    }
+    None
+}
+
+/// The obstruction values of the Rust diagnostic as a JSON object.
+fn obstruction_json(found: ising_generators::ice::Obstructions) -> Value {
+    json!({
+        "components": found.components,
+        "cycle_rank": found.cycle_rank,
+        "frustrated_cycles": found.frustrated_cycles,
+        "gauge_equivalent": found.gauge_equivalent,
+    })
+}
+
+/// Rebuild every salt of one recipe with the Rust construction and compare
+/// the hash, the counts, and the obstruction values.
+fn check_twisted_recipe(recipe: &Value) -> Result<(), String> {
+    use ising_generators::descriptor::{admit, params_digest, AdvertisedLimits};
+    use ising_generators::family::{admit_topology, generate_instance, BaseTopology};
+    use ising_generators::ice::{gauge_obstructions, local_gauges, TWISTED_DIMER_V1};
+    let params = codec::hex_decode(str_field(recipe, "params_hex")?)?;
+    compare(
+        recipe,
+        "params_digest",
+        &codec::hex_encode(&params_digest(&params)),
+        &str_field(recipe, "params_digest")?.to_owned(),
+    )?;
+    let contracts = [TWISTED_DIMER_V1];
+    let admitted = admit(
+        &contracts,
+        str_field(recipe, "family_id")?.as_bytes(),
+        u32_field(recipe, "revision")?,
+        &params,
+        &params_digest(&params),
+    )
+    .map_err(|c| format!("{}: admit failed with {c}", case_name(recipe)))?;
+    let (nodes, edges) = topology_inputs(object_field(recipe, "topology")?)?;
+    let topology = BaseTopology::new(nodes, &edges).map_err(|e| format!("{e:?}"))?;
+    compare(
+        recipe,
+        "order_digest",
+        &codec::hex_encode(topology.order_digest()),
+        &str_field(object_field(recipe, "topology")?, "order_digest")?.to_owned(),
+    )?;
+    let bounds = admit_topology(
+        &admitted,
+        &topology,
+        topology.order_digest(),
+        &AdvertisedLimits {
+            max_nodes: 0,
+            max_edges: 0,
+            max_degree: 0,
+        },
+    )
+    .map_err(|c| format!("{}: admit_topology failed with {c}", case_name(recipe)))?;
+    let salts = entries_of(recipe, "salts")?;
+    compare(
+        recipe,
+        "salts",
+        &u64::try_from(salts.len()).map_err(|e| e.to_string())?,
+        &u64_decimal(object_field(recipe, "lease")?, "salt_count")?,
+    )?;
+    for salt in salts {
+        compare(
+            recipe,
+            "nonce",
+            &lease_nonce(recipe, u64_decimal(salt, "index")?)?,
+            &str_field(salt, "nonce")?.to_owned(),
+        )?;
+        let nonce = codec::hex32(str_field(salt, "nonce")?)?;
+        let built = generate_instance(&admitted, &topology, &bounds, nonce)
+            .map_err(|fault| format!("{}: generation gave {fault:?}", case_name(recipe)))?;
+        let canonical = built.canonical_bytes().map_err(|e| e.to_string())?;
+        compare(
+            recipe,
+            "canonical_blake3",
+            &blake3::hash(&canonical).to_hex().to_string(),
+            &str_field(salt, "canonical_blake3")?.to_owned(),
+        )?;
+        let (tiles, gauges) = local_gauges(&built).ok_or("no local gauges")?;
+        compare(
+            recipe,
+            "tiles",
+            &u64::try_from(tiles.len()).map_err(|e| e.to_string())?,
+            &salt
+                .get("tiles")
+                .and_then(Value::as_u64)
+                .ok_or("no tiles")?,
+        )?;
+        compare(
+            recipe,
+            "pairs",
+            &pair_count_of(built.metadata()).map(u64::from),
+            &salt.get("pairs").and_then(Value::as_u64),
+        )?;
+        let found = gauge_obstructions(&tiles, &gauges, built.node_ids().len())
+            .map_err(|e| format!("{}: obstructions: {e:?}", case_name(recipe)))?;
+        compare(
+            recipe,
+            "obstructions",
+            &obstruction_json(found),
+            salt.get("obstructions").ok_or("no obstructions")?,
+        )?;
+    }
+    Ok(())
+}
+
+#[test]
+fn twisted_recipes_match_the_rust_construction() -> Result<(), String> {
+    let doc = twisted_doc()?;
+    for recipe in section(&doc, "recipes")? {
+        check_twisted_recipe(recipe)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn twisted_recipes_match_the_rust_constants() -> Result<(), String> {
+    use ising_generators::descriptor::params_digest;
+    use ising_generators::ice::RECIPES;
+    let doc = twisted_doc()?;
+    let recipes = section(&doc, "recipes")?;
+    compare(&doc, "recipe count", &recipes.len(), &RECIPES.len())?;
+    for (recipe, want) in recipes.iter().zip(RECIPES) {
+        compare(recipe, "alias", &str_field(recipe, "alias")?, &want.alias)?;
+        compare(recipe, "cell", &str_field(recipe, "cell")?, &want.cell)?;
+        compare(
+            recipe,
+            "params_hex",
+            &str_field(recipe, "params_hex")?.to_owned(),
+            &codec::hex_encode(want.params),
+        )?;
+        compare(
+            recipe,
+            "params_digest",
+            &str_field(recipe, "params_digest")?.to_owned(),
+            &codec::hex_encode(&params_digest(want.params)),
+        )?;
+    }
+    Ok(())
+}
+
+/// An array of four-entry integer arrays, as rows of the diagnostic input.
+fn rows<T: TryFrom<i64>>(value: Option<&Value>) -> Result<Vec<[T; 4]>, String> {
+    let bad = || "a row that is not four integers".to_owned();
+    value
+        .and_then(Value::as_array)
+        .ok_or("rows is not an array")?
+        .iter()
+        .map(|row| {
+            let ints: Vec<T> = row
+                .as_array()
+                .ok_or_else(bad)?
+                .iter()
+                .map(|v| v.as_i64().and_then(|n| T::try_from(n).ok()).ok_or_else(bad))
+                .collect::<Result<_, _>>()?;
+            ints.try_into().map_err(|_| bad())
+        })
+        .collect()
+}
+
+/// Run the Rust diagnostic on every obstruction case and compare.
+fn check_obstructions(doc: &Value) -> Result<(), String> {
+    use ising_generators::ice::{gauge_obstructions, StructureError};
+    for case in section(doc, "obstructions")? {
+        let tiles: Vec<[u32; 4]> = rows(case.get("tiles"))?;
+        let gauges: Vec<[i8; 4]> = rows(case.get("gauges"))?;
+        let n = case
+            .get("n")
+            .and_then(Value::as_u64)
+            .and_then(|n| usize::try_from(n).ok())
+            .ok_or("no n")?;
+        match gauge_obstructions(&tiles, &gauges, n) {
+            Ok(found) => compare(
+                case,
+                "obstructions",
+                &Some(obstruction_json(found)),
+                &case.get("expected").cloned(),
+            )?,
+            Err(error) => {
+                let detail = match error {
+                    StructureError::MembershipAboveTwo(position) => vec![position],
+                    _ => vec![],
+                };
+                compare(
+                    case,
+                    "error",
+                    &Some(error.name()),
+                    &case.get("error").and_then(Value::as_str),
+                )?;
+                compare(
+                    case,
+                    "error_detail",
+                    &Some(detail),
+                    &case
+                        .get("error_detail")
+                        .map(|d| u32_list(d, "error_detail"))
+                        .transpose()?,
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn twisted_obstructions_match_the_rust_diagnostic() -> Result<(), String> {
+    check_obstructions(&twisted_doc()?)
+}
+
+#[test]
+fn twisted_admission_codes_match_the_rust_admission() -> Result<(), String> {
+    use ising_generators::descriptor::{admit, params_digest, AdvertisedLimits};
+    use ising_generators::family::{admit_topology, BaseTopology};
+    use ising_generators::ice::TWISTED_DIMER_V1;
+    let doc = twisted_doc()?;
+    let contracts = [TWISTED_DIMER_V1];
+    for case in section(&doc, "admission")? {
+        let params = codec::hex_decode(str_field(case, "params_hex")?)?;
+        let (nodes, edges) = topology_inputs(object_field(case, "topology")?)?;
+        let topology = BaseTopology::new(nodes, &edges).map_err(|e| format!("{e:?}"))?;
+        let got = admit(
+            &contracts,
+            str_field(case, "family_id")?.as_bytes(),
+            u32_field(case, "revision")?,
+            &params,
+            &params_digest(&params),
+        )
+        .and_then(|admitted| {
+            admit_topology(
+                &admitted,
+                &topology,
+                topology.order_digest(),
+                &AdvertisedLimits {
+                    max_nodes: 0,
+                    max_edges: 0,
+                    max_degree: 0,
+                },
+            )
+        });
+        let got = got.err().map(ising_generators::Code::value);
+        compare(case, "admission code", &got, &expected_code(case)?)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn a_changed_twisted_coupling_fails_the_recompute() -> Result<(), String> {
+    let doc = twisted_doc()?;
+    let pointer = "/cases/0/instances/0/j/0";
+    let was = doc
+        .pointer(pointer)
+        .and_then(Value::as_i64)
+        .ok_or("no coupling")?;
+    let broken = mutate(&doc, pointer, json!(was + 1000));
+    expect_err(&check_twisted(&broken), "a changed coupling")
+}
+
+#[test]
+fn a_changed_recipe_hash_fails_the_recompute() -> Result<(), String> {
+    let doc = twisted_doc()?;
+    let recipe = section(&doc, "recipes")?.first().ok_or("no recipe")?;
+    let was = str_field(
+        recipe.pointer("/salts/0").ok_or("no salt")?,
+        "canonical_blake3",
+    )?;
+    let broken = mutate(
+        &doc,
+        "/recipes/0/salts/0/canonical_blake3",
+        json!(flip_last_hex_digit(was)),
+    );
+    let recipe = section(&broken, "recipes")?.first().ok_or("no recipe")?;
+    expect_err(&check_twisted_recipe(recipe), "a changed recipe hash")
+}
+
+#[test]
+fn a_changed_obstruction_value_fails_the_check() -> Result<(), String> {
+    let doc = twisted_doc()?;
+    let pointer = "/obstructions/3/expected/frustrated_cycles";
+    let was = doc
+        .pointer(pointer)
+        .and_then(Value::as_u64)
+        .ok_or("no value")?;
+    let broken = mutate(&doc, pointer, json!(was + 1));
+    expect_err(&check_obstructions(&broken), "a changed obstruction value")
 }
 
 // ---- topology files (vectors/topologies/) ----

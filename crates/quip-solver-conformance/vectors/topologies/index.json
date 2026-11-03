@@ -176,6 +176,17 @@
     "provenance": "specified"
   },
   {
+    "about": "Explicit topology first used by the case twisted-dimer-adjacency-z22-sparse in twisted_dimer.json cases.",
+    "edges": 353,
+    "file": "twisted-dimer-adjacency-z22-sparse.bin.gz",
+    "kind": "explicit",
+    "name": "twisted-dimer-adjacency-z22-sparse",
+    "nodes": 80,
+    "order_digest": "7d9b717cf50355e3fb3f978e21ab2d4fd3402cee4e0300a91260a3d0b07bf0c7",
+    "payload_blake3": "f70cc745f01be851048d894daad715d5ef53a3224a50199dd8897644af18ecb9",
+    "provenance": "specified"
+  },
+  {
     "about": "Explicit topology first used by the case z12-zephyr in ice_structure.json structure.",
     "edges": 76,
     "file": "z12-zephyr.bin.gz",

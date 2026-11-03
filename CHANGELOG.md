@@ -87,6 +87,15 @@ encodings do not change.
   and the gauge. The contract is `docs/families/quip-ice-glass-1.md`, the vectors
   are the `cases` of `ice_structure.json`, and the Rust contract is
   `ising_generators::ice::ICE_GLASS_V1`. The research cohort is not regenerated.
+- `quip/twisted-ice-dimer@1`, a registered family with status `research`. It gives
+  each ice tile its own local gauge, adds a weak signed layer, and sets disjoint
+  ferromagnetic pairs. The parameters are the Zephyr shape, `weak_milli`, and
+  `pairs`. The metadata holds the tiles, the local gauges, and the pairs. The
+  contract registers three parameter sets on z(12, 4) as recipes. The contract is
+  `docs/families/quip-twisted-ice-dimer-1.md`, the vectors are `twisted_dimer.json`,
+  and the Rust contract is `ising_generators::ice::TWISTED_DIMER_V1`. The gauge
+  obstruction diagnostic `gauge_obstructions` describes an instance and never
+  decides acceptance. The research cohort is not regenerated.
 
 ### Changed
 
