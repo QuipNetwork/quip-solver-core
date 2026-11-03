@@ -2,7 +2,7 @@
 //! gauge. The result describes an instance only. It is never an acceptance
 //! rule.
 
-use alloc::collections::VecDeque;
+use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -29,6 +29,8 @@ pub struct Obstructions {
 /// order, assign each tile a sign. A link is frustrated when the potentials
 /// disagree with its relation.
 ///
+/// A malformed input gives Overflow before any membership check.
+///
 /// # Errors
 ///
 /// [`StructureError::MembershipAboveTwo`] with the lowest dense position that
@@ -44,23 +46,22 @@ pub fn gauge_obstructions(
         return Err(StructureError::Overflow);
     }
     let tile_count = u32::try_from(tiles.len()).map_err(|_| StructureError::Overflow)?;
-    let mut membership: Vec<Vec<(u32, i8)>> = vec![Vec::new(); n];
+    let mut membership: BTreeMap<u32, Vec<(u32, i8)>> = BTreeMap::new();
     for (tile, (positions, signs)) in (0..tile_count).zip(tiles.iter().zip(gauges)) {
         for (&position, &sign) in positions.iter().zip(signs) {
             if sign != 1 && sign != -1 {
                 return Err(StructureError::Overflow);
             }
-            let slot = usize::try_from(position)
-                .ok()
-                .and_then(|index| membership.get_mut(index))
-                .ok_or(StructureError::Overflow)?;
-            slot.push((tile, sign));
+            if usize::try_from(position).map_or(true, |index| index >= n) {
+                return Err(StructureError::Overflow);
+            }
+            membership.entry(position).or_default().push((tile, sign));
         }
     }
 
     let mut links: Vec<(u32, u32, i8)> = Vec::new();
     let mut neighbours: Vec<Vec<(u32, i8)>> = vec![Vec::new(); tiles.len()];
-    for (position, group) in (0_u32..).zip(&membership) {
+    for (&position, group) in &membership {
         match group.as_slice() {
             [] | [_] => {}
             &[(a, sign_a), (b, sign_b)] => {

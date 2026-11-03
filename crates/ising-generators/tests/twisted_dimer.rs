@@ -81,3 +81,51 @@ fn bad_gauge_inputs_are_errors() {
         Err(StructureError::Overflow)
     );
 }
+
+#[test]
+fn parallel_links_with_different_relations_frustrate_one_cycle() {
+    // Tiles 0 and 1 share positions 0 and 3. The relation at position 0 is
+    // -1 and the relation at position 3 is +1.
+    let tiles = [[0, 1, 2, 3], [0, 3, 4, 5]];
+    let gauges = [[-1_i8, 1, 1, 1], [1, 1, 1, 1]];
+    let result = gauge_obstructions(&tiles, &gauges, 6);
+    assert_eq!(
+        result,
+        Ok(Obstructions {
+            components: 1,
+            cycle_rank: 1,
+            frustrated_cycles: 1,
+            gauge_equivalent: false,
+        })
+    );
+}
+
+#[test]
+fn separate_tiles_count_as_components() {
+    let tiles = [[0, 1, 2, 3], [4, 5, 6, 7]];
+    let gauges = [[1_i8; 4]; 2];
+    assert_eq!(
+        gauge_obstructions(&tiles, &gauges, 8),
+        Ok(Obstructions {
+            components: 2,
+            cycle_rank: 0,
+            frustrated_cycles: 0,
+            gauge_equivalent: true,
+        })
+    );
+}
+
+#[test]
+fn the_lowest_overfull_position_is_reported() {
+    let tiles = [[0, 1, 2, 3], [3, 1, 4, 5], [1, 3, 6, 7]];
+    let gauges = [[1_i8; 4]; 3];
+    assert_eq!(
+        gauge_obstructions(&tiles, &gauges, 8),
+        Err(StructureError::MembershipAboveTwo(1))
+    );
+}
+
+#[test]
+fn a_huge_node_bound_does_not_allocate() {
+    assert!(gauge_obstructions(&[], &[], usize::MAX).is_ok());
+}
