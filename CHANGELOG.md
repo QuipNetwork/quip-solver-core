@@ -91,7 +91,8 @@ encodings do not change.
 - `ising-generators` is a normal dependency of `quip-solver-conformance`.
 - The layered construction moved from the `quip-solver-core` examples into
   `quip-solver-conformance`.
-- Two evidence texts in the family vectors no longer name SC-5.
+- Two evidence entries in the family vectors no longer defer to SC-5. They defer to
+  SC-8, SC-12, and SC-13.
 
 ## 0.0.4
 
