@@ -48,17 +48,6 @@ const TIGHT_LIMITS: InstanceLimits = match InstanceLimits::new(
     None => InstanceLimits::FAM_37,
 };
 
-const SPARSE_NODES: [u32; 6] = [907, 41, 0, 4_294_967_295, 12, 3];
-const SPARSE_EDGES: [(u32, u32); 7] = [
-    (907, 41),
-    (41, 0),
-    (0, 4_294_967_295),
-    (4_294_967_295, 12),
-    (12, 3),
-    (3, 907),
-    (41, 12),
-];
-
 macro_rules! ensure {
     ($cond:expr) => {
         if !$cond {
@@ -128,8 +117,13 @@ fn nz(n: u32) -> Result<NonZeroU32, String> {
     NonZeroU32::new(n).ok_or_else(|| "zero".to_string())
 }
 
+fn sparse_ids() -> Result<ising_generators::blob::Topology, String> {
+    quip_solver_conformance::t_sparse().map_err(|e| e.to_string())
+}
+
 fn sparse() -> Result<BaseTopology, String> {
-    BaseTopology::new(SPARSE_NODES.to_vec(), &SPARSE_EDGES).map_err(|e| format!("{e:?}"))
+    let stored = sparse_ids()?;
+    BaseTopology::new(stored.nodes, &stored.edges).map_err(|e| format!("{e:?}"))
 }
 
 fn example_size_bounds(params: &Params<'_>, stats: &TopologyStats) -> Result<SizeBounds, Code> {
@@ -759,18 +753,18 @@ fn admission_runs_11_then_12_then_13() -> Result<(), String> {
     );
 
     // 12 beats 13: a repeated edge, then a self-loop.
-    let mut doubled_edges = SPARSE_EDGES.to_vec();
+    let sparse_nodes = sparse_ids()?.nodes;
+    let mut doubled_edges = sparse_ids()?.edges;
     doubled_edges.push((41, 907));
     let doubled =
-        BaseTopology::new(SPARSE_NODES.to_vec(), &doubled_edges).map_err(|e| format!("{e:?}"))?;
+        BaseTopology::new(sparse_nodes.clone(), &doubled_edges).map_err(|e| format!("{e:?}"))?;
     ensure_eq!(
         admit_topology(&admitted_l2, &doubled, doubled.order_digest(), &tiny),
         Err(Code::TopologyIncompatible)
     );
-    let mut looped_edges = SPARSE_EDGES.to_vec();
+    let mut looped_edges = sparse_ids()?.edges;
     looped_edges.push((907, 907));
-    let looped =
-        BaseTopology::new(SPARSE_NODES.to_vec(), &looped_edges).map_err(|e| format!("{e:?}"))?;
+    let looped = BaseTopology::new(sparse_nodes, &looped_edges).map_err(|e| format!("{e:?}"))?;
     let accepting = [contract(Some(&HONEST), example_size_bounds)];
     let admitted_accepting = admitted(&accepting, P_L2_F0)?;
     ensure_eq!(

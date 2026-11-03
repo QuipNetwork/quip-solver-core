@@ -278,19 +278,16 @@ fn build_example(name: &str) -> std::path::PathBuf {
 }
 
 /// `T_SPARSE` (core.json `topologies[sparse]`), sent with the wire hash `[7; 32]`.
+#[expect(
+    clippy::unwrap_used,
+    reason = "the shared T_SPARSE blob is a fixed valid fixture"
+)]
 fn topology() -> wire::Topology {
-    let edges = [
-        (907, 41),
-        (41, 0),
-        (0, 4_294_967_295),
-        (4_294_967_295, 12),
-        (12, 3),
-        (3, 907),
-        (41, 12),
-    ];
+    let stored = quip_solver_conformance::t_sparse().unwrap();
+    let edges = stored.edges;
     wire::Topology {
         hash: vec![7; 32],
-        nodes: vec![907, 41, 0, 4_294_967_295, 12, 3],
+        nodes: stored.nodes,
         edges: Some(wire::EdgeList {
             u: edges.iter().map(|e| e.0).collect(),
             v: edges.iter().map(|e| e.1).collect(),

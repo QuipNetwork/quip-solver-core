@@ -1543,6 +1543,15 @@ fn topology_order_digests_recompute() -> Result<(), String> {
 }
 
 #[test]
+fn t_sparse_loads_from_the_shared_blob() -> Result<(), String> {
+    let stored = quip_solver_conformance::t_sparse().map_err(|e| e.to_string())?;
+    if stored.nodes != [907, 41, 0, u32::MAX, 12, 3] || stored.edges.len() != 7 {
+        return Err(format!("unexpected T_SPARSE: {stored:?}"));
+    }
+    Ok(())
+}
+
+#[test]
 fn topology_digests_are_pairwise_distinct() -> Result<(), String> {
     let doc = core()?;
     let names = [

@@ -301,3 +301,14 @@ pub fn topology(reference: &str) -> Result<blob::Topology, TopologyError> {
         .and_then(|body| body.topology())
         .map_err(TopologyError::Blob)
 }
+
+/// The shared `T_SPARSE` topology: sparse native ids, one of them
+/// `u32::MAX`. It decodes `vectors/topologies/t-sparse.bin.gz`.
+///
+/// # Errors
+///
+/// [`TopologyError`] when the embedded file is missing or does not decode.
+/// A test pins that it does, so callers treat an error as a broken build.
+pub fn t_sparse() -> Result<blob::Topology, TopologyError> {
+    topology("../topologies/t-sparse.bin.gz")
+}

@@ -1667,16 +1667,11 @@ mod family_tests {
             only_params: &[&P_SPEC],
         },
     ];
-    /// `T_SPARSE` edges in registration order.
-    const SPARSE_EDGES: [(u32, u32); 7] = [
-        (907, 41),
-        (41, 0),
-        (0, 4_294_967_295),
-        (4_294_967_295, 12),
-        (12, 3),
-        (3, 907),
-        (41, 12),
-    ];
+    /// `T_SPARSE` nodes and edges in registration order.
+    fn sparse_ids() -> (Vec<u32>, Vec<(u32, u32)>) {
+        let stored = quip_solver_conformance::t_sparse().expect("T_SPARSE loads");
+        (stored.nodes, stored.edges)
+    }
 
     fn table() -> FamilyTable {
         Declaration {
@@ -1702,7 +1697,8 @@ mod family_tests {
     }
 
     fn sparse() -> Topology {
-        wire_topology(&[907, 41, 0, 4_294_967_295, 12, 3], &SPARSE_EDGES)
+        let (nodes, edges) = sparse_ids();
+        wire_topology(&nodes, &edges)
     }
 
     fn digest_of(t: &Topology) -> Vec<u8> {
@@ -1822,13 +1818,13 @@ mod family_tests {
         let families = table();
         let generic = Declaration::GENERIC.validate().expect("generic");
         let sparse_cache = Arc::new(LeaseTopology::new(&sparse(), &families));
-        let mut doubled_edges = SPARSE_EDGES.to_vec();
+        let (sparse_nodes, mut doubled_edges) = sparse_ids();
         doubled_edges.push((41, 907));
-        let doubled = wire_topology(&[907, 41, 0, 4_294_967_295, 12, 3], &doubled_edges);
+        let doubled = wire_topology(&sparse_nodes, &doubled_edges);
         let doubled_cache = Arc::new(LeaseTopology::new(&doubled, &families));
-        let mut reordered_edges = SPARSE_EDGES.to_vec();
+        let (sparse_nodes, mut reordered_edges) = sparse_ids();
         reordered_edges.swap(0, 1);
-        let reordered = wire_topology(&[907, 41, 0, 4_294_967_295, 12, 3], &reordered_edges);
+        let reordered = wire_topology(&sparse_nodes, &reordered_edges);
         let invalid = Arc::new(LeaseTopology::new(&wire_topology(&[1, 1], &[]), &families));
         let reordered_digest = digest_of(&reordered);
         let doubled_digest = digest_of(&doubled);
@@ -2045,10 +2041,10 @@ mod family_tests {
             .expect("bytes");
         set_params(&mut job, &UNIFORM_V1, &P_L2_F0);
         generator(&mut job).topology_order_digest = vec![0; 32];
-        let mut reordered_edges = SPARSE_EDGES.to_vec();
+        let (sparse_nodes, mut reordered_edges) = sparse_ids();
         reordered_edges.swap(0, 1);
         cache = Arc::new(LeaseTopology::new(
-            &wire_topology(&[907, 41, 0, 4_294_967_295, 12, 3], &reordered_edges),
+            &wire_topology(&sparse_nodes, &reordered_edges),
             &families,
         ));
         drop(cache);

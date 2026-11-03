@@ -483,18 +483,6 @@ const SALT_COUNT: u64 = 8;
 /// Parameter bytes with a layout fault (code 7).
 const P_MALFORMED: [u8; 1] = [0x02];
 
-/// `T_SPARSE`: sparse native ids, one of them `u32::MAX`.
-const T_SPARSE_NODES: [u32; 6] = [907, 41, 0, 4_294_967_295, 12, 3];
-const T_SPARSE_EDGES: [(u32, u32); 7] = [
-    (907, 41),
-    (41, 0),
-    (0, 4_294_967_295),
-    (4_294_967_295, 12),
-    (12, 3),
-    (3, 907),
-    (41, 12),
-];
-
 /// The per-revision cases, in run order.
 const REVISION_CASES: [&str; 10] = [
     "supported-revision",
@@ -515,30 +503,51 @@ fn base_salt() -> [u8; 32] {
     salt
 }
 
-fn t_sparse_wire() -> Topology {
-    Topology {
-        hash: FAMILY_TOPOLOGY_HASH.to_vec(),
-        nodes: T_SPARSE_NODES.to_vec(),
-        edges: Some(EdgeList {
-            u: T_SPARSE_EDGES.iter().map(|&(u, _)| u).collect(),
-            v: T_SPARSE_EDGES.iter().map(|&(_, v)| v).collect(),
-        }),
-        allowed_h_milli: vec![-1000, 0, 1000],
-        allowed_j_milli: vec![-1000, 1000],
-    }
+/// `T_SPARSE` in the forms the script needs: the stored ids, `T_SPARSE`
+/// itself, and `T_REORDERED` (the first two edges swapped).
+struct SparseFixture {
+    stored: ising_generators::blob::Topology,
+    plain: BaseTopology,
+    reordered: BaseTopology,
 }
 
-/// `T_SPARSE`, or `T_REORDERED` (the first two edges swapped) when `reordered`.
-fn base_topology(reordered: bool) -> BaseTopology {
-    let mut edges = T_SPARSE_EDGES;
-    if reordered {
-        edges.swap(0, 1);
+impl SparseFixture {
+    /// Decode the shared `T_SPARSE` file.
+    ///
+    /// # Errors
+    ///
+    /// A message when the embedded file does not decode or is not valid.
+    fn load() -> Result<Self, String> {
+        let stored = crate::t_sparse().map_err(|why| format!("T_SPARSE failed to load: {why}"))?;
+        let build = |swap: bool| {
+            let mut edges = stored.edges.clone();
+            if swap {
+                edges.swap(0, 1);
+            }
+            BaseTopology::new(stored.nodes.clone(), &edges)
+                .map_err(|why| format!("T_SPARSE is not a valid topology: {why:?}"))
+        };
+        let plain = build(false)?;
+        let reordered = build(true)?;
+        Ok(Self {
+            stored,
+            plain,
+            reordered,
+        })
     }
-    #[expect(
-        clippy::expect_used,
-        reason = "T_SPARSE is a fixed valid topology, so this cannot fail"
-    )]
-    BaseTopology::new(T_SPARSE_NODES.to_vec(), &edges).expect("T_SPARSE is valid")
+
+    fn wire(&self) -> Topology {
+        Topology {
+            hash: FAMILY_TOPOLOGY_HASH.to_vec(),
+            nodes: self.stored.nodes.clone(),
+            edges: Some(EdgeList {
+                u: self.stored.edges.iter().map(|&(u, _)| u).collect(),
+                v: self.stored.edges.iter().map(|&(_, v)| v).collect(),
+            }),
+            allowed_h_milli: vec![-1000, 0, 1000],
+            allowed_j_milli: vec![-1000, 1000],
+        }
+    }
 }
 
 /// The FAM-42 wire reason of an admission code, as a raw `i32`.
@@ -1073,12 +1082,13 @@ async fn run_subject(
     tx: &mpsc::Sender<Result<CoordMsg, Status>>,
     outcome: &mut SessionOutcome,
     caps: &Capabilities,
+    sparse: &SparseFixture,
     subject: &str,
     reference: Option<&ReferenceRevision>,
 ) {
-    let topology = base_topology(false);
-    let reordered = base_topology(true);
-    let (supported, reference) = match select_supported(caps, subject, reference, &topology) {
+    let topology = &sparse.plain;
+    let reordered = &sparse.reordered;
+    let (supported, reference) = match select_supported(caps, subject, reference, topology) {
         Ok(selected) => selected,
         Err(cases) => {
             for (name, case_outcome) in cases {
@@ -1091,7 +1101,7 @@ async fn run_subject(
         caps,
         reference,
         &supported,
-        &topology,
+        topology,
         reordered.order_digest(),
     );
     for case in &cases {
@@ -1103,7 +1113,7 @@ async fn run_subject(
                 continue;
             }
         };
-        let admission = lease.admission(caps, reference, &topology);
+        let admission = lease.admission(caps, reference, topology);
         let met = match (&admission, case.needs) {
             (Ok(_), None) => true,
             (Err(code), Some(needs)) => *code == needs,
@@ -1132,8 +1142,9 @@ async fn run_session_cases(
     tx: &mpsc::Sender<Result<CoordMsg, Status>>,
     outcome: &mut SessionOutcome,
     caps: &Capabilities,
+    sparse: &SparseFixture,
 ) {
-    let order_digest = *base_topology(false).order_digest();
+    let order_digest = *sparse.plain.order_digest();
     let grade = Grade::Reject(admission_reason(Code::FamilyUnsupported));
     let generates = !caps.generated_families.is_empty();
     let name = "no-generated-families-rejects-family-lease";
@@ -1170,6 +1181,17 @@ fn grade_setup(missed: &[String]) -> CaseOutcome {
     }
 }
 
+/// Load `T_SPARSE`, or grade `session-setup` as failed and give `None`.
+fn load_sparse(outcome: &mut SessionOutcome) -> Option<SparseFixture> {
+    match SparseFixture::load() {
+        Ok(sparse) => Some(sparse),
+        Err(why) => {
+            push_case(outcome, "session-setup", None, CaseOutcome::Failed(why));
+            None
+        }
+    }
+}
+
 /// The family session script: handshake, setup, the cancel watermark, the
 /// session cases, the cases of each advertised revision, the credit ledger,
 /// and `Shutdown`.
@@ -1196,6 +1218,9 @@ pub(crate) async fn run_family_script(
     let (true, Some(caps)) = (hello, caps) else {
         return outcome;
     };
+    let Some(sparse) = load_sparse(&mut outcome) else {
+        return outcome;
+    };
 
     // 2. Welcome, configuration, the topology, and the target. The barrier is
     //    Ready plus the initial credit grant. Both setup barriers grade as
@@ -1214,7 +1239,7 @@ pub(crate) async fn run_family_script(
     }
     let mut missed = Vec::new();
     let _ = send(tx, coord_msg::Msg::Configure(configure())).await;
-    let _ = send(tx, coord_msg::Msg::Topology(t_sparse_wire())).await;
+    let _ = send(tx, coord_msg::Msg::Topology(sparse.wire())).await;
     let target = SetTarget {
         max_energy_milli: i64::MAX,
         min_solutions: 1,
@@ -1253,9 +1278,18 @@ pub(crate) async fn run_family_script(
     // 4. Every job case below runs behind a refund barrier and a Ping fence
     //    (`run_job`). 5. The session cases, then 6. the cases of each
     //    advertised revision.
-    run_session_cases(inbound, tx, &mut outcome, &caps).await;
+    run_session_cases(inbound, tx, &mut outcome, &caps, &sparse).await;
     for (subject, reference) in plan_subjects(&caps) {
-        run_subject(inbound, tx, &mut outcome, &caps, &subject, reference).await;
+        run_subject(
+            inbound,
+            tx,
+            &mut outcome,
+            &caps,
+            &sparse,
+            &subject,
+            reference,
+        )
+        .await;
     }
 
     // 7. Every dispatched job returned exactly one credit.
@@ -1356,20 +1390,12 @@ mod tests {
     }
 
     fn t_sparse(swap_first_edges: bool) -> BaseTopology {
-        let nodes = vec![907, 41, 0, 4_294_967_295, 12, 3];
-        let mut edges = vec![
-            (907, 41),
-            (41, 0),
-            (0, 4_294_967_295),
-            (4_294_967_295, 12),
-            (12, 3),
-            (3, 907),
-            (41, 12),
-        ];
+        let stored = crate::t_sparse().expect("T_SPARSE loads");
+        let mut edges = stored.edges;
         if swap_first_edges {
             edges.swap(0, 1);
         }
-        BaseTopology::new(nodes, &edges).expect("T_SPARSE is a valid topology")
+        BaseTopology::new(stored.nodes, &edges).expect("T_SPARSE is a valid topology")
     }
 
     fn admission(
