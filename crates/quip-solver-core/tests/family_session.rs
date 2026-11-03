@@ -278,19 +278,16 @@ fn build_example(name: &str) -> std::path::PathBuf {
 }
 
 /// `T_SPARSE` (core.json `topologies[sparse]`), sent with the wire hash `[7; 32]`.
+#[expect(
+    clippy::unwrap_used,
+    reason = "the shared T_SPARSE blob is a fixed valid fixture"
+)]
 fn topology() -> wire::Topology {
-    let edges = [
-        (907, 41),
-        (41, 0),
-        (0, 4_294_967_295),
-        (4_294_967_295, 12),
-        (12, 3),
-        (3, 907),
-        (41, 12),
-    ];
+    let stored = quip_solver_conformance::t_sparse().unwrap();
+    let edges = stored.edges;
     wire::Topology {
         hash: vec![7; 32],
-        nodes: vec![907, 41, 0, 4_294_967_295, 12, 3],
+        nodes: stored.nodes,
         edges: Some(wire::EdgeList {
             u: edges.iter().map(|e| e.0).collect(),
             v: edges.iter().map(|e| e.1).collect(),
@@ -505,13 +502,12 @@ fn wire_reason(core: &Value, name: &str) -> i32 {
 fn vector_topology(name: &str) -> wire::Topology {
     let core = core();
     let t = case(&core, "topologies", name);
-    let id = |v: &Value| u32::try_from(v.as_u64().unwrap()).unwrap();
-    let edges = t["edges"].as_array().unwrap();
+    let stored = quip_solver_conformance::topology(t["topology"].as_str().unwrap()).unwrap();
     wire::Topology {
-        nodes: t["nodes"].as_array().unwrap().iter().map(id).collect(),
+        nodes: stored.nodes,
         edges: Some(wire::EdgeList {
-            u: edges.iter().map(|e| id(&e[0])).collect(),
-            v: edges.iter().map(|e| id(&e[1])).collect(),
+            u: stored.edges.iter().map(|e| e.0).collect(),
+            v: stored.edges.iter().map(|e| e.1).collect(),
         }),
         ..topology()
     }

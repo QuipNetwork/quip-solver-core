@@ -190,37 +190,11 @@ fn hex_32(value: &Value, key: &str, path: &str) -> Result<[u8; 32], String> {
         .map_err(|_| format!("{path}.{key}: not 32 bytes"))
 }
 
-fn node_pair(value: &Value, path: &str) -> Result<(u32, u32), String> {
-    let pair = value
-        .as_array()
-        .map(Vec::as_slice)
-        .ok_or_else(|| format!("{path}: not an array"))?;
-    let [u, v] = pair else {
-        return Err(format!("{path}: not a pair"));
-    };
-    let id = |value: &Value| {
-        value
-            .as_u64()
-            .and_then(|id| u32::try_from(id).ok())
-            .ok_or_else(|| format!("{path}: not a node id"))
-    };
-    Ok((id(u)?, id(v)?))
-}
-
 fn parse_topology(value: &Value, path: &str) -> Result<BaseTopology, String> {
-    let mut nodes = Vec::new();
-    for (i, node) in array(value, "nodes", path)?.iter().enumerate() {
-        let id = node
-            .as_u64()
-            .and_then(|id| u32::try_from(id).ok())
-            .ok_or_else(|| format!("{path}.nodes[{i}]: not a node id"))?;
-        nodes.push(id);
-    }
-    let mut edges = Vec::new();
-    for (i, edge) in array(value, "edges", path)?.iter().enumerate() {
-        edges.push(node_pair(edge, &format!("{path}.edges[{i}]"))?);
-    }
-    BaseTopology::new(nodes, &edges).map_err(|fault| format!("{path}: {fault:?}"))
+    let at = format!("{path}.topology");
+    let topology = crate::vectors::topology(text(value, "topology", path)?)
+        .map_err(|error| format!("{at}: {error}"))?;
+    BaseTopology::new(topology.nodes, &topology.edges).map_err(|fault| format!("{path}: {fault:?}"))
 }
 
 fn parse_case(case: &Value, path: &str) -> Result<VectorCase, String> {

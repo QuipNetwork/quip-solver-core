@@ -14,7 +14,8 @@ A pytest drift test checks that the fixture is still the exact output of the ora
 
 | Check | Command | What it proves |
 |---|---|---|
-| Rust recompute | `cargo test -p quip-solver-conformance --test family_vectors` | Rust code in `tests/family_vectors.rs` agrees with `core.json`, `legacy.json`, and `layered.json` |
+| Rust recompute | `cargo test -p quip-solver-conformance --test family_vectors` | Rust code in `tests/family_vectors.rs` agrees with `core.json`, `legacy.json`, and `layered.json`, and checks `ice_structure.json` against the schema |
+| Ice structure | `cargo test -p ising-generators --test ice_structure` | The ice code agrees with `ice_structure.json`, the live topology, and the archived tiles |
 | Drift | `python -m pytest conformance/test_family_vectors_drift.py` | The fixture is the oracle output, and the sources have not changed |
 | Oracle | `python -m pytest conformance/test_family_oracle.py` | The oracle matches the existing goldens and the examples in the contract |
 
@@ -28,7 +29,28 @@ All files are under `crates/quip-solver-conformance/vectors/families/`.
 | `core.json` | `specified` | Every vector that SC-2 provides |
 | `legacy.json` | `legacy-production` | References to the production legacy draw vectors, by case hash |
 | `layered.json` | `test-construction` | Generated instances of the layered test construction for fixed lease nonces |
+| `ice_structure.json` | `specified` | The ice tile structure (Zephyr lattice, candidate tiles, spines, sides, and the order-driven selection) on small topologies and on the live topology |
+| `ice/archived-tiles.bin` and `ice/archived-tiles.json` | `archived-research` | Tiles of two archived research models, and their sidecar |
 | `registry.json` | `specified` | The family registry, maintained by hand |
+
+The topologies that the vectors use are not inline.
+Each one is a file under `crates/quip-solver-conformance/vectors/topologies/`, in the format of [docs/topology-format.md](topology-format.md).
+
+| File | Content |
+|---|---|
+| `topologies/index.json` | One entry per topology file: name, file, kind, node and edge counts, order digest, BLAKE3 of the payload, provenance, and a description |
+| `topologies/<name>.bin.gz` | One topology. Each distinct topology has one file. Two topologies are the same when the node list and the edge list match in the same order |
+| `topologies/zephyr-z12t4-live.bin.gz` | `archived-research`. The live z(12, 4) topology as the lattice minus its removed nodes and removed edges (kind 1) |
+
+A topology field in a vectors file holds a string path that starts at the directory of that file. One path is `../topologies/t-sparse.bin.gz`.
+A file takes the name of the first case that uses it, in the order `core.json`, `layered.json`, `ice_structure.json`.
+The T_SPARSE file is `t-sparse.bin.gz`.
+A path starts at `vectors/families/`, the only directory with topology references today.
+Each file in `topologies/` has an index entry. A vectors file refers to it.
+The index entry of the live topology also holds `sources`, with the SHA-256 of the external specification file that the rebuild matches.
+The oracle writes every topology file except the live one, and it writes `index.json`.
+The live file holds archived research data, and the oracle reads it.
+The Rust function `quip_solver_conformance::topology` decodes a reference.
 
 The `provenance` field has four values.
 
@@ -37,9 +59,23 @@ The `provenance` field has four values.
 | `specified` | The vector follows from `docs/problem-families.md` |
 | `legacy-production` | The vector pins a production legacy draw |
 | `test-construction` | The vector follows a test construction that only the tests and the conformance crate use |
-| `archived-research` | Reserved for later files that hold archived research instances |
+| `archived-research` | Archived research data: the live topology file and the archived tiles |
 
-No file uses `archived-research` yet.
+Only the live topology file and the files under `ice/` use `archived-research`.
+The files under `ice/` are fixtures and have no `sources` pins or schema.
+
+The live topology file records the removed nodes and removed edges of the research topology.
+The rebuild takes the z(12, 4) lattice without them.
+It has 4575 nodes and 41474 edges.
+Its index entry pins the SHA-256 of the external specification file that the rebuild matches.
+
+The archived tiles come from the research generator, which used NumPy PCG64 permutations and SciPy matching.
+They are not output of `quip/ice-glass`.
+The sidecar names the two models and gives the byte range of each in the binary file.
+The binary file has 1785 tiles per model.
+A tile is four `u16` little-endian dense positions in the live topology.
+The tiles are evidence that real research tiles are valid candidates.
+They give no parity, because no code in this repository can regenerate them.
 
 `legacy.json` holds 8 references into `golden_vectors.json` and `golden_lease.json`.
 Each reference stores a BLAKE3 hash of the canonical JSON of the referenced case.
@@ -166,7 +202,8 @@ The fixture format makes these decisions.
 
 ## Regenerating
 
-Run `make family-vectors` to rewrite `core.json`, `legacy.json`, and `layered.json`.
+Run `make family-vectors` to rewrite `core.json`, `legacy.json`, `layered.json`, and `ice_structure.json`.
+The `sources` pins of every file hash the oracle modules, so a new oracle module changes the pins of every file.
 The target needs the `blake3` package, which the `dev` extra installs.
 Run `cd conformance && python -m family_oracle check` to compare the files with the oracle output without writing.
 

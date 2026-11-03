@@ -1751,46 +1751,9 @@
         }
       ],
       "topology": {
-        "edges": [
-          [
-            907,
-            41
-          ],
-          [
-            41,
-            0
-          ],
-          [
-            0,
-            4294967295
-          ],
-          [
-            4294967295,
-            12
-          ],
-          [
-            12,
-            3
-          ],
-          [
-            3,
-            907
-          ],
-          [
-            41,
-            12
-          ]
-        ],
         "name": "sparse",
-        "nodes": [
-          907,
-          41,
-          0,
-          4294967295,
-          12,
-          3
-        ],
-        "order_digest": "07551e6f3010a65652a4099c85f3c5f5c9b784abaceddfd33b3dacf39f76fb79"
+        "order_digest": "07551e6f3010a65652a4099c85f3c5f5c9b784abaceddfd33b3dacf39f76fb79",
+        "topology": "../topologies/t-sparse.bin.gz"
       }
     },
     {
@@ -2683,46 +2646,9 @@
         }
       ],
       "topology": {
-        "edges": [
-          [
-            907,
-            41
-          ],
-          [
-            41,
-            0
-          ],
-          [
-            0,
-            4294967295
-          ],
-          [
-            4294967295,
-            12
-          ],
-          [
-            12,
-            3
-          ],
-          [
-            3,
-            907
-          ],
-          [
-            41,
-            12
-          ]
-        ],
         "name": "sparse",
-        "nodes": [
-          907,
-          41,
-          0,
-          4294967295,
-          12,
-          3
-        ],
-        "order_digest": "07551e6f3010a65652a4099c85f3c5f5c9b784abaceddfd33b3dacf39f76fb79"
+        "order_digest": "07551e6f3010a65652a4099c85f3c5f5c9b784abaceddfd33b3dacf39f76fb79",
+        "topology": "../topologies/t-sparse.bin.gz"
       }
     },
     {
@@ -3479,46 +3405,9 @@
         }
       ],
       "topology": {
-        "edges": [
-          [
-            907,
-            41
-          ],
-          [
-            41,
-            0
-          ],
-          [
-            0,
-            4294967295
-          ],
-          [
-            4294967295,
-            12
-          ],
-          [
-            12,
-            3
-          ],
-          [
-            3,
-            907
-          ],
-          [
-            41,
-            12
-          ]
-        ],
         "name": "sparse",
-        "nodes": [
-          907,
-          41,
-          0,
-          4294967295,
-          12,
-          3
-        ],
-        "order_digest": "07551e6f3010a65652a4099c85f3c5f5c9b784abaceddfd33b3dacf39f76fb79"
+        "order_digest": "07551e6f3010a65652a4099c85f3c5f5c9b784abaceddfd33b3dacf39f76fb79",
+        "topology": "../topologies/t-sparse.bin.gz"
       }
     }
   ],
@@ -3530,11 +3419,11 @@
       "path": "conformance/family_oracle/__init__.py"
     },
     {
-      "blake3": "d884518385621def2a5bd67f38a0720bff74070a901bee9dfa3a4f1d13c92e7a",
+      "blake3": "e294486553c63556b4c57573ac9a7dba430b37b2c1ee7e6857ce936e5983c104",
       "path": "conformance/family_oracle/__main__.py"
     },
     {
-      "blake3": "5d6e46466cfa1bc9789d8e27c13bc3f8814dd8aed27ca0472a4183d63a1579be",
+      "blake3": "65f3753d9431171093a123c31e92ff568809b9af8a6ff91fcfd39bb9d261b379",
       "path": "conformance/family_oracle/build.py"
     },
     {
@@ -3550,6 +3439,10 @@
       "path": "conformance/family_oracle/digests.py"
     },
     {
+      "blake3": "67f4c34fcd3798d8512e6dc0889b83e5b290fce8abb5d7e99e788bfc5f06e423",
+      "path": "conformance/family_oracle/ice.py"
+    },
+    {
       "blake3": "3e21fb7e7efe2d6d391a207b161e34f80f682d6adaa70101beea3b330b444b67",
       "path": "conformance/family_oracle/instance.py"
     },
@@ -3560,6 +3453,10 @@
     {
       "blake3": "449fb4dea64961c206253f8afe8110bb316f2f762abbae8f15a1a769e5e7b824",
       "path": "conformance/family_oracle/params.py"
+    },
+    {
+      "blake3": "4c0c3d18b5151431b25d5c450bc8347e31a4802e6a3152adf417b2218047cde2",
+      "path": "conformance/family_oracle/topology_blob.py"
     },
     {
       "blake3": "a1954919b87214bb0a6fda4e1418c99a1f7ca1c8fb8892037a4016bdbe2d0df1",

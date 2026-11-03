@@ -1,0 +1,239 @@
+[
+  {
+    "about": "Explicit topology first used by the case error-degree-above-limit in ice_structure.json structure.",
+    "edges": 33,
+    "file": "error-degree-above-limit.bin.gz",
+    "kind": "explicit",
+    "name": "error-degree-above-limit",
+    "nodes": 34,
+    "order_digest": "3f81d50484a7963bbc6c75137849a635ec4991f0159ef157d2c72f8f62e848a9",
+    "payload_blake3": "9b3531eb8b7dc0265277e24b0df9f60c7b1bc977e5f33a1b1c11b1afb869d0a1",
+    "provenance": "specified"
+  },
+  {
+    "about": "Explicit topology first used by the case error-duplicate-edge in ice_structure.json structure.",
+    "edges": 2,
+    "file": "error-duplicate-edge.bin.gz",
+    "kind": "explicit",
+    "name": "error-duplicate-edge",
+    "nodes": 2,
+    "order_digest": "cbbddb0ac64224374a82cd5c213fbbcd3fc556454d2d1c80ee31a8f56944be8c",
+    "payload_blake3": "5256200be8dc6c9c28d120e4a4086df1299e301708b68e148dd590c35f870774",
+    "provenance": "specified"
+  },
+  {
+    "about": "Explicit topology first used by the case error-membership-above-two in ice_structure.json structure.",
+    "edges": 33,
+    "file": "error-membership-above-two.bin.gz",
+    "kind": "explicit",
+    "name": "error-membership-above-two",
+    "nodes": 16,
+    "order_digest": "eed5ef060d9494facb842e0315f6fd077ad5845f64b1aa04914cb1cf47b15404",
+    "payload_blake3": "9c76c529d54e07b17c3b7ef31919c83c73d7c36d0eae2a917886eb14ae9846ec",
+    "provenance": "specified"
+  },
+  {
+    "about": "Explicit topology first used by the case error-mixed-shape in ice_structure.json structure.",
+    "edges": 4,
+    "file": "error-mixed-shape.bin.gz",
+    "kind": "explicit",
+    "name": "error-mixed-shape",
+    "nodes": 4,
+    "order_digest": "ec8b65a99111e8b3cf7e7597905dd5b0a30a52432e85f25ef1f2d62efad42b69",
+    "payload_blake3": "ba8205b3c704f4c6296091a1a70607f91f4cae68cec245b795d2daf3a459b495",
+    "provenance": "specified"
+  },
+  {
+    "about": "Explicit topology first used by the case error-not-bipartite in ice_structure.json structure.",
+    "edges": 25,
+    "file": "error-not-bipartite.bin.gz",
+    "kind": "explicit",
+    "name": "error-not-bipartite",
+    "nodes": 10,
+    "order_digest": "8799c16e5801e208c0c64a3acf66171f0ee306d2f20a451db57d1152f331e994",
+    "payload_blake3": "e5eb71455563a0ef4f3a45e83b85889b06f5ef6a5d037a5eb30278b726b8ff7f",
+    "provenance": "specified"
+  },
+  {
+    "about": "Explicit topology first used by the case error-not-zephyr-coupler in ice_structure.json structure.",
+    "edges": 1,
+    "file": "error-not-zephyr-coupler.bin.gz",
+    "kind": "explicit",
+    "name": "error-not-zephyr-coupler",
+    "nodes": 2,
+    "order_digest": "2695476f247e84a21f1be39ab17ed4d96ecfd6251266a59ac21e81a4cf856a60",
+    "payload_blake3": "0ff02b6d54a75ebf818376645a019108dc2e1012b7ed9f9de06104b52b675991",
+    "provenance": "specified"
+  },
+  {
+    "about": "Explicit topology first used by the case error-not-zephyr-node in ice_structure.json structure.",
+    "edges": 1,
+    "file": "error-not-zephyr-node.bin.gz",
+    "kind": "explicit",
+    "name": "error-not-zephyr-node",
+    "nodes": 2,
+    "order_digest": "905715aea4fb83ef84e01fe8c6c7c0dd7ca3e40c1b6c08f3a276099d35ab56dc",
+    "payload_blake3": "6e286d9dc6fc2949efcb0469baac7d5a0cb4d61b018219dd4eab3cab4b400ac2",
+    "provenance": "specified"
+  },
+  {
+    "about": "Explicit topology first used by the case error-spine-conflict in ice_structure.json structure.",
+    "edges": 16,
+    "file": "error-spine-conflict.bin.gz",
+    "kind": "explicit",
+    "name": "error-spine-conflict",
+    "nodes": 8,
+    "order_digest": "d67f43d4f20a3b647cb62c87385f5513aafa6768a3328793a36bbc9af8db3de5",
+    "payload_blake3": "7ca6711c7bffef454c607826597330f847a03d6e22a5c6d559024553dfb0ca46",
+    "provenance": "specified"
+  },
+  {
+    "about": "Explicit topology first used by the case first-check-duplicate-before-coupler in ice_structure.json structure.",
+    "edges": 3,
+    "file": "first-check-duplicate-before-coupler.bin.gz",
+    "kind": "explicit",
+    "name": "first-check-duplicate-before-coupler",
+    "nodes": 3,
+    "order_digest": "58b759bcb5957420d896b6f7fa021714b5b124431eec73bc35fce1f5ddb17184",
+    "payload_blake3": "c92fad5e96d0798892b37bc177de0bf8994ceb3948eca2c894f2c288bb49be64",
+    "provenance": "specified"
+  },
+  {
+    "about": "Explicit topology first used by the case first-check-node-before-coupler in ice_structure.json structure.",
+    "edges": 2,
+    "file": "first-check-node-before-coupler.bin.gz",
+    "kind": "explicit",
+    "name": "first-check-node-before-coupler",
+    "nodes": 3,
+    "order_digest": "395f8232a42d5d31bfcd90deb4802a483ec03fa7cb22270a7113783a275a3b28",
+    "payload_blake3": "625872ba6045fca4d2f6f22ce8a5a0f4f20f994e2dc2ca4a3f1cb9983cfa6b0b",
+    "provenance": "specified"
+  },
+  {
+    "about": "Explicit topology first used by the case reverse-ten in core.json topologies.",
+    "edges": 9,
+    "file": "reverse-ten.bin.gz",
+    "kind": "explicit",
+    "name": "reverse-ten",
+    "nodes": 10,
+    "order_digest": "0c38bd8ddc15bb093b1181ce5009a341ae0c731dac30f70d03ede7479f5b06fd",
+    "payload_blake3": "0dd6094b6a672a7bd634efb006f032e2b34ddc5aa02d7bbc0f91a16e5c6f3b0e",
+    "provenance": "specified"
+  },
+  {
+    "about": "Explicit topology first used by the case sparse-edge-flipped in core.json topologies.",
+    "edges": 7,
+    "file": "sparse-edge-flipped.bin.gz",
+    "kind": "explicit",
+    "name": "sparse-edge-flipped",
+    "nodes": 6,
+    "order_digest": "a71a4d5a7476717cb5c003eec147d973bb593c82fdb4a236dd285e7b13db4036",
+    "payload_blake3": "da88f2ca55af7f521b1a6a9bc8143e25967f2cac009dbe51a75b2ed68bfe9def",
+    "provenance": "specified"
+  },
+  {
+    "about": "Explicit topology first used by the case sparse-edges-reordered in core.json topologies.",
+    "edges": 7,
+    "file": "sparse-edges-reordered.bin.gz",
+    "kind": "explicit",
+    "name": "sparse-edges-reordered",
+    "nodes": 6,
+    "order_digest": "66fccc2038544fe27a27625de90b96e36c7fc169975d8d030930ea1f44ba5bba",
+    "payload_blake3": "6a25f4872250b1c05ef6652213ae2006e7d0a4f1fa98c420abc0ac288e202173",
+    "provenance": "specified"
+  },
+  {
+    "about": "Explicit topology first used by the case sparse-nodes-reordered in core.json topologies.",
+    "edges": 7,
+    "file": "sparse-nodes-reordered.bin.gz",
+    "kind": "explicit",
+    "name": "sparse-nodes-reordered",
+    "nodes": 6,
+    "order_digest": "1144b7187dd24a76a584998a9320dd99ae23c2fba7f0ddd2e252033e895eb51b",
+    "payload_blake3": "87c97fdd5bc45f5083c33f1cfcdd0f4ae0ccb6053b8269bc304110d5501ff817",
+    "provenance": "specified"
+  },
+  {
+    "about": "Explicit topology first used by the case sparse in core.json topologies.",
+    "edges": 7,
+    "file": "t-sparse.bin.gz",
+    "kind": "explicit",
+    "name": "t-sparse",
+    "nodes": 6,
+    "order_digest": "07551e6f3010a65652a4099c85f3c5f5c9b784abaceddfd33b3dacf39f76fb79",
+    "payload_blake3": "048b678e0d4063ba4640d156d04ab4ed244b1cd64236cc3ad428497d27c8354b",
+    "provenance": "specified"
+  },
+  {
+    "about": "Explicit topology first used by the case tie-ring-4 in ice_structure.json structure.",
+    "edges": 20,
+    "file": "tie-ring-4.bin.gz",
+    "kind": "explicit",
+    "name": "tie-ring-4",
+    "nodes": 8,
+    "order_digest": "146456fb079edfb7f3b2fa5fa9fecbb4c6bf5557e2b170874fda1b857c64ec15",
+    "payload_blake3": "aa11ff141163a38a048f7a290e9424a9890f564d829952b7d192bb214fd99d9b",
+    "provenance": "specified"
+  },
+  {
+    "about": "Explicit topology first used by the case z12-zephyr in ice_structure.json structure.",
+    "edges": 76,
+    "file": "z12-zephyr.bin.gz",
+    "kind": "explicit",
+    "name": "z12-zephyr",
+    "nodes": 24,
+    "order_digest": "ba0aa7ea11decc8e109d7a69e7780bad48314d22b96a39da1a661a6358173a64",
+    "payload_blake3": "864270230ed7a66aac5005e7a3641b0fe55fa76672edd11dae3b1c32a7cb95ab",
+    "provenance": "specified"
+  },
+  {
+    "about": "Explicit topology first used by the case z22-cut-edge-zephyr in ice_structure.json structure.",
+    "edges": 355,
+    "file": "z22-cut-edge-zephyr.bin.gz",
+    "kind": "explicit",
+    "name": "z22-cut-edge-zephyr",
+    "nodes": 80,
+    "order_digest": "cc6c07788a7f0e92c980ee64cd5a5812c73d00d2bb0ee05da368a5fa374ffd47",
+    "payload_blake3": "37ed51927caddb46e226e828340e624493bc4855eef7a3f5af8ffe837d1ea183",
+    "provenance": "specified"
+  },
+  {
+    "about": "Explicit topology first used by the case z22-permuted-order-zephyr in ice_structure.json structure.",
+    "edges": 356,
+    "file": "z22-permuted-order-zephyr.bin.gz",
+    "kind": "explicit",
+    "name": "z22-permuted-order-zephyr",
+    "nodes": 80,
+    "order_digest": "39d8e26adfbfbfdd564e5bdf7489938917db6346c4834e02b322361825931ddd",
+    "payload_blake3": "0435d08f4a00b25740d988607683b1c3caffbddacb4d0b7d20323ca3dced03a3",
+    "provenance": "specified"
+  },
+  {
+    "about": "Explicit topology first used by the case z22-zephyr in ice_structure.json structure.",
+    "edges": 356,
+    "file": "z22-zephyr.bin.gz",
+    "kind": "explicit",
+    "name": "z22-zephyr",
+    "nodes": 80,
+    "order_digest": "81842870ddfbc7038395e8851a5ca3e85178ddaa959c1d037c432ca00d199e47",
+    "payload_blake3": "8962288db90ddb506bed03296e0541c27e38ac67a0ece3162abbd5676bce2e7a",
+    "provenance": "specified"
+  },
+  {
+    "about": "The live Zephyr z(12, 4) topology of the research regime, as z(12, 4) minus the removed nodes and removed edges. The file is the kind 1 form of that topology. It is archived research data and the generator does not rewrite it. The sha256 pins the external spec file that the rebuild was checked against. The source path is relative to the research data root.",
+    "edges": 41474,
+    "file": "zephyr-z12t4-live.bin.gz",
+    "kind": "zephyr-removed",
+    "name": "zephyr-z12t4-live",
+    "nodes": 4575,
+    "order_digest": "e12cffc9392cc502c5d065d6e1a3e2eabcc08247ffd55d2fe1b41988d2bc37e3",
+    "payload_blake3": "9d16960bc799eaad71504c4f22284ab283fcd962fba678ade07e53dff80e29de",
+    "provenance": "archived-research",
+    "sources": [
+      {
+        "path": "quip-data/regimes/topology-live-2026-09-21.spec.json",
+        "sha256": "65ef58bdfff7ecebadf041e77f2c8ae4b12763fa76190f7cd507a14145e747be"
+      }
+    ]
+  }
+]

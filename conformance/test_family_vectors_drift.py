@@ -41,6 +41,97 @@ def test_layered_fixture_matches_oracle():
     assert build.render(build.build_layered()) == build.LAYERED_PATH.read_text()
 
 
+def _ice_doc() -> dict:
+    return json.loads(build.ICE_STRUCTURE_PATH.read_text())
+
+
+def test_ice_structure_fixture_matches_oracle():
+    text = build.render(build.build_ice_structure())
+    assert text == build.ICE_STRUCTURE_PATH.read_text()
+
+
+def test_topology_index_matches_oracle():
+    text = build.render(build.build_topology_index())
+    assert text == build.INDEX_PATH.read_text()
+
+
+def test_file_matches_compares_payloads_not_compressed_bytes(tmp_path):
+    data = build.topology_blob.encode(
+        {"kind": "explicit", "nodes": [1, 2], "edges": [[1, 2]]}
+    )
+    path = tmp_path / "x.bin.gz"
+    path.write_bytes(data)
+    assert build.file_matches(path, data)
+    # The same payload in another DEFLATE stream (stored, not compressed).
+    payload = build.topology_blob.decompress(data)
+    stored = (
+        data[:10]
+        + b"\x01"
+        + len(payload).to_bytes(2, "little")
+        + (len(payload) ^ 0xFFFF).to_bytes(2, "little")
+        + payload
+        + data[-8:]
+    )
+    assert stored != data
+    path.write_bytes(stored)
+    assert build.file_matches(path, data)
+    path.write_bytes(data[:-1])
+    assert not build.file_matches(path, data)
+    other = build.topology_blob.encode({"kind": "explicit", "nodes": [1], "edges": []})
+    assert not build.file_matches(path, other)
+
+
+def test_topology_blobs_match_oracle():
+    blobs = build.topology_blobs()
+    assert blobs
+    for path, data in blobs.items():
+        # Payloads, not compressed bytes: another zlib build gives other DEFLATE bytes.
+        assert build.file_matches(path, data), path.name
+
+
+def test_topology_directory_holds_only_known_files():
+    on_disk = {path.name for path in build.TOPOLOGIES_DIR.iterdir()}
+    expected = {path.name for path in build.topology_blobs()}
+    expected |= {build.INDEX_PATH.name, build.LIVE_BLOB_PATH.name}
+    assert on_disk == expected
+
+
+def test_every_json_topology_reference_names_an_indexed_file():
+    index = {entry["file"] for entry in json.loads(build.INDEX_PATH.read_text())}
+    refs: list[str] = []
+
+    def walk(value):
+        if isinstance(value, str) and value.endswith(".bin.gz"):
+            refs.append(value)
+        elif isinstance(value, list):
+            for item in value:
+                walk(item)
+        elif isinstance(value, dict):
+            for item in value.values():
+                walk(item)
+
+    for load in (_core_doc, _layered_doc, _ice_doc):
+        walk(load())
+    assert refs
+    # Every topology file is referenced by a JSON file and indexed.
+    names = {(build.FAMILIES_DIR / ref).resolve().name for ref in refs}
+    assert names == index == {p.name for p in build.TOPOLOGIES_DIR.glob("*.bin.gz")}
+    for ref in refs:
+        target = (build.FAMILIES_DIR / ref).resolve()
+        assert target.parent == build.TOPOLOGIES_DIR.resolve(), ref
+        assert target.name in index, ref
+        assert target.exists(), ref
+
+
+def test_ice_structure_evidence_is_sc8():
+    doc = _ice_doc()
+    tagged = [
+        tag for key in ("structure", "live") for c in doc[key] for tag in c["evidence"]
+    ]
+    assert tagged
+    assert set(tagged) == {"SC-8:ice-structure-vectors"}
+
+
 def test_canonical_json_is_sorted_compact_and_rejects_floats():
     assert build.canonical_json({"b": [1, "x"], "a": None}) == '{"a":null,"b":[1,"x"]}'
     with pytest.raises(TypeError):
@@ -77,7 +168,7 @@ def test_every_provided_id_has_a_case():
         assert tag.startswith("SC-2:")
 
 
-@pytest.mark.parametrize("load", [_core_doc, _legacy_doc, _layered_doc])
+@pytest.mark.parametrize("load", [_core_doc, _legacy_doc, _layered_doc, _ice_doc])
 def test_sources_hash_spec_and_oracle(load):
     doc = load()
     root = build.SPEC_PATH.parents[1]

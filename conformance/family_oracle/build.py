@@ -3,13 +3,14 @@
 Every derived value comes from an oracle function. Nothing here is a typed digest.
 """
 
+import functools
 import json
 import re
 from pathlib import Path
 
 import blake3
 
-from . import decisions, layered
+from . import decisions, ice, layered, topology_blob
 from .chacha8 import ChaCha8, shuffle, uniform
 from .digests import (
     descriptor_digest,
@@ -49,6 +50,11 @@ FAMILIES_DIR = ROOT / "crates/quip-solver-conformance/vectors/families"
 CORE_PATH = FAMILIES_DIR / "core.json"
 LEGACY_PATH = FAMILIES_DIR / "legacy.json"
 LAYERED_PATH = FAMILIES_DIR / "layered.json"
+ICE_STRUCTURE_PATH = FAMILIES_DIR / "ice_structure.json"
+TOPOLOGIES_DIR = FAMILIES_DIR.parent / "topologies"
+INDEX_PATH = TOPOLOGIES_DIR / "index.json"
+LIVE_NAME = "zephyr-z12t4-live"
+LIVE_BLOB_PATH = TOPOLOGIES_DIR / f"{LIVE_NAME}.bin.gz"
 SPEC_PATH = ROOT / "docs/problem-families.md"
 WIRE_PATH = ROOT / "crates/quip-solver-conformance/vectors/golden_wire.json"
 ORACLE_DIR = ROOT / "conformance/family_oracle"
@@ -617,8 +623,7 @@ def _topology_cases() -> list[dict]:
         _case(
             name,
             _ev("topology-order-digest-reordered-edges", "digest-derive-key-contexts"),
-            nodes=nodes,
-            edges=[list(e) for e in edges],
+            topology=_topology_ref(nodes, edges),
             material_hex=topology_order_material(nodes, edges).hex(),
             order_digest=topology_order_digest(nodes, edges).hex(),
         )
@@ -629,6 +634,160 @@ def _topology_cases() -> list[dict]:
 def _topology_digest(name: str) -> bytes:
     nodes, edges = _TOPOLOGIES[name]
     return topology_order_digest(nodes, edges)
+
+
+# ---- topology blob files ----
+#
+# One file per distinct topology (same node list and edge list in the same
+# order). A file takes the name of the first case that uses it, in the order
+# core.json, layered.json, ice_structure.json. T_SPARSE is always t-sparse.
+
+_T_SPARSE_NAME = "t-sparse"
+_LIVE_ABOUT = (
+    "The live Zephyr z(12, 4) topology of the research regime, as z(12, 4) minus "
+    "the removed nodes and removed edges. "
+    "The file is the kind 1 form of that topology. It is archived research data "
+    "and the generator does not rewrite it. "
+    "The sha256 pins the external spec file that the rebuild was checked against. "
+    "The source path is relative to the research data root."
+)
+_LIVE_SOURCES = [
+    {
+        "path": "quip-data/regimes/topology-live-2026-09-21.spec.json",
+        "sha256": "65ef58bdfff7ecebadf041e77f2c8ae4b12763fa76190f7cd507a14145e747be",
+    }
+]
+
+_TopologyKey = tuple[tuple[int, ...], tuple[tuple[int, int], ...]]
+
+
+def _topology_key(nodes: list[int], edges: list[tuple[int, int]]) -> _TopologyKey:
+    return tuple(nodes), tuple((a, b) for a, b in edges)
+
+
+@functools.cache
+def _registry() -> dict[_TopologyKey, dict]:
+    """The distinct explicit topologies, keyed by content, in first-use order."""
+    uses = [
+        ("core.json topologies", "specified", name, nodes, edges)
+        for name, (nodes, edges) in _TOPOLOGIES.items()
+    ]
+    sparse = _TOPOLOGIES["sparse"]
+    uses.append(("layered.json layered", "test-construction", "sparse", *sparse))
+    uses += [
+        ("ice_structure.json structure", "specified", name, nodes, edges)
+        for name, _, _, nodes, edges in _structure_inputs()
+    ]
+    sparse_key = _topology_key(*sparse)
+    found: dict[_TopologyKey, dict] = {}
+    for where, provenance, case, nodes, edges in uses:
+        key = _topology_key(nodes, edges)
+        if key in found:
+            continue
+        name = _T_SPARSE_NAME if key == sparse_key else case
+        found[key] = {
+            "name": name,
+            "nodes": nodes,
+            "edges": edges,
+            "provenance": provenance,
+            "about": f"Explicit topology first used by the case {case} in {where}.",
+        }
+    names = [entry["name"] for entry in found.values()]
+    if len(names) != len(set(names)):
+        raise ValueError("two distinct topologies share a file name")
+    return found
+
+
+def _topology_file(name: str) -> str:
+    return f"{name}.bin.gz"
+
+
+def _topology_ref(nodes: list[int], edges: list[tuple[int, int]]) -> str:
+    """The path of the topology file, relative to a file in vectors/families/."""
+    name = _registry()[_topology_key(nodes, edges)]["name"]
+    return f"../topologies/{_topology_file(name)}"
+
+
+def _index_entry(name: str, body: dict, provenance: str, about: str) -> dict:
+    expanded = topology_blob.expand(body)
+    nodes, edges = expanded["nodes"], expanded["edges"]
+    return {
+        "name": name,
+        "file": _topology_file(name),
+        "kind": body["kind"],
+        "nodes": len(nodes),
+        "edges": len(edges),
+        "order_digest": topology_order_digest(nodes, edges).hex(),
+        "payload_blake3": blake3.blake3(topology_blob.encode_payload(body)).hexdigest(),
+        "provenance": provenance,
+        "about": about,
+    }
+
+
+def topology_blobs() -> dict[Path, bytes]:
+    """Every generated topology file, except the archived live one."""
+    return {
+        TOPOLOGIES_DIR / _topology_file(entry["name"]): topology_blob.encode(
+            {"kind": "explicit", "nodes": entry["nodes"], "edges": entry["edges"]}
+        )
+        for entry in _registry().values()
+    }
+
+
+def build_topology_index() -> dict:
+    entries = [
+        _index_entry(
+            entry["name"],
+            {"kind": "explicit", "nodes": entry["nodes"], "edges": entry["edges"]},
+            entry["provenance"],
+            entry["about"],
+        )
+        for entry in _registry().values()
+    ]
+    live = _index_entry(
+        LIVE_NAME,
+        topology_blob.decode(LIVE_BLOB_PATH.read_bytes()),
+        "archived-research",
+        _LIVE_ABOUT,
+    )
+    live["sources"] = _LIVE_SOURCES
+    entries.append(live)
+    return sorted(entries, key=lambda entry: entry["name"])
+
+
+def file_matches(path: Path, data: bytes) -> bool:
+    """Whether the file at `path` holds `data`.
+
+    A topology file matches when its payload matches. Other zlib builds give
+    other DEFLATE bytes for the same payload, so compressed bytes never decide.
+    The committed file must also pass the reader rules.
+    """
+    if not path.exists():
+        return False
+    current = path.read_bytes()
+    if path.name.endswith(".bin.gz"):
+        try:
+            payload = topology_blob.decompress(current)
+            topology_blob.decode_payload(payload)
+        except topology_blob.BlobError:
+            return False
+        return payload == topology_blob.decompress(data)
+    return current == data
+
+
+def targets() -> dict[Path, bytes]:
+    """Every file `write` produces, by path. The live topology file is an input."""
+    texts = {
+        CORE_PATH: render(build_core()),
+        LEGACY_PATH: render(build_legacy()),
+        LAYERED_PATH: render(build_layered()),
+        ICE_STRUCTURE_PATH: render(build_ice_structure()),
+        INDEX_PATH: render(build_topology_index()),
+    }
+    return {
+        **{path: text.encode() for path, text in texts.items()},
+        **topology_blobs(),
+    }
 
 
 _HASH_A = bytes([0x11]) * 32
@@ -1506,8 +1665,7 @@ def _layered_case(name: str, family_id: str, params: bytes, salt_count: int) -> 
         coefficient_bound_milli=layered.COEFFICIENT_BOUND,
         topology={
             "name": "sparse",
-            "nodes": nodes,
-            "edges": [list(e) for e in edges],
+            "topology": _topology_ref(nodes, edges),
             "order_digest": order.hex(),
         },
         lease={
@@ -1549,5 +1707,224 @@ def build_layered() -> dict:
             _layered_case(
                 "restricted-p-spec-sparse", "vectors/restricted-field", _P_SPEC, 8
             ),
+        ],
+    }
+
+
+# ---- ice structure (ice_structure.json) ----
+
+_SC8_EVIDENCE = ("ice-structure-vectors",)
+_ICE_SEEDS = (bytes(range(32)), bytes(range(32, 64)))
+_ICE_ABOUT = [
+    *_ABOUT,
+    "Structure of the ice tiles: Zephyr lattice, candidates, spines, sides, and select.",
+    "Orders are the shuffle of the identity with ChaCha8 from the seed, left then right.",
+    "All tile, spine, and side values are dense positions in the topology node list.",
+    "The live cases rebuild z(12, 4) from ../topologies/zephyr-z12t4-live.bin.gz.",
+]
+
+
+def _sc8(*ids: str) -> list[str]:
+    unknown = set(ids) - set(_SC8_EVIDENCE)
+    if unknown:
+        raise ValueError(f"unknown evidence id: {sorted(unknown)}")
+    return [f"SC-8:{i}" for i in sorted(set(ids))]
+
+
+def _clique(nodes: list[int]) -> list[tuple[int, int]]:
+    return [(a, b) for i, a in enumerate(nodes) for b in nodes[i + 1 :]]
+
+
+def _union(*parts: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    return sorted({e for part in parts for e in part})
+
+
+def _tile_ring(length: int) -> list[tuple[int, int]]:
+    """Spine edge i is (2i, 2i+1). Consecutive spines form one clique each."""
+    return _union(
+        *(
+            _clique(
+                [2 * i, 2 * i + 1, 2 * ((i + 1) % length), 2 * ((i + 1) % length) + 1]
+            )
+            for i in range(length)
+        )
+    )
+
+
+def _graph(edges: list[tuple[int, int]]) -> tuple[list[int], list[tuple[int, int]]]:
+    return list(range(max(max(e) for e in edges) + 1)), edges
+
+
+def _structure_case(
+    name: str,
+    m: int,
+    t: int,
+    nodes: list[int],
+    edges: list[tuple[int, int]],
+) -> dict:
+    case = _case(
+        name,
+        _sc8(*_SC8_EVIDENCE),
+        lattice={"m": m, "t": t},
+        topology=_topology_ref(nodes, edges),
+    )
+    try:
+        tiles, spines = ice.candidates(m, t, nodes, edges)
+    except ice.StructureError as err:
+        case["error"] = err.name
+        case["error_detail"] = err.detail
+        return case
+    coords = [ice.zephyr_coordinates(m, t, n) for n in nodes] if m else []
+    left, right = ice.sides(m, coords, spines)  # type: ignore[arg-type]
+    selections = []
+    for seed in _ICE_SEEDS:
+        left_order, right_order = ice.seeded_orders(seed, len(left), len(right))
+        chosen = ice.select(tiles, spines, left, right, left_order, right_order)
+        selections.append(
+            {
+                "seed": seed.hex(),
+                "left_order": left_order,
+                "right_order": right_order,
+                "tiles": [list(tile) for tile in chosen],
+            }
+        )
+    case["tiles"] = [list(tile) for tile in tiles]
+    case["spines"] = [None if s is None else [list(e) for e in s] for s in spines]
+    case["left"] = [list(e) for e in left]
+    case["right"] = [list(e) for e in right]
+    case["selections"] = selections
+    return case
+
+
+def _permuted(
+    nodes: list[int], edges: list[tuple[int, int]]
+) -> tuple[list[int], list[tuple[int, int]]]:
+    """Reverse the node registration order. Reverse the edges and flip every second."""
+    flipped = [(b, a) if i % 2 else (a, b) for i, (a, b) in enumerate(reversed(edges))]
+    return nodes[::-1], flipped
+
+
+def _cut_edge(m: int, t: int) -> tuple[list[int], list[tuple[int, int]]]:
+    """z(m, t) without the internal edge joining the two spines of its first tile."""
+    nodes, edges = ice.lattice(m, t)
+    _, spines = ice.candidates(m, t, nodes, edges)
+    first = spines[0]
+    if first is None:
+        raise ValueError("a Zephyr tile always has a spine")
+    (a, _), (c, _) = first
+    cut = (min(a, c), max(a, c))
+    if cut not in set(edges):
+        raise ValueError("the spine ends are not adjacent")
+    return nodes, [e for e in edges if e != cut]
+
+
+_StructureInput = tuple[str, int, int, list[int], list[tuple[int, int]]]
+
+
+def _structure_input(
+    name: str, m: int, t: int, nodes: list[int], edges: list[tuple[int, int]]
+) -> _StructureInput:
+    return (name, m, t, nodes, edges)
+
+
+def _structure_inputs() -> list[_StructureInput]:
+    cases: list[_StructureInput] = []
+    for m, t in ((1, 2), (2, 2)):
+        nodes, edges = ice.lattice(m, t)
+        for mode, shape in (("zephyr", (m, t)), ("adjacency", (0, 0))):
+            cases.append(_structure_input(f"z{m}{t}-{mode}", *shape, nodes, edges))
+    nodes, edges = ice.lattice(2, 2)
+    nodes, edges = _permuted(nodes, edges)
+    for mode, shape in (("zephyr", (2, 2)), ("adjacency", (0, 0))):
+        cases.append(
+            _structure_input(f"z22-permuted-order-{mode}", *shape, nodes, edges)
+        )
+    nodes, edges = _cut_edge(2, 2)
+    for mode, shape in (("zephyr", (2, 2)), ("adjacency", (0, 0))):
+        cases.append(_structure_input(f"z22-cut-edge-{mode}", *shape, nodes, edges))
+    cases.append(_structure_input("tie-ring-4", 0, 0, *_graph(_tile_ring(4))))
+    around: list[tuple[int, int]] = []
+    nxt = 4
+    for p in (1, 2, 3):
+        for _ in range(2):
+            around += _clique([0, p, nxt, nxt + 1])
+            nxt += 2
+    conflict = _union(
+        _clique([0, 1, 2, 3]), _clique([0, 1, 4, 5]), _clique([0, 2, 6, 7])
+    )
+    cycle4 = [(0, 1), (1, 2), (2, 3), (3, 0)]
+    cases += [
+        _structure_input("error-mixed-shape", 1, 0, *_graph(cycle4)),
+        _structure_input(
+            "error-degree-above-limit", 0, 0, *_graph([(0, i) for i in range(1, 34)])
+        ),
+        _structure_input("error-duplicate-edge", 0, 0, [0, 1], [(0, 1), (1, 0)]),
+        _structure_input("error-not-zephyr-node", 1, 1, [0, 12], [(0, 12)]),
+        _structure_input("error-not-zephyr-coupler", 1, 1, [0, 3], [(3, 0)]),
+        _structure_input("error-no-candidates", 0, 0, *_graph(cycle4)),
+        _structure_input("error-spine-conflict", 0, 0, *_graph(conflict)),
+        _structure_input("error-membership-above-two", 0, 0, *_graph(_union(around))),
+        _structure_input("error-not-bipartite", 0, 0, *_graph(_tile_ring(5))),
+        _structure_input(
+            "first-check-duplicate-before-coupler",
+            1,
+            1,
+            [0, 1, 3],
+            [(0, 1), (1, 0), (0, 3)],
+        ),
+        _structure_input(
+            "first-check-node-before-coupler", 1, 1, [0, 3, 12], [(0, 3), (0, 12)]
+        ),
+    ]
+    return cases
+
+
+def _structure_cases() -> list[dict]:
+    return [_structure_case(*inputs) for inputs in _structure_inputs()]
+
+
+def _live_case(mode: str, nodes: list[int], edges: list[tuple[int, int]]) -> dict:
+    shape = (12, 4) if mode == "zephyr" else (0, 0)
+    tiles, spines = ice.candidates(*shape, nodes, edges)
+    coords = [ice.zephyr_coordinates(12, 4, n) for n in nodes] if shape[0] else []
+    left, right = ice.sides(shape[0], coords, spines)  # type: ignore[arg-type]
+    selections = []
+    for seed in _ICE_SEEDS:
+        left_order, right_order = ice.seeded_orders(seed, len(left), len(right))
+        chosen = ice.select(tiles, spines, left, right, left_order, right_order)
+        flat = b"".join(
+            value.to_bytes(4, "little") for tile in chosen for value in tile
+        )
+        selections.append(
+            {
+                "seed": seed.hex(),
+                "selected": len(chosen),
+                "tiles_blake3": blake3.blake3(flat).hexdigest(),
+            }
+        )
+    return _case(
+        mode,
+        _sc8(*_SC8_EVIDENCE),
+        topology=f"../topologies/{_topology_file(LIVE_NAME)}",
+        candidates=len(tiles),
+        free=sum(1 for s in spines if s is None),
+        left=len(left),
+        right=len(right),
+        selections=selections,
+    )
+
+
+def build_ice_structure() -> dict:
+    live = topology_blob.expand(topology_blob.decode(LIVE_BLOB_PATH.read_bytes()))
+    nodes, edges = live["nodes"], [(a, b) for a, b in live["edges"]]
+    return {
+        "schema_revision": 1,
+        "provenance": "specified",
+        "about": _ICE_ABOUT,
+        "sources": _sources(),
+        "structure": _structure_cases(),
+        "live": [
+            _live_case("adjacency", nodes, edges),
+            _live_case("zephyr", nodes, edges),
         ],
     }

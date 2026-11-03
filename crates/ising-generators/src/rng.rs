@@ -4,6 +4,7 @@ use core::fmt;
 use core::num::NonZeroU32;
 
 use crate::digest::BufferedHasher;
+use crate::Code;
 
 /// The `ChaCha` constants, the ASCII bytes of `expand 32-byte k` as LE words.
 pub const SIGMA: [u32; 4] = [0x6170_7865, 0x3320_646e, 0x7962_2d32, 0x6b20_6574];
@@ -134,6 +135,27 @@ pub fn uniform(rng: &mut ChaCha8Rng, n: NonZeroU32) -> u32 {
             return (x % n) as u32;
         }
     }
+}
+
+/// Fisher-Yates shuffle of `items` in place (FAM-24).
+///
+/// For `i` from `len - 1` down to `1`, draws `j` with `uniform(i + 1)` and swaps
+/// `items[i]` with `items[j]`. A slice of fewer than two items reads no words.
+///
+/// # Errors
+///
+/// Returns [`Code::BoundsExceeded`] when `items` is longer than `u32::MAX`
+/// elements, because the draw bound `i + 1` must fit in `u32`. The length check
+/// runs before any word is read, so the stream is unchanged on error.
+pub fn shuffle<T>(rng: &mut ChaCha8Rng, items: &mut [T]) -> Result<(), Code> {
+    let len = u32::try_from(items.len()).map_err(|_| Code::BoundsExceeded)?;
+    for i in (1..len).rev() {
+        // i + 1 is at least 2 and at most len, so it is non-zero and fits in u32.
+        let bound = NonZeroU32::new(i + 1).ok_or(Code::BoundsExceeded)?;
+        let j = uniform(rng, bound);
+        items.swap(i as usize, j as usize);
+    }
+    Ok(())
 }
 
 /// The longest substream label in bytes.

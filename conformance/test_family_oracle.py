@@ -1,11 +1,15 @@
 """Tests for the family oracle stream and digest primitives."""
 
 import json
+import struct
+import subprocess
+import sys
+import zlib
 from pathlib import Path
 
 import blake3
 import pytest
-from family_oracle import decisions
+from family_oracle import build, decisions, ice, topology_blob
 from family_oracle.chacha8 import ChaCha8, shuffle, uniform
 from family_oracle.digests import (
     derive_key,
@@ -13,6 +17,7 @@ from family_oracle.digests import (
     descriptor_material,
     lease_salts,
     params_digest,
+    topology_order_digest,
 )
 from family_oracle.instance import (
     bound_code,
@@ -598,16 +603,11 @@ def test_layered_p_spec_skips_match_the_session_capture():
     from family_oracle import layered
     from family_oracle.digests import lease_salts
 
-    nodes = [907, 41, 0, 4294967295, 12, 3]
-    edges = [
-        (907, 41),
-        (41, 0),
-        (0, 4294967295),
-        (4294967295, 12),
-        (12, 3),
-        (3, 907),
-        (41, 12),
-    ]
+    shared = topology_blob.decode(
+        (VECTORS / "topologies" / "t-sparse.bin.gz").read_bytes()
+    )
+    nodes = shared["nodes"]
+    edges = [tuple(edge) for edge in shared["edges"]]
     params = bytes.fromhex("01010002000000020002000400000024faffff")
     lease = lease_salts(
         bytes([0x11]) * 32,
@@ -628,3 +628,416 @@ def test_layered_p_spec_skips_match_the_session_capture():
         else:
             assert instance is not None
     assert skipped == {0, 3, 9, 13}
+
+
+# ---- ice structure oracle ----
+
+
+@pytest.mark.parametrize("m", [1, 2, 3])
+@pytest.mark.parametrize("t", [1, 2, 3, 4])
+def test_ice_lattice_counts(m, t):
+    nodes, edges = ice.lattice(m, t)
+    assert len(nodes) == 4 * t * m * (2 * m + 1)
+    expected = (
+        2 * t * (8 * t + 3) if m == 1 else 2 * t * ((8 * t + 8) * m * m - 2 * m - 3)
+    )
+    assert len(edges) == expected
+    assert edges == sorted(set(edges))
+    assert all(a < b for a, b in edges)
+
+
+def test_ice_coordinates_invert_the_linear_id():
+    m, t = 2, 3
+    for q in range(ice.node_count(m, t)):
+        assert ice.linear_id(m, t, *ice.zephyr_coordinates(m, t, q)) == q
+    assert ice.zephyr_coordinates(m, t, ice.node_count(m, t)) is None
+
+
+def test_ice_live_blob_gives_the_pinned_counts_and_digest():
+    live_cases = json.loads(build.ICE_STRUCTURE_PATH.read_text())["live"]
+    paths = {(build.FAMILIES_DIR / case["topology"]).resolve() for case in live_cases}
+    assert paths == {build.LIVE_BLOB_PATH.resolve()}
+    body = topology_blob.decode(paths.pop().read_bytes())
+    assert body["kind"] == "zephyr-removed"
+    live = topology_blob.expand(body)
+    nodes, edges = live["nodes"], live["edges"]
+    assert (len(nodes), len(edges)) == (4575, 41474)
+    assert topology_order_digest(nodes, edges).hex() == (
+        "e12cffc9392cc502c5d065d6e1a3e2eabcc08247ffd55d2fe1b41988d2bc37e3"
+    )
+    rebuilt_nodes, rebuilt_edges = ice.live_topology(
+        body["removed_nodes"], body["removed_edges"]
+    )
+    assert nodes == rebuilt_nodes
+    assert edges == [list(edge) for edge in rebuilt_edges]
+
+
+def test_ice_both_modes_agree_and_select_is_a_matching():
+    nodes, edges = ice.lattice(2, 2)
+    zephyr = ice.candidates(2, 2, nodes, edges)
+    assert zephyr == ice.candidates(0, 0, nodes, edges)
+    tiles, spines = zephyr
+    coords = [ice.zephyr_coordinates(2, 2, n) for n in nodes]
+    left, right = ice.sides(2, coords, spines)
+    for seed in (bytes(range(32)), bytes(range(32, 64))):
+        orders = ice.seeded_orders(seed, len(left), len(right))
+        chosen = ice.select(tiles, spines, left, right, *orders)
+        used = [e for tile in chosen for e in ice._tile_edges(tile)]
+        assert len(used) == len(set(used))
+        assert len(chosen) == min(len(left), len(right))
+
+
+def test_ice_ties_follow_the_orders():
+    nodes, edges = build._graph(build._tile_ring(4))
+    tiles, spines = ice.candidates(0, 0, nodes, edges)
+    left, right = ice.sides(0, [], spines)
+    assert left == [(0, 1), (4, 5)] and right == [(2, 3), (6, 7)]
+    assert ice.select(tiles, spines, left, right, [0, 1], [0, 1]) == [
+        (0, 1, 6, 7),
+        (2, 3, 4, 5),
+    ]
+    assert ice.select(tiles, spines, left, right, [1, 0], [0, 1]) == [
+        (0, 1, 2, 3),
+        (4, 5, 6, 7),
+    ]
+
+
+# ---- topology blob codec ----
+
+BLOB_HEAD = b"QTOP\x01\x00"
+BLOB_FILE_HEAD = bytes([0x1F, 0x8B, 8, 0, 0, 0, 0, 0, 2, 0xFF])
+
+
+def _varint(value):
+    out = bytearray()
+    topology_blob.put_varint(out, value)
+    return bytes(out)
+
+
+def _frame(payload, crc=None, size=None, header=BLOB_FILE_HEAD):
+    compressor = zlib.compressobj(9, zlib.DEFLATED, -15)
+    stream = compressor.compress(payload) + compressor.flush()
+    crc = zlib.crc32(payload) if crc is None else crc
+    size = len(payload) if size is None else size
+    return header + stream + struct.pack("<II", crc, size)
+
+
+def _explicit(nodes, edges):
+    return {"kind": "explicit", "nodes": nodes, "edges": edges}
+
+
+def _zephyr(m, t, nodes, edges):
+    return {
+        "kind": "zephyr-removed",
+        "m": m,
+        "t": t,
+        "removed_nodes": nodes,
+        "removed_edges": edges,
+    }
+
+
+def _payload_error(payload):
+    with pytest.raises(topology_blob.BlobError) as info:
+        topology_blob.decode_payload(payload)
+    return info.value.code
+
+
+def _file_error(data):
+    with pytest.raises(topology_blob.BlobError) as info:
+        topology_blob.decode(data)
+    return info.value.code
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"kind": "explicit", "nodes": [True], "edges": []},
+        {"kind": "explicit", "nodes": [1], "edges": [[1, False]]},
+        {"kind": "explicit", "nodes": (1,), "edges": []},
+        {"kind": "explicit", "nodes": [1], "edges": {"a": 1}},
+        {"kind": "explicit", "nodes": [1], "edges": [[1, 2, 3]]},
+        {"kind": "explicit", "nodes": [1], "edges": [5]},
+        {
+            "kind": "zephyr-removed",
+            "m": True,
+            "t": 1,
+            "removed_nodes": [],
+            "removed_edges": [],
+        },
+        {
+            "kind": "zephyr-removed",
+            "m": 1,
+            "t": True,
+            "removed_nodes": [],
+            "removed_edges": [],
+        },
+        {
+            "kind": "zephyr-removed",
+            "m": 1,
+            "t": 1,
+            "removed_nodes": "ab",
+            "removed_edges": [],
+        },
+        {
+            "kind": "zephyr-removed",
+            "m": 1,
+            "t": 1,
+            "removed_nodes": [],
+            "removed_edges": {},
+        },
+        {
+            "kind": "zephyr-removed",
+            "m": 1,
+            "t": 1,
+            "removed_nodes": [],
+            "removed_edges": [[1]],
+        },
+    ],
+)
+def test_blob_encoder_rejects_what_the_rust_encoder_rejects(body):
+    with pytest.raises(topology_blob.BlobError) as info:
+        topology_blob.encode_payload(body)
+    assert info.value.code == "shape"
+
+
+def test_blob_payload_bytes_are_pinned():
+    payload = topology_blob.encode_payload(_explicit([1, 2], [[1, 2]]))
+    assert payload.hex() == "51544f5001" + "00" + "020202010202"
+    assert topology_blob.encode_payload(_zephyr(2, 2, [5], [[0, 1]])) == (
+        BLOB_HEAD[:5] + b"\x01" + bytes([2, 2, 1, 5, 1, 0, 1])
+    )
+
+
+def test_blob_t_sparse_style_round_trips():
+    body = _explicit(
+        [4294967295, 0, 7, 3],
+        [[4294967295, 0], [0, 4294967295], [7, 3], [7, 3], [3, 3]],
+    )
+    data = topology_blob.encode(body)
+    assert data[:10] == BLOB_FILE_HEAD
+    assert topology_blob.decode(data) == body
+    assert topology_blob.decode(topology_blob.encode(_explicit([], []))) == _explicit(
+        [], []
+    )
+
+
+def test_blob_encode_is_byte_stable():
+    nodes, edges = ice.lattice(2, 2)
+    body = _zephyr(2, 2, [0, 5], [list(edges[40])])
+    first = topology_blob.encode(body)
+    assert first == topology_blob.encode(body)
+    assert first == topology_blob.encode(json.loads(json.dumps(body)))
+    explicit = _explicit(nodes, [list(e) for e in edges])
+    assert topology_blob.encode(explicit) == topology_blob.encode(explicit)
+
+
+def test_blob_zephyr_expands_to_the_lattice_minus_removals():
+    nodes, edges = ice.lattice(2, 2)
+    edge = next(e for e in edges if not {0, 5} & set(e))
+    body = _zephyr(2, 2, [0, 5], [list(edge)])
+    assert topology_blob.decode(topology_blob.encode(body)) == body
+    expanded = topology_blob.expand(body)
+    assert expanded["nodes"] == [n for n in nodes if n not in (0, 5)]
+    assert [list(edge)] not in [[e] for e in expanded["edges"]]
+    assert all(
+        a < b and a not in (0, 5) and b not in (0, 5) for a, b in expanded["edges"]
+    )
+    assert expanded["edges"] == sorted(expanded["edges"])
+    full = topology_blob.expand(_zephyr(2, 2, [], []))
+    assert full == _explicit(nodes, [list(e) for e in edges])
+    z11 = topology_blob.expand(_zephyr(1, 1, [], []))
+    assert len(z11["nodes"]) == 12 and len(z11["edges"]) == 22
+
+
+def test_blob_gzip_errors():
+    good = topology_blob.encode(_explicit([1, 2], [[1, 2]]))
+    assert _file_error(b"") == "gzip"
+    assert _file_error(good[:-1]) == "gzip"
+    assert _file_error(good[:12]) == "gzip"
+    assert _file_error(good + b"\x00") == "gzip"
+    assert _file_error(good + good) == "gzip"
+    assert _file_error(good + good[:5]) == "gzip"
+    for index, value in ((0, 0), (1, 0), (2, 7), (3, 8)):
+        bad = bytearray(good)
+        bad[index] = value
+        assert _file_error(bytes(bad)) == "gzip"
+    # Garbage in place of the DEFLATE stream.
+    assert _file_error(good[:10] + b"\xff" * 12) == "gzip"
+
+
+def test_blob_checksum_errors():
+    payload = topology_blob.encode_payload(_explicit([1, 2], [[1, 2]]))
+    assert _file_error(_frame(payload, crc=zlib.crc32(payload) ^ 1)) == "crc"
+    assert _file_error(_frame(payload, size=len(payload) + 1)) == "isize"
+    assert _file_error(_frame(payload, size=len(payload) - 1)) == "isize"
+
+
+def test_blob_reader_accepts_other_mtime_xfl_os():
+    payload = topology_blob.encode_payload(_explicit([1, 2], [[1, 2]]))
+    header = bytes([0x1F, 0x8B, 8, 0, 1, 2, 3, 4, 0, 3])
+    assert topology_blob.decode(_frame(payload, header=header)) == _explicit(
+        [1, 2], [[1, 2]]
+    )
+
+
+def test_blob_oversize_payload_is_rejected():
+    limit = topology_blob.MAX_PAYLOAD
+    assert _file_error(_frame(b"\x00" * (limit + 1))) == "too-large"
+    # A payload of exactly the limit passes the framing and fails on its magic.
+    assert _payload_error(topology_blob.decompress(_frame(b"\x00" * limit))) == "magic"
+
+
+def test_blob_header_errors():
+    assert _payload_error(b"") == "magic"
+    assert _payload_error(b"QTO") == "magic"
+    assert _payload_error(b"QTOQ\x01\x00\x00\x00") == "magic"
+    assert _payload_error(b"QTOP\x02\x00\x00\x00") == "version"
+    assert _payload_error(b"QTOP\x00\x00\x00\x00") == "version"
+    assert _payload_error(b"QTOP\x01\x02\x00\x00") == "kind"
+    assert _payload_error(b"QTOP\x01") == "truncated"
+    assert _payload_error(b"QTOP\x01\x00") == "truncated"
+
+
+def test_blob_varint_errors():
+    assert _payload_error(BLOB_HEAD + b"\x80\x00") == "varint-non-minimal"
+    assert _payload_error(BLOB_HEAD + b"\xff\x80\x00") == "varint-non-minimal"
+    assert _payload_error(BLOB_HEAD + b"\x80") == "truncated"
+    assert _payload_error(BLOB_HEAD + b"\xff" * 10 + b"\x01") == "varint-overflow"
+    assert _payload_error(BLOB_HEAD + b"\xff" * 9 + b"\x02") == "varint-overflow"
+    assert _payload_error(BLOB_HEAD + b"\x80" * 10 + b"\x00") == "varint-overflow"
+    # u64::MAX itself is a legal varint, so it reaches the count check instead.
+    assert _payload_error(BLOB_HEAD + _varint(2**64 - 1)) == "count-too-large"
+
+
+def test_blob_explicit_range_errors():
+    assert _payload_error(BLOB_HEAD + b"\x01" + _varint(2 * 2**32)) == "id-range"
+    assert _payload_error(BLOB_HEAD + b"\x01" + _varint(1)) == "id-range"
+    # A zigzag delta below zero from 0.
+    assert _payload_error(BLOB_HEAD + b"\x01\x01\x00\x00") == "id-range"
+    edge = BLOB_HEAD + b"\x00\x01"
+    assert _payload_error(edge + _varint(2 * 2**32) + b"\x00") == "id-range"
+    assert _payload_error(edge + b"\x02" + _varint(2 * 2**32)) == "id-range"
+    assert _payload_error(edge + b"\x01" + b"\x01") == "id-range"
+    # zigzag(i64::MAX) and zigzag(i64::MIN) as deltas overflow the id range.
+    assert _payload_error(BLOB_HEAD + b"\x01" + _varint(2**64 - 2)) == "id-range"
+    assert _payload_error(BLOB_HEAD + b"\x01" + _varint(2**64 - 1)) == "id-range"
+
+
+def test_blob_counts_larger_than_the_remaining_bytes_are_rejected():
+    assert _payload_error(BLOB_HEAD + b"\x05\x00\x00") == "count-too-large"
+    assert _payload_error(BLOB_HEAD + b"\x00\x01\x00") == "count-too-large"
+    assert _payload_error(BLOB_HEAD + b"\x00\x02\x00\x00\x00") == "count-too-large"
+    assert _payload_error(BLOB_HEAD + _varint(2**40)) == "count-too-large"
+    zephyr = b"QTOP\x01\x01\x01\x01"
+    assert _payload_error(zephyr + b"\x03\x00\x01") == "count-too-large"
+    assert _payload_error(zephyr + b"\x00\x01\x00") == "count-too-large"
+
+
+def test_blob_trailing_bytes_are_rejected():
+    assert _payload_error(BLOB_HEAD + b"\x00\x00\x00") == "trailing-bytes"
+    assert _payload_error(b"QTOP\x01\x01\x01\x01\x00\x00\x00") == "trailing-bytes"
+    assert topology_blob.decode_payload(BLOB_HEAD + b"\x00\x00") == _explicit([], [])
+
+
+def test_blob_zephyr_range_errors():
+    head = b"QTOP\x01\x01"
+    assert _payload_error(head + b"\x00\x01") == "m-range"
+    assert _payload_error(head + b"\x21\x01") == "m-range"
+    assert _payload_error(head + b"\x01\x00") == "t-range"
+    assert _payload_error(head + b"\x01\x09") == "t-range"
+    # z(1, 1) has nodes 0..=11.
+    assert _payload_error(head + b"\x01\x01\x01\x0c\x00") == "not-a-node"
+
+
+def test_blob_zephyr_order_errors():
+    head = b"QTOP\x01\x01\x01\x01"
+    assert _payload_error(head + b"\x02\x03\x00\x00") == "order"
+    # Ascending nodes, then bad edges. (0, 1) and (0, 6) are z(1, 1) couplers.
+    nodes = b"\x00"
+    assert _payload_error(head + nodes + b"\x02\x00\x00\x00\x01") == "order"
+    assert _payload_error(head + nodes + b"\x02\x00\x06\x00\x01") == "order"
+    assert _payload_error(head + nodes + b"\x02\x00\x01\x00\x01") == "order"
+    assert _payload_error(head + nodes + b"\x02\x00\x01\x00\x00") == "order"
+
+
+def test_blob_zephyr_lattice_errors():
+    head = b"QTOP\x01\x01\x01\x01\x00"
+    # (0, 2) is not a coupler of z(1, 1), (0, 1) is.
+    assert _payload_error(head + b"\x01\x00\x02") == "not-a-coupler"
+    # The lattice has 12 nodes, so an edge end of 12 is not a node.
+    assert _payload_error(head + b"\x01\x00\x0c") == "not-a-node"
+    assert topology_blob.decode_payload(head + b"\x01\x00\x01")["removed_edges"] == [
+        [0, 1]
+    ]
+    # Removed edge (0, 1) while node 1 is removed.
+    both = b"QTOP\x01\x01\x01\x01\x01\x01\x01\x00\x01"
+    assert _payload_error(both) == "edge-at-removed-node"
+    both = b"QTOP\x01\x01\x01\x01\x01\x00\x01\x00\x01"
+    assert _payload_error(both) == "edge-at-removed-node"
+
+
+def test_blob_zephyr_edge_end_beyond_the_lattice_stops_the_loop():
+    head = b"QTOP\x01\x01\x01\x01\x00"
+    # Two edges. The first end is above the 12 lattice nodes.
+    assert _payload_error(head + b"\x02\x00" + _varint(2**40) + b"\x00\x01") == (
+        "not-a-node"
+    )
+
+
+def test_blob_encoder_rejects_what_the_decoder_rejects():
+    cases = [
+        _explicit([2**32], []),
+        _explicit([-1], []),
+        _explicit([1], [[1, 2**32]]),
+        _zephyr(0, 1, [], []),
+        _zephyr(33, 1, [], []),
+        _zephyr(1, 9, [], []),
+        _zephyr(1, 1, [12], []),
+        _zephyr(1, 1, [3, 3], []),
+        _zephyr(1, 1, [4, 3], []),
+        _zephyr(1, 1, [], [[0, 2]]),
+        _zephyr(1, 1, [], [[1, 0]]),
+        _zephyr(1, 1, [], [[0, 6], [0, 1]]),
+        _zephyr(1, 1, [], [[0, 1], [0, 1]]),
+        _zephyr(1, 1, [0], [[0, 1]]),
+        {"kind": "other"},
+    ]
+    for body in cases:
+        with pytest.raises(topology_blob.BlobError):
+            topology_blob.encode(body)
+
+
+def test_blob_cli_round_trip(tmp_path):
+    source = tmp_path / "in.json"
+    blob = tmp_path / "out.bin.gz"
+    body = _zephyr(2, 2, [0, 5], [])
+    source.write_text(json.dumps(body))
+    root = Path(__file__).parent
+
+    def run(*args):
+        return subprocess.run(
+            [sys.executable, "-m", "family_oracle", "topology", *args],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    assert run("encode", str(source), str(blob)).returncode == 0
+    assert blob.read_bytes() == topology_blob.encode(body)
+    decoded = run("decode", str(blob))
+    assert json.loads(decoded.stdout) == body
+    expanded = run("decode", "--expand", str(blob))
+    assert json.loads(expanded.stdout) == topology_blob.expand(body)
+    out = tmp_path / "back.json"
+    assert run("decode", str(blob), str(out)).returncode == 0
+    assert json.loads(out.read_text()) == body
+    blob.write_bytes(blob.read_bytes()[:-1])
+    failed = run("decode", str(blob))
+    assert failed.returncode == 1 and "gzip" in failed.stderr
+    assert run("topology").returncode == 2
+    for text in ("[1, 2]", "3", "null", '"x"'):
+        source.write_text(text)
+        failed = run("encode", str(source), str(blob))
+        assert failed.returncode == 1, text
+        assert "shape" in failed.stderr and "Traceback" not in failed.stderr, text

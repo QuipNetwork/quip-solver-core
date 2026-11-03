@@ -19,7 +19,7 @@ name = "quip-solver-drive"
 path = "src/bin/quip-solver-drive.rs"
 
 [dependencies]
-ising-generators = { workspace = true }
+ising-generators = { workspace = true, features = ["blob"] }
 quip-proto = { workspace = true }
 quip-protocol = { workspace = true }
 serde = { version = "1", features = ["derive"] }

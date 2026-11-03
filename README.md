@@ -15,6 +15,7 @@ Releases from `0.0.2-rc3` require protocol version 2.
 Update the coordinator and solvers together using the
 [coordinator upgrade guide](docs/coordinator-upgrade-v2.md).
 The [miner hardware guide](docs/miner-side-generation.md) describes how a GPU or other device draws lease problems.
+The [topology file format](docs/topology-format.md) defines the `.bin.gz` files that hold the family vectors topologies.
 
 ## Crates
 

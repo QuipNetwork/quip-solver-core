@@ -39,17 +39,8 @@ fn hex_decode(hex: &str) -> Result<Vec<u8>, String> {
 
 /// The topology `T_SPARSE`.
 fn t_sparse() -> Result<BaseTopology, String> {
-    let nodes = vec![907, 41, 0, 4_294_967_295, 12, 3];
-    let edges = [
-        (907, 41),
-        (41, 0),
-        (0, 4_294_967_295),
-        (4_294_967_295, 12),
-        (12, 3),
-        (3, 907),
-        (41, 12),
-    ];
-    BaseTopology::new(nodes, &edges).map_err(|e| format!("{e:?}"))
+    let stored = quip_solver_conformance::t_sparse().map_err(|e| e.to_string())?;
+    BaseTopology::new(stored.nodes, &stored.edges).map_err(|e| format!("{e:?}"))
 }
 
 /// Generate the instance of lease slot 1 for `P_SPEC` on `T_SPARSE` under `contract`.

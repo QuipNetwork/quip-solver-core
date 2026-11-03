@@ -361,6 +361,203 @@
       "pattern": "^(0|-?[1-9][0-9]*)$",
       "type": "string"
     },
+    "ice_live_case": {
+      "additionalProperties": false,
+      "properties": {
+        "candidates": {
+          "type": "integer"
+        },
+        "evidence": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "free": {
+          "type": "integer"
+        },
+        "left": {
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "right": {
+          "type": "integer"
+        },
+        "selections": {
+          "items": {
+            "$ref": "#/$defs/ice_live_selection"
+          },
+          "type": "array"
+        },
+        "topology": {
+          "$ref": "#/$defs/topology_ref"
+        }
+      },
+      "required": [
+        "name",
+        "evidence",
+        "candidates",
+        "free",
+        "left",
+        "right",
+        "selections",
+        "topology"
+      ],
+      "type": "object"
+    },
+    "ice_live_selection": {
+      "additionalProperties": false,
+      "properties": {
+        "seed": {
+          "$ref": "#/$defs/hex32"
+        },
+        "selected": {
+          "type": "integer"
+        },
+        "tiles_blake3": {
+          "$ref": "#/$defs/hex32"
+        }
+      },
+      "required": [
+        "seed",
+        "selected",
+        "tiles_blake3"
+      ],
+      "type": "object"
+    },
+    "ice_selection": {
+      "additionalProperties": false,
+      "properties": {
+        "left_order": {
+          "items": {
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "right_order": {
+          "items": {
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "seed": {
+          "$ref": "#/$defs/hex32"
+        },
+        "tiles": {
+          "items": {
+            "items": {
+              "type": "integer"
+            },
+            "maxItems": 4,
+            "minItems": 4,
+            "type": "array"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "seed",
+        "left_order",
+        "right_order",
+        "tiles"
+      ],
+      "type": "object"
+    },
+    "ice_structure_case": {
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "type": "string"
+        },
+        "error_detail": {
+          "items": {
+            "type": "integer"
+          },
+          "maxItems": 2,
+          "type": "array"
+        },
+        "evidence": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "lattice": {
+          "additionalProperties": false,
+          "properties": {
+            "m": {
+              "type": "integer"
+            },
+            "t": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "m",
+            "t"
+          ],
+          "type": "object"
+        },
+        "left": {
+          "items": {
+            "$ref": "#/$defs/int_pair"
+          },
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        },
+        "right": {
+          "items": {
+            "$ref": "#/$defs/int_pair"
+          },
+          "type": "array"
+        },
+        "selections": {
+          "items": {
+            "$ref": "#/$defs/ice_selection"
+          },
+          "type": "array"
+        },
+        "spines": {
+          "items": {
+            "items": {
+              "$ref": "#/$defs/int_pair"
+            },
+            "maxItems": 2,
+            "minItems": 2,
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "type": "array"
+        },
+        "tiles": {
+          "items": {
+            "items": {
+              "type": "integer"
+            },
+            "maxItems": 4,
+            "minItems": 4,
+            "type": "array"
+          },
+          "type": "array"
+        },
+        "topology": {
+          "$ref": "#/$defs/topology_ref"
+        }
+      },
+      "required": [
+        "name",
+        "evidence",
+        "lattice",
+        "topology"
+      ],
+      "type": "object"
+    },
     "instance_bound_case": {
       "additionalProperties": false,
       "properties": {
@@ -561,6 +758,14 @@
       ],
       "type": "object"
     },
+    "int_pair": {
+      "items": {
+        "type": "integer"
+      },
+      "maxItems": 2,
+      "minItems": 2,
+      "type": "array"
+    },
     "label_case": {
       "additionalProperties": false,
       "properties": {
@@ -687,34 +892,19 @@
         "topology": {
           "additionalProperties": false,
           "properties": {
-            "edges": {
-              "items": {
-                "items": {
-                  "type": "integer"
-                },
-                "maxItems": 2,
-                "minItems": 2,
-                "type": "array"
-              },
-              "type": "array"
-            },
             "name": {
               "type": "string"
             },
-            "nodes": {
-              "items": {
-                "type": "integer"
-              },
-              "type": "array"
-            },
             "order_digest": {
               "$ref": "#/$defs/hex32"
+            },
+            "topology": {
+              "$ref": "#/$defs/topology_ref"
             }
           },
           "required": [
             "name",
-            "nodes",
-            "edges",
+            "topology",
             "order_digest"
           ],
           "type": "object"
@@ -1488,17 +1678,6 @@
     "topology_case": {
       "additionalProperties": false,
       "properties": {
-        "edges": {
-          "items": {
-            "items": {
-              "type": "integer"
-            },
-            "maxItems": 2,
-            "minItems": 2,
-            "type": "array"
-          },
-          "type": "array"
-        },
         "evidence": {
           "items": {
             "type": "string"
@@ -1511,25 +1690,99 @@
         "name": {
           "type": "string"
         },
-        "nodes": {
-          "items": {
-            "type": "integer"
-          },
-          "type": "array"
-        },
         "order_digest": {
           "$ref": "#/$defs/hex32"
+        },
+        "topology": {
+          "$ref": "#/$defs/topology_ref"
         }
       },
       "required": [
         "name",
         "evidence",
-        "nodes",
-        "edges",
+        "topology",
         "material_hex",
         "order_digest"
       ],
       "type": "object"
+    },
+    "topology_index_entry": {
+      "additionalProperties": false,
+      "properties": {
+        "about": {
+          "type": "string"
+        },
+        "edges": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "file": {
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "explicit",
+            "zephyr-removed"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "nodes": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "order_digest": {
+          "$ref": "#/$defs/hex32"
+        },
+        "payload_blake3": {
+          "$ref": "#/$defs/hex32"
+        },
+        "provenance": {
+          "enum": [
+            "specified",
+            "legacy-production",
+            "archived-research",
+            "test-construction"
+          ]
+        },
+        "sources": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "sha256": {
+                "$ref": "#/$defs/hex32"
+              }
+            },
+            "required": [
+              "path",
+              "sha256"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "name",
+        "file",
+        "kind",
+        "nodes",
+        "edges",
+        "order_digest",
+        "payload_blake3",
+        "provenance",
+        "about"
+      ],
+      "type": "object"
+    },
+    "topology_ref": {
+      "$comment": "A path to a topology file, relative to vectors/families/, the only directory that references topologies.",
+      "pattern": "^\\.\\./topologies/[a-z0-9-]+\\.bin\\.gz$",
+      "type": "string"
     },
     "u64s": {
       "pattern": "^(0|[1-9][0-9]*)$",
@@ -1774,6 +2027,12 @@
       },
       "type": "array"
     },
+    "live": {
+      "items": {
+        "$ref": "#/$defs/ice_live_case"
+      },
+      "type": "array"
+    },
     "metadata": {
       "items": {
         "$ref": "#/$defs/metadata_case"
@@ -1855,6 +2114,12 @@
     "streams": {
       "items": {
         "$ref": "#/$defs/stream_case"
+      },
+      "type": "array"
+    },
+    "structure": {
+      "items": {
+        "$ref": "#/$defs/ice_structure_case"
       },
       "type": "array"
     },

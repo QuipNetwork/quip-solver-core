@@ -48,17 +48,6 @@ const TIGHT_LIMITS: InstanceLimits = match InstanceLimits::new(
     None => InstanceLimits::FAM_37,
 };
 
-const SPARSE_NODES: [u32; 6] = [907, 41, 0, 4_294_967_295, 12, 3];
-const SPARSE_EDGES: [(u32, u32); 7] = [
-    (907, 41),
-    (41, 0),
-    (0, 4_294_967_295),
-    (4_294_967_295, 12),
-    (12, 3),
-    (3, 907),
-    (41, 12),
-];
-
 macro_rules! ensure {
     ($cond:expr) => {
         if !$cond {
@@ -124,42 +113,17 @@ fn str_field<'a>(case: &'a Value, key: &str) -> Result<&'a str, String> {
         .ok_or_else(|| format!("missing string {key}"))
 }
 
-fn u32_of(v: &Value) -> Result<u32, String> {
-    v.as_u64()
-        .and_then(|n| u32::try_from(n).ok())
-        .ok_or_else(|| format!("not a u32: {v}"))
-}
-
-fn pairs_of(case: &Value, key: &str) -> Result<Vec<(u32, u32)>, String> {
-    case.get(key)
-        .and_then(Value::as_array)
-        .ok_or_else(|| format!("missing {key}"))?
-        .iter()
-        .map(|e| {
-            let pair = e.as_array().ok_or("edge is not an array")?;
-            match pair.as_slice() {
-                [u, v] => Ok((u32_of(u)?, u32_of(v)?)),
-                _ => Err("edge is not a pair".to_string()),
-            }
-        })
-        .collect()
-}
-
-fn nodes_of(case: &Value) -> Result<Vec<u32>, String> {
-    case.get("nodes")
-        .and_then(Value::as_array)
-        .ok_or("missing nodes")?
-        .iter()
-        .map(u32_of)
-        .collect()
-}
-
 fn nz(n: u32) -> Result<NonZeroU32, String> {
     NonZeroU32::new(n).ok_or_else(|| "zero".to_string())
 }
 
+fn sparse_ids() -> Result<ising_generators::blob::Topology, String> {
+    quip_solver_conformance::t_sparse().map_err(|e| e.to_string())
+}
+
 fn sparse() -> Result<BaseTopology, String> {
-    BaseTopology::new(SPARSE_NODES.to_vec(), &SPARSE_EDGES).map_err(|e| format!("{e:?}"))
+    let stored = sparse_ids()?;
+    BaseTopology::new(stored.nodes, &stored.edges).map_err(|e| format!("{e:?}"))
 }
 
 fn example_size_bounds(params: &Params<'_>, stats: &TopologyStats) -> Result<SizeBounds, Code> {
@@ -577,8 +541,9 @@ fn an_unlisted_label_is_a_defect() -> Result<(), String> {
 fn base_topologies_match_the_topology_vectors() -> Result<(), String> {
     let doc = core()?;
     for case in section(&doc, "topologies")? {
-        let nodes = nodes_of(case)?;
-        let edges = pairs_of(case, "edges")?;
+        let stored = quip_solver_conformance::topology(str_field(case, "topology")?)
+            .map_err(|e| e.to_string())?;
+        let (nodes, edges) = (stored.nodes, stored.edges);
         let topology = BaseTopology::new(nodes.clone(), &edges).map_err(|e| format!("{e:?}"))?;
         let want = hex32(str_field(case, "order_digest")?)?;
         ensure_eq!(topology.order_digest(), &want, str_field(case, "name")?);
@@ -788,18 +753,19 @@ fn admission_runs_11_then_12_then_13() -> Result<(), String> {
     );
 
     // 12 beats 13: a repeated edge, then a self-loop.
-    let mut doubled_edges = SPARSE_EDGES.to_vec();
+    let stored = sparse_ids()?;
+    let sparse_nodes = stored.nodes.clone();
+    let mut doubled_edges = stored.edges.clone();
     doubled_edges.push((41, 907));
     let doubled =
-        BaseTopology::new(SPARSE_NODES.to_vec(), &doubled_edges).map_err(|e| format!("{e:?}"))?;
+        BaseTopology::new(sparse_nodes.clone(), &doubled_edges).map_err(|e| format!("{e:?}"))?;
     ensure_eq!(
         admit_topology(&admitted_l2, &doubled, doubled.order_digest(), &tiny),
         Err(Code::TopologyIncompatible)
     );
-    let mut looped_edges = SPARSE_EDGES.to_vec();
+    let mut looped_edges = stored.edges;
     looped_edges.push((907, 907));
-    let looped =
-        BaseTopology::new(SPARSE_NODES.to_vec(), &looped_edges).map_err(|e| format!("{e:?}"))?;
+    let looped = BaseTopology::new(sparse_nodes, &looped_edges).map_err(|e| format!("{e:?}"))?;
     let accepting = [contract(Some(&HONEST), example_size_bounds)];
     let admitted_accepting = admitted(&accepting, P_L2_F0)?;
     ensure_eq!(

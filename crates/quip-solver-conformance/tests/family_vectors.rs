@@ -498,10 +498,12 @@ fn u64_decimal(case: &Value, key: &str) -> Result<u64, String> {
 
 type Topology = (Vec<u32>, Vec<(u32, u32)>);
 
+/// The nodes and edges of the topology file that `case["topology"]` names.
 fn topology_inputs(case: &Value) -> Result<Topology, String> {
-    let nodes = u32_list(case.get("nodes").ok_or("no nodes")?, "nodes")?;
-    let edges = edge_list(case.get("edges").ok_or("no edges")?)?;
-    Ok((nodes, edges))
+    let reference = str_field(case, "topology")?;
+    let stored = quip_solver_conformance::topology(reference)
+        .map_err(|e| format!("{}: {e}", case_name(case)))?;
+    Ok((stored.nodes, stored.edges))
 }
 
 fn check_topologies(doc: &Value) -> Result<(), String> {
@@ -1541,6 +1543,24 @@ fn topology_order_digests_recompute() -> Result<(), String> {
 }
 
 #[test]
+fn t_sparse_loads_from_the_shared_blob() -> Result<(), String> {
+    let stored = quip_solver_conformance::t_sparse().map_err(|e| e.to_string())?;
+    let edges = [
+        (907, 41),
+        (41, 0),
+        (0, u32::MAX),
+        (u32::MAX, 12),
+        (12, 3),
+        (3, 907),
+        (41, 12),
+    ];
+    if stored.nodes != [907, 41, 0, u32::MAX, 12, 3] || stored.edges != edges {
+        return Err(format!("unexpected T_SPARSE: {stored:?}"));
+    }
+    Ok(())
+}
+
+#[test]
 fn topology_digests_are_pairwise_distinct() -> Result<(), String> {
     let doc = core()?;
     let names = [
@@ -1610,28 +1630,53 @@ fn lease_nonces_recompute() -> Result<(), String> {
     check_leases(&core()?)
 }
 
-#[test]
-fn reordered_topology_nodes_fails() -> Result<(), String> {
+/// Point `sparse` at the file of another topology case, as a changed fixture would.
+fn repoint_sparse(other: &str) -> Result<Value, String> {
     let doc = core()?;
     let i = find_index(&doc, "topologies", "sparse")?;
-    let broken = swap_pointers(
+    let j = find_index(&doc, "topologies", other)?;
+    let reference = doc
+        .pointer(&format!("/topologies/{j}/topology"))
+        .cloned()
+        .ok_or("no topology reference")?;
+    Ok(mutate(
         &doc,
-        &format!("/topologies/{i}/nodes/0"),
-        &format!("/topologies/{i}/nodes/1"),
-    )?;
+        &format!("/topologies/{i}/topology"),
+        reference,
+    ))
+}
+
+#[test]
+fn reordered_topology_nodes_fails() -> Result<(), String> {
+    let broken = repoint_sparse("sparse-nodes-reordered")?;
     expect_err(&check_topologies(&broken), "reordered topology nodes")
 }
 
 #[test]
 fn swapped_topology_edges_fails() -> Result<(), String> {
+    let broken = repoint_sparse("sparse-edges-reordered")?;
+    expect_err(&check_topologies(&broken), "swapped topology edges")
+}
+
+#[test]
+fn a_missing_topology_file_fails() -> Result<(), String> {
     let doc = core()?;
     let i = find_index(&doc, "topologies", "sparse")?;
-    let broken = swap_pointers(
+    let broken = mutate(
         &doc,
-        &format!("/topologies/{i}/edges/0"),
-        &format!("/topologies/{i}/edges/1"),
-    )?;
-    expect_err(&check_topologies(&broken), "swapped topology edges")
+        &format!("/topologies/{i}/topology"),
+        json!("../topologies/absent.bin.gz"),
+    );
+    expect_err(&check_topologies(&broken), "a missing topology file")?;
+    let outside = mutate(
+        &doc,
+        &format!("/topologies/{i}/topology"),
+        json!("../families/core.json"),
+    );
+    expect_err(
+        &check_topologies(&outside),
+        "a reference outside topologies",
+    )
 }
 
 #[test]
@@ -2608,6 +2653,285 @@ fn changed_registered_case_fails_the_pin() -> Result<(), String> {
         let slot = cases.first_mut().ok_or("no cases")?;
         *slot = mutate(&first, pointer, json!(was + 1000));
         expect_err(&check_pin(entry, &cases), "a changed registered case")?;
+    }
+    Ok(())
+}
+
+// ---- ice structure vectors (ice_structure.json) ----
+
+#[test]
+fn ice_structure_fixture_matches_schema() -> Result<(), String> {
+    let doc: Value = serde_json::from_str(include_str!("../vectors/families/ice_structure.json"))
+        .map_err(|e| e.to_string())?;
+    validate(&schema()?, &doc)?;
+    match doc.get("provenance").and_then(Value::as_str) {
+        Some("specified") => {}
+        other => return Err(format!("provenance is {other:?}, expected specified")),
+    }
+    check_names_unique(&doc)?;
+    section(&doc, "structure").map(|_| ())?;
+    section(&doc, "live").map(|_| ())?;
+    Ok(())
+}
+
+// ---- topology files (vectors/topologies/) ----
+
+fn vectors_dir() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("vectors")
+}
+
+/// Every `.json` file below `dir`, sorted.
+fn json_files(dir: &std::path::Path, found: &mut Vec<std::path::PathBuf>) -> Result<(), String> {
+    let mut entries = Vec::new();
+    for entry in std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))? {
+        entries.push(entry.map_err(|e| e.to_string())?.path());
+    }
+    entries.sort();
+    for path in entries {
+        if path.is_dir() {
+            json_files(&path, found)?;
+        } else if path.extension().is_some_and(|ext| ext == "json") {
+            found.push(path);
+        }
+    }
+    Ok(())
+}
+
+/// Every string in `value` that ends in `.bin.gz`.
+fn topology_references(value: &Value, found: &mut Vec<String>) {
+    match value {
+        Value::String(text) if text.ends_with(".bin.gz") => found.push(text.clone()),
+        Value::Array(items) => items.iter().for_each(|v| topology_references(v, found)),
+        Value::Object(map) => map.values().for_each(|v| topology_references(v, found)),
+        _ => {}
+    }
+}
+
+/// The `.bin.gz` file names in `vectors/topologies/`, sorted.
+fn topology_directory() -> Result<Vec<String>, String> {
+    let dir = vectors_dir().join("topologies");
+    let mut names = Vec::new();
+    for entry in std::fs::read_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))? {
+        let name = entry.map_err(|e| e.to_string())?.file_name();
+        let name = name
+            .to_str()
+            .ok_or("a file name that is not UTF-8")?
+            .to_owned();
+        if name != "index.json" {
+            names.push(name);
+        }
+    }
+    names.sort();
+    Ok(names)
+}
+
+fn topology_index() -> Result<Vec<Value>, String> {
+    let index: Value =
+        serde_json::from_str(quip_solver_conformance::TOPOLOGY_INDEX).map_err(|e| e.to_string())?;
+    index
+        .as_array()
+        .cloned()
+        .ok_or_else(|| "the topology index is not an array".to_owned())
+}
+
+fn count_field(entry: &Value, key: &str) -> Result<u64, String> {
+    entry
+        .get(key)
+        .and_then(Value::as_u64)
+        .ok_or_else(|| format!("{}: {key} is not a count", case_name(entry)))
+}
+
+/// Check one topology file against its index entry.
+fn check_topology_entry(entry: &Value, bytes: &[u8]) -> Result<(), String> {
+    let name = case_name(entry);
+    let body = ising_generators::blob::decode(bytes).map_err(|e| format!("{name}: {e:?}"))?;
+    let kind = match body {
+        ising_generators::blob::Body::Explicit(_) => "explicit",
+        ising_generators::blob::Body::ZephyrRemoved { .. } => "zephyr-removed",
+        _ => return Err(format!("{name}: unknown body kind")),
+    };
+    compare(entry, "kind", &kind, &str_field(entry, "kind")?)?;
+    let topology = body.topology().map_err(|e| format!("{name}: {e:?}"))?;
+    compare(
+        entry,
+        "nodes",
+        &(topology.nodes.len() as u64),
+        &count_field(entry, "nodes")?,
+    )?;
+    compare(
+        entry,
+        "edges",
+        &(topology.edges.len() as u64),
+        &count_field(entry, "edges")?,
+    )?;
+    compare(
+        entry,
+        "order_digest",
+        &codec::hex_encode(&digests::topology_order_digest(
+            &topology.nodes,
+            &topology.edges,
+        )),
+        &str_field(entry, "order_digest")?.to_owned(),
+    )?;
+    let payload =
+        ising_generators::blob::decompress(bytes).map_err(|e| format!("{name}: {e:?}"))?;
+    compare(
+        entry,
+        "payload_blake3",
+        &blake3::hash(&payload).to_hex().to_string(),
+        &str_field(entry, "payload_blake3")?.to_owned(),
+    )
+}
+
+#[test]
+fn every_topology_reference_resolves() -> Result<(), String> {
+    let schema = schema()?;
+    let index = topology_index()?;
+    let mut names = Vec::new();
+    for entry in &index {
+        validate_def(&schema, "topology_index_entry", entry)?;
+        names.push(case_name(entry).to_owned());
+        let file = str_field(entry, "file")?;
+        if file != format!("{}.bin.gz", case_name(entry)) {
+            return Err(format!(
+                "{}: file {file} does not match the name",
+                case_name(entry)
+            ));
+        }
+        let bytes = quip_solver_conformance::topology_bytes(&format!("../topologies/{file}"))
+            .map_err(|e| e.to_string())?;
+        check_topology_entry(entry, bytes)?;
+    }
+    let mut sorted = names.clone();
+    sorted.sort();
+    sorted.dedup();
+    if names != sorted {
+        return Err("the index is not sorted by name without repeats".to_owned());
+    }
+    let mut files = Vec::new();
+    json_files(&vectors_dir().join("families"), &mut files)?;
+    let mut referenced = Vec::new();
+    for path in &files {
+        let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let doc: Value =
+            serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+        let mut found = Vec::new();
+        topology_references(&doc, &mut found);
+        for reference in found {
+            let target = path
+                .parent()
+                .ok_or("a file without a directory")?
+                .join(&reference);
+            let on_disk = std::fs::read(&target)
+                .map_err(|e| format!("{}: {reference}: {e}", path.display()))?;
+            let embedded = quip_solver_conformance::topology_bytes(&reference)
+                .map_err(|e| format!("{}: {e}", path.display()))?;
+            if on_disk != embedded {
+                return Err(format!(
+                    "{reference}: the embedded bytes differ from the file"
+                ));
+            }
+            let file = reference
+                .rsplit('/')
+                .next()
+                .ok_or("an empty reference")?
+                .to_owned();
+            if !index
+                .iter()
+                .any(|entry| entry.get("file").and_then(Value::as_str) == Some(&file))
+            {
+                return Err(format!("{reference}: no index entry"));
+            }
+            referenced.push(file);
+        }
+    }
+    let indexed: Vec<String> = index
+        .iter()
+        .map(|entry| str_field(entry, "file").map(str::to_owned))
+        .collect::<Result<_, _>>()?;
+    for file in topology_directory()? {
+        if !referenced.contains(&file) {
+            return Err(format!("{file}: no JSON file references it"));
+        }
+        if !indexed.contains(&file) {
+            return Err(format!("{file}: not listed in the index"));
+        }
+    }
+    let embedded: Vec<String> = quip_solver_conformance::TOPOLOGY_FILES
+        .iter()
+        .map(|(name, _)| (*name).to_owned())
+        .collect();
+    if embedded != topology_directory()? {
+        return Err("TOPOLOGY_FILES does not list every file in vectors/topologies/".to_owned());
+    }
+    Ok(())
+}
+
+#[test]
+fn topology_references_cannot_leave_the_topology_directory() {
+    use quip_solver_conformance::{topology, TopologyError};
+    for reference in [
+        "../families/core.json",
+        "../topologies/../families/core.json",
+        "topologies/t-sparse.bin.gz",
+        "../../topologies/t-sparse.bin.gz",
+        "../topologies/absent.bin.gz",
+        "../topologies/",
+        "",
+    ] {
+        assert!(
+            matches!(topology(reference), Err(TopologyError::NotFound(_))),
+            "{reference}"
+        );
+    }
+    assert!(topology("../topologies/t-sparse.bin.gz").is_ok());
+}
+
+#[test]
+fn the_live_topology_file_gives_the_pinned_counts_and_digest() -> Result<(), String> {
+    let live = quip_solver_conformance::topology("../topologies/zephyr-z12t4-live.bin.gz")
+        .map_err(|e| e.to_string())?;
+    compare_value(
+        &(live.nodes.len(), live.edges.len()),
+        &(4575, 41474),
+        "live counts",
+    )?;
+    compare_value(
+        &codec::hex_encode(&digests::topology_order_digest(&live.nodes, &live.edges)),
+        &"e12cffc9392cc502c5d065d6e1a3e2eabcc08247ffd55d2fe1b41988d2bc37e3".to_owned(),
+        "live order digest",
+    )
+}
+
+fn compare_value<T: PartialEq + core::fmt::Debug>(
+    got: &T,
+    want: &T,
+    what: &str,
+) -> Result<(), String> {
+    if got == want {
+        Ok(())
+    } else {
+        Err(format!("{what}: got {got:?}, want {want:?}"))
+    }
+}
+
+#[test]
+fn topology_reference_pattern_is_enforced() -> Result<(), String> {
+    let schema = schema()?;
+    validate_def(
+        &schema,
+        "topology_ref",
+        &json!("../topologies/t-sparse.bin.gz"),
+    )?;
+    for bad in [
+        "topologies/t-sparse.bin.gz",
+        "../topologies/T-sparse.bin.gz",
+        "../topologies/a/b.bin.gz",
+        "../topologies/.bin.gz",
+        "../other/t-sparse.bin.gz",
+        "../topologies/t-sparse.json",
+    ] {
+        expect_err(&validate_def(&schema, "topology_ref", &json!(bad)), bad)?;
     }
     Ok(())
 }
