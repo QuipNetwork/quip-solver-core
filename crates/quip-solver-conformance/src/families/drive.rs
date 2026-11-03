@@ -25,7 +25,8 @@ use tokio::sync::mpsc;
 use tonic::{Status, Streaming};
 
 use super::layered::P_L2_F0;
-use super::{export_instances, reference_revision, ReferenceRevision};
+use super::layered::{P_F5000, P_L3_F0, P_SPEC};
+use super::{export_instances, reference_revision, ReferenceRevision, REFERENCE_REVISIONS};
 use crate::driver::{
     configure, dispatch, drain_to_end, read_hello, read_until, run_miner, send, ScriptKind,
     SessionOutcome, Terminal, CONFIGURED_SWEEPS, PHASE_TIMEOUT,
@@ -447,9 +448,26 @@ const FAMILY_CANCEL_GENERATION: u64 = 3;
 /// Generation of every live family job, above the cancel watermark.
 const FAMILY_LIVE_GENERATION: u64 = FAMILY_CANCEL_GENERATION + 1;
 
+/// Barriers outside the per-revision cases, each bounded by one
+/// `PHASE_TIMEOUT`: the Hello, the two setup barriers, two per session case
+/// (two session cases), and the drain after `Shutdown`.
+const SESSION_BARRIERS: u32 = 1 + 2 + 2 * 2 + 1;
+
 /// How long the gate waits for the solver to exit. A walk in which every
 /// barrier times out must still finish, so the report names every case.
-const FAMILY_CHILD_TIMEOUT: Duration = Duration::from_secs(PHASE_TIMEOUT.as_secs() * 64);
+///
+/// Each reference revision runs at most `REVISION_CASES.len()` cases of two
+/// barriers each. With 10 cases and 2 reference revisions the budget is
+/// `(8 + 2 * 20 + 1) * 10 s = 490 s`, the `+ 1` being one phase of slack so
+/// the script ends before the child is killed.
+fn family_child_timeout() -> Duration {
+    let per_revision = u32::try_from(REVISION_CASES.len() * 2).unwrap_or(u32::MAX);
+    let revisions = u32::try_from(REFERENCE_REVISIONS.len()).unwrap_or(u32::MAX);
+    let phases = per_revision
+        .saturating_mul(revisions)
+        .saturating_add(SESSION_BARRIERS + 1);
+    PHASE_TIMEOUT.saturating_mul(phases)
+}
 
 /// The hash the script caches `T_SPARSE` under.
 const FAMILY_TOPOLOGY_HASH: [u8; 32] = [0x77; 32];
@@ -612,15 +630,17 @@ enum Grade {
     Lease(ExpectedLease),
     Reject(i32),
     Stale,
-    /// The gate cannot build the expectation, so the case fails unsent.
+    /// The gate cannot build the expectation, so the case fails whatever
+    /// the miner sends.
     Unavailable(String),
 }
 
-/// One job case: its name, its lease, the reference admission it needs
-/// (`None` means admitted), and its grader.
+/// One per-revision case: its name, its lease, the reference admission it
+/// needs (`None` means admitted), and its grader. The lease is `Err` with the
+/// skip reason when no reference params set gives the needed code.
 struct JobCase {
     name: &'static str,
-    lease: FamilyLease,
+    lease: Result<FamilyLease, String>,
     needs: Option<Code>,
     grade: Grade,
 }
@@ -697,6 +717,12 @@ async fn run_job(
     job: Job,
     stale: bool,
 ) -> Result<usize, String> {
+    if outcome.stream_ended() {
+        return Err(format!(
+            "the stream ended ({:?}) before the job was sent",
+            outcome.terminal
+        ));
+    }
     let start = outcome.messages.len();
     let job_id = job.job_id.clone();
     let case = String::from_utf8_lossy(&job_id).into_owned();
@@ -725,34 +751,24 @@ async fn run_job(
     Ok(start)
 }
 
-/// Run one job case and record its outcome.
+/// Run one job case and record its outcome. The job id is `"{name}/{subject}"`,
+/// or `"{name}"` for a session case.
 async fn run_job_case(
     inbound: &mut Streaming<MinerMsg>,
     tx: &mpsc::Sender<Result<CoordMsg, Status>>,
     outcome: &mut SessionOutcome,
-    subject: Option<&str>,
-    case: &JobCase,
+    (name, subject): (&'static str, Option<&str>),
+    lease: &FamilyLease,
+    grade: &Grade,
 ) {
-    let job_id = subject.map_or_else(
-        || case.name.to_owned(),
-        |subject| format!("{}/{subject}", case.name),
-    );
-    if let Grade::Unavailable(why) = &case.grade {
-        push_case(
-            outcome,
-            case.name,
-            subject,
-            CaseOutcome::Failed(why.clone()),
-        );
-        return;
-    }
-    let stale = matches!(case.grade, Grade::Stale);
-    let graded = match run_job(inbound, tx, outcome, case.lease.job(&job_id), stale).await {
+    let job_id = subject.map_or_else(|| name.to_owned(), |subject| format!("{name}/{subject}"));
+    let stale = matches!(grade, Grade::Stale);
+    let graded = match run_job(inbound, tx, outcome, lease.job(&job_id), stale).await {
         Err(why) => CaseOutcome::Failed(why),
         Ok(start) => {
             let slice = outcome.messages.get(start..).unwrap_or_default();
             let job_id = job_id.as_bytes();
-            match &case.grade {
+            match grade {
                 Grade::Lease(expected) => grade_lease(slice, job_id, expected),
                 Grade::Reject(want) => grade_reject(slice, job_id, *want),
                 Grade::Stale => grade_stale(slice, job_id),
@@ -760,7 +776,26 @@ async fn run_job_case(
             }
         }
     };
-    push_case(outcome, case.name, subject, graded);
+    push_case(outcome, name, subject, graded);
+}
+
+/// The constant name of a reference params set, for skip reasons.
+fn params_name(params: &[u8]) -> String {
+    for (name, known) in [
+        ("P_SPEC", &P_SPEC[..]),
+        ("P_L2_F0", &P_L2_F0[..]),
+        ("P_L3_F0", &P_L3_F0[..]),
+        ("P_F5000", &P_F5000[..]),
+    ] {
+        if params == known {
+            return name.to_owned();
+        }
+    }
+    let mut hex = String::new();
+    for byte in params {
+        let _ = write!(hex, "{byte:02x}");
+    }
+    hex
 }
 
 fn show_admission(admission: &Result<SizeBounds, Code>) -> String {
@@ -789,6 +824,40 @@ fn degree_is_the_cause(
         .is_some_and(|degree| bounds.degree > u64::from(degree))
 }
 
+/// The supported lease with the first reference params set whose admission
+/// gives `code` and passes `extra`.
+///
+/// # Errors
+///
+/// The skip reason, naming what each candidate gives.
+fn first_params_with(
+    caps: &Capabilities,
+    reference: &ReferenceRevision,
+    supported: &FamilyLease,
+    topology: &BaseTopology,
+    code: Code,
+    extra: &dyn Fn(&FamilyLease) -> bool,
+) -> Result<FamilyLease, String> {
+    let mut tried = Vec::new();
+    for params in reference.params {
+        let lease = supported.clone().with_params(params);
+        let admission = lease.admission(caps, reference, topology);
+        if admission == Err(code) && extra(&lease) {
+            return Ok(lease);
+        }
+        let mut gives = show_admission(&admission);
+        if admission == Err(code) {
+            gives.push_str(" for another reason");
+        }
+        tried.push(format!("{} gives {gives}", params_name(params)));
+    }
+    Err(format!(
+        "no reference params set gives code {} ({})",
+        code.value(),
+        tried.join(", ")
+    ))
+}
+
 /// The ten per-revision cases of one subject, built from its supported lease.
 fn revision_cases(
     caps: &Capabilities,
@@ -799,12 +868,7 @@ fn revision_cases(
 ) -> Vec<JobCase> {
     let variant = |params: &[u8]| supported.clone().with_params(params);
     let first_with = |code: Code, extra: &dyn Fn(&FamilyLease) -> bool| {
-        reference
-            .params
-            .iter()
-            .map(|params| variant(params))
-            .find(|lease| lease.admission(caps, reference, topology) == Err(code) && extra(lease))
-            .unwrap_or_else(|| supported.clone())
+        first_params_with(caps, reference, supported, topology, code, extra)
     };
     let reject = |code: Code| Grade::Reject(admission_reason(code));
     let grade_supported = match expected_lease(reference, supported, topology) {
@@ -814,37 +878,37 @@ fn revision_cases(
     vec![
         JobCase {
             name: "supported-revision",
-            lease: supported.clone(),
+            lease: Ok(supported.clone()),
             needs: None,
             grade: grade_supported,
         },
         JobCase {
             name: "revision-plus-one",
-            lease: FamilyLease {
+            lease: Ok(FamilyLease {
                 revision: supported.revision.saturating_add(1),
                 ..supported.clone()
-            },
+            }),
             needs: Some(Code::RevisionUnsupported),
             grade: reject(Code::RevisionUnsupported),
         },
         JobCase {
             name: "params-malformed",
-            lease: variant(&P_MALFORMED),
+            lease: Ok(variant(&P_MALFORMED)),
             needs: Some(Code::ParamsMalformed),
             grade: reject(Code::ParamsMalformed),
         },
         JobCase {
             name: "params-digest-mismatch",
-            lease: FamilyLease {
+            lease: Ok(FamilyLease {
                 params_digest: vec![0; 32],
                 ..supported.clone()
-            },
+            }),
             needs: Some(Code::ParamsDigestMismatch),
             grade: reject(Code::ParamsDigestMismatch),
         },
         JobCase {
             name: "params-out-of-bounds",
-            lease: variant(reference.out_of_bounds_params),
+            lease: Ok(variant(reference.out_of_bounds_params)),
             needs: Some(Code::ParamsOutOfBounds),
             grade: reject(Code::ParamsOutOfBounds),
         },
@@ -856,10 +920,10 @@ fn revision_cases(
         },
         JobCase {
             name: "topology-order-mismatch",
-            lease: FamilyLease {
+            lease: Ok(FamilyLease {
                 order_digest: reordered_digest.to_vec(),
                 ..supported.clone()
-            },
+            }),
             needs: Some(Code::TopologyOrderMismatch),
             grade: reject(Code::TopologyOrderMismatch),
         },
@@ -873,19 +937,19 @@ fn revision_cases(
         },
         JobCase {
             name: "stale-lease",
-            lease: FamilyLease {
+            lease: Ok(FamilyLease {
                 generation: FAMILY_CANCEL_GENERATION,
                 ..supported.clone()
-            },
+            }),
             needs: None,
             grade: Grade::Stale,
         },
         JobCase {
             name: "deadline-expired",
-            lease: FamilyLease {
+            lease: Ok(FamilyLease {
                 deadline_ms: 1,
                 ..supported.clone()
-            },
+            }),
             needs: None,
             grade: Grade::Reject(RejectReason::Expired as i32),
         },
@@ -942,14 +1006,23 @@ async fn run_subject(
         reordered.order_digest(),
     );
     for case in &cases {
-        let admission = case.lease.admission(caps, reference, &topology);
+        let lease = match &case.lease {
+            Ok(lease) => lease,
+            Err(why) => {
+                let skipped = CaseOutcome::Skipped(why.clone());
+                push_case(outcome, case.name, Some(subject), skipped);
+                continue;
+            }
+        };
+        let admission = lease.admission(caps, reference, &topology);
         let met = match (&admission, case.needs) {
             (Ok(_), None) => true,
             (Err(code), Some(needs)) => *code == needs,
             (Ok(_), Some(_)) | (Err(_), None) => false,
         };
         if met {
-            run_job_case(inbound, tx, outcome, Some(subject), case).await;
+            let at = (case.name, Some(subject));
+            run_job_case(inbound, tx, outcome, at, lease, &case.grade).await;
         } else {
             let needs = case.needs.map_or_else(
                 || "admitted".to_owned(),
@@ -972,20 +1045,15 @@ async fn run_session_cases(
     caps: &Capabilities,
 ) {
     let order_digest = *base_topology(false).order_digest();
-    let unsupported = |family_id: &str, name: &'static str| JobCase {
-        name,
-        lease: FamilyLease::new(family_id, 1, &P_L2_F0, &order_digest),
-        needs: Some(Code::FamilyUnsupported),
-        grade: Grade::Reject(admission_reason(Code::FamilyUnsupported)),
-    };
+    let grade = Grade::Reject(admission_reason(Code::FamilyUnsupported));
     let generates = !caps.generated_families.is_empty();
     let name = "no-generated-families-rejects-family-lease";
     if generates {
         let why = "the binary lists generated families".to_owned();
         push_case(outcome, name, None, CaseOutcome::Skipped(why));
     } else {
-        let case = unsupported("vectors/uniform-field", name);
-        run_job_case(inbound, tx, outcome, None, &case).await;
+        let lease = FamilyLease::new("vectors/uniform-field", 1, &P_L2_F0, &order_digest);
+        run_job_case(inbound, tx, outcome, (name, None), &lease, &grade).await;
     }
     let name = "unknown-family";
     let lists_none = caps
@@ -999,8 +1067,17 @@ async fn run_session_cases(
         let why = "the binary lists vectors/none".to_owned();
         push_case(outcome, name, None, CaseOutcome::Skipped(why));
     } else {
-        let case = unsupported("vectors/none", name);
-        run_job_case(inbound, tx, outcome, None, &case).await;
+        let lease = FamilyLease::new("vectors/none", 1, &P_L2_F0, &order_digest);
+        run_job_case(inbound, tx, outcome, (name, None), &lease, &grade).await;
+    }
+}
+
+/// Grade the session setup: `missed` names each setup barrier that did not hold.
+fn grade_setup(missed: &[String]) -> CaseOutcome {
+    if missed.is_empty() {
+        CaseOutcome::Passed
+    } else {
+        CaseOutcome::Failed(missed.join(", "))
     }
 }
 
@@ -1032,7 +1109,8 @@ pub(crate) async fn run_family_script(
     };
 
     // 2. Welcome, configuration, the topology, and the target. The barrier is
-    //    Ready plus the initial credit grant.
+    //    Ready plus the initial credit grant. Both setup barriers grade as
+    //    the `session-setup` case.
     if !send(
         tx,
         coord_msg::Msg::Welcome(Welcome {
@@ -1041,8 +1119,11 @@ pub(crate) async fn run_family_script(
     )
     .await
     {
+        let missed = ["the miner left before the Welcome".to_owned()];
+        push_case(&mut outcome, "session-setup", None, grade_setup(&missed));
         return outcome;
     }
+    let mut missed = Vec::new();
     let _ = send(tx, coord_msg::Msg::Configure(configure())).await;
     let _ = send(tx, coord_msg::Msg::Topology(t_sparse_wire())).await;
     let target = SetTarget {
@@ -1054,10 +1135,13 @@ pub(crate) async fn run_family_script(
         ..SetTarget::default()
     };
     let _ = send(tx, coord_msg::Msg::SetTarget(target)).await;
-    let _ = read_until(inbound, &mut outcome, "configure->ready", |o| {
+    if !read_until(inbound, &mut outcome, "configure->ready", |o| {
         o.ready_received && !o.job_request_credits.is_empty()
     })
-    .await;
+    .await
+    {
+        missed.push(barrier_failure(&outcome, "configure->ready"));
+    }
 
     // 3. The cancel watermark the stale-lease case sits at.
     let before = outcome.statuses.len();
@@ -1068,12 +1152,18 @@ pub(crate) async fn run_family_script(
         }),
     )
     .await;
-    let _ = read_until(inbound, &mut outcome, "cancel->status", |o| {
+    if !read_until(inbound, &mut outcome, "cancel->status", |o| {
         o.statuses.len() > before
     })
-    .await;
+    .await
+    {
+        missed.push(barrier_failure(&outcome, "cancel->status"));
+    }
+    push_case(&mut outcome, "session-setup", None, grade_setup(&missed));
 
-    // 5. Session cases, then 6. the cases of each advertised revision.
+    // 4. Every job case below runs behind a refund barrier and a Ping fence
+    //    (`run_job`). 5. The session cases, then 6. the cases of each
+    //    advertised revision.
     run_session_cases(inbound, tx, &mut outcome, &caps).await;
     for (subject, reference) in plan_subjects(&caps) {
         run_subject(inbound, tx, &mut outcome, &caps, &subject, reference).await;
@@ -1105,12 +1195,18 @@ pub async fn drive_miner_family(bin_path: &str, args: &[&str], socket: &str) -> 
         args,
         socket,
         ScriptKind::Family,
-        FAMILY_CHILD_TIMEOUT,
+        family_child_timeout(),
     )
     .await;
     if outcome.family_cases.is_empty() {
-        // The session never started, so the script graded nothing.
-        let (version, generators) = grade_hello(None);
+        // The script graded nothing: the binary never connected, or its
+        // session produced no outcome before the harness gave up on it.
+        let (version, generators) = if exit_code == -1 || !outcome.connected {
+            grade_hello(None)
+        } else {
+            let lost = CaseOutcome::Failed("the session produced no outcome".to_owned());
+            (lost.clone(), lost)
+        };
         push_case(&mut outcome, "hello-protocol-version-2", None, version);
         push_case(
             &mut outcome,
@@ -1667,6 +1763,34 @@ mod tests {
         ];
         let want = RejectReason::Malformed as i32;
         assert!(failed(&grade_reject(&slice, JOB, want)));
+    }
+
+    #[test]
+    fn a_missed_setup_barrier_fails_session_setup() {
+        assert_eq!(grade_setup(&[]), CaseOutcome::Passed);
+        let missed = ["phase configure->ready timed out".to_owned()];
+        assert_eq!(
+            grade_setup(&missed),
+            CaseOutcome::Failed("phase configure->ready timed out".to_owned())
+        );
+        let both = [
+            "phase configure->ready timed out".to_owned(),
+            "phase cancel->status timed out".to_owned(),
+        ];
+        assert_eq!(
+            grade_setup(&both),
+            CaseOutcome::Failed(
+                "phase configure->ready timed out, phase cancel->status timed out".to_owned()
+            )
+        );
+    }
+
+    #[test]
+    fn the_child_budget_covers_every_reference_revision() {
+        // 8 session barriers, 20 per reference revision, 1 phase of slack.
+        let phases = 8 + 20 * REFERENCE_REVISIONS.len() + 1;
+        let phases = u32::try_from(phases).expect("small");
+        assert_eq!(family_child_timeout(), PHASE_TIMEOUT * phases);
     }
 
     #[test]

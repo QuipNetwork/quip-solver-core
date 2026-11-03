@@ -565,6 +565,9 @@ pub(crate) struct SessionOutcome {
     pub(crate) messages: Vec<miner_msg::Msg>,
     /// The cases the family script graded, in run order.
     pub(crate) family_cases: Vec<FamilyCase>,
+    /// True when the miner opened a session. Set by [`run_miner`], so it
+    /// holds even when the script's outcome never arrived.
+    pub(crate) connected: bool,
 }
 
 impl SessionOutcome {
@@ -614,6 +617,7 @@ pub(crate) enum ScriptKind {
 struct MockCoordinator {
     outcome_tx: Mutex<Option<oneshot::Sender<SessionOutcome>>>,
     script: ScriptKind,
+    connected: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[tonic::async_trait]
@@ -624,6 +628,8 @@ impl MinerService for MockCoordinator {
         &self,
         request: Request<Streaming<MinerMsg>>,
     ) -> Result<Response<Self::SessionStream>, Status> {
+        self.connected
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         let mut inbound = request.into_inner();
         let (tx, rx) = mpsc::channel::<Result<CoordMsg, Status>>(64);
         let outcome_tx = self.outcome_tx.lock().await.take();
@@ -1604,9 +1610,11 @@ pub(crate) async fn run_miner(
     let incoming = UnixListenerStream::new(uds);
 
     let (otx, orx) = oneshot::channel::<SessionOutcome>();
+    let connected = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let svc = MockCoordinator {
         outcome_tx: Mutex::new(Some(otx)),
         script,
+        connected: std::sync::Arc::clone(&connected),
     };
     let server = tokio::spawn(async move {
         Server::builder()
@@ -1667,11 +1675,12 @@ pub(crate) async fn run_miner(
     let stderr = finish_stderr_capture(stderr_reader, captured_stderr).await;
     // The session handler sends the outcome as the miner closes its stream on
     // exit; the timeout guards a miner that dies before ever connecting.
-    let outcome = tokio::time::timeout(OUTCOME_TIMEOUT, orx)
+    let mut outcome = tokio::time::timeout(OUTCOME_TIMEOUT, orx)
         .await
         .ok()
         .and_then(Result::ok)
         .unwrap_or_default();
+    outcome.connected = connected.load(std::sync::atomic::Ordering::SeqCst);
     server.abort();
     let _ = std::fs::remove_file(&path);
 

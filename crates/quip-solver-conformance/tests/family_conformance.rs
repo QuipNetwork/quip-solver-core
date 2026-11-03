@@ -582,4 +582,17 @@ async fn a_binary_that_never_connects_fails_the_family_gate() {
         "{}",
         report.summary()
     );
+    assert!(
+        matches!(
+            report.outcome("clean-exit", None),
+            Some(CaseOutcome::Failed(_))
+        ),
+        "{}",
+        report.summary()
+    );
+    assert!(
+        report.cases.iter().all(|case| case.subject.is_none()),
+        "{}",
+        report.summary()
+    );
 }
