@@ -11,7 +11,7 @@ use ising_generators::descriptor::{
 };
 use ising_generators::instance::{validate_metadata, Instance, InstanceLimits, InstanceParts};
 use ising_generators::random::derive_nonce;
-use ising_generators::rng::{stream_seed, uniform, ChaCha8Rng};
+use ising_generators::rng::{shuffle, stream_seed, uniform, ChaCha8Rng};
 use ising_generators::Code;
 use serde_json::Value;
 
@@ -164,6 +164,71 @@ fn uniform_of_one_reads_one_word() -> Result<(), String> {
     let _ = b.next_u32();
     if a.next_u32() != b.next_u32() {
         return Err("uniform(1) did not read exactly one word".into());
+    }
+    Ok(())
+}
+
+#[test]
+fn shuffle_matches_the_core_vectors() -> Result<(), String> {
+    let doc = core()?;
+    for case in section(&doc, "shuffle")? {
+        let name = case.get("name").and_then(Value::as_str).ok_or("no name")?;
+        let seed = hex32(case.get("seed").and_then(Value::as_str).ok_or("no seed")?)?;
+        let length = case
+            .get("length")
+            .and_then(Value::as_u64)
+            .ok_or("no length")?;
+        let length = usize::try_from(length).map_err(|e| e.to_string())?;
+        let want: Vec<u64> = case
+            .get("permutation")
+            .and_then(Value::as_array)
+            .ok_or("no permutation")?
+            .iter()
+            .map(|v| v.as_u64().ok_or("non-integer permutation entry"))
+            .collect::<Result<_, _>>()?;
+        let used = case
+            .get("words_used")
+            .and_then(Value::as_u64)
+            .ok_or("no words_used")?;
+        let used = usize::try_from(used).map_err(|e| e.to_string())?;
+
+        let mut rng = ChaCha8Rng::from_seed(seed);
+        let mut items: Vec<u32> = (0..length)
+            .map(|i| u32::try_from(i).map_err(|e| e.to_string()))
+            .collect::<Result<_, _>>()?;
+        shuffle(&mut rng, &mut items).map_err(|c| format!("{name}: {c}"))?;
+
+        let got: Vec<u64> = items.iter().map(|&x| u64::from(x)).collect();
+        if got != want {
+            return Err(format!("{name}: got {got:?}, want {want:?}"));
+        }
+
+        let mut fresh = ChaCha8Rng::from_seed(seed);
+        for _ in 0..used {
+            let _ = fresh.next_u32();
+        }
+        let want_next = fresh.next_u32();
+        let next = rng.next_u32();
+        if next != want_next {
+            return Err(format!(
+                "{name}: next word after shuffle is not word {used} of the stream"
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn shuffle_of_fewer_than_two_reads_no_words() -> Result<(), String> {
+    let seed = [7u8; 32];
+    for len in [0usize, 1] {
+        let mut rng = ChaCha8Rng::from_seed(seed);
+        let mut items: Vec<u32> = vec![0; len];
+        shuffle(&mut rng, &mut items).map_err(|c| c.to_string())?;
+        let mut fresh = ChaCha8Rng::from_seed(seed);
+        if rng.next_u32() != fresh.next_u32() {
+            return Err(format!("shuffle of {len} item(s) read a word"));
+        }
     }
     Ok(())
 }
