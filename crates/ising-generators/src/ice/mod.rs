@@ -10,12 +10,17 @@ pub mod glass;
 pub mod matching;
 pub mod obstructions;
 pub mod topology;
+pub mod twisted_dimer;
 
 pub use glass::{ICE_GLASS, ICE_GLASS_SCHEMA, ICE_GLASS_V1, STRONG_MILLI};
 pub use matching::{select, sides, Sides};
 pub use obstructions::{gauge_obstructions, Obstructions};
 pub use topology::{
     candidates, zephyr_coordinates, zephyr_coupler, zephyr_lattice, Candidates, Tile,
+};
+pub use twisted_dimer::{
+    local_gauges, Recipe, PAIR_MILLI, RECIPES, TWISTED_DIMER, TWISTED_DIMER_SCHEMA,
+    TWISTED_DIMER_V1,
 };
 
 /// The work bound of candidate search (FAM-38 bounded traversal).
