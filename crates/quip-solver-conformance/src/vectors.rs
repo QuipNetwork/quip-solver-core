@@ -248,7 +248,7 @@ impl core::fmt::Display for TopologyError {
             Self::NotFound(reference) => {
                 write!(f, "no topology file for the reference {reference}")
             }
-            Self::Blob(error) => write!(f, "invalid topology file: {error:?}"),
+            Self::Blob(error) => write!(f, "invalid topology file: {error}"),
         }
     }
 }

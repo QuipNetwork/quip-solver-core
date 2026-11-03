@@ -3,7 +3,7 @@
 //! The subcommands, JSON shapes, and exit codes match
 //! `python -m family_oracle topology`, so either tool reads what the other
 //! wrote. Exit 0 is success, 1 is a format or file error (the `BlobError` name
-//! goes to stderr), and 2 is a usage error.
+//! and its message go to stderr), and 2 is a usage error.
 
 use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
@@ -64,7 +64,7 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(failure) => {
             let text = match failure {
-                Failure::Blob(error) => format!("{error:?}"),
+                Failure::Blob(error) => format!("{error:?}: {error}"),
                 Failure::Message(message) => message,
             };
             let _ = writeln!(std::io::stderr(), "topology: {text}");
@@ -86,7 +86,7 @@ fn run_decode(input: &Path, output: Option<&Path>, expand: bool) -> Result<(), F
     let text = if expand {
         render_explicit(&body.topology()?)
     } else {
-        render(&body)
+        render(&body)?
     };
     match output {
         Some(path) => std::fs::write(path, text)?,
@@ -182,8 +182,8 @@ fn render_explicit(topology: &Topology) -> String {
     out
 }
 
-fn render(body: &Body) -> String {
-    match body {
+fn render(body: &Body) -> Result<String, Failure> {
+    Ok(match body {
         Body::Explicit(topology) => render_explicit(topology),
         Body::ZephyrRemoved {
             m,
@@ -199,5 +199,6 @@ fn render(body: &Body) -> String {
             let _ = write!(out, ",\n  \"t\": {t}\n}}\n");
             out
         }
-    }
+        _ => return Err(Failure::Message("unsupported body kind".to_owned())),
+    })
 }

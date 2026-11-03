@@ -40,6 +40,7 @@ pub struct Topology {
 
 /// How a payload stores its topology.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Body {
     /// Every node and edge, in registration order.
     Explicit(Topology),
@@ -86,6 +87,27 @@ pub enum BlobError {
     /// The payload has bytes after the body.
     Trailing,
 }
+
+impl core::fmt::Display for BlobError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let message = match self {
+            Self::Gzip => "gzip framing is invalid",
+            Self::Checksum => "checksum or size does not match",
+            Self::TooLarge => "payload is larger than 64 MiB",
+            Self::Magic => "payload does not start with the QTOP magic",
+            Self::Version => "version is missing or not 1",
+            Self::Kind => "kind is missing or unknown",
+            Self::Varint => "varint is truncated, too long, or not minimal",
+            Self::Range => "a value or count is out of range",
+            Self::Order => "a sequence is not strictly ascending",
+            Self::NotLattice => "a removed node or edge is not part of the lattice",
+            Self::Trailing => "payload has bytes after the body",
+        };
+        f.write_str(message)
+    }
+}
+
+impl core::error::Error for BlobError {}
 
 // --- CRC-32 and gzip -------------------------------------------------------
 
@@ -510,6 +532,11 @@ impl Body {
     /// # Errors
     ///
     /// The lattice errors of [`encode_payload`] for an invalid body.
+    ///
+    /// # Cost
+    ///
+    /// Expanding the largest kind 1 lattice, z(32, 8) with 66,560 nodes, takes
+    /// about 1 s in an optimized build. [`decode`] without expansion stays fast.
     pub fn topology(&self) -> Result<Topology, BlobError> {
         match self {
             Self::Explicit(topology) => Ok(topology.clone()),

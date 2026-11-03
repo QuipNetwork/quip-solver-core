@@ -2748,6 +2748,7 @@ fn check_topology_entry(entry: &Value, bytes: &[u8]) -> Result<(), String> {
     let kind = match body {
         ising_generators::blob::Body::Explicit(_) => "explicit",
         ising_generators::blob::Body::ZephyrRemoved { .. } => "zephyr-removed",
+        _ => return Err(format!("{name}: unknown body kind")),
     };
     compare(entry, "kind", &kind, &str_field(entry, "kind")?)?;
     let topology = body.topology().map_err(|e| format!("{name}: {e:?}"))?;
