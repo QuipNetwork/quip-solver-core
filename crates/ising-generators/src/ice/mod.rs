@@ -8,7 +8,7 @@
 pub mod matching;
 pub mod topology;
 
-pub use matching::{sides, Sides};
+pub use matching::{select, sides, Sides};
 pub use topology::{
     candidates, zephyr_coordinates, zephyr_coupler, zephyr_lattice, Candidates, Tile,
 };

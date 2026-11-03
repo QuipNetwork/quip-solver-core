@@ -1,11 +1,12 @@
-//! The two sides of the spine edges.
+//! The two sides of the spine edges and the order-driven matching.
 
+use alloc::collections::BTreeMap;
 use alloc::collections::BTreeSet;
 use alloc::collections::VecDeque;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use super::topology::{zephyr_coordinates, Candidates};
+use super::topology::{zephyr_coordinates, Candidates, Tile};
 use super::{Lattice, StructureError};
 use crate::family::BaseTopology;
 
@@ -154,4 +155,134 @@ fn adjacency_sides(
         }
     }
     Ok(colour.into_iter().map(|c| c.unwrap_or(false)).collect())
+}
+
+/// Check that `order` is a permutation of `0..len` and return the position of
+/// each index in it.
+fn ranks(order: &[u32], len: usize) -> Result<Vec<usize>, StructureError> {
+    if order.len() != len {
+        return Err(StructureError::BadOrder);
+    }
+    let mut rank: Vec<Option<usize>> = vec![None; len];
+    for (position, &index) in order.iter().enumerate() {
+        let slot = usize::try_from(index)
+            .ok()
+            .and_then(|i| rank.get_mut(i))
+            .ok_or(StructureError::BadOrder)?;
+        if slot.is_some() {
+            return Err(StructureError::BadOrder);
+        }
+        *slot = Some(position);
+    }
+    rank.into_iter()
+        .map(|r| r.ok_or(StructureError::BadOrder))
+        .collect()
+}
+
+/// Try to match left spine `root`, following augmenting paths in the order
+/// of `adj`. This is the recursive `try(l)` with an explicit stack: each
+/// frame is a left spine and the next position in its list.
+fn augment(
+    root: usize,
+    adj: &[Vec<usize>],
+    visited: &mut [bool],
+    matched: &mut [Option<usize>],
+) -> Result<(), StructureError> {
+    let mut stack: Vec<(usize, usize)> = vec![(root, 0)];
+    while let Some(&(left, position)) = stack.last() {
+        let list = adj.get(left).ok_or(StructureError::Overflow)?;
+        let Some(&right) = list.get(position) else {
+            let _ = stack.pop();
+            continue;
+        };
+        if let Some(top) = stack.last_mut() {
+            top.1 = position.saturating_add(1);
+        }
+        let seen = visited.get_mut(right).ok_or(StructureError::Overflow)?;
+        if *seen {
+            continue;
+        }
+        *seen = true;
+        let owner = matched
+            .get(right)
+            .copied()
+            .ok_or(StructureError::Overflow)?;
+        if let Some(next) = owner {
+            stack.push((next, 0));
+            continue;
+        }
+        // Success: every frame takes the right spine it just tried.
+        for &(frame_left, next_position) in &stack {
+            let chosen = adj
+                .get(frame_left)
+                .and_then(|l| l.get(next_position.saturating_sub(1)))
+                .copied()
+                .ok_or(StructureError::Overflow)?;
+            *matched.get_mut(chosen).ok_or(StructureError::Overflow)? = Some(frame_left);
+        }
+        return Ok(());
+    }
+    Ok(())
+}
+
+/// Select the tiles: free tiles plus a maximum matching of spine tiles.
+///
+/// A spine tile is an edge between its left and its right spine edge. The
+/// matching takes each left spine in `left_order` and searches for an
+/// augmenting path over right spines in ascending position in
+/// `right_order`. `left_order` and `right_order` are permutations of
+/// `0..sides.left.len()` and `0..sides.right.len()`. The result is ascending
+/// by `nodes`.
+///
+/// # Errors
+///
+/// [`StructureError::BadOrder`] when an order has the wrong length or repeats
+/// or exceeds an index. [`StructureError::Overflow`] when `sides` does not
+/// match `candidates`.
+pub fn select(
+    candidates: &Candidates,
+    sides: &Sides,
+    left_order: &[u32],
+    right_order: &[u32],
+) -> Result<Vec<Tile>, StructureError> {
+    let _ = ranks(left_order, sides.left.len())?;
+    let rank = ranks(right_order, sides.right.len())?;
+    let mut tile_of: BTreeMap<(usize, usize), Tile> = BTreeMap::new();
+    let mut selected: Vec<Tile> = Vec::new();
+    for (tile, spine) in candidates.tiles.iter().zip(&candidates.spines) {
+        let Some([e, f]) = spine else {
+            selected.push(*tile);
+            continue;
+        };
+        let straight = (sides.left.binary_search(e), sides.right.binary_search(f));
+        let swapped = (sides.left.binary_search(f), sides.right.binary_search(e));
+        let (Ok(l), Ok(r)) = (if straight.0.is_ok() {
+            straight
+        } else {
+            swapped
+        }) else {
+            return Err(StructureError::Overflow);
+        };
+        let _ = tile_of.insert((l, r), *tile);
+    }
+    let mut adj: Vec<Vec<usize>> = vec![Vec::new(); sides.left.len()];
+    for &(l, r) in tile_of.keys() {
+        adj.get_mut(l).ok_or(StructureError::Overflow)?.push(r);
+    }
+    for list in &mut adj {
+        list.sort_by_key(|r| rank.get(*r).copied().unwrap_or(usize::MAX));
+    }
+    let mut matched: Vec<Option<usize>> = vec![None; sides.right.len()];
+    for &l in left_order {
+        let mut visited = vec![false; sides.right.len()];
+        let root = usize::try_from(l).map_err(|_| StructureError::BadOrder)?;
+        augment(root, &adj, &mut visited, &mut matched)?;
+    }
+    for (r, owner) in matched.iter().enumerate() {
+        if let Some(l) = owner {
+            selected.push(*tile_of.get(&(*l, r)).ok_or(StructureError::Overflow)?);
+        }
+    }
+    selected.sort_unstable();
+    Ok(selected)
 }

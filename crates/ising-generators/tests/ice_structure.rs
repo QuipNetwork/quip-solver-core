@@ -11,8 +11,8 @@ use std::collections::BTreeSet;
 
 use ising_generators::family::BaseTopology;
 use ising_generators::ice::{
-    candidates, zephyr_coordinates, zephyr_coupler, zephyr_lattice, Candidates, Lattice,
-    StructureError, MAX_DEGREE,
+    candidates, select, sides, zephyr_coordinates, zephyr_coupler, zephyr_lattice, Candidates,
+    Lattice, Sides, StructureError, Tile, MAX_DEGREE,
 };
 
 fn topology(nodes: Vec<u32>, edges: &[(u32, u32)]) -> BaseTopology {
@@ -282,4 +282,189 @@ fn the_first_failing_check_names_the_error() {
     let base = topology(vec![0, 1, 3], &[(0, 1), (1, 0), (0, 3)]);
     let got = candidates(Lattice::Zephyr { m: 1, t: 1 }, &base);
     assert_eq!(got, Err(StructureError::DuplicateEdge));
+}
+
+/// Tiles for spine-graph edges over spine indices: spine `i` is the edge
+/// `(2i, 2i + 1)` and each pair is the clique of its two spines.
+fn spine_graph(pairs: &[(u32, u32)]) -> BaseTopology {
+    let tiles: Vec<_> = pairs
+        .iter()
+        .map(|&(a, b)| clique([2 * a, 2 * a + 1, 2 * b, 2 * b + 1]))
+        .collect();
+    adjacency_graph(&union(&tiles))
+}
+
+fn adjacency_parts(base: &BaseTopology) -> (Candidates, Sides) {
+    let found = candidates(Lattice::Adjacency, base).expect("candidates");
+    let split = sides(Lattice::Adjacency, base, &found).expect("sides");
+    (found, split)
+}
+
+fn permutations(len: u32) -> Vec<Vec<u32>> {
+    if len == 0 {
+        return vec![Vec::new()];
+    }
+    let mut out = Vec::new();
+    for rest in permutations(len - 1) {
+        for at in 0..=rest.len() {
+            let mut one = rest.clone();
+            one.insert(at, len - 1);
+            out.push(one);
+        }
+    }
+    out
+}
+
+fn identity(len: usize) -> Vec<u32> {
+    (0..u32::try_from(len).expect("small")).collect()
+}
+
+/// The size of a maximum set of spine tiles with pairwise distinct spine
+/// edges, by trying every subset.
+fn brute_force_maximum(found: &Candidates) -> usize {
+    let spine_tiles: Vec<[(u32, u32); 2]> = found.spines.iter().flatten().copied().collect();
+    assert!(spine_tiles.len() <= 16);
+    let mut best = 0;
+    for mask in 0u32..(1 << spine_tiles.len()) {
+        let mut used = BTreeSet::new();
+        let mut ok = true;
+        for (i, pair) in spine_tiles.iter().enumerate() {
+            if mask >> i & 1 == 1 {
+                ok &= used.insert(pair[0]) && used.insert(pair[1]);
+            }
+        }
+        if ok {
+            best = best.max(mask.count_ones() as usize);
+        }
+    }
+    best
+}
+
+#[test]
+fn tiny_exhaustive_matching_is_maximum() {
+    let fixtures: [&[(u32, u32)]; 3] = [
+        &[(0, 1), (0, 3), (2, 1), (2, 3)],
+        &[(0, 1), (1, 2), (2, 3), (3, 4), (4, 5)],
+        &[
+            (0, 1),
+            (0, 3),
+            (0, 5),
+            (2, 1),
+            (2, 5),
+            (4, 3),
+            (4, 5),
+            (4, 7),
+            (6, 7),
+        ],
+    ];
+    for pairs in fixtures {
+        let base = spine_graph(pairs);
+        let (found, split) = adjacency_parts(&base);
+        assert!(split.left.len() <= 4 && split.right.len() <= 4, "{pairs:?}");
+        let maximum = brute_force_maximum(&found);
+        let spine_count = found.spines.iter().flatten().count();
+        assert_eq!(spine_count, pairs.len());
+        let lefts = permutations(u32::try_from(split.left.len()).expect("small"));
+        let rights = permutations(u32::try_from(split.right.len()).expect("small"));
+        for left in &lefts {
+            for right in &rights {
+                let chosen = select(&found, &split, left, right).expect("select");
+                assert_eq!(chosen.len(), maximum, "{pairs:?} {left:?} {right:?}");
+                let mut used = BTreeSet::new();
+                let mut slots = BTreeSet::new();
+                for tile in &chosen {
+                    let at = found.tiles.binary_search(tile).expect("a candidate");
+                    let [e, f] = found.spines[at].expect("spine tile");
+                    assert!(used.insert(e) && used.insert(f), "edge reused");
+                    let _ = slots.insert(*tile);
+                }
+                assert_eq!(slots.len(), chosen.len());
+                for node in 0..=found.tiles.iter().flat_map(|t| t.nodes).max().unwrap_or(0) {
+                    let count = chosen.iter().filter(|t| t.nodes.contains(&node)).count();
+                    assert!(count <= 2, "node {node} in {count} slots");
+                }
+                assert!(chosen.windows(2).all(|w| w[0] < w[1]));
+            }
+        }
+    }
+}
+
+#[test]
+fn matching_ties_follow_the_orders() {
+    let base = adjacency_graph(&tile_ring(4));
+    let (found, split) = adjacency_parts(&base);
+    assert_eq!(split.left, [(0, 1), (4, 5)]);
+    assert_eq!(split.right, [(2, 3), (6, 7)]);
+    let tile = |nodes| Tile { nodes };
+    let identity_orders = select(&found, &split, &[0, 1], &[0, 1]).expect("identity");
+    assert_eq!(identity_orders, [tile([0, 1, 6, 7]), tile([2, 3, 4, 5])]);
+    let reversed_left = select(&found, &split, &[1, 0], &[0, 1]).expect("reversed");
+    assert_eq!(reversed_left, [tile([0, 1, 2, 3]), tile([4, 5, 6, 7])]);
+}
+
+#[test]
+fn free_tiles_are_always_selected() {
+    let free = clique([20, 21, 22, 23]);
+    let base = adjacency_graph(&union(&[tile_ring(4), free]));
+    let (found, split) = adjacency_parts(&base);
+    let free_tile = Tile {
+        nodes: [20, 21, 22, 23],
+    };
+    let at = found.tiles.binary_search(&free_tile).expect("free tile");
+    assert_eq!(found.spines[at], None);
+    for left in permutations(2) {
+        for right in permutations(2) {
+            let chosen = select(&found, &split, &left, &right).expect("select");
+            assert!(chosen.contains(&free_tile));
+            assert_eq!(chosen.len(), 3);
+        }
+    }
+}
+
+#[test]
+fn a_bad_order_is_rejected() {
+    let base = adjacency_graph(&tile_ring(4));
+    let (found, split) = adjacency_parts(&base);
+    let bad = Err(StructureError::BadOrder);
+    assert_eq!(select(&found, &split, &[0], &[0, 1]), bad);
+    assert_eq!(select(&found, &split, &[0, 1, 1], &[0, 1]), bad);
+    assert_eq!(select(&found, &split, &[0, 0], &[0, 1]), bad);
+    assert_eq!(select(&found, &split, &[0, 2], &[0, 1]), bad);
+    assert_eq!(select(&found, &split, &[0, 1], &[1, 1]), bad);
+    assert_eq!(select(&found, &split, &[0, 1], &[]), bad);
+}
+
+#[test]
+fn zephyr_sides_split_vertical_and_horizontal() {
+    let base = lattice_topology(2, 2);
+    let lattice = Lattice::Zephyr { m: 2, t: 2 };
+    let found = candidates(lattice, &base).expect("candidates");
+    let split = sides(lattice, &base, &found).expect("sides");
+    let spine_edges: BTreeSet<_> = found.spines.iter().flatten().flatten().copied().collect();
+    assert_eq!(split.left.len() + split.right.len(), spine_edges.len());
+    assert!(!split.left.is_empty() && !split.right.is_empty());
+    assert!(split.left.windows(2).all(|w| w[0] < w[1]));
+    assert!(split.right.windows(2).all(|w| w[0] < w[1]));
+    let u_of = |dense: u32| {
+        let id = base.node_ids()[dense as usize];
+        zephyr_coordinates(2, 2, id).expect("node")[0]
+    };
+    assert!(split
+        .left
+        .iter()
+        .all(|&(a, b)| u_of(a) == 0 && u_of(b) == 0));
+    assert!(split
+        .right
+        .iter()
+        .all(|&(a, b)| u_of(a) == 1 && u_of(b) == 1));
+    for [e, f] in found.spines.iter().flatten() {
+        assert_ne!(split.left.contains(e), split.left.contains(f));
+    }
+    let chosen = select(
+        &found,
+        &split,
+        &identity(split.left.len()),
+        &identity(split.right.len()),
+    );
+    assert!(chosen.expect("select").len() <= split.left.len().min(split.right.len()));
 }
