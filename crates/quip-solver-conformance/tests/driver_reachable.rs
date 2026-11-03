@@ -59,3 +59,26 @@ fn the_layered_construction_is_exported() {
     assert_eq!(RESTRICTED_V1.family_id, "vectors/restricted-field");
     assert_eq!(LAYERED.labels, ["salt", "couplings"]);
 }
+
+#[test]
+fn the_family_checker_is_exported() {
+    use quip_solver_conformance::families::{
+        check_case, compare, export_instances, first_diff, parse_vector_cases, CaseMismatch,
+        Component, Expected, ExpectedSalt, FirstDiff, VectorCase,
+    };
+    let _ = (
+        export_instances,
+        parse_vector_cases,
+        first_diff,
+        compare,
+        check_case,
+    );
+    let _: Option<(
+        CaseMismatch,
+        Component,
+        Expected,
+        ExpectedSalt,
+        FirstDiff,
+        VectorCase,
+    )> = None;
+}
