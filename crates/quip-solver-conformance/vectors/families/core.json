@@ -3412,7 +3412,7 @@
       "path": "conformance/family_oracle/__init__.py"
     },
     {
-      "blake3": "d38dbbd0df36100ab7c77eca5a7db1ce12dc99496d25574fc8f07a939c689546",
+      "blake3": "e18a7c719cd8f78823432dcc45c6df0d865d0e30d6e914a613e8ef3f53834121",
       "path": "conformance/family_oracle/__main__.py"
     },
     {
@@ -3446,6 +3446,10 @@
     {
       "blake3": "449fb4dea64961c206253f8afe8110bb316f2f762abbae8f15a1a769e5e7b824",
       "path": "conformance/family_oracle/params.py"
+    },
+    {
+      "blake3": "c8329cce3e8cb7d3d0ee42611e5c0d5655b6a27934548ee131c17434c5aaa036",
+      "path": "conformance/family_oracle/topology_blob.py"
     },
     {
       "blake3": "a1954919b87214bb0a6fda4e1418c99a1f7ca1c8fb8892037a4016bdbe2d0df1",

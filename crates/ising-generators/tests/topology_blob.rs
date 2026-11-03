@@ -418,3 +418,35 @@ fn partial_second_member_is_rejected() {
         assert_eq!(file_err(&file), BlobError::Gzip, "extra bytes: {extra}");
     }
 }
+
+#[test]
+fn python_written_blobs_decode() {
+    // Both files were written by the Python oracle encoder:
+    // `python -m family_oracle topology encode IN.json OUT.bin.gz` (from conformance/).
+    let sparse = decode(include_bytes!("data/python-t-sparse.bin.gz")).expect("sparse");
+    assert_eq!(
+        sparse,
+        explicit(
+            &[4_294_967_295, 0, 7, 3],
+            &[
+                (4_294_967_295, 0),
+                (0, 4_294_967_295),
+                (7, 3),
+                (7, 3),
+                (3, 3),
+            ],
+        )
+    );
+    let removed = decode(include_bytes!("data/python-z22-removed.bin.gz")).expect("z22");
+    assert_eq!(removed, zephyr(2, 2, &[5], &[(1, 2)]));
+    let (nodes, edges) = zephyr_lattice(2, 2).expect("z(2,2)");
+    let topology = removed.topology().expect("expand");
+    assert_eq!(topology.nodes.len(), nodes.len() - 1);
+    assert!(!topology.nodes.contains(&5));
+    assert!(!topology.edges.contains(&(1, 2)));
+    let expected: Vec<(u32, u32)> = edges
+        .into_iter()
+        .filter(|&(a, b)| a != 5 && b != 5 && (a, b) != (1, 2))
+        .collect();
+    assert_eq!(topology.edges, expected);
+}
