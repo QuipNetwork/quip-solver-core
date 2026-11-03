@@ -46,7 +46,7 @@ Check every operation. An overflow returns code 13, `BoundsExceeded`.
 5. For each layer `k`, add each base edge `(a, b)` as `(k * n + min(a, b), k * n + max(a, b))`. For `k` in `0..L-1`, add `(k * n + pos, (k + 1) * n + pos)` for each `pos`. Sort the edges in ascending order.
 6. For each edge in sorted order, set `J = (uniform(couplings, 3) - 1) * 1000`.
 7. Set `offset_milli = 250 * L`.
-8. Write the metadata region, 14 bytes. The bytes are `01 00`, `01 00`, `06 00 00 00`, then `L` as `u16` LE, then `n` as `u32` LE.
+8. Write the metadata region, 14 bytes. The bytes are the section count 1 as `u16` LE (`01 00`), the kind 1 as `u16` LE (`01 00`), the payload length 6 as `u32` LE (`06 00 00 00`), then `L` as `u16` LE, then `n` as `u32` LE.
 
 Topology admission rejects a base topology that repeats an edge.
 Instance generation then applies the contract limits. A coefficient with `|h| > 2000` returns code 13.
