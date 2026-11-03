@@ -362,3 +362,59 @@ fn invalid_body_does_not_expand() {
         Err(BlobError::NotLattice)
     );
 }
+
+#[test]
+fn z11_lattice_matches_the_spec_example() {
+    // The same list is printed in docs/topology-format.md.
+    let (nodes, edges) = zephyr_lattice(1, 1).expect("z(1,1)");
+    assert_eq!(nodes, (0..12).collect::<Vec<u32>>());
+    let expected = [
+        (0, 1),
+        (0, 6),
+        (0, 8),
+        (1, 8),
+        (1, 10),
+        (2, 3),
+        (2, 6),
+        (2, 7),
+        (2, 8),
+        (2, 9),
+        (3, 8),
+        (3, 9),
+        (3, 10),
+        (3, 11),
+        (4, 5),
+        (4, 7),
+        (4, 9),
+        (5, 9),
+        (5, 11),
+        (6, 7),
+        (8, 9),
+        (10, 11),
+    ];
+    assert_eq!(edges, expected);
+}
+
+#[test]
+fn truncated_deflate_with_a_full_tail_is_rejected() {
+    let good = encode(&explicit(&[1, 2, 3], &[(1, 2), (2, 3)])).expect("encode");
+    let n = good.len();
+    // Keep the header, drop the last deflate byte, keep the 8-byte tail.
+    let mut cut = good[..n - 9].to_vec();
+    cut.extend_from_slice(&good[n - 8..]);
+    assert_eq!(file_err(&cut), BlobError::Gzip);
+    // Keep only part of the deflate stream with the tail.
+    let mut half = good[..12].to_vec();
+    half.extend_from_slice(&good[n - 8..]);
+    assert_eq!(file_err(&half), BlobError::Gzip);
+}
+
+#[test]
+fn partial_second_member_is_rejected() {
+    let good = encode(&explicit(&[1, 2], &[(1, 2)])).expect("encode");
+    for extra in 1..=7 {
+        let mut file = good.clone();
+        file.extend_from_slice(&good[..extra]);
+        assert_eq!(file_err(&file), BlobError::Gzip, "extra bytes: {extra}");
+    }
+}

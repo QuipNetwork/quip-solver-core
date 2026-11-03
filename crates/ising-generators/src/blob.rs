@@ -26,6 +26,8 @@ const KIND_ZEPHYR: u8 = 1;
 const GZIP_HEADER: [u8; 10] = [0x1f, 0x8b, 0x08, 0x00, 0, 0, 0, 0, 0x02, 0xff];
 const GZIP_TRAILER: usize = 8;
 const CHUNK: usize = 32 * 1024;
+/// Largest up-front reservation for a decoded sequence. Vectors grow past it.
+const INITIAL_CAPACITY: usize = 1 << 16;
 
 /// A decoded topology in native ids, in stored order.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -387,14 +389,14 @@ pub fn encode_payload(body: &Body) -> Result<Vec<u8>, BlobError> {
 
 fn decode_explicit(reader: &mut Reader<'_>) -> Result<Body, BlobError> {
     let node_count = reader.count(1)?;
-    let mut nodes = Vec::with_capacity(node_count);
+    let mut nodes = Vec::with_capacity(node_count.min(INITIAL_CAPACITY));
     let mut previous = 0_i64;
     for _ in 0..node_count {
         previous = reader.id_delta(previous)?;
         nodes.push(to_id(previous)?);
     }
     let edge_count = reader.count(2)?;
-    let mut edges = Vec::with_capacity(edge_count);
+    let mut edges = Vec::with_capacity(edge_count.min(INITIAL_CAPACITY));
     let mut previous_u = 0_i64;
     for _ in 0..edge_count {
         let u = reader.id_delta(previous_u)?;
@@ -412,7 +414,7 @@ fn decode_zephyr(reader: &mut Reader<'_>) -> Result<Body, BlobError> {
         return Err(BlobError::Range);
     }
     let node_count = reader.count(1)?;
-    let mut removed_nodes = Vec::with_capacity(node_count);
+    let mut removed_nodes = Vec::with_capacity(node_count.min(INITIAL_CAPACITY));
     let mut previous = 0_u64;
     for index in 0..node_count {
         let delta = reader.varint()?;
@@ -423,7 +425,7 @@ fn decode_zephyr(reader: &mut Reader<'_>) -> Result<Body, BlobError> {
         removed_nodes.push(u32::try_from(previous).map_err(|_| BlobError::Range)?);
     }
     let edge_count = reader.count(2)?;
-    let mut removed_edges = Vec::with_capacity(edge_count);
+    let mut removed_edges = Vec::with_capacity(edge_count.min(INITIAL_CAPACITY));
     let mut previous_a = 0_u64;
     for _ in 0..edge_count {
         let a = previous_a
