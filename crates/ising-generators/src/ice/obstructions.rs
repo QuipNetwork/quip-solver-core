@@ -29,7 +29,9 @@ pub struct Obstructions {
 /// order, assign each tile a sign. A link is frustrated when the potentials
 /// disagree with its relation.
 ///
-/// A malformed input gives Overflow before any membership check.
+/// A malformed input gives Overflow before any membership check. The function
+/// expects the tiles of a valid instance. It does not check for a repeated
+/// position inside a tile or for duplicate tiles.
 ///
 /// # Errors
 ///

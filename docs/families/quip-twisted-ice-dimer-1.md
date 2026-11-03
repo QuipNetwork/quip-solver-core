@@ -92,7 +92,7 @@ The function `ising_generators::ice::gauge_obstructions` tests whether the local
 The result is information only. It never decides acceptance, and no check in this contract uses it.
 A node that two tiles share links them. The relation of the link is the product of the two gauges at that node. A breadth-first walk gives each tile a potential of `+1` or `-1`. The walk starts at each unvisited tile in ascending order. It visits the neighbours of a tile in ascending order of tile index and then of relation. A link counts as frustrated when the product of the potentials of its two tiles differs from its relation.
 The result holds the number of components, the cycle rank (links minus tiles plus components), the number of frustrated links, and a flag that is true when every link agrees with the potentials.
-A malformed input gives an error. A node in more than two tiles gives the error with the lowest such position.
+The function expects the tiles of a valid instance. It does not check for a repeated position inside a tile or for duplicate tiles. A mismatched length, a position outside the node range, or a gauge that is not `1` or `-1` gives an error. A node in more than two tiles gives the error with the lowest such position.
 
 ### Tile structure
 
@@ -196,6 +196,6 @@ The parameters do not change the sizes. If `max_degree(T)` is more than 32, the 
 
 `none`
 
-No step retries. A salt whose greedy pair walk ends with fewer than `pairs` pairs gives code 14 and the miner skips it.
+No step retries. The pair walk is a single bounded attempt, and its exhaustion is the retry exhaustion of FAM-26. A salt whose greedy pair walk ends with fewer than `pairs` pairs gives code 14, and the miner skips it.
 Every other salt gives an instance when the topology passes admission.
 A topology that fails admission gets code 12 or code 13, and no salt gives a draw.

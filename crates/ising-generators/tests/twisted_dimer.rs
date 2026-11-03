@@ -18,7 +18,7 @@ use ising_generators::ice::{
     candidates, gauge_obstructions, local_gauges, select, sides, zephyr_lattice, Lattice,
     Obstructions, StructureError, PAIR_MILLI, RECIPES, STRONG_MILLI, TWISTED_DIMER_V1,
 };
-use ising_generators::instance::{Instance, InstanceParts};
+use ising_generators::instance::{Instance, InstanceLimits, InstanceParts};
 use ising_generators::Code;
 
 #[expect(dead_code, reason = "this test uses only the live topology loader")]
@@ -378,6 +378,17 @@ fn a_shortfall_skips_the_salt() {
 }
 
 #[test]
+fn a_boundary_build_reaches_a_perfect_pair_count() {
+    // z(1,2) has 24 nodes, so 12 pairs is the largest admitted count.
+    let topology = lattice_topology(1, 2);
+    let bytes = params(1, 2, 62, 12);
+    let built = (0..64u8).find_map(|i| try_build(&bytes, &topology, nonce_of(i)).ok());
+    let instance = built.expect("some salt of the first 64 builds");
+    assert_eq!(pairs_of(&instance).len(), 12);
+    assert!(check(&bytes, &instance));
+}
+
+#[test]
 fn each_tile_edge_uses_its_own_tile_gauges() {
     let topology = lattice_topology(2, 2);
     let bytes = params(2, 2, 62, 8);
@@ -469,6 +480,33 @@ fn valid_z22(nonce: u8) -> (Vec<u8>, Instance) {
     (bytes, instance)
 }
 
+/// A pair section listing `pairs`, which must be ascending.
+fn pair_payload(pairs: &[(u32, u32)]) -> Vec<u8> {
+    let count = u32::try_from(pairs.len()).expect("fits");
+    let mut payload = count.to_le_bytes().to_vec();
+    for (a, b) in pairs {
+        payload.extend_from_slice(&a.to_le_bytes());
+        payload.extend_from_slice(&b.to_le_bytes());
+    }
+    payload
+}
+
+/// `J` of an instance whose generated pairs are all weak again, so a test can
+/// list a new set of pairs without leaving an unlisted edge at the pair value.
+fn j_without_pairs(instance: &Instance, weak: i32) -> Vec<i32> {
+    let mut j = instance.j().to_vec();
+    for pair in pairs_of(instance) {
+        j[edge_position(instance, pair)] = weak;
+    }
+    j
+}
+
+/// An instance with the given couplings that lists exactly `pairs`.
+fn with_listed_pairs(instance: &Instance, j: Vec<i32>, pairs: &[(u32, u32)]) -> Instance {
+    let [tiles, gauges, _] = split(instance);
+    rebuilt(instance, j, join(&[tiles, gauges, pair_payload(pairs)]))
+}
+
 #[test]
 fn check_metadata_rejects_each_rule() {
     let (bytes, instance) = valid_z22(10);
@@ -476,7 +514,7 @@ fn check_metadata_rejects_each_rule() {
     let tile_edges = tile_edge_set(&instance);
     let pairs = pairs_of(&instance);
 
-    // A tile edge with the wrong sign.
+    // Breaks one rule: a tile edge carries the wrong sign.
     let tile_edge = *tile_edges.iter().next().expect("a tile edge");
     let mut j = instance.j().to_vec();
     j[edge_position(&instance, tile_edge)] *= -1;
@@ -485,7 +523,7 @@ fn check_metadata_rejects_each_rule() {
         "tile J"
     );
 
-    // A pair with a positive coupling.
+    // Breaks one rule: a listed pair has a positive coupling.
     let mut j = instance.j().to_vec();
     j[edge_position(&instance, pairs[0])] = -PAIR_MILLI;
     assert!(
@@ -493,7 +531,7 @@ fn check_metadata_rejects_each_rule() {
         "pair J"
     );
 
-    // A weak edge with the wrong magnitude.
+    // Breaks one rule: a weak edge has the wrong magnitude.
     let weak_at = instance
         .edges()
         .iter()
@@ -506,47 +544,58 @@ fn check_metadata_rejects_each_rule() {
         "weak J"
     );
 
-    // A pair that is a tile edge: one pair, the tile edge listed as the pair.
-    let topology = lattice_topology(2, 2);
+    // Breaks one rule: a pair is a tile edge. The base lists one pair and
+    // every other generated pair is weak again. The tile edge has J = -1000,
+    // so the coupling rule holds and only the tile-edge rule can fail.
     let one_bytes = params(2, 2, 62, 1);
-    let one = build(&one_bytes, &topology, nonce_of(10));
-    let [tiles, gauges, _] = split(&one);
-    let mut on_tile = 1u32.to_le_bytes().to_vec();
-    on_tile.extend_from_slice(&tile_edge.0.to_le_bytes());
-    on_tile.extend_from_slice(&tile_edge.1.to_le_bytes());
-    let bad = rebuilt(&one, one.j().to_vec(), join(&[tiles, gauges, on_tile]));
-    assert!(!check(&one_bytes, &bad), "pair on a tile edge");
+    let weak_base = j_without_pairs(&instance, 62);
+    let mut j = weak_base.clone();
+    j[edge_position(&instance, pairs[0])] = PAIR_MILLI;
+    let control = with_listed_pairs(&instance, j, &[pairs[0]]);
+    assert!(check(&one_bytes, &control), "one-pair control");
+    let strong_tile_edge = tile_edges
+        .iter()
+        .copied()
+        .find(|&edge| instance.j()[edge_position(&instance, edge)] == PAIR_MILLI)
+        .expect("a tile edge with J = -1000 in this instance");
+    let mut j = weak_base.clone();
+    j[edge_position(&instance, strong_tile_edge)] = PAIR_MILLI;
+    let on_tile = with_listed_pairs(&instance, j, &[strong_tile_edge]);
+    assert!(!check(&one_bytes, &on_tile), "pair on a tile edge");
 
-    // Two pairs that share a node, both with the pair coupling.
-    let touching = instance
+    // Breaks one rule: two pairs share a node. The control lists pairs[0]
+    // and a node-disjoint edge, both at -1000, with every other generated
+    // pair weak. The violation swaps the second pair for an edge that touches
+    // pairs[0].
+    let nodes_of_first = [pairs[0].0, pairs[0].1];
+    let mut free = instance
         .edges()
         .iter()
         .copied()
-        .find(|&(a, b)| {
-            !tile_edges.contains(&(a, b))
-                && !pairs.contains(&(a, b))
-                && [a, b].iter().any(|n| [pairs[0].0, pairs[0].1].contains(n))
-        })
+        .filter(|edge| !tile_edges.contains(edge) && *edge != pairs[0] && edge != &pairs[1]);
+    let disjoint = free
+        .clone()
+        .find(|&(a, b)| ![a, b].iter().any(|n| nodes_of_first.contains(n)))
+        .expect("an edge disjoint from the first pair");
+    let touching = free
+        .find(|&(a, b)| [a, b].iter().any(|n| nodes_of_first.contains(n)))
         .expect("an edge touching the first pair");
-    let mut j = instance.j().to_vec();
-    j[edge_position(&instance, pairs[1])] = 62;
-    j[edge_position(&instance, touching)] = PAIR_MILLI;
-    let mut two = vec![pairs[0], touching];
-    two.sort_unstable();
-    let mut payload = 2u32.to_le_bytes().to_vec();
-    for (a, b) in &two {
-        payload.extend_from_slice(&a.to_le_bytes());
-        payload.extend_from_slice(&b.to_le_bytes());
-    }
     let two_bytes = params(2, 2, 62, 2);
-    let [tiles, gauges, _] = split(&instance);
-    let overlap = rebuilt(&instance, j, join(&[tiles, gauges, payload]));
-    assert!(!check(&two_bytes, &overlap), "overlapping pairs");
+    let listed = |second: (u32, u32)| {
+        let mut j = weak_base.clone();
+        j[edge_position(&instance, pairs[0])] = PAIR_MILLI;
+        j[edge_position(&instance, second)] = PAIR_MILLI;
+        let mut both = vec![pairs[0], second];
+        both.sort_unstable();
+        with_listed_pairs(&instance, j, &both)
+    };
+    assert!(check(&two_bytes, &listed(disjoint)), "two-pair control");
+    assert!(!check(&two_bytes, &listed(touching)), "overlapping pairs");
 
-    // A pair count that differs from the parameter.
+    // Breaks one rule: the pair count differs from the parameter.
     assert!(!check(&params(2, 2, 62, 9), &instance), "pair count");
 
-    // A gauge byte above one.
+    // Breaks one rule: a gauge byte is above one.
     let [tiles, mut gauges, pair_payload] = split(&instance);
     gauges[4] = 2;
     let bad = rebuilt(
@@ -556,7 +605,7 @@ fn check_metadata_rejects_each_rule() {
     );
     assert!(!check(&bytes, &bad), "gauge byte 2");
 
-    // One tile fewer in the gauge section.
+    // Breaks one rule: the gauge section has one tile fewer.
     let [tiles, mut gauges, pair_payload] = split(&instance);
     let count = u32::from_le_bytes(gauges[..4].try_into().expect("four bytes")) - 1;
     gauges.truncate(gauges.len() - 4);
@@ -568,7 +617,7 @@ fn check_metadata_rejects_each_rule() {
     );
     assert!(!check(&bytes, &bad), "gauge count");
 
-    // A nonzero field.
+    // Breaks one rule: a field is nonzero.
     let mut h = instance.h().to_vec();
     h[0] = 1;
     let bad = rebuilt_with(&instance, h, instance.j().to_vec(), metadata);
@@ -576,9 +625,29 @@ fn check_metadata_rejects_each_rule() {
 }
 
 #[test]
+fn check_metadata_rejects_a_nonzero_offset() {
+    let (bytes, instance) = valid_z22(12);
+    let parts = InstanceParts {
+        descriptor_digest: *instance.descriptor_digest(),
+        topology_order_digest: *instance.topology_order_digest(),
+        nonce: instance.nonce().copied(),
+        node_ids: instance.node_ids().to_vec(),
+        edges: instance.edges().to_vec(),
+        h: instance.h().to_vec(),
+        j: instance.j().to_vec(),
+        offset_milli: 1,
+        metadata: instance.metadata().to_vec(),
+    };
+    let limits = InstanceLimits::new(131_072, 2_097_152, 1_000, 1, 8_388_608).expect("limits");
+    let shifted = Instance::new(parts, &limits, TWISTED_DIMER_V1.metadata_kinds, None)
+        .expect("well formed under a looser offset limit");
+    assert!(!check(&bytes, &shifted));
+}
+
+#[test]
 fn oversized_counts_are_rejected_without_allocation() {
     let (bytes, instance) = valid_z22(11);
-    for which in [1usize, 2] {
+    for which in [0usize, 1, 2] {
         let mut payloads = split(&instance);
         payloads[which][..4].copy_from_slice(&u32::MAX.to_le_bytes());
         let bad = rebuilt(&instance, instance.j().to_vec(), join(&payloads));

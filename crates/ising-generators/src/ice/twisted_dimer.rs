@@ -220,19 +220,23 @@ type ChosenPair = (usize, (u32, u32));
 pub type TileGauges = (Vec<[u32; 4]>, Vec<[i8; 4]>);
 
 /// The six edges of a tile with their strong couplings under the tile's own
-/// gauge: `STRONG_MILLI * g[a] * g[b]`.
-fn tile_couplings(nodes: [u32; 4], gauge: [i8; 4]) -> [((u32, u32), i32); 6] {
+/// gauge: `STRONG_MILLI * g[a] * g[b]`. `None` when the arithmetic overflows.
+fn tile_couplings(nodes: [u32; 4], gauge: [i8; 4]) -> Option<[((u32, u32), i32); 6]> {
     let [a, b, c, d] = nodes;
     let [ga, gb, gc, gd] = gauge;
-    let coupling = |x: i8, y: i8| STRONG_MILLI * i32::from(x) * i32::from(y);
-    [
-        ((a, b), coupling(ga, gb)),
-        ((a, c), coupling(ga, gc)),
-        ((a, d), coupling(ga, gd)),
-        ((b, c), coupling(gb, gc)),
-        ((b, d), coupling(gb, gd)),
-        ((c, d), coupling(gc, gd)),
-    ]
+    let coupling = |x: i8, y: i8| {
+        STRONG_MILLI
+            .checked_mul(i32::from(x))?
+            .checked_mul(i32::from(y))
+    };
+    Some([
+        ((a, b), coupling(ga, gb)?),
+        ((a, c), coupling(ga, gc)?),
+        ((a, d), coupling(ga, gd)?),
+        ((b, c), coupling(gb, gc)?),
+        ((b, d), coupling(gb, gd)?),
+        ((c, d), coupling(gc, gd)?),
+    ])
 }
 
 fn generate(
@@ -265,7 +269,7 @@ fn generate(
     let edges = sorted_edges(topology);
     let mut strong: Vec<Option<i32>> = vec![None; edges.len()];
     for (tile, gauge) in tiles.iter().zip(&gauges) {
-        for (pair, coupling) in tile_couplings(tile.nodes, *gauge) {
+        for (pair, coupling) in tile_couplings(tile.nodes, *gauge).ok_or(Code::BoundsExceeded)? {
             let at = edges.binary_search(&pair).map_err(|_| defect)?;
             *strong.get_mut(at).ok_or(defect)? = Some(coupling);
         }
@@ -455,7 +459,7 @@ fn check_instance(params: &Params<'_>, instance: &Instance) -> Option<()> {
 
     let mut is_tile = mark_tiles(&tiles, edges, n)?;
     for (tile, gauge) in tiles.iter().zip(&gauges) {
-        for (pair, coupling) in tile_couplings(*tile, *gauge) {
+        for (pair, coupling) in tile_couplings(*tile, *gauge)? {
             let at = edges.binary_search(&pair).ok()?;
             if *js.get(at)? != coupling {
                 return None;
