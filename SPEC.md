@@ -640,6 +640,7 @@ A solver is conformant when all of these hold:
 - `quip-solver-drive <solver-binary> unix://<socket>` reports a conformant
   session.
 - `quip-solver-drive --solve <solver-binary>` reports no failed case.
+- A solver that lists `generated_families` passes the family gate, `quip-solver-drive --family <solver-binary> unix://<socket>`, as [Family conformance](docs/family-conformance.md) defines it.
 - The adaptive parameters of the solver match the `golden_adapt.json` cases.
 
 The driver spawns any executable. The driver speaks the proto over the
@@ -677,6 +678,7 @@ A Rust solver repository may use this convenience form:
 
 ```rust
 use quip_solver_conformance::driver::drive_miner;
+use quip_solver_conformance::families::drive_miner_family;
 use quip_solver_conformance::solve::drive_solve;
 
 #[tokio::test]
@@ -684,6 +686,8 @@ async fn solver_is_conformant() {
     let report = drive_miner(bin, "unix:///tmp/s.sock").await;
     assert!(report.is_conformant());
     let report = drive_solve(bin).await;
+    assert!(report.is_conformant(), "{}", report.summary());
+    let report = drive_miner_family(bin, &[], "unix:///tmp/f.sock").await;
     assert!(report.is_conformant(), "{}", report.summary());
 }
 ```
@@ -790,7 +794,7 @@ These pieces exist now:
 - The proto.
 - The `quip-solver-core` wheel: protocol primitives, scoring, wire encoding, and
   exit codes.
-- `quip-solver-drive` as the conformance gate for a solver in any language, in session mode and with `--solve`.
+- `quip-solver-drive` as the conformance gate for a solver in any language, in session mode, with `--solve`, and with `--family`.
 - C and C++ through a C binary interface with a registered callback. `quip_solver_run`
   carries the session loop and calls the sampler callback the solver
   registers. The artifact is `libquip_solver_c` plus `quip_solver.h`, attached

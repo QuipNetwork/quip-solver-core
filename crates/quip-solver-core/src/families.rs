@@ -46,8 +46,8 @@ impl FamilyList {
 /// The `solver_id` and family lists a binary advertises.
 ///
 /// List a revision in `generated` only after it passes SC-7 conformance on
-/// this binary (FAM-57), and never an archived revision (FAM-59). The SDK
-/// cannot check either rule. A revision missing from `accepted` is served at
+/// this binary (FAM-57) as `docs/family-conformance.md` defines it, and never
+/// an archived revision (FAM-59). The SDK cannot check either rule. A revision missing from `accepted` is served at
 /// the generic tier: the plain model is solved and the coordinator decides
 /// acceptance (FAM-55, FAM-69).
 ///

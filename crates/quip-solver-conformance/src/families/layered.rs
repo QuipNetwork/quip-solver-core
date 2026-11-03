@@ -209,3 +209,19 @@ pub const RESTRICTED_V1: Contract = Contract {
     family_id: "vectors/restricted-field",
     ..UNIFORM_V1
 };
+
+/// `P_SPEC`: two layers, field -1500.
+pub const P_SPEC: [u8; 19] = [
+    0x01, 1, 0, 2, 0, 0, 0, 2, 0, 2, 0, 4, 0, 0, 0, 0x24, 0xfa, 0xff, 0xff,
+];
+
+/// Two layers, field 0. Admitted by every contract, and by no restricted claim.
+pub const P_L2_F0: [u8; 19] = [0x01, 1, 0, 2, 0, 0, 0, 2, 0, 2, 0, 4, 0, 0, 0, 0, 0, 0, 0];
+
+/// Three layers, field 0. The degree bound is 5 on the sparse test topology.
+pub const P_L3_F0: [u8; 19] = [0x01, 1, 0, 2, 0, 0, 0, 3, 0, 2, 0, 4, 0, 0, 0, 0, 0, 0, 0];
+
+/// Two layers, field 5000. Decodes, and is out of bounds (code 9).
+pub const P_F5000: [u8; 19] = [
+    0x01, 1, 0, 2, 0, 0, 0, 2, 0, 2, 0, 4, 0, 0, 0, 0x88, 0x13, 0, 0,
+];

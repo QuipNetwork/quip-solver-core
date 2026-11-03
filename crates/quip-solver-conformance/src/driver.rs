@@ -28,12 +28,14 @@ use tokio_stream::wrappers::{ReceiverStream, UnixListenerStream};
 use tonic::transport::Server;
 use tonic::{Request, Response, Status, Streaming};
 
+use crate::families::{run_family_script, FamilyCase};
+
 /// How long one phase waits for the reply its `CoordMsg` must cause.
 ///
 /// A phase that is never satisfied records itself in
 /// [`DriverReport::timed_out_phases`] and the walk continues, so one
 /// unimplemented feature surfaces as one named failure rather than a hang.
-const PHASE_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const PHASE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How long the harness waits for the miner process to exit.
 ///
@@ -526,7 +528,7 @@ impl DriverReport {
 /// The problem the driver sent with a job, in the miner's dense index space —
 /// what re-scoring a returned solution needs.
 #[derive(Debug, Clone)]
-struct ScoreSpec {
+pub(crate) struct ScoreSpec {
     h: Vec<f64>,
     j: Vec<f64>,
     edges: Vec<(usize, usize)>,
@@ -538,33 +540,40 @@ struct ScoreSpec {
     clippy::struct_excessive_bools,
     reason = "mirrors DriverReport's independent observation axes"
 )]
-struct SessionOutcome {
+pub(crate) struct SessionOutcome {
     lease: Option<LeaseOutcome>,
     lease_salts: HashSet<Vec<u8>>,
     lease_refund_messages: u32,
     handshake_ok: bool,
-    hello: Option<Hello>,
-    ready_received: bool,
-    job_request_credits: Vec<u32>,
-    jobs_dispatched: usize,
+    pub(crate) hello: Option<Hello>,
+    pub(crate) ready_received: bool,
+    pub(crate) job_request_credits: Vec<u32>,
+    pub(crate) jobs_dispatched: usize,
     results: Vec<ObservedResult>,
     rejects: Vec<ObservedReject>,
-    statuses: Vec<MinerStatus>,
+    pub(crate) statuses: Vec<MinerStatus>,
     cancel_acked: bool,
     ping_acked: bool,
     capabilities_received: Option<Capabilities>,
     cancelled_watermark: u64,
     fatal: Option<(i32, String)>,
-    terminal: Terminal,
+    pub(crate) terminal: Terminal,
     timed_out_phases: Vec<String>,
     /// Problems the script dispatched, keyed by job id, for re-scoring.
     expected: HashMap<Vec<u8>, ScoreSpec>,
+    /// Every inbound message after the `Hello`, in arrival order.
+    pub(crate) messages: Vec<miner_msg::Msg>,
+    /// The cases the family script graded, in run order.
+    pub(crate) family_cases: Vec<FamilyCase>,
+    /// True when the miner opened a session. Set by [`run_miner`], so it
+    /// holds even when the script's outcome never arrived.
+    pub(crate) connected: bool,
 }
 
 impl SessionOutcome {
     /// Credits returned after the initial grant. Mirrors
     /// [`DriverReport::credits_refunded`]; the barriers need it mid-walk.
-    fn credits_refunded(&self) -> u64 {
+    pub(crate) fn credits_refunded(&self) -> u64 {
         self.job_request_credits
             .iter()
             .skip(1)
@@ -574,14 +583,14 @@ impl SessionOutcome {
 
     /// True once the miner's stream has ended, however it ended. No further
     /// barrier can be satisfied after this, so the script stops sending.
-    fn stream_ended(&self) -> bool {
+    pub(crate) fn stream_ended(&self) -> bool {
         self.terminal != Terminal::Open
     }
 }
 
 /// Which scripted session `MockCoordinator` plays against a connecting miner.
 #[derive(Debug, Clone, Copy)]
-enum ScriptKind {
+pub(crate) enum ScriptKind {
     /// The full conformance walk: handshake, capabilities, ping, jobs,
     /// rejects, cancellation, shutdown.
     Full,
@@ -601,11 +610,14 @@ enum ScriptKind {
     /// coordinator that refused the session token (expected: exit
     /// `TokenRejected`).
     CloseBeforeWelcome,
+    /// The family gate: family leases graded against reference contracts.
+    Family,
 }
 
 struct MockCoordinator {
     outcome_tx: Mutex<Option<oneshot::Sender<SessionOutcome>>>,
     script: ScriptKind,
+    connected: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[tonic::async_trait]
@@ -616,6 +628,8 @@ impl MinerService for MockCoordinator {
         &self,
         request: Request<Streaming<MinerMsg>>,
     ) -> Result<Response<Self::SessionStream>, Status> {
+        self.connected
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         let mut inbound = request.into_inner();
         let (tx, rx) = mpsc::channel::<Result<CoordMsg, Status>>(64);
         let outcome_tx = self.outcome_tx.lock().await.take();
@@ -634,6 +648,7 @@ impl MinerService for MockCoordinator {
                 ScriptKind::CloseBeforeWelcome => {
                     run_script_close(&mut inbound, tx, /* send_welcome */ false).await
                 }
+                ScriptKind::Family => run_family_script(&mut inbound, &tx).await,
             };
             if let Some(otx) = outcome_tx {
                 let _ = otx.send(outcome);
@@ -863,7 +878,7 @@ fn sparse_topology() -> Topology {
 
 /// The `Configure` the script sends. `backend_toml` is populated: an empty
 /// string never proves the field is read at all.
-fn configure() -> Configure {
+pub(crate) fn configure() -> Configure {
     Configure {
         queue_depth: 3,
         idle_timeout_s: 300,
@@ -904,7 +919,10 @@ fn job_kind(job_id: &[u8], deadline_ms: u64, kind: JobKind, ising: IsingProblem)
 /// Read the first inbound message, which must be a valid `Hello`. Returns
 /// `false` (without touching `outcome.handshake_ok`) if the stream ended or
 /// the first message was something else.
-async fn read_hello(inbound: &mut Streaming<MinerMsg>, outcome: &mut SessionOutcome) -> bool {
+pub(crate) async fn read_hello(
+    inbound: &mut Streaming<MinerMsg>,
+    outcome: &mut SessionOutcome,
+) -> bool {
     match tokio::time::timeout(PHASE_TIMEOUT, inbound.message()).await {
         Ok(Ok(Some(MinerMsg {
             msg: Some(miner_msg::Msg::Hello(h)),
@@ -938,6 +956,7 @@ async fn read_hello(inbound: &mut Streaming<MinerMsg>, outcome: &mut SessionOutc
 
 /// Fold one inbound message into the running outcome.
 fn fold(outcome: &mut SessionOutcome, m: miner_msg::Msg) {
+    outcome.messages.push(m.clone());
     match m {
         miner_msg::Msg::Ready(_) => outcome.ready_received = true,
         miner_msg::Msg::JobRequest(jr) => {
@@ -1109,7 +1128,7 @@ async fn run_lease(
 ///
 /// This is the barrier that gives the walk its causality: nothing is sent for
 /// the next phase until the reply this phase requires has actually arrived.
-async fn read_until<F>(
+pub(crate) async fn read_until<F>(
     inbound: &mut Streaming<MinerMsg>,
     outcome: &mut SessionOutcome,
     phase: &str,
@@ -1142,20 +1161,20 @@ where
 
 /// Read to the end of the miner's stream, folding everything that arrives.
 /// Used after `Shutdown`, where the terminal condition is itself the assertion.
-async fn drain_to_end(inbound: &mut Streaming<MinerMsg>, outcome: &mut SessionOutcome) {
+pub(crate) async fn drain_to_end(inbound: &mut Streaming<MinerMsg>, outcome: &mut SessionOutcome) {
     // Never satisfied: only the stream ending or the budget expiring stops it.
     let _ = read_until(inbound, outcome, "drain", |_| false).await;
 }
 
 /// Send one `CoordMsg`. Returns `false` when the miner is already gone, which
 /// tells the script to stop rather than push into a closed channel.
-async fn send(tx: &mpsc::Sender<Result<CoordMsg, Status>>, msg: coord_msg::Msg) -> bool {
+pub(crate) async fn send(tx: &mpsc::Sender<Result<CoordMsg, Status>>, msg: coord_msg::Msg) -> bool {
     tx.send(Ok(coord(msg))).await.is_ok()
 }
 
 /// Dispatch a job, recording both the credit obligation it creates and the
 /// problem needed to re-score whatever comes back.
-async fn dispatch(
+pub(crate) async fn dispatch(
     tx: &mpsc::Sender<Result<CoordMsg, Status>>,
     outcome: &mut SessionOutcome,
     j: Job,
@@ -1568,12 +1587,19 @@ async fn finish_stderr_capture(
     stderr
 }
 
-/// Bind a UDS mock coordinator, spawn `bin_path` as a miner client against it,
-/// run the given scripted session, and report what was observed.
+/// Bind the socket, serve `MockCoordinator` with `script`, spawn
+/// `bin_path --quip-coordinator <socket> --miner-id mock-0 <extra_args...>`,
+/// and wait up to `child_timeout`. Returns the outcome, the exit code (-1 on timeout), and stderr.
 ///
 /// `socket` is a `unix://<path>` URI; the same value is passed to the miner via
 /// `--quip-coordinator`.
-async fn drive_miner_with_script(bin_path: &str, socket: &str, script: ScriptKind) -> DriverReport {
+pub(crate) async fn run_miner(
+    bin_path: &str,
+    extra_args: &[&str],
+    socket: &str,
+    script: ScriptKind,
+    child_timeout: Duration,
+) -> (SessionOutcome, i32, String) {
     let path = socket.strip_prefix("unix://").unwrap_or(socket).to_string();
     let _ = std::fs::remove_file(&path);
     #[expect(
@@ -1584,9 +1610,11 @@ async fn drive_miner_with_script(bin_path: &str, socket: &str, script: ScriptKin
     let incoming = UnixListenerStream::new(uds);
 
     let (otx, orx) = oneshot::channel::<SessionOutcome>();
+    let connected = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let svc = MockCoordinator {
         outcome_tx: Mutex::new(Some(otx)),
         script,
+        connected: std::sync::Arc::clone(&connected),
     };
     let server = tokio::spawn(async move {
         Server::builder()
@@ -1604,6 +1632,7 @@ async fn drive_miner_with_script(bin_path: &str, socket: &str, script: ScriptKin
         .arg(socket)
         .arg("--miner-id")
         .arg("mock-0")
+        .args(extra_args)
         .env("QUIP_SESSION_TOKEN", "test-token")
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -1630,9 +1659,10 @@ async fn drive_miner_with_script(bin_path: &str, socket: &str, script: ScriptKin
 
     // Bound the wait so a hung miner can't hang the test suite; on timeout,
     // kill the child and report a sentinel exit code so callers fail loudly
-    // instead of blocking forever. The budget covers a walk whose every phase
-    // times out, so a partial failure still produces a full phase list.
-    let exit_code = if let Ok(status) = tokio::time::timeout(CHILD_TIMEOUT, child.wait()).await {
+    // instead of blocking forever. The caller's budget covers a walk whose
+    // every phase times out, so a partial failure still produces a full phase
+    // list.
+    let exit_code = if let Ok(status) = tokio::time::timeout(child_timeout, child.wait()).await {
         #[expect(
             clippy::expect_used,
             reason = "test harness panics if wait fails after spawn succeeded"
@@ -1645,14 +1675,26 @@ async fn drive_miner_with_script(bin_path: &str, socket: &str, script: ScriptKin
     let stderr = finish_stderr_capture(stderr_reader, captured_stderr).await;
     // The session handler sends the outcome as the miner closes its stream on
     // exit; the timeout guards a miner that dies before ever connecting.
-    let outcome = tokio::time::timeout(OUTCOME_TIMEOUT, orx)
+    let mut outcome = tokio::time::timeout(OUTCOME_TIMEOUT, orx)
         .await
         .ok()
         .and_then(Result::ok)
         .unwrap_or_default();
+    outcome.connected = connected.load(std::sync::atomic::Ordering::SeqCst);
     server.abort();
     let _ = std::fs::remove_file(&path);
 
+    (outcome, exit_code, stderr)
+}
+
+/// Bind a UDS mock coordinator, spawn `bin_path` as a miner client against it,
+/// run the given scripted session, and report what was observed.
+///
+/// `socket` is a `unix://<path>` URI; the same value is passed to the miner via
+/// `--quip-coordinator`.
+async fn drive_miner_with_script(bin_path: &str, socket: &str, script: ScriptKind) -> DriverReport {
+    let (outcome, exit_code, stderr) =
+        run_miner(bin_path, &[], socket, script, CHILD_TIMEOUT).await;
     DriverReport {
         lease: outcome.lease,
         handshake_ok: outcome.handshake_ok,

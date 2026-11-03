@@ -11,7 +11,49 @@ use ising_generators::instance::Instance;
 use ising_generators::Code;
 use serde_json::Value;
 
+mod drive;
 pub mod layered;
+
+pub(crate) use drive::run_family_script;
+pub use drive::{drive_miner_family, FamilyCase, FamilyReport};
+
+use layered::{P_F5000, P_L2_F0, P_L3_F0, P_SPEC, RESTRICTED_V1, UNIFORM_V1};
+
+/// A family revision the `--family` gate can drive.
+#[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
+pub struct ReferenceRevision {
+    /// The contract the gate regenerates with.
+    pub contract: &'static Contract,
+    /// Valid parameter sets, in the order the gate tries them.
+    pub params: &'static [&'static [u8]],
+    /// A parameter set that decodes but is out of bounds (code 9).
+    pub out_of_bounds_params: &'static [u8],
+}
+
+/// Every revision the gate can drive: `UNIFORM_V1` and `RESTRICTED_V1`, each
+/// with params `[P_SPEC, P_L2_F0, P_L3_F0]` and `out_of_bounds_params`
+/// `P_F5000`.
+pub static REFERENCE_REVISIONS: &[ReferenceRevision] = &[
+    ReferenceRevision {
+        contract: &UNIFORM_V1,
+        params: &[&P_SPEC, &P_L2_F0, &P_L3_F0],
+        out_of_bounds_params: &P_F5000,
+    },
+    ReferenceRevision {
+        contract: &RESTRICTED_V1,
+        params: &[&P_SPEC, &P_L2_F0, &P_L3_F0],
+        out_of_bounds_params: &P_F5000,
+    },
+];
+
+/// The reference revision for `family_id` at `revision`, if the gate can drive it.
+#[must_use]
+pub fn reference_revision(family_id: &str, revision: u32) -> Option<&'static ReferenceRevision> {
+    REFERENCE_REVISIONS.iter().find(|reference| {
+        reference.contract.family_id == family_id && reference.contract.revision == revision
+    })
+}
 
 /// Generate the canonical instance of each nonce with `contract`, without
 /// sampling. Admission uses no advertised limits, because the limits of one

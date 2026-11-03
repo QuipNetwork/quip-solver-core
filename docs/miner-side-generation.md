@@ -87,7 +87,7 @@ The default session path adds the offset itself.
 
 A miner may use an optimized family generator only under these conditions:
 
-- The claimed `(family_id, revision)` must pass SC-7 conformance (future) on the actual code that generates the instance.
+- The claimed `(family_id, revision)` must pass [SC-7 conformance](family-conformance.md#the-gate-fam-57) on the actual code that generates the instance.
   The default session path and a device path are separate code, and each must pass.
 - The miner must list the revision in `generated_families` only after it passes.
   [Capabilities](problem-families.md#capabilities) gives the rule.
