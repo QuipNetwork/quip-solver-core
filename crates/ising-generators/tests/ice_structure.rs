@@ -139,8 +139,7 @@ fn missing_edge_removes_its_candidates() {
     let full = lattice_topology(2, 2);
     let base = candidates(Lattice::Zephyr { m: 2, t: 2 }, &full).expect("full");
     let tile = base.tiles[0];
-    let [(a, b), (c, _)] = base.spines[0].expect("spine");
-    let _ = b;
+    let [(a, _), (c, _)] = base.spines[0].expect("spine");
     let removed = (a.min(c), a.max(c));
     assert!(edges.contains(&removed), "an internal edge of the tile");
     let kept: Vec<_> = edges.iter().copied().filter(|e| *e != removed).collect();
@@ -187,7 +186,6 @@ fn even_tile_rings_are_accepted() {
 
 #[test]
 fn invalid_topologies_return_stable_errors() {
-    let z11 = |nodes: Vec<u32>, edges: &[(u32, u32)]| topology(nodes, edges);
     // Three tile pairs around node 0, each pair sharing the spine edge
     // (0, p): node 0 is on three spine edges.
     let mut around = Vec::new();
@@ -247,13 +245,13 @@ fn invalid_topologies_return_stable_errors() {
             "not-zephyr-node",
             StructureError::NotZephyrNode(12),
             Lattice::Zephyr { m: 1, t: 1 },
-            z11(vec![0, 12], &[(0, 12)]),
+            topology(vec![0, 12], &[(0, 12)]),
         ),
         (
             "not-zephyr-coupler",
             StructureError::NotZephyrCoupler(0, 3),
             Lattice::Zephyr { m: 1, t: 1 },
-            z11(vec![0, 3], &[(3, 0)]),
+            topology(vec![0, 3], &[(3, 0)]),
         ),
     ];
     assert_eq!(MAX_DEGREE, 32);
@@ -467,4 +465,12 @@ fn zephyr_sides_split_vertical_and_horizontal() {
         &identity(split.right.len()),
     );
     assert!(chosen.expect("select").len() <= split.left.len().min(split.right.len()));
+}
+
+#[test]
+fn a_zephyr_mode_node_failure_beats_a_coupler_failure() {
+    // Node 12 is not a z(1, 1) node and (0, 3) is not a z(1, 1) coupler.
+    let base = topology(vec![0, 3, 12], &[(0, 3), (0, 12)]);
+    let got = candidates(Lattice::Zephyr { m: 1, t: 1 }, &base);
+    assert_eq!(got, Err(StructureError::NotZephyrNode(12)));
 }

@@ -9,8 +9,12 @@ use super::{Lattice, StructureError, MAX_DEGREE};
 use crate::family::BaseTopology;
 
 /// The node count `4 * t * m * (2m + 1)` of `z(m, t)`.
-fn node_count(m: u16, t: u8) -> u64 {
-    4 * u64::from(t) * u64::from(m) * (2 * u64::from(m) + 1)
+fn node_count(m: u16, t: u8) -> Option<u64> {
+    let m = u64::from(m);
+    let side = m.checked_mul(2)?.checked_add(1)?;
+    4u64.checked_mul(u64::from(t))?
+        .checked_mul(m)?
+        .checked_mul(side)
 }
 
 /// Zephyr index (u, w, k, j, z) of a linear id:
@@ -23,7 +27,7 @@ fn node_count(m: u16, t: u8) -> u64 {
     reason = "u, w, k, j, z are the Zephyr coordinate names"
 )]
 pub fn zephyr_coordinates(m: u16, t: u8, q: u32) -> Option<[u32; 5]> {
-    if m == 0 || t == 0 || u64::from(q) >= node_count(m, t) {
+    if m == 0 || t == 0 || u64::from(q) >= node_count(m, t)? {
         return None;
     }
     let (m, t, q) = (u32::from(m), u32::from(t), u64::from(q));
@@ -54,14 +58,23 @@ fn zephyr_id(m: u16, t: u8, c: [i64; 5]) -> Option<u32> {
     let (m, t) = (i64::from(m), i64::from(t));
     let [u, w, k, j, z] = c;
     if !(0..2).contains(&u)
-        || !(0..=2 * m).contains(&w)
+        || !(0..=m.checked_mul(2)?).contains(&w)
         || !(0..t).contains(&k)
         || !(0..2).contains(&j)
         || !(0..m).contains(&z)
     {
         return None;
     }
-    let q = (((u * (2 * m + 1) + w) * t + k) * 2 + j) * m + z;
+    let side = m.checked_mul(2)?.checked_add(1)?;
+    let q = u
+        .checked_mul(side)?
+        .checked_add(w)?
+        .checked_mul(t)?
+        .checked_add(k)?
+        .checked_mul(2)?
+        .checked_add(j)?
+        .checked_mul(m)?
+        .checked_add(z)?;
     u32::try_from(q).ok()
 }
 
@@ -88,9 +101,16 @@ fn directed_coupler(ca: [u32; 5], cb: [u32; 5]) -> bool {
     // where `w` is `zb`, `z` is `za`, `i` is `jb` and `j` is `ja`.
     let reaches = |index: u32, centre: u32, bit: u32| -> bool {
         // index = 2*centre + 1 + s*(2*bit - 1) for s in {0, 1}.
-        let base = 2 * u64::from(centre) + 1;
         let index = u64::from(index);
-        index == base || (bit == 1 && index == base + 1) || (bit == 0 && index + 1 == base)
+        let Some(base) = u64::from(centre)
+            .checked_mul(2)
+            .and_then(|doubled| doubled.checked_add(1))
+        else {
+            return false;
+        };
+        index == base
+            || (bit == 1 && base.checked_add(1) == Some(index))
+            || (bit == 0 && index.checked_add(1) == Some(base))
     };
     reaches(wa, zb, jb) && reaches(wb, za, ja)
 }
@@ -121,7 +141,7 @@ pub fn zephyr_lattice(m: u16, t: u8) -> Option<(Vec<u32>, Vec<(u32, u32)>)> {
     if m == 0 || t == 0 {
         return None;
     }
-    let count = u32::try_from(node_count(m, t)).ok()?;
+    let count = u32::try_from(node_count(m, t)?).ok()?;
     let nodes: Vec<u32> = (0..count).collect();
     let mut edges = Vec::new();
     for &a in &nodes {
