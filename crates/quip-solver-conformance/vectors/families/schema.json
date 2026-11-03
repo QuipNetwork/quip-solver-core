@@ -467,6 +467,13 @@
         "error": {
           "type": "string"
         },
+        "error_detail": {
+          "items": {
+            "type": "integer"
+          },
+          "maxItems": 2,
+          "type": "array"
+        },
         "evidence": {
           "items": {
             "type": "string"

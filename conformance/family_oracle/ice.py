@@ -8,6 +8,7 @@ and the recursive augmenting-path `select`. Dense positions are indexes into the
 node list in registration order.
 """
 
+import sys
 from collections.abc import Sequence
 from itertools import combinations
 
@@ -20,11 +21,16 @@ Spine = tuple[Edge, Edge]
 
 
 class StructureError(Exception):
-    """A topology that cannot carry ice tiles. `name` is the kebab-case variant."""
+    """A topology that cannot carry ice tiles.
 
-    def __init__(self, name: str) -> None:
+    `name` is the kebab-case variant. `detail` holds the native ids of the
+    payload: `[id]`, `[a, b]` with `a < b`, or empty.
+    """
+
+    def __init__(self, name: str, detail: Sequence[int] = ()) -> None:
         super().__init__(name)
         self.name = name
+        self.detail = list(detail)
 
 
 # ---- Zephyr lattice ----
@@ -184,13 +190,23 @@ def _zephyr_tiles(
     return found
 
 
-def _adjacency_tiles(neighbours: list[set[int]]) -> list[tuple[int, ...]]:
+def _adjacency_tiles(
+    neighbours: list[set[int]], edge_count: int
+) -> list[tuple[int, ...]]:
+    """Every 4-clique. More than `edge_count // 4` of them is a spine conflict.
+
+    Without a spine conflict each tile shares at most its 2 spine edges, so it
+    owns at least 4 of its 6 edges alone and `4 * tiles <= edges`.
+    """
+    cap = edge_count // 4
     tiles = []
     for a, na in enumerate(neighbours):
         for b in sorted(x for x in na if x > a):
             above = sorted(c for c in na & neighbours[b] if c > b)
             for c, d in combinations(above, 2):
                 if d in neighbours[c]:
+                    if len(tiles) >= cap:
+                        raise StructureError("spine-conflict")
                     tiles.append((a, b, c, d))
     return tiles
 
@@ -224,12 +240,12 @@ def candidates(
         for n in nodes:
             c = zephyr_coordinates(m, t, n)
             if c is None:
-                raise StructureError("not-zephyr-node")
+                raise StructureError("not-zephyr-node", [n])
             coords.append(c)
         coupler = set(lattice_edges(m, t))
         for a, b in edges:
             if (min(a, b), max(a, b)) not in coupler:
-                raise StructureError("not-zephyr-coupler")
+                raise StructureError("not-zephyr-coupler", [min(a, b), max(a, b)])
     neighbours: list[set[int]] = [set() for _ in nodes]
     for a, b in edge_set:
         neighbours[a].add(b)
@@ -240,19 +256,19 @@ def candidates(
         tiles = sorted(by_tile)
         spines = [by_tile[tile] for tile in tiles]
     else:
-        tiles = sorted(set(_adjacency_tiles(neighbours)))
+        tiles = sorted(set(_adjacency_tiles(neighbours, len(edge_set))))
         spines = _adjacency_spines(tiles)
     if not tiles:
         raise StructureError("no-candidates")
-    _check_slots(len(nodes), tiles, spines)
+    _check_slots(nodes, tiles, spines)
     sides(m, coords, spines)
     return tiles, spines
 
 
 def _check_slots(
-    count: int, tiles: list[tuple[int, ...]], spines: list[Spine | None]
+    nodes: Sequence[int], tiles: list[tuple[int, ...]], spines: list[Spine | None]
 ) -> None:
-    slots = [0] * count
+    slots = [0] * len(nodes)
     spine_edges: set[Edge] = set()
     for tile, spine in zip(tiles, spines, strict=True):
         if spine is None:
@@ -263,8 +279,9 @@ def _check_slots(
     for a, b in spine_edges:
         slots[a] += 1
         slots[b] += 1
-    if any(slot > 2 for slot in slots):
-        raise StructureError("membership-above-two")
+    for node, slot in zip(nodes, slots, strict=True):
+        if slot > 2:
+            raise StructureError("membership-above-two", [node])
 
 
 # ---- sides ----
@@ -359,8 +376,16 @@ def select(
                     return True
         return False
 
-    for l in left_order:
-        attempt(l, [False] * len(right))
+    # `attempt` recurses once per left vertex on an augmenting path, so the
+    # depth is bounded only by the left side. Raise the limit for the matching
+    # and restore it afterwards.
+    saved = sys.getrecursionlimit()
+    sys.setrecursionlimit(max(saved, len(left) + 1000))
+    try:
+        for l in left_order:
+            attempt(l, [False] * len(right))
+    finally:
+        sys.setrecursionlimit(saved)
     chosen = free + [tile_of[(l, r)] for r, l in enumerate(match) if l is not None]
     return sorted(chosen)
 

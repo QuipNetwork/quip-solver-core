@@ -603,6 +603,15 @@ fn archived_tiles_are_valid_candidates() {
     }
 }
 
+/// The native ids carried by an error variant.
+fn error_detail(error: StructureError) -> Vec<u32> {
+    match error {
+        StructureError::NotZephyrNode(id) | StructureError::MembershipAboveTwo(id) => vec![id],
+        StructureError::NotZephyrCoupler(a, b) => vec![a, b],
+        _ => Vec::new(),
+    }
+}
+
 /// Check one structure case against the library.
 fn check_structure_case(case: &Value) {
     let name = text(case, "name");
@@ -624,6 +633,11 @@ fn check_structure_case(case: &Value) {
     if let Some(error) = case.get("error") {
         let got = result.expect_err(name);
         assert_eq!(got.name(), error.as_str().expect("error name"), "{name}");
+        assert_eq!(
+            error_detail(got),
+            u32s(field(case, "error_detail")),
+            "{name}: error detail"
+        );
         return;
     }
     let (_, found, split) = result.unwrap_or_else(|e| panic!("{name}: {e:?}"));

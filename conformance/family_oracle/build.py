@@ -1616,6 +1616,7 @@ def _structure_case(
         tiles, spines = ice.candidates(m, t, nodes, edges)
     except ice.StructureError as err:
         case["error"] = err.name
+        case["error_detail"] = err.detail
         return case
     coords = [ice.zephyr_coordinates(m, t, n) for n in nodes] if m else []
     left, right = ice.sides(m, coords, spines)  # type: ignore[arg-type]
@@ -1639,6 +1640,14 @@ def _structure_case(
     return case
 
 
+def _permuted(
+    nodes: list[int], edges: list[tuple[int, int]]
+) -> tuple[list[int], list[tuple[int, int]]]:
+    """Reverse the node registration order. Reverse the edges and flip every second."""
+    flipped = [(b, a) if i % 2 else (a, b) for i, (a, b) in enumerate(reversed(edges))]
+    return nodes[::-1], flipped
+
+
 def _cut_edge(m: int, t: int) -> tuple[list[int], list[tuple[int, int]]]:
     """z(m, t) without the internal edge joining the two spines of its first tile."""
     nodes, edges = ice.lattice(m, t)
@@ -1659,6 +1668,12 @@ def _structure_cases() -> list[dict]:
         nodes, edges = ice.lattice(m, t)
         for mode, shape in (("zephyr", (m, t)), ("adjacency", (0, 0))):
             cases.append(_structure_case(f"z{m}{t}-{mode}", *shape, nodes, edges))
+    nodes, edges = ice.lattice(2, 2)
+    nodes, edges = _permuted(nodes, edges)
+    for mode, shape in (("zephyr", (2, 2)), ("adjacency", (0, 0))):
+        cases.append(
+            _structure_case(f"z22-permuted-order-{mode}", *shape, nodes, edges)
+        )
     nodes, edges = _cut_edge(2, 2)
     for mode, shape in (("zephyr", (2, 2)), ("adjacency", (0, 0))):
         cases.append(_structure_case(f"z22-cut-edge-{mode}", *shape, nodes, edges))
