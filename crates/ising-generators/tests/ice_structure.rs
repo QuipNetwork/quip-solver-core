@@ -280,6 +280,12 @@ fn the_first_failing_check_names_the_error() {
     let base = topology(vec![0, 1, 3], &[(0, 1), (1, 0), (0, 3)]);
     let got = candidates(Lattice::Zephyr { m: 1, t: 1 }, &base);
     assert_eq!(got, Err(StructureError::DuplicateEdge));
+
+    // Node 12 is not a z(1, 1) node and (0, 3) is not a z(1, 1) coupler. The
+    // node check runs before the coupler check.
+    let base = topology(vec![0, 3, 12], &[(0, 3), (0, 12)]);
+    let got = candidates(Lattice::Zephyr { m: 1, t: 1 }, &base);
+    assert_eq!(got, Err(StructureError::NotZephyrNode(12)));
 }
 
 /// Tiles for spine-graph edges over spine indices: spine `i` is the edge
@@ -465,12 +471,4 @@ fn zephyr_sides_split_vertical_and_horizontal() {
         &identity(split.right.len()),
     );
     assert!(chosen.expect("select").len() <= split.left.len().min(split.right.len()));
-}
-
-#[test]
-fn a_zephyr_mode_node_failure_beats_a_coupler_failure() {
-    // Node 12 is not a z(1, 1) node and (0, 3) is not a z(1, 1) coupler.
-    let base = topology(vec![0, 3, 12], &[(0, 3), (0, 12)]);
-    let got = candidates(Lattice::Zephyr { m: 1, t: 1 }, &base);
-    assert_eq!(got, Err(StructureError::NotZephyrNode(12)));
 }
