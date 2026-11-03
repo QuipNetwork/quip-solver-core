@@ -82,6 +82,9 @@ def generate(
         for a, b in native_edges
     )
     strong = {pair for tile in chosen for pair in combinations(tile, 2)}
+    missing = strong.difference(edges)
+    if missing:
+        raise ValueError(f"tile pairs that are not topology edges: {sorted(missing)}")
     glass_rng = stream(LABELS[2])
     j = []
     for edge in edges:

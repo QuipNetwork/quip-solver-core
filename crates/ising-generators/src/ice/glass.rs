@@ -54,6 +54,15 @@ const KIND_TILES: u16 = 1;
 /// Metadata kind of the gauge.
 const KIND_GAUGE: u16 = 2;
 
+/// The stream that orders the left spine edges.
+const LEFT: &str = "left";
+/// The stream that orders the right spine edges.
+const RIGHT: &str = "right";
+/// The stream that draws the glass signs.
+const GLASS: &str = "glass";
+/// The stream that draws the gauge.
+const GAUGE: &str = "gauge";
+
 const LIMITS: InstanceLimits = match InstanceLimits::new(131_072, 2_097_152, 1_000, 0, 8_388_608) {
     Some(limits) => limits,
     None => InstanceLimits::FAM_37,
@@ -62,7 +71,7 @@ const LIMITS: InstanceLimits = match InstanceLimits::new(131_072, 2_097_152, 1_0
 /// The construction of `quip/ice-glass@1`. Its streams are `left`, `right`,
 /// `glass`, and `gauge`.
 pub static ICE_GLASS: Construction = Construction {
-    labels: &["left", "right", "glass", "gauge"],
+    labels: &[LEFT, RIGHT, GLASS, GAUGE],
     check_topology,
     generate,
     check_metadata,
@@ -161,8 +170,8 @@ fn generate(
     let lattice = lattice(params).map_err(|_| defect)?;
     let found = candidates(lattice, topology).map_err(|_| defect)?;
     let split = sides(lattice, topology, &found).map_err(|_| defect)?;
-    let left_order = shuffled_order(streams, "left", split.left.len())?;
-    let right_order = shuffled_order(streams, "right", split.right.len())?;
+    let left_order = shuffled_order(streams, LEFT, split.left.len())?;
+    let right_order = shuffled_order(streams, RIGHT, split.right.len())?;
     let tiles = select(&found, &split, &left_order, &right_order).map_err(|_| defect)?;
 
     let n = u32::try_from(topology.node_ids().len()).map_err(|_| Code::BoundsExceeded)?;
@@ -179,7 +188,7 @@ fn generate(
         .collect();
 
     let two = NonZeroU32::MIN.saturating_add(1);
-    let mut glass = streams.open("glass").ok_or(Code::NoInstance)?;
+    let mut glass = streams.open(GLASS).ok_or(Code::NoInstance)?;
     let mut j: Vec<i32> = Vec::with_capacity(edges.len());
     for edge in &edges {
         if strong.contains(edge) {
@@ -191,7 +200,7 @@ fn generate(
         }
     }
 
-    let mut gauge_stream = streams.open("gauge").ok_or(Code::NoInstance)?;
+    let mut gauge_stream = streams.open(GAUGE).ok_or(Code::NoInstance)?;
     let gauge: Vec<i64> = (0..n)
         .map(|_| {
             if uniform(&mut gauge_stream, two) == 0 {

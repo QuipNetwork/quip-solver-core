@@ -15,7 +15,7 @@ use ising_generators::family::{admit_topology, generate_instance, BaseTopology};
 use ising_generators::ice::{
     candidates, select, sides, zephyr_lattice, Lattice, ICE_GLASS_V1, STRONG_MILLI,
 };
-use ising_generators::instance::{Instance, InstanceParts};
+use ising_generators::instance::{Instance, InstanceLimits, InstanceParts};
 use ising_generators::Code;
 
 #[expect(dead_code, reason = "this test uses only the live topology loader")]
@@ -327,4 +327,176 @@ fn live_generation_has_1785_tiles() {
         })
         .count();
     assert_eq!(strong, 10_710);
+}
+
+/// A kind 1 and kind 2 region from raw tiles and raw gauge bytes.
+fn region_of(tiles: &[[u32; 4]], gauge: &[u8]) -> Vec<u8> {
+    let count = u32::try_from(tiles.len()).expect("fits");
+    let tile_len = 4 + 16 * count;
+    let mut region = vec![2, 0, 1, 0];
+    region.extend_from_slice(&tile_len.to_le_bytes());
+    region.extend_from_slice(&count.to_le_bytes());
+    for tile in tiles {
+        for pos in tile {
+            region.extend_from_slice(&pos.to_le_bytes());
+        }
+    }
+    region.extend_from_slice(&[2, 0]);
+    let n = u32::try_from(gauge.len()).expect("fits");
+    region.extend_from_slice(&(4 + n).to_le_bytes());
+    region.extend_from_slice(&n.to_le_bytes());
+    region.extend_from_slice(gauge);
+    region
+}
+
+/// The raw gauge bytes of a valid instance.
+fn gauge_bytes(instance: &Instance) -> Vec<u8> {
+    let (_, gauge) = decode(instance);
+    gauge.iter().map(|&g| u8::from(g < 0)).collect()
+}
+
+/// A valid z(2,2) instance, its parameter bytes, tiles, and gauge bytes.
+fn valid_z22(nonce: u8) -> (Vec<u8>, Instance, Vec<[u32; 4]>, Vec<u8>) {
+    let topology = lattice_topology(2, 2);
+    let bytes = params(2, 2, 125);
+    let instance = build(&bytes, &topology, nonce_of(nonce));
+    let (tiles, _) = decode(&instance);
+    let gauge = gauge_bytes(&instance);
+    assert!(check(&bytes, &instance), "the base instance is valid");
+    (bytes, instance, tiles, gauge)
+}
+
+#[test]
+fn check_metadata_rejects_a_gauge_byte_above_one() {
+    let (bytes, instance, tiles, mut gauge) = valid_z22(10);
+    gauge[0] = 2;
+    let bad = rebuilt(&instance, instance.j().to_vec(), region_of(&tiles, &gauge));
+    assert!(!check(&bytes, &bad));
+}
+
+#[test]
+fn check_metadata_rejects_a_gauge_count_that_differs_from_the_node_count() {
+    let (bytes, instance, tiles, gauge) = valid_z22(11);
+    let mut region = region_of(&tiles, &gauge);
+    let count_at = region.len() - gauge.len() - 4;
+    let short = u32::try_from(gauge.len() - 1).expect("fits");
+    region[count_at..count_at + 4].copy_from_slice(&short.to_le_bytes());
+    let bad = rebuilt(&instance, instance.j().to_vec(), region);
+    assert!(!check(&bytes, &bad));
+}
+
+#[test]
+fn check_metadata_rejects_tiles_that_share_an_edge() {
+    let (bytes, instance, tiles, gauge) = valid_z22(12);
+    let n = u32::try_from(instance.node_ids().len()).expect("fits");
+    let first = *tiles.first().expect("a tile");
+    let overlap = [first[0], first[1], n - 2, n - 1];
+    assert!(
+        first < overlap,
+        "the overlapping tile sorts after the first"
+    );
+    let bad = rebuilt(
+        &instance,
+        instance.j().to_vec(),
+        region_of(&[first, overlap], &gauge),
+    );
+    assert!(!check(&bytes, &bad));
+}
+
+#[test]
+fn check_metadata_rejects_a_node_in_three_tiles() {
+    let (bytes, instance, tiles, gauge) = valid_z22(13);
+    let n = u32::try_from(instance.node_ids().len()).expect("fits");
+    let shared = tiles
+        .iter()
+        .enumerate()
+        .flat_map(|(i, a)| tiles.iter().skip(i + 1).map(move |b| (*a, *b)))
+        .find_map(|(a, b)| a.iter().find(|pos| b.contains(pos)).map(|&pos| (a, b, pos)));
+    let (a, b, node) = shared.expect("two selected tiles share a node");
+    let mut third = [node, n - 3, n - 2, n - 1];
+    third.sort_unstable();
+    assert!(b < third, "the third tile sorts last");
+    let bad = rebuilt(
+        &instance,
+        instance.j().to_vec(),
+        region_of(&[a, b, third], &gauge),
+    );
+    assert!(!check(&bytes, &bad));
+}
+
+#[test]
+fn check_metadata_rejects_a_tile_count_the_payload_cannot_hold() {
+    let (bytes, instance, tiles, gauge) = valid_z22(14);
+    let mut region = region_of(&tiles, &gauge);
+    region[8..12].copy_from_slice(&u32::MAX.to_le_bytes());
+    let bad = rebuilt(&instance, instance.j().to_vec(), region);
+    assert!(!check(&bytes, &bad));
+}
+
+#[test]
+fn check_metadata_rejects_a_glass_edge_of_the_wrong_magnitude() {
+    let (bytes, instance, tiles, _) = valid_z22(15);
+    let strong: BTreeSet<(u32, u32)> = tiles.iter().flat_map(|t| tile_pairs(*t)).collect();
+    let at = instance
+        .edges()
+        .iter()
+        .position(|edge| !strong.contains(edge))
+        .expect("a glass edge");
+    let mut j = instance.j().to_vec();
+    j[at] = 1;
+    let bad = rebuilt(&instance, j, instance.metadata().to_vec());
+    assert!(!check(&bytes, &bad));
+}
+
+#[test]
+fn check_metadata_rejects_a_nonzero_offset() {
+    let (bytes, instance, _, _) = valid_z22(16);
+    let parts = InstanceParts {
+        descriptor_digest: *instance.descriptor_digest(),
+        topology_order_digest: *instance.topology_order_digest(),
+        nonce: instance.nonce().copied(),
+        node_ids: instance.node_ids().to_vec(),
+        edges: instance.edges().to_vec(),
+        h: instance.h().to_vec(),
+        j: instance.j().to_vec(),
+        offset_milli: 1,
+        metadata: instance.metadata().to_vec(),
+    };
+    let limits = InstanceLimits::new(131_072, 2_097_152, 1_000, 1, 8_388_608).expect("limits");
+    let shifted = Instance::new(parts, &limits, ICE_GLASS_V1.metadata_kinds, None)
+        .expect("well formed under a looser offset limit");
+    assert!(!check(&bytes, &shifted));
+}
+
+#[test]
+fn check_metadata_rejects_tiles_that_are_not_ascending() {
+    let (bytes, instance, tiles, gauge) = valid_z22(17);
+    let mut swapped = tiles.clone();
+    swapped[0].swap(0, 1);
+    let bad = rebuilt(
+        &instance,
+        instance.j().to_vec(),
+        region_of(&swapped, &gauge),
+    );
+    assert!(!check(&bytes, &bad), "positions out of order inside a tile");
+    let mut reordered = tiles;
+    reordered.swap(0, 1);
+    let bad = rebuilt(
+        &instance,
+        instance.j().to_vec(),
+        region_of(&reordered, &gauge),
+    );
+    assert!(!check(&bytes, &bad), "tiles out of order");
+}
+
+#[test]
+fn check_metadata_rejects_tiles_that_are_not_distinct() {
+    let (bytes, instance, tiles, gauge) = valid_z22(18);
+    let first = *tiles.first().expect("a tile");
+    let bad = rebuilt(
+        &instance,
+        instance.j().to_vec(),
+        region_of(&[first, first], &gauge),
+    );
+    assert!(!check(&bytes, &bad));
 }

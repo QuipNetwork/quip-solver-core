@@ -46,10 +46,10 @@ Let `n` be the node count of the base topology. Let `g` be `glass_milli`.
 Check every operation. An overflow returns code 13, `BoundsExceeded`.
 A dense position is the index of a node in the registration order of the base topology.
 
-1. Find the tile candidates of the base topology and its sides. The shape `(zephyr_m, zephyr_t)` selects the mode. Tile edges are the 6 edges of each selected tile. A defect in a topology that admission accepted returns code 12, `TopologyIncompatible`.
+1. Find the tile candidates of the base topology and its sides. The shape `(zephyr_m, zephyr_t)` selects the mode. A defect in a topology that admission accepted returns code 12, `TopologyIncompatible`.
 2. Set `left_order` to the identity order of the left spine edges. Shuffle it with the Fisher-Yates shuffle (FAM-24) on the stream `left`.
 3. Set `right_order` to the identity order of the right spine edges. Shuffle it the same way on the stream `right`. The shuffle of the left order draws first. The two streams are independent.
-4. Select the tiles. Select every free tile, which has no spine. Then match the left spine edges to the right spine edges. The matching visits the left spine edges in `left_order`. For each one it tries the right spine edges in the rank order of `right_order`, and it looks for one augmenting path. Each matched pair is one spine tile. The result is the sorted list of tiles. Each tile is four dense positions in ascending order.
+4. Select the tiles. Select every free tile, which has no spine. Then match the left spine edges to the right spine edges. The matching visits the left spine edges in `left_order`. For each one it tries the right spine edges in the rank order of `right_order`, and it looks for one augmenting path. Each matched pair is one spine tile. The result is the sorted list of tiles. Each tile is four dense positions in ascending order. Tile edges are the 6 edges of each selected tile.
 5. List the nodes in registration order. List every edge of the base topology as `(min, max)` of its dense positions, in ascending order.
 6. Give each tile edge the coupling `+1000`. Visit every other edge in ascending order. Draw `d = uniform(glass, 2)`. If `d = 0`, set the coupling to `+g`. If `d = 1`, set the coupling to `-g`.
 7. For each node in registration order, draw `uniform(gauge, 2)`. The value 0 gives the gauge `+1` and the value 1 gives `-1`. Then multiply each coupling `J(u, v)` by the gauge of `u` and the gauge of `v`.
