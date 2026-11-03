@@ -7,13 +7,13 @@
 use clap::Parser;
 use quip_protocol::scoring::energy_from_milli;
 use quip_solver_core::coefficient::Milli;
-use quip_solver_core::families::{Declaration, FamilyClaim};
+use quip_solver_core::families::{Declaration, FamilyClaim, FamilyContext};
 use quip_solver_core::ising_generators::descriptor::Contract;
 use quip_solver_core::ising_generators::family::SaltFault;
 use quip_solver_core::ising_generators::instance::InstanceLimits;
 use quip_solver_core::{
     run, BackendIdentity, CommonArgs, IsingGraph, Lease, LeaseSink, ModelLimits, SampleError,
-    SampleParams, Sampler, SamplerResult, TopologyView,
+    SampleParams, Sampler, SamplerResult, TopologyView, WarmStart,
 };
 use std::fmt::Write as _;
 use std::process::ExitCode;
@@ -95,6 +95,48 @@ impl Sampler<Milli> for DefaultFamily {
         }
         std::thread::sleep(std::time::Duration::from_millis(5));
         let spins = vec![1i8; graph.num_nodes()];
+        let h = graph.h.iter().map(|v| v.0).collect::<Vec<_>>();
+        let j = graph.j.iter().map(|v| v.0).collect::<Vec<_>>();
+        let energy = energy_from_milli(&spins, &h, &j, &graph.edges);
+        Ok((0..params.num_reads)
+            .map(|_| SamplerResult {
+                spins: spins.clone(),
+                energy_milli: energy,
+            })
+            .collect())
+    }
+}
+
+/// Opts in to the family context. A job with a context gets all-`-1` spins,
+/// scored on the plain graph without the offset; any other job gets the
+/// default all-`+1` spins.
+struct AwareFamily(DefaultFamily);
+
+impl Sampler<Milli> for AwareFamily {
+    fn declaration() -> Declaration {
+        DefaultFamily::declaration()
+    }
+
+    fn accepts_family_metadata() -> bool {
+        true
+    }
+
+    fn sample(
+        &self,
+        graph: &IsingGraph<Milli>,
+        params: &SampleParams,
+    ) -> Result<Vec<SamplerResult>, SampleError> {
+        self.0.sample(graph, params)
+    }
+
+    fn sample_family(
+        &self,
+        graph: &IsingGraph<Milli>,
+        params: &SampleParams,
+        _warm: Option<&WarmStart>,
+        _family: &FamilyContext,
+    ) -> Result<Vec<SamplerResult>, SampleError> {
+        let spins = vec![-1i8; graph.num_nodes()];
         let h = graph.h.iter().map(|v| v.0).collect::<Vec<_>>();
         let j = graph.j.iter().map(|v| v.0).collect::<Vec<_>>();
         let energy = energy_from_milli(&spins, &h, &j, &graph.edges);
@@ -192,6 +234,8 @@ enum Mode {
     Default,
     /// The sampler generates the instances itself and pushes the reads.
     Local,
+    /// The session expands each salt and hands `sample_family` its context.
+    Aware,
 }
 
 #[derive(Parser)]
@@ -230,5 +274,8 @@ fn main() -> ExitCode {
     match cli.mode {
         Mode::Default => run(id, &cli.common, || Ok(DefaultFamily { gate: cli.gate })),
         Mode::Local => run(id, &cli.common, || Ok(LocalFamily)),
+        Mode::Aware => run(id, &cli.common, || {
+            Ok(AwareFamily(DefaultFamily { gate: cli.gate }))
+        }),
     }
 }

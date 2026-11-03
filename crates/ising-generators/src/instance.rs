@@ -173,6 +173,33 @@ pub struct InstanceParts {
     pub metadata: Vec<u8>,
 }
 
+impl InstanceParts {
+    /// The bounds step of [`Instance::new`] (FAM-37, FAM-65 step 2): the node
+    /// count, the edge count, the metadata size, each `|h|` and `|J|`, and
+    /// `|offset|`. It checks nothing else, so an explicit job can run it
+    /// before its FAM-46 length checks.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Code::BoundsExceeded`] (13) when any of them is above
+    /// `limits`.
+    pub fn check_bounds(&self, limits: &InstanceLimits) -> Result<(), Code> {
+        if exceeds(self.node_ids.len(), limits.nodes)
+            || exceeds(self.edges.len(), limits.edges)
+            || exceeds(self.metadata.len(), limits.metadata)
+            || self
+                .h
+                .iter()
+                .chain(&self.j)
+                .any(|v| v.unsigned_abs() > limits.coefficient)
+            || self.offset_milli.unsigned_abs() > limits.offset
+        {
+            return Err(Code::BoundsExceeded);
+        }
+        Ok(())
+    }
+}
+
 /// A validated instance with its canonical encoding length.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Instance {
@@ -240,7 +267,7 @@ impl Instance {
     /// Validate the parts. The first failure wins, in the FAM-65 order
     /// (steps 2 to 4):
     ///
-    /// 1. Code 13: the bounds.
+    /// 1. Code 13: the bounds ([`InstanceParts::check_bounds`]).
     /// 2. Code 15: the `h` and `j` lengths, the edge positions, `u < v`, and
     ///    the ascending edge order.
     /// 3. Code 15: when `expected_digest` is `Some`, a comparison with the
@@ -266,19 +293,7 @@ impl Instance {
         contract_kinds: &[u16],
         expected_digest: Option<&[u8; 32]>,
     ) -> Result<Self, Code> {
-        let over = Code::BoundsExceeded;
-        if exceeds(parts.node_ids.len(), limits.nodes)
-            || exceeds(parts.edges.len(), limits.edges)
-            || exceeds(parts.metadata.len(), limits.metadata)
-            || parts
-                .h
-                .iter()
-                .chain(&parts.j)
-                .any(|v| v.unsigned_abs() > limits.coefficient)
-            || parts.offset_milli.unsigned_abs() > limits.offset
-        {
-            return Err(over);
-        }
+        parts.check_bounds(limits)?;
         let mismatch = Code::InstanceDigestMismatch;
         let n = parts.node_ids.len();
         if parts.h.len() != n || parts.j.len() != parts.edges.len() {
@@ -298,7 +313,7 @@ impl Instance {
             return Err(mismatch);
         }
         validate_metadata(&parts.metadata, contract_kinds)?;
-        let canonical_len = checked_len(&parts).ok_or(over)?;
+        let canonical_len = checked_len(&parts).ok_or(Code::BoundsExceeded)?;
         Ok(Self {
             parts,
             canonical_len,

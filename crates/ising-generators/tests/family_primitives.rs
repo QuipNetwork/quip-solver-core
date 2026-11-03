@@ -917,6 +917,40 @@ fn bounds_beat_edges_beat_metadata() {
     assert_eq!(code(&parts), Some(16));
 }
 
+/// `check_bounds` is the bounds step of `Instance::new`: the same code 13 on
+/// every bound vector, and no opinion on the later steps.
+#[test]
+fn check_bounds_is_the_bounds_step_of_instance_new() -> Result<(), String> {
+    let doc = core()?;
+    for case in section(&doc, "instance_bounds")? {
+        let name = str_field(case, "name")?;
+        let value = str_field(case, "value")?;
+        let parts = match str_field(case, "quantity")? {
+            "h" => two_node_parts(value.parse::<i32>().map_err(|e| format!("{e}"))?, 0, 0),
+            "j" => two_node_parts(0, value.parse::<i32>().map_err(|e| format!("{e}"))?, 0),
+            _ => two_node_parts(0, 0, i64_of(case.get("value").ok_or("no value")?)?),
+        };
+        let bounds = parts.check_bounds(&InstanceLimits::FAM_37).err();
+        let full = Instance::new(parts, &InstanceLimits::FAM_37, &[], None).err();
+        if bounds != full {
+            return Err(format!(
+                "{name}: check_bounds {bounds:?}, Instance::new {full:?}"
+            ));
+        }
+    }
+    let mut later = two_node_parts(0, 0, 0);
+    later.h = vec![0];
+    later.edges = vec![(1, 0)];
+    later.metadata = vec![];
+    expect_eq!(later.check_bounds(&InstanceLimits::FAM_37), Ok(()))?;
+    let tight = InstanceLimits::new(1, 1, 1000, 1000, 16).ok_or("limits are at most FAM-37")?;
+    expect_eq!(
+        two_node_parts(0, 0, 0).check_bounds(&tight),
+        Err(Code::BoundsExceeded)
+    )?;
+    Ok(())
+}
+
 #[test]
 fn length_mismatch_is_code_15() {
     let mut parts = two_node_parts(0, 0, 0);

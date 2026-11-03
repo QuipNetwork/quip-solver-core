@@ -160,13 +160,17 @@ pub struct StreamJob<C: Coefficient = f64> {
 }
 
 /// One job entering [`Sampler::sample_stream_warm`]: the plain job, plus its
-/// warm start when the coordinator sent one.
+/// warm start when the coordinator sent one and its family context when the
+/// sampler opted in and the job carries one.
 #[non_exhaustive]
 pub struct WarmStreamJob<C: Coefficient = f64> {
     /// The job, exactly as [`Sampler::sample_stream`] would receive it.
     pub job: StreamJob<C>,
     /// Start states and anneal start point, or `None` for a cold job.
     pub warm_start: Option<WarmStart>,
+    /// The validated family structure, or `None` for a job without one. Set
+    /// only when [`Sampler::accepts_family_metadata`] is `true`.
+    pub family: Option<families::FamilyContext>,
 }
 
 /// One job leaving the streaming sampler, in completion order.
@@ -257,7 +261,7 @@ pub trait Sampler<C: Coefficient = f64>: Send + Sync + 'static {
         out: tokio::sync::mpsc::Sender<StreamResult>,
         cancel: CancelToken,
     ) {
-        serial_stream(self, jobs, &out, &cancel, |j| (j, None));
+        serial_stream(self, jobs, &out, &cancel, |j| (j, None, None));
     }
 
     /// Whether this backend uses warm-start states (`IsingProblem` fields 9 to
@@ -267,7 +271,7 @@ pub trait Sampler<C: Coefficient = f64>: Send + Sync + 'static {
     ///
     /// Default `false`: the session feeds [`sample_stream`](Sampler::sample_stream)
     /// and the states never reach the backend. When `true`, the session
-    /// advertises the `initial-spins` feature and feeds
+    /// advertises the `initial-spins` feature and feeds every job through
     /// [`sample_stream_warm`](Sampler::sample_stream_warm) instead. Override it
     /// together with [`sample_warm`](Sampler::sample_warm), or with
     /// `sample_stream_warm` for a backend that keeps several models in flight.
@@ -298,7 +302,8 @@ pub trait Sampler<C: Coefficient = f64>: Send + Sync + 'static {
 
     /// The warm-start form of [`sample_stream`](Sampler::sample_stream), with
     /// the same contract. Called instead of `sample_stream` only when
-    /// [`accepts_warm_start`](Sampler::accepts_warm_start) is `true`.
+    /// [`accepts_warm_start`](Sampler::accepts_warm_start) or
+    /// [`accepts_family_metadata`](Sampler::accepts_family_metadata) is `true`.
     /// Default: serial loop over [`sample_warm`](Sampler::sample_warm) for a
     /// seeded job and [`sample`](Sampler::sample) for a cold one.
     fn sample_stream_warm(
@@ -307,7 +312,56 @@ pub trait Sampler<C: Coefficient = f64>: Send + Sync + 'static {
         out: tokio::sync::mpsc::Sender<StreamResult>,
         cancel: CancelToken,
     ) {
-        serial_stream(self, jobs, &out, &cancel, |w| (w.job, w.warm_start));
+        serial_stream(self, jobs, &out, &cancel, |w| {
+            (w.job, w.warm_start, w.family)
+        });
+    }
+
+    /// Whether this backend uses the validated family structure of a job.
+    /// Answered without a device.
+    ///
+    /// Default `false`: the backend sees the plain model only. When `true`,
+    /// the session calls [`sample_stream_warm`](Sampler::sample_stream_warm)
+    /// for every job (plain jobs, legacy lease salts, and family jobs) and
+    /// never calls [`sample_stream`](Sampler::sample_stream). A job that
+    /// carries a [`FamilyContext`](families::FamilyContext) reaches
+    /// [`sample_family`](Sampler::sample_family) through the default loop.
+    ///
+    /// A backend that overrides `sample_stream` must also override
+    /// `sample_stream_warm` and route each job with `family: Some(..)` to
+    /// `sample_family`. Without that override, all of its jobs run through the
+    /// default serial loop.
+    #[must_use]
+    fn accepts_family_metadata() -> bool
+    where
+        Self: Sized,
+    {
+        false
+    }
+
+    /// Sample one job with its validated family structure. Called only when
+    /// [`accepts_family_metadata`](Sampler::accepts_family_metadata) is `true`
+    /// and the job carries a context. Report the energy of `graph` without the
+    /// offset: the session adds it for a lease salt (FAM-52) and never for an
+    /// explicit job (FAM-64).
+    /// Default: ignore `family` and call [`sample_warm`](Sampler::sample_warm)
+    /// for a seeded job, [`sample`](Sampler::sample) for a cold one.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`sample`](Sampler::sample).
+    fn sample_family(
+        &self,
+        graph: &IsingGraph<C>,
+        params: &SampleParams,
+        warm: Option<&WarmStart>,
+        family: &families::FamilyContext,
+    ) -> Result<Vec<SamplerResult>, SampleError> {
+        let _ = family;
+        match warm {
+            Some(w) => self.sample_warm(graph, params, w),
+            None => self.sample(graph, params),
+        }
     }
 
     /// Number of models the backend keeps in flight. Default 1 (serial).
@@ -384,19 +438,25 @@ pub trait Sampler<C: Coefficient = f64>: Send + Sync + 'static {
 
 /// The serial loop behind the default [`Sampler::sample_stream`] and
 /// [`Sampler::sample_stream_warm`]. `split` pulls the plain job and its
-/// optional warm start out of the channel item.
+/// optional warm start and family context out of the channel item.
 fn serial_stream<S, J, C>(
     sampler: &S,
     mut jobs: tokio::sync::mpsc::Receiver<J>,
     out: &tokio::sync::mpsc::Sender<StreamResult>,
     cancel: &CancelToken,
-    split: impl Fn(J) -> (StreamJob<C>, Option<WarmStart>),
+    split: impl Fn(
+        J,
+    ) -> (
+        StreamJob<C>,
+        Option<WarmStart>,
+        Option<families::FamilyContext>,
+    ),
 ) where
     S: Sampler<C> + ?Sized,
     C: Coefficient,
 {
     while let Some(item) = jobs.blocking_recv() {
-        let (j, warm) = split(item);
+        let (j, warm, family) = split(item);
         // Skip a job the coordinator abandoned on reseed; refund the credit
         // (via the session's Cancelled handling) so the pipeline keeps depth.
         // The serial default can only check at dequeue; backends that own a
@@ -418,9 +478,10 @@ fn serial_stream<S, J, C>(
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
         let t0 = std::time::Instant::now();
-        let result = match &warm {
-            Some(w) => sampler.sample_warm(&j.graph, &j.params, w),
-            None => sampler.sample(&j.graph, &j.params),
+        let result = match (&family, &warm) {
+            (Some(f), _) => sampler.sample_family(&j.graph, &j.params, warm.as_ref(), f),
+            (None, Some(w)) => sampler.sample_warm(&j.graph, &j.params, w),
+            (None, None) => sampler.sample(&j.graph, &j.params),
         };
         #[expect(
             clippy::cast_possible_truncation,
@@ -751,6 +812,7 @@ mod stream_tests {
                             watermark: None,
                         },
                         warm_start,
+                        family: None,
                     })
                     .await
                     .expect("send");
@@ -768,6 +830,188 @@ mod stream_tests {
         worker.join().expect("worker join");
         assert_eq!(energies.get(&vec![1u8]), Some(&Some(-1))); // sample_warm
         assert_eq!(energies.get(&vec![2u8]), Some(&Some(0))); // sample
+    }
+
+    /// A context over a two-node instance, for routing tests.
+    fn family_context() -> families::FamilyContext {
+        use ising_generators::instance::{Instance, InstanceLimits, InstanceParts};
+        static CONTRACT: ising_generators::descriptor::Contract =
+            ising_generators::descriptor::Contract {
+                family_id: "vectors/uniform-field",
+                revision: 1,
+                schema: layered::UNIFORM_FIELD,
+                metadata_kinds: &[1],
+                limits: InstanceLimits::FAM_37,
+                size_bounds: layered::example_size_bounds,
+                construction: Some(&layered::LAYERED),
+            };
+        let instance = Instance::new(
+            InstanceParts {
+                descriptor_digest: [0; 32],
+                topology_order_digest: [0; 32],
+                nonce: None,
+                node_ids: vec![0, 1],
+                edges: vec![(0, 1)],
+                h: vec![0, 0],
+                j: vec![0],
+                offset_milli: 0,
+                metadata: vec![0, 0],
+            },
+            &InstanceLimits::FAM_37,
+            &[1],
+            None,
+        )
+        .expect("valid instance");
+        families::FamilyContext::new(
+            &CONTRACT,
+            Arc::from(Vec::new()),
+            Arc::new(instance),
+            families::FamilySource::ExplicitJob,
+        )
+    }
+
+    /// Energy 0 from `sample`, 1 from `sample_warm`; `sample_family` is the default.
+    struct DefaultFamilyRoute;
+    impl Sampler for DefaultFamilyRoute {
+        fn sample(
+            &self,
+            _graph: &IsingGraph,
+            _params: &SampleParams,
+        ) -> Result<Vec<SamplerResult>, SampleError> {
+            Ok(vec![SamplerResult {
+                spins: vec![1, 1],
+                energy_milli: 0,
+            }])
+        }
+
+        fn sample_warm(
+            &self,
+            _graph: &IsingGraph,
+            _params: &SampleParams,
+            _warm: &WarmStart,
+        ) -> Result<Vec<SamplerResult>, SampleError> {
+            Ok(vec![SamplerResult {
+                spins: vec![1, 1],
+                energy_milli: 1,
+            }])
+        }
+
+        fn accepts_family_metadata() -> bool {
+            true
+        }
+    }
+
+    fn warm_start() -> WarmStart {
+        WarmStart {
+            spins: vec![vec![-1, 1]],
+            start_beta: None,
+            reversal_s: None,
+            reversal_pause_us: None,
+        }
+    }
+
+    /// Run `sampler` over warm-stream jobs and return the first energy by job id.
+    fn run_warm_stream<S: Sampler>(
+        sampler: S,
+        jobs: Vec<(u8, Option<WarmStart>, Option<families::FamilyContext>)>,
+    ) -> std::collections::HashMap<Vec<u8>, i64> {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("rt");
+        let (job_tx, job_rx) = tokio::sync::mpsc::channel::<WarmStreamJob>(4);
+        let (res_tx, mut res_rx) = tokio::sync::mpsc::channel::<StreamResult>(4);
+        let worker = std::thread::spawn(move || {
+            sampler.sample_stream_warm(job_rx, res_tx, CancelToken::default());
+        });
+        let energies = rt.block_on(async {
+            for (id, warm_start, family) in jobs {
+                job_tx
+                    .send(WarmStreamJob {
+                        job: StreamJob {
+                            job_id: vec![id],
+                            graph: tiny_graph(),
+                            params: SampleParams::default(),
+                            watermark: None,
+                        },
+                        warm_start,
+                        family,
+                    })
+                    .await
+                    .expect("send");
+            }
+            drop(job_tx);
+            let mut energies = std::collections::HashMap::new();
+            while let Some(r) = res_rx.recv().await {
+                let StreamOutcome::Completed(Ok(reads)) = r.outcome else {
+                    panic!("every job completes");
+                };
+                let energy = reads.first().map(|x| x.energy_milli).expect("one read");
+                let _ = energies.insert(r.job_id, energy);
+            }
+            energies
+        });
+        worker.join().expect("worker join");
+        energies
+    }
+
+    /// The default `sample_family` ignores the context and picks `sample_warm`
+    /// for a seeded job and `sample` for a cold one.
+    #[test]
+    fn default_sample_family_routes_to_sample_or_sample_warm() {
+        let energies = run_warm_stream(
+            DefaultFamilyRoute,
+            vec![
+                (1, Some(warm_start()), Some(family_context())),
+                (2, None, Some(family_context())),
+            ],
+        );
+        assert_eq!(energies.get(&vec![1u8]), Some(&1)); // sample_warm
+        assert_eq!(energies.get(&vec![2u8]), Some(&0)); // sample
+    }
+
+    /// Counts `sample_family` calls and reports the context's family id length.
+    struct FamilyCounter(Arc<std::sync::atomic::AtomicUsize>);
+    impl Sampler for FamilyCounter {
+        fn sample(
+            &self,
+            _graph: &IsingGraph,
+            _params: &SampleParams,
+        ) -> Result<Vec<SamplerResult>, SampleError> {
+            Ok(vec![SamplerResult {
+                spins: vec![1, 1],
+                energy_milli: 0,
+            }])
+        }
+
+        fn accepts_family_metadata() -> bool {
+            true
+        }
+
+        fn sample_family(
+            &self,
+            _graph: &IsingGraph,
+            _params: &SampleParams,
+            _warm: Option<&WarmStart>,
+            family: &families::FamilyContext,
+        ) -> Result<Vec<SamplerResult>, SampleError> {
+            let _ = self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![SamplerResult {
+                spins: vec![-1, -1],
+                energy_milli: i64::from(family.revision()) + 100,
+            }])
+        }
+    }
+
+    #[test]
+    fn a_family_job_reaches_sample_family_once() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let energies = run_warm_stream(
+            FamilyCounter(Arc::clone(&calls)),
+            vec![(1, None, Some(family_context())), (2, None, None)],
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(energies.get(&vec![1u8]), Some(&101)); // sample_family
+        assert_eq!(energies.get(&vec![2u8]), Some(&0)); // no context: sample
     }
 
     /// The advertised width defaults to the live width, so a backend that
@@ -823,6 +1067,7 @@ mod stream_tests {
                         watermark: None,
                     },
                     warm_start: None,
+                    family: None,
                 })
                 .await
                 .expect("send job");

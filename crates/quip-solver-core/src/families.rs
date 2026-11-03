@@ -3,12 +3,14 @@
 //! (docs/problem-families.md, FAM-56 to FAM-63). Answered without a device.
 
 use std::fmt;
+use std::sync::Arc;
 
-use ising_generators::descriptor::{params_digest, Contract, Params};
+use ising_generators::descriptor::{admit, params_digest, Contract, Params};
 use ising_generators::family::Construction;
+use ising_generators::instance::{Instance, InstanceLimits, InstanceParts};
 use ising_generators::Code;
-use quip_proto::v1::FamilySupport;
-use quip_protocol::family::{entry_claims, solver_id_class, SolverIdClass};
+use quip_proto::v1::{ising_problem, FamilySupport, IsingProblem};
+use quip_protocol::family::{entry_claims, solver_id_class, support_code, SolverIdClass};
 
 /// One `FamilySupport` entry as a binary declares it.
 #[derive(Clone, Copy, Debug)]
@@ -49,10 +51,11 @@ impl FamilyList {
 /// the generic tier: the plain model is solved and the coordinator decides
 /// acceptance (FAM-55, FAM-69).
 ///
-/// The session admits family leases for the `generated` revisions. It does
-/// not yet check `FamilyBinding`s for the `accepted` revisions (FAM-65 to
-/// FAM-68): every explicit family job is solved as a plain model. Every
-/// claimed contract needs a [`Construction`].
+/// The session admits family leases for the `generated` revisions. It checks
+/// the `FamilyBinding` of an explicit job for an `accepted` revision in the
+/// FAM-65 order before the sampler sees it, and solves every other explicit
+/// family job as a plain model. Every claimed contract needs a
+/// [`Construction`].
 #[derive(Clone, Copy, Debug)]
 pub struct Declaration {
     /// Stable id across releases (FAM-60), or `""` for no pin target.
@@ -275,6 +278,235 @@ impl FamilyTable {
     }
 }
 
+/// Validated family structure for one job. Only the session builds one, and
+/// only after the instance passed every check (FAM-36, FAM-65 to FAM-68).
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct FamilyContext {
+    contract: &'static Contract,
+    params: Arc<[u8]>,
+    instance: Arc<Instance>,
+    source: FamilySource,
+}
+
+/// Where a [`FamilyContext`] came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum FamilySource {
+    /// The session regenerated the instance of one lease salt.
+    Lease {
+        /// The salt index within the lease.
+        salt_index: u64,
+    },
+    /// The coordinator sent the instance with a `FamilyBinding`.
+    ExplicitJob,
+}
+
+impl FamilyContext {
+    /// Wrap an instance the session has validated against `contract`.
+    pub(crate) fn new(
+        contract: &'static Contract,
+        params: Arc<[u8]>,
+        instance: Arc<Instance>,
+        source: FamilySource,
+    ) -> Self {
+        Self {
+            contract,
+            params,
+            instance,
+            source,
+        }
+    }
+
+    /// The contract the instance was validated against.
+    #[must_use]
+    pub const fn contract(&self) -> &'static Contract {
+        self.contract
+    }
+
+    /// The family id of the contract.
+    #[must_use]
+    pub const fn family_id(&self) -> &'static str {
+        self.contract.family_id
+    }
+
+    /// The revision of the contract.
+    #[must_use]
+    pub const fn revision(&self) -> u32 {
+        self.contract.revision
+    }
+
+    /// The canonical parameter bytes of the descriptor.
+    #[must_use]
+    pub fn params(&self) -> &[u8] {
+        &self.params
+    }
+
+    /// The validated instance.
+    #[must_use]
+    pub fn instance(&self) -> &Instance {
+        &self.instance
+    }
+
+    /// The offset of the instance, in milli. The session adds it to the energy
+    /// of a lease salt (FAM-52) and never to an explicit job (FAM-64).
+    #[must_use]
+    pub fn offset_milli(&self) -> i64 {
+        self.instance.offset_milli()
+    }
+
+    /// The payload of metadata section `kind`, from the validated region.
+    #[must_use]
+    pub fn section(&self, kind: u16) -> Option<&[u8]> {
+        metadata_section(self.instance.metadata(), kind)
+    }
+
+    /// Where this context came from.
+    #[must_use]
+    pub const fn source(&self) -> FamilySource {
+        self.source
+    }
+}
+
+/// FAM-65 on an explicit job whose plain model passed every plain-job check
+/// (G9). `edges` are the resolved dense edges of the plain model.
+///
+/// `Ok(None)` is the generic tier: no binding, a binding without a
+/// descriptor (G12), or a `(family_id, revision)` that `accepted_families`
+/// does not list (FAM-69). `Ok(Some)` is a binding that passed every check.
+///
+/// # Errors
+///
+/// The first failing code, in the FAM-65 order: 7, 8, 9, then 10 from the
+/// accepted entry; 13 for a FAM-37 bound (G10); 15 for the `topology_hash`
+/// graph form (FAM-64), a FAM-46 field length, an edge fault or a digest
+/// mismatch; 16 for the metadata layout or the construction's metadata check.
+pub(crate) fn check_binding(
+    table: &FamilyTable,
+    ising: &IsingProblem,
+    edges: &[(usize, usize)],
+) -> Result<Option<FamilyContext>, Code> {
+    let Some(binding) = ising.family.as_ref() else {
+        return Ok(None);
+    };
+    let Some(family) = binding.family.as_ref() else {
+        return Ok(None);
+    };
+    // Codes 5 and 6 from the accepted list make this solver generic for the
+    // job. A held code 10 loses to codes 7 to 9.
+    let restricted = match support_code(
+        table.accepted(),
+        &family.family_id,
+        family.revision,
+        &family.params_digest,
+    ) {
+        Some(Code::ParamsRestricted) => true,
+        Some(_) => return Ok(None),
+        None => false,
+    };
+    // Declaration::validate makes both lookups below unreachable. The release
+    // build falls back to the generic tier.
+    let Some(contract) = table.accepted_contract(&family.family_id, family.revision) else {
+        debug_assert!(
+            false,
+            "support_code admitted a pair with no accepted contract"
+        );
+        return Ok(None);
+    };
+    let Some(construction) = contract.construction else {
+        debug_assert!(false, "an accepted contract has no construction");
+        return Ok(None);
+    };
+
+    // Step 1: the descriptor.
+    let admitted = admit(
+        std::slice::from_ref(contract),
+        family.family_id.as_bytes(),
+        family.revision,
+        &family.params,
+        &family.params_digest,
+    )?;
+    if restricted {
+        return Err(Code::ParamsRestricted);
+    }
+
+    // Step 2: the FAM-37 bounds on the rebuilt instance. A field of the wrong
+    // length is read as zeros here; step 3 rejects it.
+    let mismatch = Code::InstanceDigestMismatch;
+    // The plain model already decoded, so a failure here is a value that does
+    // not decode to the canonical milli coefficient (FAM-64).
+    let (h, j) = crate::encoding::decode_milli(ising).map_err(|_| mismatch)?;
+    let digest = |bytes: &[u8]| <[u8; 32]>::try_from(bytes).ok();
+    let position = |p: usize| u32::try_from(p).map_err(|_| mismatch);
+    let parts = InstanceParts {
+        descriptor_digest: admitted.descriptor().digest(),
+        topology_order_digest: digest(&binding.topology_order_digest).unwrap_or([0; 32]),
+        nonce: digest(&binding.nonce),
+        node_ids: binding.node_ids.clone(),
+        edges: edges
+            .iter()
+            .map(|&(u, v)| Ok((position(u)?, position(v)?)))
+            .collect::<Result<_, Code>>()?,
+        h,
+        j,
+        offset_milli: binding.offset_milli,
+        metadata: binding.metadata.clone(),
+    };
+    parts.check_bounds(&InstanceLimits::FAM_37)?;
+
+    // Step 3: the graph form, the FAM-46 lengths, then the edges and the
+    // digest inside `Instance::new`, which also runs the step 4 layout check.
+    let edges_form = matches!(ising.graph, Some(ising_problem::Graph::Edges(_)));
+    let lengths_ok = (binding.nonce.is_empty() || binding.nonce.len() == 32)
+        && binding.topology_order_digest.len() == 32
+        && binding.node_ids.len() == parts.h.len();
+    let sent_digest = digest(&binding.instance_digest)
+        .filter(|_| edges_form && lengths_ok)
+        .ok_or(mismatch)?;
+    let instance = Instance::new(
+        parts,
+        &InstanceLimits::FAM_37,
+        contract.metadata_kinds,
+        Some(&sent_digest),
+    )?;
+
+    // Step 4: the metadata against the instance (FAM-36, FAM-67).
+    if !(construction.check_metadata)(admitted.params(), &instance) {
+        return Err(Code::MetadataInvalid);
+    }
+    Ok(Some(FamilyContext::new(
+        contract,
+        Arc::from(family.params.as_slice()),
+        Arc::new(instance),
+        FamilySource::ExplicitJob,
+    )))
+}
+
+/// The payload of section `kind` in a metadata region that passed
+/// `validate_metadata`. Returns `None` for a kind that is absent, and for a
+/// region that is not well formed.
+fn metadata_section(region: &[u8], kind: u16) -> Option<&[u8]> {
+    let count = u16::from_le_bytes(region.get(..2)?.try_into().ok()?);
+    let mut pos: usize = 2;
+    for _ in 0..count {
+        let found = u16::from_le_bytes(region.get(pos..pos.checked_add(2)?)?.try_into().ok()?);
+        let len_at = pos.checked_add(2)?;
+        let length = u32::from_le_bytes(
+            region
+                .get(len_at..len_at.checked_add(4)?)?
+                .try_into()
+                .ok()?,
+        );
+        let start = pos.checked_add(6)?;
+        let end = start.checked_add(usize::try_from(length).ok()?)?;
+        if found == kind {
+            return region.get(start..end);
+        }
+        pos = end;
+    }
+    None
+}
+
 /// Why a [`Declaration`] cannot be advertised (FAM-62: a solver must not
 /// advertise an invalid list).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -412,3 +644,85 @@ impl fmt::Display for DeclarationError {
 }
 
 impl std::error::Error for DeclarationError {}
+
+#[cfg(test)]
+mod context_tests {
+    use super::*;
+    use ising_generators::instance::{InstanceLimits, InstanceParts};
+
+    static CONTRACT: Contract = Contract {
+        family_id: "vectors/uniform-field",
+        revision: 1,
+        schema: crate::layered::UNIFORM_FIELD,
+        metadata_kinds: &[1, 3],
+        limits: InstanceLimits::FAM_37,
+        size_bounds: crate::layered::example_size_bounds,
+        construction: Some(&crate::layered::LAYERED),
+    };
+
+    /// Two sections: kind 1 with `[7, 8, 9]` and kind 3 with `[5]`.
+    const REGION: [u8; 18] = [2, 0, 1, 0, 3, 0, 0, 0, 7, 8, 9, 3, 0, 1, 0, 0, 0, 5];
+
+    fn context() -> FamilyContext {
+        let instance = Instance::new(
+            InstanceParts {
+                descriptor_digest: [0; 32],
+                topology_order_digest: [0; 32],
+                nonce: None,
+                node_ids: vec![0, 1],
+                edges: vec![(0, 1)],
+                h: vec![0, 0],
+                j: vec![0],
+                offset_milli: 750,
+                metadata: REGION.to_vec(),
+            },
+            &InstanceLimits::FAM_37,
+            &[1, 3],
+            None,
+        )
+        .expect("valid instance");
+        FamilyContext::new(
+            &CONTRACT,
+            Arc::from(vec![1u8, 2, 3]),
+            Arc::new(instance),
+            FamilySource::Lease { salt_index: 4 },
+        )
+    }
+
+    #[test]
+    fn accessors_report_what_the_constructor_got() {
+        let c = context();
+        assert_eq!(c.offset_milli(), 750);
+        assert_eq!(c.params(), &[1, 2, 3]);
+        assert_eq!(c.instance().node_ids(), &[0, 1]);
+        assert_eq!(c.source(), FamilySource::Lease { salt_index: 4 });
+        assert_eq!((c.family_id(), c.revision()), ("vectors/uniform-field", 1));
+    }
+
+    #[test]
+    fn section_returns_the_payload_of_a_present_kind() {
+        let c = context();
+        assert_eq!(c.section(1), Some(&[7u8, 8, 9][..]));
+        assert_eq!(c.section(3), Some(&[5u8][..]));
+    }
+
+    #[test]
+    fn section_of_an_absent_kind_is_none() {
+        assert_eq!(context().section(2), None);
+    }
+
+    #[test]
+    fn a_truncated_region_gives_none_without_panicking() {
+        for len in 0..REGION.len() {
+            let cut = REGION.get(..len).unwrap_or_default();
+            // A cut inside the second section must not hide the intact first one.
+            let first = metadata_section(cut, 1);
+            if len >= 11 {
+                assert_eq!(first, Some(&[7u8, 8, 9][..]), "len {len}");
+            } else {
+                assert_eq!(first, None, "len {len}");
+            }
+            assert_eq!(metadata_section(cut, 3), None, "len {len}");
+        }
+    }
+}

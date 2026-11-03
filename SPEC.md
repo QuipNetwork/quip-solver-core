@@ -223,9 +223,13 @@ Plain and mempool jobs keep their credits, rejects, provenance, and warm-start b
 
 `IsingProblem.family` is tag 17.
 `miner.proto` defines this field.
-A solver session does not yet use it. It ignores the field and solves the plain model.
-A solver that lists the revision in `accepted_families` validates the binding and may use its structure.
-Any other solver ignores the field and solves the plain model.
+A solver session checks the binding only when the solver lists the pair in `accepted_families` (FAM-65).
+A solver that does not list the pair, or a binding with no descriptor, gets the plain model (FAM-69).
+For a listed pair, the session runs the plain checks first, then the binding checks, then the `max_reads` check.
+The binding checks run in FAM-65 order, and each failure code maps to a wire reason through `reject_reason(code, CodePhase::ExplicitJob)`.
+An explicit job has no offset in the energy (FAM-64), so the session adds none.
+A sampler that returns `true` from `accepts_family_metadata` gets the validated structure as a `FamilyContext`.
+Any other solver solves the plain model.
 See [Explicit family jobs](docs/problem-families.md#explicit-family-jobs).
 
 ### Generated jobs
@@ -343,7 +347,8 @@ A generated-family solver lists it in `generated_families`.
 A Rust solver declares `solver_id` and both lists through `Sampler::declaration`.
 The default declares the generic tier, with an empty `solver_id` and both lists empty.
 The session adds `GENERATOR_ALGORITHM_FAMILY_CHACHA8_V1` to the advertised generators exactly when `generated_families` is not empty (FAM-58).
-The session admits family leases for the revisions in `generated_families`, but does not check family bindings on explicit jobs.
+The session admits family leases for the revisions in `generated_families`.
+It checks the family binding of an explicit job for the revisions in `accepted_families`.
 A pin on `solver_id` never bypasses these compatibility checks.
 See [Capabilities](docs/problem-families.md#capabilities) and [Dispatch and pins](docs/problem-families.md#dispatch-and-pins).
 
@@ -447,7 +452,7 @@ Use `Backend::Cpu` and `Algorithm::Sa` for a CPU simulated annealer.
 The [migration name table](MIGRATING.md#identity-names) lists all supported names.
 The fixed map in `quip_protocol::session` keeps command-line identity strings lowercase.
 
-The thirteen defaulted methods are:
+The fifteen defaulted methods are:
 
 | Method | Default |
 |---|---|
@@ -462,6 +467,8 @@ The thirteen defaulted methods are:
 | `max_reads` | `u32::MAX` |
 | `apply_config` | No action. |
 | `generates_locally` | `false`. The session draws lease problems. |
+| `accepts_family_metadata` | `false`. `true` makes the session feed `sample_stream_warm` and pass a `FamilyContext` to `sample_family`. |
+| `sample_family` | Ignores the `FamilyContext` and calls `sample_warm` for a seeded job and `sample` for a cold one. |
 | `sample_lease` | Returns `DeviceFault` if called without an override. |
 | `declaration` | `Declaration::GENERIC`: no `solver_id` and no family listed. |
 
@@ -472,6 +479,27 @@ Each listed parameter set must pass the schema and bounds of every listed revisi
 The session validates the declaration before it runs any mode.
 An invalid declaration logs an error and exits 70 in every mode, before the device opens.
 `capabilities_for::<S, C>(&id)` builds the advertised `Capabilities` and returns `DeclarationError` for an invalid declaration.
+
+A sampler that returns `true` from `accepts_family_metadata` receives every job through `sample_stream_warm`, and never through `sample_stream`.
+`WarmStreamJob.family` holds `Some(FamilyContext)` for a job that passed the checks, and `None` for any other job.
+A backend that overrides `sample_stream` must also override `sample_stream_warm`. That override must route each job that has a family context to `sample_family`. Without it, all jobs of that backend run through the default serial loop.
+`FamilyContext` gives `contract()`, `family_id()`, `revision()`, `params()`, `instance()`, `offset_milli()`, `section(kind)`, and `source()`.
+`section(kind)` returns the payload of one metadata section from the validated region.
+`FamilySource` is `Lease { salt_index }` or `ExplicitJob`.
+Only the session builds a `FamilyContext`.
+
+`sample_family` reports the energy of the graph without the offset.
+The session adds the offset for a lease salt (FAM-52) and never for an explicit job (FAM-64).
+
+An explicit job reaches the binding checks in this order:
+
+1. The plain checks (G9): parse, shape, size, model limits, and warm start.
+2. A binding with no descriptor, or a pair that `support_code` gives code 5 or 6, takes the generic tier (FAM-65, FAM-69).
+3. Codes 7, 8, 9, and 10, then the bounds code 13 and the instance codes 15 and 16, in the order of FAM-65.
+4. The `max_reads` check.
+
+The `topology_hash` graph form of a bound job gets code 15 (FAM-64).
+`ising_generators::InstanceParts::check_bounds` runs the bounds step that `Instance::new` uses.
 
 ### Optional local generation
 
