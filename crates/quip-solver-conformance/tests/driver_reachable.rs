@@ -51,3 +51,11 @@ fn the_wire_fixture_is_reachable() {
         "golden_wire.json must carry the RejectReason numbers"
     );
 }
+
+#[test]
+fn the_layered_construction_is_exported() {
+    use quip_solver_conformance::families::layered::{LAYERED, RESTRICTED_V1, UNIFORM_V1};
+    assert_eq!(UNIFORM_V1.family_id, "vectors/uniform-field");
+    assert_eq!(RESTRICTED_V1.family_id, "vectors/restricted-field");
+    assert_eq!(LAYERED.labels, ["salt", "couplings"]);
+}

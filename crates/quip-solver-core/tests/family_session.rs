@@ -430,10 +430,8 @@ const PINNED_RESULTS: [(&str, &str, &str); 3] = [
 // Family leases (SC-5). The expected instances come from
 // `generate_instance` on the inputs the lease names.
 
-#[path = "../examples/support/layered_family.rs"]
-mod layered;
-
 use quip_protocol::lease::LeaseSpec;
+use quip_solver_conformance::families::layered::{RESTRICTED_V1, UNIFORM_V1};
 use quip_solver_core::ising_generators::{
     descriptor::{admit, params_digest, topology_order_digest, AdvertisedLimits, Contract},
     family::{admit_topology, generate_instance, BaseTopology, SaltFault},
@@ -441,29 +439,6 @@ use quip_solver_core::ising_generators::{
 };
 use serde_json::Value;
 
-const TIGHT_LIMITS: InstanceLimits = match InstanceLimits::new(
-    16_777_216,
-    67_108_864,
-    2000,
-    72_057_594_037_927_936,
-    67_108_864,
-) {
-    Some(limits) => limits,
-    None => InstanceLimits::FAM_37,
-};
-static UNIFORM_V1: Contract = Contract {
-    family_id: "vectors/uniform-field",
-    revision: 1,
-    schema: layered::UNIFORM_FIELD,
-    metadata_kinds: &[1],
-    limits: TIGHT_LIMITS,
-    size_bounds: layered::example_size_bounds,
-    construction: Some(&layered::LAYERED),
-};
-static RESTRICTED_V1: Contract = Contract {
-    family_id: "vectors/restricted-field",
-    ..UNIFORM_V1
-};
 const P_SPEC: [u8; 19] = [
     0x01, 1, 0, 2, 0, 0, 0, 2, 0, 2, 0, 4, 0, 0, 0, 0x24, 0xfa, 0xff, 0xff,
 ];

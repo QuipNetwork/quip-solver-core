@@ -24,14 +24,6 @@ pub mod limits;
 pub mod logging;
 mod session;
 
-// The layered test construction, shared with the examples and the session
-// tests. The shared file names this crate by its package name.
-#[cfg(test)]
-extern crate self as quip_solver_core;
-#[cfg(test)]
-#[path = "../examples/support/layered_family.rs"]
-mod layered;
-
 pub use cli::CommonArgs;
 pub use csr::CsrGraph;
 pub use error::SampleError;
@@ -835,6 +827,7 @@ mod stream_tests {
     /// A context over a two-node instance, for routing tests.
     fn family_context() -> families::FamilyContext {
         use ising_generators::instance::{Instance, InstanceLimits, InstanceParts};
+        use quip_solver_conformance::families::layered;
         static CONTRACT: ising_generators::descriptor::Contract =
             ising_generators::descriptor::Contract {
                 family_id: "vectors/uniform-field",

@@ -14,6 +14,9 @@ pub mod driver;
 /// section 2 and reports each case.
 pub mod solve;
 
+/// Generated family instances: the layered test construction.
+pub mod families;
+
 mod vectors;
 
 pub use vectors::{

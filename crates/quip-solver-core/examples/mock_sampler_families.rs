@@ -14,10 +14,7 @@ use quip_solver_core::{
 };
 use std::process::ExitCode;
 
-#[path = "support/layered_family.rs"]
-mod layered;
-
-use layered::{example_size_bounds, UNIFORM_FIELD};
+use quip_solver_conformance::families::layered::{self, example_size_bounds, UNIFORM_FIELD};
 
 const ZERO_FIELD_PARAMS: [u8; 19] = [0x01, 1, 0, 2, 0, 0, 0, 2, 0, 2, 0, 4, 0, 0, 0, 0, 0, 0, 0];
 

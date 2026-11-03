@@ -1621,10 +1621,10 @@ mod tests {
 mod family_tests {
     use super::*;
     use crate::families::{Declaration, FamilyClaim};
-    use crate::layered;
     use ising_generators::descriptor::params_digest;
     use ising_generators::instance::InstanceLimits;
     use quip_proto::v1::{EdgeList, FamilyDescriptor, GeneratorAlgorithm, IsingProblemGenerator};
+    use quip_solver_conformance::families::layered;
 
     const TIGHT_LIMITS: InstanceLimits = match InstanceLimits::new(
         16_777_216,
