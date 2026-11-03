@@ -127,7 +127,9 @@ pub fn zephyr_coupler(m: u16, t: u8, a: u32, b: u32) -> bool {
 
 /// The full z(m,t) lattice: node ids ascending, edges (a < b) ascending.
 ///
-/// `None` when `m` or `t` is zero or the node count does not fit `u32`.
+/// `None` when `m` or `t` is zero, when `m` is above 32 or `t` is above 8
+/// (the `quip/ice-glass@1` bounds), or when the node count does not fit
+/// `u32`.
 #[must_use]
 #[expect(
     clippy::many_single_char_names,
@@ -138,7 +140,7 @@ pub fn zephyr_coupler(m: u16, t: u8, a: u32, b: u32) -> bool {
     reason = "the return type is the pinned interface"
 )]
 pub fn zephyr_lattice(m: u16, t: u8) -> Option<(Vec<u32>, Vec<(u32, u32)>)> {
-    if m == 0 || t == 0 {
+    if m == 0 || t == 0 || m > 32 || t > 8 {
         return None;
     }
     let count = u32::try_from(node_count(m, t)?).ok()?;
@@ -202,19 +204,24 @@ fn at<T: Copy>(items: &[T], pos: u32) -> Result<T, StructureError> {
 }
 
 /// Ascending neighbour lists over dense positions.
-fn neighbour_lists(n: usize, edges: &BTreeSet<(u32, u32)>) -> Vec<Vec<u32>> {
+fn neighbour_lists(
+    n: usize,
+    edges: &BTreeSet<(u32, u32)>,
+) -> Result<Vec<Vec<u32>>, StructureError> {
     let mut lists: Vec<Vec<u32>> = vec![Vec::new(); n];
     for &(a, b) in edges {
         for (from, to) in [(a, b), (b, a)] {
-            if let Some(list) = usize::try_from(from).ok().and_then(|i| lists.get_mut(i)) {
-                list.push(to);
-            }
+            usize::try_from(from)
+                .ok()
+                .and_then(|i| lists.get_mut(i))
+                .ok_or(StructureError::Overflow)?
+                .push(to);
         }
     }
     for list in &mut lists {
         list.sort_unstable();
     }
-    lists
+    Ok(lists)
 }
 
 fn neighbours(lists: &[Vec<u32>], node: u32) -> &[u32] {
@@ -370,7 +377,7 @@ pub fn candidates(lattice: Lattice, topology: &BaseTopology) -> Result<Candidate
         Lattice::Zephyr { m, t } => Some(zephyr_checked(m, t, topology)?),
         Lattice::Adjacency => None,
     };
-    let lists = neighbour_lists(topology.node_ids().len(), &edges);
+    let lists = neighbour_lists(topology.node_ids().len(), &edges)?;
     let mut found: Found = match &coordinates {
         Some(coordinates) => zephyr_tiles(coordinates, &edges, &lists)?,
         None => adjacency_tiles(&lists)
@@ -401,20 +408,27 @@ fn check_membership(
 ) -> Result<(), StructureError> {
     let mut slots = vec![0u32; topology.node_ids().len()];
     let mut spine_edges = BTreeSet::new();
-    let mut add = |node: u32| {
-        if let Some(slot) = usize::try_from(node).ok().and_then(|i| slots.get_mut(i)) {
-            *slot = slot.saturating_add(1);
-        }
+    let mut add = |node: u32| -> Result<(), StructureError> {
+        let slot = usize::try_from(node)
+            .ok()
+            .and_then(|i| slots.get_mut(i))
+            .ok_or(StructureError::Overflow)?;
+        *slot = slot.saturating_add(1);
+        Ok(())
     };
     for (tile, spine) in tiles.iter().zip(spines) {
         match spine {
             Some(pair) => spine_edges.extend(pair.iter().copied()),
-            None => tile.nodes.into_iter().for_each(&mut add),
+            None => {
+                for node in tile.nodes {
+                    add(node)?;
+                }
+            }
         }
     }
     for (a, b) in spine_edges {
-        add(a);
-        add(b);
+        add(a)?;
+        add(b)?;
     }
     for (&id, &slot) in topology.node_ids().iter().zip(&slots) {
         if slot > 2 {

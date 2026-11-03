@@ -171,6 +171,7 @@ fn uniform_of_one_reads_one_word() -> Result<(), String> {
 #[test]
 fn shuffle_matches_the_core_vectors() -> Result<(), String> {
     let doc = core()?;
+    let mut checked = 0usize;
     for case in section(&doc, "shuffle")? {
         let name = case.get("name").and_then(Value::as_str).ok_or("no name")?;
         let seed = hex32(case.get("seed").and_then(Value::as_str).ok_or("no seed")?)?;
@@ -214,6 +215,10 @@ fn shuffle_matches_the_core_vectors() -> Result<(), String> {
                 "{name}: next word after shuffle is not word {used} of the stream"
             ));
         }
+        checked += 1;
+    }
+    if checked == 0 {
+        return Err("no shuffle cases checked".into());
     }
     Ok(())
 }

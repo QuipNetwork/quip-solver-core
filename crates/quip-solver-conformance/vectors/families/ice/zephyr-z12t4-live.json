@@ -2,7 +2,7 @@
   "about": [
     "The live Zephyr z(12, 4) topology of the research regime, as z(12, 4) minus the removed nodes and removed edges.",
     "Rebuild: the lattice nodes without removed_nodes, ascending, and the lattice edges without removed_edges and without an edge at a removed node, ascending.",
-    "The sha256 pins the external spec file that the rebuild was checked against."
+    "The sha256 pins the external spec file that the rebuild was checked against. The source path is relative to the research data root."
   ],
   "edges": 41474,
   "nodes": 4575,
@@ -1343,7 +1343,7 @@
   ],
   "sources": [
     {
-      "path": "/home/carback1/quip-data/regimes/topology-live-2026-09-21.spec.json",
+      "path": "quip-data/regimes/topology-live-2026-09-21.spec.json",
       "sha256": "65ef58bdfff7ecebadf041e77f2c8ae4b12763fa76190f7cd507a14145e747be"
     }
   ],

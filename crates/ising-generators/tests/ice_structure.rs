@@ -381,14 +381,11 @@ fn tiny_exhaustive_matching_is_maximum() {
                 let chosen = select(&found, &split, left, right).expect("select");
                 assert_eq!(chosen.len(), maximum, "{pairs:?} {left:?} {right:?}");
                 let mut used = BTreeSet::new();
-                let mut slots = BTreeSet::new();
                 for tile in &chosen {
                     let at = found.tiles.binary_search(tile).expect("a candidate");
                     let [e, f] = found.spines[at].expect("spine tile");
                     assert!(used.insert(e) && used.insert(f), "edge reused");
-                    let _ = slots.insert(*tile);
                 }
-                assert_eq!(slots.len(), chosen.len());
                 for node in 0..=found.tiles.iter().flat_map(|t| t.nodes).max().unwrap_or(0) {
                     let count = chosen.iter().filter(|t| t.nodes.contains(&node)).count();
                     assert!(count <= 2, "node {node} in {count} slots");

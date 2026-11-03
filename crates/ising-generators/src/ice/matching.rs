@@ -179,6 +179,11 @@ fn ranks(order: &[u32], len: usize) -> Result<Vec<usize>, StructureError> {
         .collect()
 }
 
+/// Check that `order` is a permutation of `0..len`.
+fn check_order(order: &[u32], len: usize) -> Result<(), StructureError> {
+    ranks(order, len).map(drop)
+}
+
 /// Try to match left spine `root`, following augmenting paths in the order
 /// of `adj`. This is the recursive `try(l)` with an explicit stack: each
 /// frame is a left spine and the next position in its list.
@@ -245,7 +250,7 @@ pub fn select(
     left_order: &[u32],
     right_order: &[u32],
 ) -> Result<Vec<Tile>, StructureError> {
-    let _ = ranks(left_order, sides.left.len())?;
+    check_order(left_order, sides.left.len())?;
     let rank = ranks(right_order, sides.right.len())?;
     let mut tile_of: BTreeMap<(usize, usize), Tile> = BTreeMap::new();
     let mut selected: Vec<Tile> = Vec::new();
@@ -263,7 +268,11 @@ pub fn select(
         }) else {
             return Err(StructureError::Overflow);
         };
-        let _ = tile_of.insert((l, r), *tile);
+        // Two distinct candidate tiles cannot share both spine edges, since
+        // the two edges name all four nodes.
+        if tile_of.insert((l, r), *tile).is_some() {
+            return Err(StructureError::Overflow);
+        }
     }
     let mut adj: Vec<Vec<usize>> = vec![Vec::new(); sides.left.len()];
     for &(l, r) in tile_of.keys() {

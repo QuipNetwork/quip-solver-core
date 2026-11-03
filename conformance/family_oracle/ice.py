@@ -241,12 +241,11 @@ def candidates(
         spines = [by_tile[tile] for tile in tiles]
     else:
         tiles = sorted(set(_adjacency_tiles(neighbours)))
+        spines = _adjacency_spines(tiles)
     if not tiles:
         raise StructureError("no-candidates")
-    if not zephyr:
-        spines = _adjacency_spines(tiles)
     _check_slots(len(nodes), tiles, spines)
-    sides(m, t, coords, spines)
+    sides(m, coords, spines)
     return tiles, spines
 
 
@@ -273,7 +272,6 @@ def _check_slots(
 
 def sides(
     m: int,
-    t: int,
     coords: list[tuple[int, int, int, int, int]],
     spines: Sequence[Spine | None],
 ) -> tuple[list[Edge], list[Edge]]:

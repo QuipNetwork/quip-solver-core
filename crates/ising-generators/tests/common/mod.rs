@@ -123,12 +123,18 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
 ///
 /// # Panics
 ///
-/// When the string has an odd length or a character that is not hex.
+/// When the string has an odd length or a character that is not hex, or
+/// when a byte offset does not fall on a character boundary.
 pub(crate) fn unhex(text: &str) -> Vec<u8> {
     assert_eq!(text.len() % 2, 0, "even hex length");
     (0..text.len())
         .step_by(2)
-        .map(|at| u8::from_str_radix(&text[at..at + 2], 16).expect("hex"))
+        .map(|at| {
+            let pair = text
+                .get(at..at + 2)
+                .expect("hex pair on a character boundary");
+            u8::from_str_radix(pair, 16).expect("hex")
+        })
         .collect()
 }
 

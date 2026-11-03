@@ -1618,7 +1618,7 @@ def _structure_case(
         case["error"] = err.name
         return case
     coords = [ice.zephyr_coordinates(m, t, n) for n in nodes] if m else []
-    left, right = ice.sides(m, t, coords, spines)  # type: ignore[arg-type]
+    left, right = ice.sides(m, coords, spines)  # type: ignore[arg-type]
     selections = []
     for seed in _ICE_SEEDS:
         left_order, right_order = ice.seeded_orders(seed, len(left), len(right))
@@ -1703,7 +1703,7 @@ def _live_case(mode: str, nodes: list[int], edges: list[tuple[int, int]]) -> dic
     shape = (12, 4) if mode == "zephyr" else (0, 0)
     tiles, spines = ice.candidates(*shape, nodes, edges)
     coords = [ice.zephyr_coordinates(12, 4, n) for n in nodes] if shape[0] else []
-    left, right = ice.sides(*shape, coords, spines)  # type: ignore[arg-type]
+    left, right = ice.sides(shape[0], coords, spines)  # type: ignore[arg-type]
     selections = []
     for seed in _ICE_SEEDS:
         left_order, right_order = ice.seeded_orders(seed, len(left), len(right))

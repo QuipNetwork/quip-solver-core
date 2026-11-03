@@ -72,7 +72,10 @@ pub enum StructureError {
     NotBipartite,
     /// A select order that is not a permutation of its side.
     BadOrder,
-    /// A count does not fit its integer type.
+    /// A count does not fit its integer type. This also reports an internal
+    /// inconsistency (a dense position out of range, a missing spine edge, or
+    /// a repeated tile slot) that a topology accepted by
+    /// [`BaseTopology::new`](crate::family::BaseTopology::new) cannot produce.
     Overflow,
 }
 

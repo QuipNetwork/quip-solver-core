@@ -668,7 +668,7 @@ def test_ice_both_modes_agree_and_select_is_a_matching():
     assert zephyr == ice.candidates(0, 0, nodes, edges)
     tiles, spines = zephyr
     coords = [ice.zephyr_coordinates(2, 2, n) for n in nodes]
-    left, right = ice.sides(2, 2, coords, spines)
+    left, right = ice.sides(2, coords, spines)
     for seed in (bytes(range(32)), bytes(range(32, 64))):
         orders = ice.seeded_orders(seed, len(left), len(right))
         chosen = ice.select(tiles, spines, left, right, *orders)
@@ -680,7 +680,7 @@ def test_ice_both_modes_agree_and_select_is_a_matching():
 def test_ice_ties_follow_the_orders():
     nodes, edges = build._graph(build._tile_ring(4))
     tiles, spines = ice.candidates(0, 0, nodes, edges)
-    left, right = ice.sides(0, 0, [], spines)
+    left, right = ice.sides(0, [], spines)
     assert left == [(0, 1), (4, 5)] and right == [(2, 3), (6, 7)]
     assert ice.select(tiles, spines, left, right, [0, 1], [0, 1]) == [
         (0, 1, 6, 7),
