@@ -1041,3 +1041,17 @@ def test_blob_cli_round_trip(tmp_path):
         failed = run("encode", str(source), str(blob))
         assert failed.returncode == 1, text
         assert "shape" in failed.stderr and "Traceback" not in failed.stderr, text
+
+
+def test_glass_rejects_a_tile_pair_that_is_not_an_edge(monkeypatch):
+    from family_oracle import glass
+
+    nodes, edges = ice.lattice(2, 2)
+    params = build._ice_glass_params(2, 2, 125)
+    monkeypatch.setattr(
+        glass,
+        "select",
+        lambda *_args: [(0, 1, len(nodes) - 2, len(nodes) - 1)],
+    )
+    with pytest.raises(ValueError, match="not topology edges"):
+        glass.generate(b"quip/ice-glass", 1, params, nodes, edges, bytes(32))

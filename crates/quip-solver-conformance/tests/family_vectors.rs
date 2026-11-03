@@ -2315,9 +2315,46 @@ fn check_layered_instance(
     Ok(())
 }
 
+/// The size bounds a family states for a case: `(nodes, edges, degree)`, or
+/// `None` when the family gives no bounds.
+type SizeBoundsOf =
+    fn(&Value, &[u8], &[u32], &[(u32, u32)]) -> Result<Option<(u64, u64, u64)>, String>;
+
+/// The bounds of the layered construction: `n_layers` copies of the topology.
+fn layered_size_bounds(
+    case: &Value,
+    params: &[u8],
+    nodes: &[u32],
+    edges: &[(u32, u32)],
+) -> Result<Option<(u64, u64, u64)>, String> {
+    Ok(decisions::example_size_bounds(
+        layered_n_layers(case, params)?,
+        u64::try_from(nodes.len()).map_err(|e| e.to_string())?,
+        u64::try_from(edges.len()).map_err(|e| e.to_string())?,
+        topology_max_degree(nodes, edges),
+    ))
+}
+
+/// The bounds of `quip/ice-glass`: the topology itself.
+fn ice_glass_size_bounds(
+    _: &Value,
+    _: &[u8],
+    nodes: &[u32],
+    edges: &[(u32, u32)],
+) -> Result<Option<(u64, u64, u64)>, String> {
+    Ok(Some((
+        u64::try_from(nodes.len()).map_err(|e| e.to_string())?,
+        u64::try_from(edges.len()).map_err(|e| e.to_string())?,
+        topology_max_degree(nodes, edges),
+    )))
+}
+
 /// Recompute the digests and size bounds of a case. Returns the descriptor
 /// digest and the topology order digest.
-fn check_layered_identity(case: &Value) -> Result<([u8; 32], [u8; 32]), String> {
+fn check_layered_identity(
+    case: &Value,
+    bounds: SizeBoundsOf,
+) -> Result<([u8; 32], [u8; 32]), String> {
     let family = str_field(case, "family_id")?;
     let params = codec::hex_decode(str_field(case, "params_hex")?)?;
     let params_digest = digests::params_digest(&params);
@@ -2348,12 +2385,7 @@ fn check_layered_identity(case: &Value) -> Result<([u8; 32], [u8; 32]), String> 
         &str_field(topology, "order_digest")?.to_owned(),
     )?;
     let sizes = object_field(case, "size_bounds")?;
-    let want_bounds = decisions::example_size_bounds(
-        layered_n_layers(case, &params)?,
-        u64::try_from(nodes.len()).map_err(|e| e.to_string())?,
-        u64::try_from(edges.len()).map_err(|e| e.to_string())?,
-        topology_max_degree(&nodes, &edges),
-    );
+    let want_bounds = bounds(case, &params, &nodes, &edges)?;
     compare(
         case,
         "size_bounds",
@@ -2367,9 +2399,9 @@ fn check_layered_identity(case: &Value) -> Result<([u8; 32], [u8; 32]), String> 
     Ok((descriptor, order))
 }
 
-fn check_layered_case(case: &Value) -> Result<(), String> {
+fn check_layered_case(case: &Value, bounds: SizeBoundsOf) -> Result<(), String> {
     use quip_protocol::lease::{Generator, LeaseSpec};
-    let (descriptor, order) = check_layered_identity(case)?;
+    let (descriptor, order) = check_layered_identity(case, bounds)?;
     let lease = object_field(case, "lease")?;
     let spec = LeaseSpec::new(
         Generator::Blake3Chacha8V1,
@@ -2433,8 +2465,8 @@ fn check_layered_case(case: &Value) -> Result<(), String> {
 fn check_layered(doc: &Value) -> Result<(), String> {
     validate(&schema()?, doc)?;
     check_names_unique(doc)?;
-    for case in section(doc, "layered")? {
-        check_layered_case(case)?;
+    for case in section(doc, "cases")? {
+        check_layered_case(case, layered_size_bounds)?;
     }
     Ok(())
 }
@@ -2444,11 +2476,13 @@ fn check_layered(doc: &Value) -> Result<(), String> {
 fn check_layered_against_rust(case: &Value) -> Result<(), String> {
     use ising_generators::descriptor::{admit, params_digest};
     use ising_generators::family::{admit_topology, generate_instance, BaseTopology, SaltFault};
+    use ising_generators::ice::ICE_GLASS_V1;
     use quip_solver_conformance::families::layered::{RESTRICTED_V1, UNIFORM_V1};
     let family = str_field(case, "family_id")?;
     let contract = match family {
         "vectors/uniform-field" => UNIFORM_V1,
         "vectors/restricted-field" => RESTRICTED_V1,
+        "quip/ice-glass" => ICE_GLASS_V1,
         other => return Err(format!("{}: unknown family {other}", case_name(case))),
     };
     let params = codec::hex_decode(str_field(case, "params_hex")?)?;
@@ -2533,7 +2567,7 @@ fn layered_vectors_recompute() -> Result<(), String> {
 
 #[test]
 fn layered_vectors_match_the_rust_construction() -> Result<(), String> {
-    for case in section(&layered_doc()?, "layered")? {
+    for case in section(&layered_doc()?, "cases")? {
         check_layered_against_rust(case)?;
     }
     Ok(())
@@ -2542,7 +2576,7 @@ fn layered_vectors_match_the_rust_construction() -> Result<(), String> {
 #[test]
 fn uniform_p_spec_skips_match_the_session_capture() -> Result<(), String> {
     let doc = layered_doc()?;
-    let case = find_named(&doc, "layered", "uniform-p-spec-sparse")?;
+    let case = find_named(&doc, "cases", "uniform-p-spec-sparse")?;
     let mut skipped = Vec::new();
     for entry in entries_of(case, "skipped")? {
         skipped.push(u64_decimal(entry, "index")?);
@@ -2554,7 +2588,7 @@ fn uniform_p_spec_skips_match_the_session_capture() -> Result<(), String> {
 #[test]
 fn changed_layered_coupling_fails() -> Result<(), String> {
     let doc = layered_doc()?;
-    let pointer = "/layered/0/instances/0/j/0";
+    let pointer = "/cases/0/instances/0/j/0";
     let was = doc
         .pointer(pointer)
         .and_then(Value::as_i64)
@@ -2579,7 +2613,7 @@ fn registered_cases(
         .map_err(|e| format!("{}: {e}", entry.vectors))?;
     let doc: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
     let mut cases = Vec::new();
-    for case in section(&doc, "layered")? {
+    for case in section(&doc, "cases")? {
         if str_field(case, "family_id")? == entry.family_id
             && u32_field(case, "revision")? == entry.revision
         {
@@ -2671,7 +2705,68 @@ fn ice_structure_fixture_matches_schema() -> Result<(), String> {
     check_names_unique(&doc)?;
     section(&doc, "structure").map(|_| ())?;
     section(&doc, "live").map(|_| ())?;
+    section(&doc, "cases").map(|_| ())?;
     Ok(())
+}
+
+fn ice_glass_doc() -> Result<Value, String> {
+    serde_json::from_str(include_str!("../vectors/families/ice_structure.json"))
+        .map_err(|e| e.to_string())
+}
+
+/// Recompute the digests, nonces, and instance bytes of every registered
+/// `quip/ice-glass` case with Rust code that does not call the construction.
+fn check_ice_glass(doc: &Value) -> Result<(), String> {
+    validate(&schema()?, doc)?;
+    for case in section(doc, "cases")? {
+        check_layered_case(case, ice_glass_size_bounds)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn ice_glass_cases_recompute() -> Result<(), String> {
+    check_ice_glass(&ice_glass_doc()?)
+}
+
+#[test]
+fn ice_glass_cases_match_the_rust_construction() -> Result<(), String> {
+    for case in section(&ice_glass_doc()?, "cases")? {
+        check_layered_against_rust(case)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn ice_glass_params_constants_match_the_vectors() -> Result<(), String> {
+    use quip_solver_conformance::families::ice::{P_ICE_ADJ_125, P_ICE_Z12_200};
+    let doc = ice_glass_doc()?;
+    let cases = section(&doc, "cases")?;
+    for (name, want) in [
+        ("ice-glass-adjacency-z12", P_ICE_ADJ_125),
+        ("ice-glass-zephyr-z12", P_ICE_Z12_200),
+    ] {
+        let case = find_named(&doc, "cases", name)?;
+        compare(
+            case,
+            "params_hex",
+            &str_field(case, "params_hex")?.to_owned(),
+            &codec::hex_encode(&want),
+        )?;
+    }
+    compare(&doc, "case count", &cases.len(), &4)
+}
+
+#[test]
+fn a_changed_ice_glass_coupling_fails_the_recompute() -> Result<(), String> {
+    let doc = ice_glass_doc()?;
+    let pointer = "/cases/0/instances/0/j/0";
+    let was = doc
+        .pointer(pointer)
+        .and_then(Value::as_i64)
+        .ok_or("no coupling")?;
+    let broken = mutate(&doc, pointer, json!(was + 1000));
+    expect_err(&check_ice_glass(&broken), "a changed coupling")
 }
 
 // ---- topology files (vectors/topologies/) ----

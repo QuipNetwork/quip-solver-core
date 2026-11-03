@@ -212,7 +212,7 @@ fn a_malformed_vector_is_an_error() -> Result<(), String> {
     let mut root: serde_json::Value =
         serde_json::from_str(FAMILY_LAYERED).map_err(|e| e.to_string())?;
     let case = root
-        .get_mut("layered")
+        .get_mut("cases")
         .and_then(|cases| cases.get_mut(0))
         .and_then(serde_json::Value::as_object_mut)
         .ok_or("no case 0")?;
@@ -225,7 +225,7 @@ fn a_malformed_vector_is_an_error() -> Result<(), String> {
     let mut root: serde_json::Value =
         serde_json::from_str(FAMILY_LAYERED).map_err(|e| e.to_string())?;
     let hex = root
-        .pointer_mut("/layered/0/instances/0/canonical_hex")
+        .pointer_mut("/cases/0/instances/0/canonical_hex")
         .ok_or("no canonical_hex")?;
     *hex = serde_json::Value::String("abc".to_owned());
     match parse_vector_cases(&root.to_string()) {

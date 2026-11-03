@@ -8,6 +8,19 @@
   "registry": [
     {
       "adapted_from": null,
+      "contract": "docs/families/quip-ice-glass-1.md",
+      "evidence": [
+        "SC-8:ice-glass-vectors-frozen"
+      ],
+      "family_id": "quip/ice-glass",
+      "name": "quip/ice-glass@1",
+      "revision": 1,
+      "status": "research",
+      "vectors": "crates/quip-solver-conformance/vectors/families/ice_structure.json",
+      "vectors_blake3": "2d864176c13dd035d0c6de837a1e81fd0d532ffc47d62006446aadbd19b004c9"
+    },
+    {
+      "adapted_from": null,
       "contract": "docs/families/vectors-restricted-field-1.md",
       "evidence": [
         "SC-7:revision-vectors-frozen"

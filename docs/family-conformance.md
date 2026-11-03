@@ -73,7 +73,8 @@ Per-revision cases carry the subject `family_id@revision`.
 ### Cases of each revision
 
 The gate runs these ten cases for each `(family_id, revision)` that the binary lists in `generated_families`.
-At present the reference revisions are `vectors/uniform-field@1` and `vectors/restricted-field@1`.
+At present the reference revisions are `vectors/uniform-field@1`, `vectors/restricted-field@1`, and `quip/ice-glass@1`.
+The gate sends the fixed topology `T_SPARSE`, which carries no ice tiles. A binary that lists `quip/ice-glass@1` fails `supported-revision`, because every reference params set gets code 12 (`TopologyIncompatible`). No solver in this repository lists it.
 If the gate cannot drive a listed revision, `supported-revision` fails and states the reason.
 The reason is one of these:
 
@@ -117,7 +118,7 @@ The checker lives in `quip_solver_conformance::families`.
 
 | Item | Use |
 |---|---|
-| `parse_vector_cases` | Reads the `layered` section of a vector file into `VectorCase` values |
+| `parse_vector_cases` | Reads the `cases` section of a vector file into `VectorCase` values |
 | `export_instances` | Generates the canonical instance of each nonce with a `Contract`, without sampling |
 | `check_case` | Exports every salt of a case and compares each salt in index order. It returns the first `CaseMismatch`. |
 | `compare` | Compares one generated salt with its `ExpectedSalt` by outcome, then bytes, then digest |
@@ -148,10 +149,10 @@ The tests in step 4 are in `crates/quip-solver-core/tests/family_registry_declar
    - `vectors_blake3`, the BLAKE3 of the canonical JSON of the array of the cases of the revision.
    Keep the entries sorted by `family_id` and then `revision`, with no repeat.
 
-   Put the cases of the revision in a top-level `layered` array of the vectors file.
+   Put the cases of the revision in a top-level `cases` array of the vectors file.
    Each case uses the case format of `layered.json`, including `params_hex` and `descriptor_digest`.
-   The checker, the `--family` gate, and the tests read only that section (`families::parse_vector_cases`, `layered_cases`, `registered_cases`).
-   A file with another section name fails with `no layered section`.
+   The checker, the `--family` gate, and the tests read only that section (`families::parse_vector_cases`, `registered_section`, `registered_cases`).
+   A file with another section name fails with `no cases section`.
    A different section name needs a change to all three functions together.
 
    To get the pin, run `registered_vectors_are_frozen` with a placeholder pin and copy the found value from the failure.

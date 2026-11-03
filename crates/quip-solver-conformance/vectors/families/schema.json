@@ -1922,6 +1922,12 @@
       "minItems": 1,
       "type": "array"
     },
+    "cases": {
+      "items": {
+        "$ref": "#/$defs/layered_case"
+      },
+      "type": "array"
+    },
     "codes": {
       "items": {
         "$ref": "#/$defs/code_row"
@@ -1988,12 +1994,6 @@
     "labels": {
       "items": {
         "$ref": "#/$defs/label_case"
-      },
-      "type": "array"
-    },
-    "layered": {
-      "items": {
-        "$ref": "#/$defs/layered_case"
       },
       "type": "array"
     },

@@ -81,6 +81,12 @@ encodings do not change.
 - SC-8 ice structure in `ising-generators`: the FAM-24 shuffle, ice tile candidates
   from Zephyr coordinates or adjacency, a maximum edge-disjoint tile selection in a
   fixed order, and the vectors `ice_structure.json` with the archived tile fixtures.
+- `quip/ice-glass@1`, a registered family with status `research`. It plants
+  edge-disjoint ice tiles in a spin glass and hides them with a random gauge. The
+  parameters are the Zephyr shape and `glass_milli`. The metadata holds the tiles
+  and the gauge. The contract is `docs/families/quip-ice-glass-1.md`, the vectors
+  are the `cases` of `ice_structure.json`, and the Rust contract is
+  `ising_generators::ice::ICE_GLASS_V1`. The research cohort is not regenerated.
 
 ### Changed
 
