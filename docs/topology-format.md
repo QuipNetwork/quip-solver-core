@@ -12,6 +12,8 @@ A writer MUST emit this 10-byte header: `1f 8b 08 00 00 00 00 00 02 ff`. The fla
 
 A reader MUST require ID1 = `1f`, ID2 = `8b`, CM = 8, and FLG = 0. A reader MUST accept any MTIME, XFL, and OS. A reader MUST check the CRC-32 and ISIZE, MUST reject any byte after the member, and MUST reject a payload larger than 64 MiB (67108864 bytes).
 
+A reader MUST reject any input that breaks a rule of this document. When an input breaks more than one rule, which error the reader reports is not part of the format. Two conforming readers MAY report different errors for the same input.
+
 The same topology MUST give the same file bytes from the same writer. Different writers MAY produce different compressed bytes. Compare topologies by payload bytes or by the BLAKE3 digest of the payload, never by the compressed bytes.
 
 ## Payload
@@ -84,3 +86,31 @@ A decoder expands the body as follows:
 A JSON field that names a topology holds a string path. The path is relative to the directory of the JSON file. Example: `"topology": "../topologies/t-sparse.bin.gz"`.
 
 The file `vectors/topologies/index.json` lists each topology file with these fields: `name`, `file`, `kind`, `nodes`, `edges`, `order_digest`, `payload_blake3`, `provenance`, and `about`. The entry for the live topology also has `sources`, which holds the external sha256.
+
+## Tools
+
+Two tools convert between JSON and blob files. They read each other's output and use the same exit codes.
+
+- Rust: `quip-topology encode IN.json OUT.bin.gz` and `quip-topology decode IN.bin.gz [OUT.json] [--expand]`. The binary is in the `ising-generators` crate and needs the `cli` feature.
+- Python: `python -m family_oracle topology encode IN.json OUT.bin.gz` and `python -m family_oracle topology decode IN.bin.gz [OUT.json] [--expand]`, run from the `conformance` directory.
+
+The decode command prints the JSON to standard output when it has no `OUT.json`. The option `--expand` turns a zephyr-removed topology into the explicit form.
+
+The JSON has one of two shapes. All ids and edge ends are plain numbers.
+
+- Explicit: `{"kind": "explicit", "nodes": [ids], "edges": [[x, y]]}`.
+- Zephyr-removed: `{"kind": "zephyr-removed", "m": 12, "t": 4, "removed_nodes": [ids], "removed_edges": [[a, b]]}`.
+
+The exit codes are:
+
+| Code | Meaning |
+|------|---------|
+| 0    | Success |
+| 1    | The input file or the JSON is not valid, or the blob breaks a rule of this format |
+| 2    | The command line is not valid |
+
+## Library entry points
+
+The Rust crate `ising-generators` has the module `ising_generators::blob` behind the `blob` feature. The feature needs no standard library. The module holds `encode`, `decode`, and the types `Body` and `Topology`. The function `decode` returns a `Body`. The method `Body::topology` expands it into a `Topology`, which holds the node list and the edge list.
+
+The crate `quip-solver-conformance` has two functions at its root. The function `topology` decodes the embedded file that a vectors reference names. The function `t_sparse` returns the shared T_SPARSE topology.

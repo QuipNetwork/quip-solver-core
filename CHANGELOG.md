@@ -67,6 +67,20 @@ encodings do not change.
 - `families::registry::{Status, RegistryEntry, parse_registry, unregistered_quip_ids,
   archived_among}`.
 - The contracts in `docs/families/`, one for each registered revision.
+- The topology blob format, defined in `docs/topology-format.md`. A `.bin.gz` file
+  holds an explicit topology or a Zephyr lattice minus removals.
+- `ising-generators` features `blob` and `cli`. The `blob` feature is `no_std` and
+  adds `ising_generators::blob::{encode, decode, Body, Topology, BlobError}`. It
+  depends on `miniz_oxide`. The `cli` feature adds the `quip-topology` binary, with
+  `encode` and `decode [--expand]`, and depends on `serde_json`. The default
+  features do not change.
+- `python -m family_oracle topology encode|decode`, the Python codec for the same
+  format.
+- `quip_solver_conformance::{topology, topology_bytes, t_sparse, TopologyError,
+  TOPOLOGY_FILES, TOPOLOGY_INDEX}`. They decode the embedded topology files.
+- SC-8 ice structure in `ising-generators`: the FAM-24 shuffle, ice tile candidates
+  from Zephyr coordinates or adjacency, a largest edge-disjoint tile selection in a
+  fixed order, and the vectors `ice_structure.json` with the archived tile fixtures.
 
 ### Changed
 
@@ -107,6 +121,12 @@ encodings do not change.
   `quip-solver-conformance`.
 - Two evidence entries in the family vectors no longer defer to SC-5. They defer to
   SC-8, SC-12, and SC-13.
+- The family vectors store each topology as a file under
+  `crates/quip-solver-conformance/vectors/topologies/`, with `index.json`. A
+  topology field in a vectors file is now a path. The `vectors_blake3` pins of
+  `vectors/restricted-field@1` and `vectors/uniform-field@1` in `registry.json`
+  changed because the topology field became a file reference. The instance bytes
+  did not change. Every `T_SPARSE` copy in the tests loads the shared file.
 
 ## 0.0.4
 

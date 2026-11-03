@@ -34,7 +34,7 @@ All files are under `crates/quip-solver-conformance/vectors/families/`.
 | `registry.json` | `specified` | The family registry, maintained by hand |
 
 The topologies that the vectors use are not inline.
-Each one is a file under `crates/quip-solver-conformance/vectors/topologies/`, in the format of `docs/topology-format.md`.
+Each one is a file under `crates/quip-solver-conformance/vectors/topologies/`, in the format of [docs/topology-format.md](topology-format.md).
 
 | File | Content |
 |---|---|
