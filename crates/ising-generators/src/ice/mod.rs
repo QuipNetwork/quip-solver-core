@@ -5,6 +5,7 @@
 //! holds every edge the tile shares with another tile. [`topology`] finds
 //! the tiles and [`matching`] splits the spine edges into two sides.
 
+pub(crate) mod build;
 pub mod glass;
 pub mod matching;
 pub mod topology;
