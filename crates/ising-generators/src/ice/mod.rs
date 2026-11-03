@@ -5,9 +5,11 @@
 //! holds every edge the tile shares with another tile. [`topology`] finds
 //! the tiles and [`matching`] splits the spine edges into two sides.
 
+pub mod glass;
 pub mod matching;
 pub mod topology;
 
+pub use glass::{ICE_GLASS, ICE_GLASS_SCHEMA, ICE_GLASS_V1, STRONG_MILLI};
 pub use matching::{select, sides, Sides};
 pub use topology::{
     candidates, zephyr_coordinates, zephyr_coupler, zephyr_lattice, Candidates, Tile,
