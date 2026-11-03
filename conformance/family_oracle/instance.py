@@ -8,7 +8,7 @@ _MAX_EDGES = 2**26
 _MAX_METADATA = 2**26
 _COEFFICIENT_BOUND = 2**30
 _OFFSET_BOUND = 2**56
-_MAX_KIND = 5
+_MAX_KIND = 6
 
 
 def canonical_bytes(

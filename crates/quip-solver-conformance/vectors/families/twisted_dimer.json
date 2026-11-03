@@ -17411,7 +17411,7 @@
       "path": "conformance/family_oracle/__main__.py"
     },
     {
-      "blake3": "972ce7f5e3c58786ffc6726fc04cc3ac1069d58fd228095abf979edceded2bc3",
+      "blake3": "100fe2ece1b71285a6cab280f5c4635f6bc2961f4789c3dfd15be6e57726dd9f",
       "path": "conformance/family_oracle/build.py"
     },
     {
@@ -17435,7 +17435,7 @@
       "path": "conformance/family_oracle/ice.py"
     },
     {
-      "blake3": "3e21fb7e7efe2d6d391a207b161e34f80f682d6adaa70101beea3b330b444b67",
+      "blake3": "d354a18c65f12f29bfde450b14fab5e52b825af2ba3290e85c880a05dd4b2ed4",
       "path": "conformance/family_oracle/instance.py"
     },
     {
@@ -17455,7 +17455,7 @@
       "path": "conformance/family_oracle/twisted.py"
     },
     {
-      "blake3": "a1954919b87214bb0a6fda4e1418c99a1f7ca1c8fb8892037a4016bdbe2d0df1",
+      "blake3": "13f8f88715699784e9994c39dbec8fd262485076f0f32b614de7a387d03b7bd3",
       "path": "docs/problem-families.md"
     }
   ]

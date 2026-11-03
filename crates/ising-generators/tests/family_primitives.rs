@@ -953,8 +953,8 @@ fn instance_bound_vectors() -> Result<(), String> {
 fn metadata_vectors() -> Result<(), String> {
     let doc = core()?;
     let cases = section(&doc, "metadata")?;
-    if cases.len() != 13 {
-        return Err(format!("expected 13 metadata cases, found {}", cases.len()));
+    if cases.len() != 14 {
+        return Err(format!("expected 14 metadata cases, found {}", cases.len()));
     }
     for case in cases {
         let name = str_field(case, "name")?;
@@ -966,6 +966,25 @@ fn metadata_vectors() -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+#[test]
+fn metadata_kind_six_is_registered_and_kind_seven_is_not() {
+    let section = |kind: u16| {
+        let mut bytes = 1u16.to_le_bytes().to_vec();
+        bytes.extend_from_slice(&kind.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes
+    };
+    assert_eq!(code_of(&validate_metadata(&section(6), &[1, 6])), None);
+    assert_eq!(
+        code_of(&validate_metadata(&section(7), &[1, 6, 7])),
+        Some(16)
+    );
+    assert_eq!(
+        validate_metadata(&section(7), &[1, 6, 7]),
+        Err(Code::MetadataInvalid)
+    );
 }
 
 #[test]

@@ -321,6 +321,9 @@ These metadata faults give code 16, `MetadataInvalid`:
 | 3 | `dimers` |
 | 4 | `charges` |
 | 5 | `incidence` |
+| 6 | `tile_charges` |
+
+Kind 6 holds synthetic charges of tiles. Kind 4 holds physical vertex charges.
 
 **FAM-35.** Metadata is part of the instance bytes, so `instance_digest` covers it.
 

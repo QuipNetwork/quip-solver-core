@@ -226,7 +226,7 @@ def test_every_provided_id_has_a_case():
     wanted |= {item["id"] for item in build.EVIDENCE["partial"]}
     assert wanted <= {tag.removeprefix("SC-2:") for tag in tagged}
     for tag in tagged:
-        assert tag.startswith("SC-2:")
+        assert tag.startswith(("SC-2:", "SC-10:"))
 
 
 @pytest.mark.parametrize(

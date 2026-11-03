@@ -1211,6 +1211,7 @@ def _metadata_cases() -> list[dict]:
         ("sparse-valid", _SPARSE_METADATA),
         ("empty-region-valid", bytes.fromhex("0000")),
         ("kind-6", region(section(6, b""))),
+        ("kind-7", region(section(7, b""))),
         ("kind-0", region(section(0, b""))),
         ("kind-2-not-in-contract", region(section(2, b""))),
         ("kinds-descending", region(three, one)),
@@ -1228,7 +1229,8 @@ def _metadata_cases() -> list[dict]:
             _ev(
                 "metadata-kind-and-section-length-faults",
                 "explicit-job-metadata-invalid",
-            ),
+            )
+            + (["SC-10:metadata-kind-6"] if name == "kind-7" else []),
             metadata_hex=data.hex(),
             contract_kinds=[1, 3],
             expected_code=metadata_code(data, [1, 3]),
