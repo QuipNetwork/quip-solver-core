@@ -1581,3 +1581,29 @@ async fn a_generic_solver_ignores_the_binding() {
     assert_eq!(solution.energy_milli, plain_energy(&instance, 1));
     s.finish().await;
 }
+
+/// FAM-56: a tier applies per revision. The binary lists revision 1 of
+/// `vectors/uniform-field` and no revision 2, so a damaged digest rejects at
+/// revision 1 and is ignored at revision 2.
+#[tokio::test]
+async fn a_tier_applies_per_revision() {
+    let instance = explicit_instance();
+    let mut job = explicit_job(&parts_of(&instance), &UNIFORM_V1, &P_SPEC);
+    if let Some(first) = binding(&mut job).instance_digest.first_mut() {
+        *first ^= 1;
+    }
+    let mut s = Session::start("mock_sampler_family_lease").await;
+    s.setup(i64::MAX).await;
+    s.send(coord_msg::Msg::Job(job.clone())).await;
+    expect_reject(
+        &mut s,
+        wire::RejectReason::Malformed as i32,
+        "accepted tier",
+    )
+    .await;
+    binding(&mut job).family.as_mut().unwrap().revision = 2;
+    s.send(coord_msg::Msg::Job(job)).await;
+    let solution = expect_solved(&mut s, "generic tier for revision 2").await;
+    assert_eq!(solution.energy_milli, plain_energy(&instance, 1));
+    s.finish().await;
+}
