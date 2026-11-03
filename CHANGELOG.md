@@ -55,9 +55,17 @@ encodings do not change.
   `CaseMismatch`. A mismatch names the first differing component of the instance bytes.
 - `FAMILY_LAYERED` and `vectors/families/layered.json`, the oracle vectors for the
   layered construction. Their provenance is `test-construction`.
+- `quip-solver-drive --family <solver-binary> unix://<socket>`, the family gate.
+  It grades the session cases and ten cases for each reference revision.
+- `families::{drive_miner_family, FamilyReport, FamilyCase, ReferenceRevision,
+  REFERENCE_REVISIONS, reference_revision}`.
+- `families::layered::{P_SPEC, P_L2_F0, P_L3_F0, P_F5000}`.
+- `docs/family-conformance.md`. It defines the FAM-57 gate and the coverage of
+  the 44 SC-7 check ids.
 
 ### Changed
 
+- Section 6 of `SPEC.md` adds the family gate to the conformance definition.
 - A solver that lists a pair in `accepted_families` gets the binding of an explicit
   job checked in FAM-65 order, after the plain checks and before `max_reads`. A
   failure maps to a wire reject reason. A job that passes reaches an opted-in

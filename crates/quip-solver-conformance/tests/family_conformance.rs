@@ -596,3 +596,152 @@ async fn a_binary_that_never_connects_fails_the_family_gate() {
         report.summary()
     );
 }
+
+/// Read a repository file at run time, so a published package still builds.
+fn read_repo_file(relative: &str) -> Result<String, String> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(relative);
+    std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// One row of the `## Coverage` table of `docs/family-conformance.md`.
+struct CoverageRow {
+    id: String,
+    status: String,
+    coverage: String,
+    evidence: String,
+}
+
+/// Parse the rows of the `## Coverage` table: the lines that start with a
+/// backticked check id.
+fn coverage_rows() -> Result<Vec<CoverageRow>, String> {
+    let doc = read_repo_file("docs/family-conformance.md")?;
+    let (_, section) = doc
+        .split_once("\n## Coverage\n")
+        .ok_or("no `## Coverage` section")?;
+    let section = section.split("\n## ").next().unwrap_or(section);
+    let mut rows = Vec::new();
+    for line in section.lines().filter(|line| line.starts_with("| `")) {
+        let cells: Vec<&str> = line
+            .trim()
+            .trim_matches('|')
+            .split('|')
+            .map(str::trim)
+            .collect();
+        let [id, _rule, status, coverage, evidence] = cells[..] else {
+            return Err(format!("expected 5 cells: {line}"));
+        };
+        rows.push(CoverageRow {
+            id: id.trim_matches('`').to_owned(),
+            status: status.to_owned(),
+            coverage: coverage.to_owned(),
+            evidence: evidence.to_owned(),
+        });
+    }
+    Ok(rows)
+}
+
+/// Every `SC-7:<id>` after `## Traceability` in `docs/problem-families.md`.
+fn spec_sc7_ids() -> Result<Vec<String>, String> {
+    let spec = read_repo_file("docs/problem-families.md")?;
+    let (_, trace) = spec
+        .split_once("\n## Traceability\n")
+        .ok_or("no `## Traceability` section")?;
+    let mut ids = Vec::new();
+    for piece in trace.split("`SC-7:").skip(1) {
+        let id = piece.split('`').next().unwrap_or(piece);
+        ids.push(id.to_owned());
+    }
+    Ok(ids)
+}
+
+#[test]
+fn coverage_table_lists_every_sc7_id() -> Result<(), String> {
+    let mut table: Vec<String> = coverage_rows()?.into_iter().map(|row| row.id).collect();
+    let mut spec = spec_sc7_ids()?;
+    if table.len() != 44 || spec.len() != 44 {
+        return Err(format!(
+            "expected 44 ids: table has {}, spec has {}",
+            table.len(),
+            spec.len()
+        ));
+    }
+    table.sort();
+    spec.sort();
+    if let Some([id, _]) = table
+        .windows(2)
+        .find(|pair| matches!(pair, [a, b] if a == b))
+    {
+        return Err(format!("the table repeats {id}"));
+    }
+    if table != spec {
+        let missing: Vec<&String> = spec.iter().filter(|id| !table.contains(id)).collect();
+        let extra: Vec<&String> = table.iter().filter(|id| !spec.contains(id)).collect();
+        return Err(format!(
+            "missing from the table {missing:?}, extra {extra:?}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn coverage_rows_follow_the_status_rules() -> Result<(), String> {
+    let rows = coverage_rows()?;
+    for row in &rows {
+        let (coverage, evidence_ok) = match row.status.as_str() {
+            "covered" => ("host-only", !row.evidence.starts_with("needs ")),
+            "not covered" => ("none", row.evidence.starts_with("needs ")),
+            other => return Err(format!("{}: unknown status `{other}`", row.id)),
+        };
+        if row.coverage != coverage {
+            return Err(format!(
+                "{}: status `{}` needs coverage `{coverage}`, found `{}`",
+                row.id, row.status, row.coverage
+            ));
+        }
+        if !evidence_ok {
+            return Err(format!(
+                "{}: evidence does not match status `{}`",
+                row.id, row.status
+            ));
+        }
+    }
+    let covered = rows.iter().filter(|row| row.status == "covered").count();
+    if covered != 14 || rows.len() - covered != 30 {
+        return Err(format!(
+            "expected 14 covered and 30 not covered, found {covered} and {}",
+            rows.len() - covered
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn covered_rows_cite_tests_that_exist() -> Result<(), String> {
+    for row in coverage_rows()?
+        .iter()
+        .filter(|row| row.status == "covered")
+    {
+        let items: Vec<&str> = row
+            .evidence
+            .split('`')
+            .skip(1)
+            .step_by(2)
+            .filter(|item| item.contains("::"))
+            .collect();
+        if items.is_empty() {
+            return Err(format!("{}: no `path::test` item in the evidence", row.id));
+        }
+        for item in items {
+            let (path, name) = item
+                .split_once("::")
+                .ok_or_else(|| format!("{}: bad item {item}", row.id))?;
+            let source = read_repo_file(path).map_err(|e| format!("{}: {e}", row.id))?;
+            if !source.contains(&format!("fn {name}(")) {
+                return Err(format!("{}: {path} has no `fn {name}(`", row.id));
+            }
+        }
+    }
+    Ok(())
+}
