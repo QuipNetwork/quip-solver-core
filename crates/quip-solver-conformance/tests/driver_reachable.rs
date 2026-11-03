@@ -85,8 +85,12 @@ fn the_family_checker_is_exported() {
 
 #[test]
 fn the_family_gate_surface_is_exported() {
-    use quip_solver_conformance::families::{reference_revision, FamilyCase, FamilyReport};
+    use quip_solver_conformance::families::{
+        drive_miner_family, reference_revision, FamilyCase, FamilyReport,
+    };
     use quip_solver_conformance::solve::CaseOutcome;
+
+    let _ = drive_miner_family;
 
     let _ = FamilyReport::is_conformant;
     let _ = FamilyReport::outcome;

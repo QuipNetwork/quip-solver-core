@@ -14,7 +14,8 @@ use serde_json::Value;
 mod drive;
 pub mod layered;
 
-pub use drive::{FamilyCase, FamilyReport};
+pub(crate) use drive::run_family_script;
+pub use drive::{drive_miner_family, FamilyCase, FamilyReport};
 
 use layered::{P_F5000, P_L2_F0, P_L3_F0, P_SPEC, RESTRICTED_V1, UNIFORM_V1};
 

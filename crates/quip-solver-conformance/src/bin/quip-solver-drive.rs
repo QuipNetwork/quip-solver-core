@@ -2,14 +2,17 @@
 //!
 //! `quip-solver-drive <solver-bin> <unix://socket>` runs the session walk
 //! against the mock coordinator. `quip-solver-drive --solve <solver-bin>` runs
-//! the one-shot `--solve` gate.
+//! the one-shot `--solve` gate. `quip-solver-drive --family <solver-bin>
+//! <unix://socket>` runs the family session gate against the mock coordinator.
 
 use quip_solver_conformance::driver::drive_miner;
+use quip_solver_conformance::families::drive_miner_family;
 use quip_solver_conformance::solve::drive_solve;
 use std::process::ExitCode;
 
-const USAGE: &str =
-    "usage: quip-solver-drive <solver-bin> <unix://socket>\n       quip-solver-drive --solve <solver-bin>";
+const USAGE: &str = "usage: quip-solver-drive <solver-bin> <unix://socket>
+       quip-solver-drive --solve <solver-bin>
+       quip-solver-drive --family <solver-bin> <unix://socket>";
 
 fn usage() -> ExitCode {
     #[expect(
@@ -72,11 +75,34 @@ async fn solve(bin_path: &str) -> ExitCode {
     verdict(report.is_conformant(), bin_path)
 }
 
+async fn family(bin_path: &str, socket: &str) -> ExitCode {
+    let report = drive_miner_family(bin_path, &[], socket).await;
+    #[expect(
+        clippy::print_stdout,
+        reason = "user-facing CLI prints the conformance report"
+    )]
+    {
+        println!("--family conformance report for {bin_path}:");
+        print!("{}", report.summary());
+    }
+    #[expect(
+        clippy::print_stderr,
+        reason = "the CLI shows the miner's own log after the report"
+    )]
+    {
+        if !report.stderr.is_empty() {
+            eprintln!("miner stderr:\n{}", report.stderr);
+        }
+    }
+    verdict(report.is_conformant(), bin_path)
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.as_slice() {
         [flag, bin_path] if flag == "--solve" => solve(bin_path).await,
+        [flag, bin_path, socket] if flag == "--family" => family(bin_path, socket).await,
         [bin_path, socket] => session(bin_path, socket).await,
         _ => usage(),
     }

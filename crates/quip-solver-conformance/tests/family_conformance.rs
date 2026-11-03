@@ -1,4 +1,6 @@
-//! SC-7 conformance of generated instances and family sessions. Library level, no binary.
+//! SC-7 conformance of generated instances and family sessions. The checker
+//! tests run at library level. The `--family` gate tests run the CLI and a
+//! binary that never connects.
 
 #[path = "family_conformance/faulty.rs"]
 mod faulty;
@@ -13,9 +15,10 @@ use ising_generators::random::derive_nonce;
 use quip_protocol::lease::salt_with_counter;
 use quip_solver_conformance::families::layered::{RESTRICTED_V1, UNIFORM_V1};
 use quip_solver_conformance::families::{
-    check_case, compare, export_instances, first_diff, parse_vector_cases, CaseMismatch, Component,
-    Expected, ExpectedSalt, VectorCase,
+    check_case, compare, drive_miner_family, export_instances, first_diff, parse_vector_cases,
+    CaseMismatch, Component, Expected, ExpectedSalt, VectorCase,
 };
+use quip_solver_conformance::solve::CaseOutcome;
 use quip_solver_conformance::FAMILY_LAYERED;
 
 /// 2 layers, field -1500.
@@ -541,4 +544,42 @@ fn first_diff_survives_absurd_counts_and_lengths() -> Result<(), String> {
         }
         other => Err(format!("absurd section length: {other:?}")),
     }
+}
+
+#[test]
+fn cli_usage_lists_the_family_gate() {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_quip-solver-drive"))
+        .arg("--family")
+        .output()
+        .expect("the CLI runs");
+    assert_eq!(output.status.code(), Some(64));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("quip-solver-drive --family <solver-bin> <unix://socket>"),
+        "{stderr}"
+    );
+}
+
+#[tokio::test]
+async fn a_binary_that_never_connects_fails_the_family_gate() {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("the clock is after the epoch")
+        .as_nanos();
+    let socket = format!(
+        "unix:///tmp/quip-family-gate-{}-{nanos}.sock",
+        std::process::id()
+    );
+    let start = std::time::Instant::now();
+    let report = drive_miner_family("/bin/true", &[], &socket).await;
+    assert!(start.elapsed() < std::time::Duration::from_secs(30));
+    assert!(!report.is_conformant(), "{}", report.summary());
+    assert!(
+        matches!(
+            report.outcome("hello-protocol-version-2", None),
+            Some(CaseOutcome::Failed(_))
+        ),
+        "{}",
+        report.summary()
+    );
 }
