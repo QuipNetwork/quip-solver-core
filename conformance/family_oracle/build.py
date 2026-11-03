@@ -108,8 +108,9 @@ EVIDENCE = {
         {
             "id": "instance-bounds-exceeded-salt-skipped",
             "provided": "the FAM-37 bound check",
-            "deferred_to": "SC-5",
-            "reason": "the salt skip needs lease execution",
+            "deferred_to": _DEFER,
+            "reason": "a vector of the salt skip needs a real construction. "
+            "The SC-5 session tests cover the skip.",
         }
     ],
     "deferred": [
@@ -131,8 +132,9 @@ EVIDENCE = {
         },
         {
             "id": "skipped-salt-lease-continues-best-energy-with-offset",
-            "deferred_to": "SC-5 with SC-8/SC-12/SC-13",
-            "reason": "needs a salt that a real construction skips",
+            "deferred_to": _DEFER,
+            "reason": "needs a salt that a real construction skips. "
+            "The SC-5 session tests cover the skip and the offset.",
         },
     ],
 }

@@ -82,3 +82,8 @@ def test_sources_hash_spec_and_oracle(load):
         for path in sorted(paths)
     ]
     assert doc["sources"] == expected
+
+
+def test_no_evidence_item_waits_for_a_finished_ticket():
+    items = build.EVIDENCE["partial"] + build.EVIDENCE["deferred"]
+    assert all("SC-5" not in item["deferred_to"] for item in items)

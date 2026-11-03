@@ -111,11 +111,11 @@ The `evidence` section of `core.json` records the same split, and the drift test
 | `family-support-entry-validity-and-duplicate-id` | `family_support` | provided |
 | `solver-id-grammar-and-length` | `solver_ids` | provided |
 | `legacy-replay-bit-for-bit` | `legacy.json` | provided |
-| `instance-bounds-exceeded-salt-skipped` | `instance_bounds` | partial. The vectors check the bound. The solver session tests in `crates/quip-solver-core/tests/family_session.rs` cover the salt skip. |
+| `instance-bounds-exceeded-salt-skipped` | `instance_bounds` | partial. The vectors check the bound. The solver session tests in `crates/quip-solver-core/tests/family_session.rs` cover the salt skip. A vector of the skip waits for SC-8, SC-12, and SC-13. |
 | `no-instance-salt-skipped` | none | deferred to SC-8, SC-12, and SC-13. Needs a construction with a retried step (FAM-25). |
 | `generation-overflow-salt-skipped` | none | deferred to SC-8, SC-12, and SC-13. Needs a construction whose arithmetic can overflow. |
 | `metadata-invalid-against-instance` | none | deferred to SC-8, SC-12, and SC-13. Only a family contract defines payload layouts (FAM-34, FAM-36). |
-| `skipped-salt-lease-continues-best-energy-with-offset` | none | partial. The solver session tests in `crates/quip-solver-core/tests/family_session.rs` cover the skip and the offset. A vector with a real construction waits for SC-8, SC-12, and SC-13. |
+| `skipped-salt-lease-continues-best-energy-with-offset` | none | deferred to SC-8, SC-12, and SC-13. The solver session tests in `crates/quip-solver-core/tests/family_session.rs` cover the skip and the offset. |
 
 ## Rulings
 
