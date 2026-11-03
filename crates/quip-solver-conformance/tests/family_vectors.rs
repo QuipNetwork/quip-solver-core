@@ -2163,3 +2163,357 @@ fn unknown_field_length_field_is_an_error() {
 fn unknown_fault_is_an_error() {
     assert!(decisions::winner(&decisions::EXPLICIT_JOB_ORDER, &["code:1".to_owned()]).is_err());
 }
+
+// ---- layered test construction (layered.json) ----
+
+fn layered_doc() -> Result<Value, String> {
+    serde_json::from_str(quip_solver_conformance::FAMILY_LAYERED).map_err(|e| e.to_string())
+}
+
+fn object_field<'a>(case: &'a Value, key: &str) -> Result<&'a Value, String> {
+    case.get(key)
+        .filter(|v| v.is_object())
+        .ok_or_else(|| format!("{}: missing object field {key}", case_name(case)))
+}
+
+/// The largest vertex degree of a topology in plain node ids.
+fn topology_max_degree(nodes: &[u32], edges: &[(u32, u32)]) -> u64 {
+    nodes
+        .iter()
+        .map(|node| {
+            edges
+                .iter()
+                .map(|&(u, v)| u64::from(u == *node) + u64::from(v == *node))
+                .sum::<u64>()
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+/// `n_layers` of the uniform-field parameters: format byte, then tag 1 with a
+/// 4-byte length, then the `u16` value.
+fn layered_n_layers(case: &Value, params: &[u8]) -> Result<u64, String> {
+    let raw: [u8; 2] = params
+        .get(7..9)
+        .and_then(|s| s.try_into().ok())
+        .ok_or_else(|| format!("{}: params too short for n_layers", case_name(case)))?;
+    Ok(u64::from(u16::from_le_bytes(raw)))
+}
+
+/// Recompute one generated instance with Rust code that does not call the
+/// construction, and compare each stored value.
+fn check_layered_instance(
+    case: &Value,
+    entry: &Value,
+    descriptor: [u8; 32],
+    order: [u8; 32],
+    kinds: &[u16],
+    bound: i64,
+) -> Result<(), String> {
+    let parts = instance::InstanceParts {
+        descriptor_digest: descriptor,
+        topology_order_digest: order,
+        nonce: codec::hex_decode(str_field(entry, "nonce")?)?,
+        node_ids: u32_list(entry.get("node_ids").ok_or("no node_ids")?, "node_ids")?,
+        edges: edge_list(entry.get("edges").ok_or("no edges")?)?,
+        h: i32_list(entry, "h")?,
+        j: i32_list(entry, "j")?,
+        offset_milli: i64_decimal(entry, "offset_milli")?,
+        metadata: codec::hex_decode(str_field(entry, "metadata_hex")?)?,
+    };
+    compare(
+        case,
+        "edge fault",
+        &instance::edge_fault(&parts.edges, parts.node_ids.len()),
+        &None,
+    )?;
+    compare(
+        case,
+        "metadata",
+        &instance::metadata_code(&parts.metadata, kinds),
+        &None,
+    )?;
+    compare(
+        case,
+        "offset bound",
+        &instance::offset_code(parts.offset_milli),
+        &None,
+    )?;
+    for value in parts.h.iter().chain(&parts.j) {
+        compare(
+            case,
+            "coefficient bound",
+            &(i64::from(*value).abs() <= bound),
+            &true,
+        )?;
+    }
+    let canonical = instance::canonical_bytes(&parts)?;
+    compare(
+        case,
+        "canonical_hex",
+        &codec::hex_encode(&canonical),
+        &str_field(entry, "canonical_hex")?.to_owned(),
+    )?;
+    compare(
+        case,
+        "instance_digest",
+        &codec::hex_encode(&digests::instance_digest(&canonical)),
+        &str_field(entry, "instance_digest")?.to_owned(),
+    )?;
+    let all_up = vec![1_i8; parts.node_ids.len()];
+    compare(
+        case,
+        "energy_all_up_milli",
+        &instance::energy_with_offset(&parts, &all_up)?,
+        &i64_decimal(entry, "energy_all_up_milli")?,
+    )?;
+    Ok(())
+}
+
+/// Recompute the digests and size bounds of a case. Returns the descriptor
+/// digest and the topology order digest.
+fn check_layered_identity(case: &Value) -> Result<([u8; 32], [u8; 32]), String> {
+    let family = str_field(case, "family_id")?;
+    let params = codec::hex_decode(str_field(case, "params_hex")?)?;
+    let params_digest = digests::params_digest(&params);
+    compare(
+        case,
+        "params_digest",
+        &codec::hex_encode(&params_digest),
+        &str_field(case, "params_digest")?.to_owned(),
+    )?;
+    let descriptor = digests::descriptor_digest(
+        family.as_bytes(),
+        u32_field(case, "revision")?,
+        &params_digest,
+    );
+    compare(
+        case,
+        "descriptor_digest",
+        &codec::hex_encode(&descriptor),
+        &str_field(case, "descriptor_digest")?.to_owned(),
+    )?;
+    let topology = object_field(case, "topology")?;
+    let (nodes, edges) = topology_inputs(topology)?;
+    let order = digests::topology_order_digest(&nodes, &edges);
+    compare(
+        case,
+        "order_digest",
+        &codec::hex_encode(&order),
+        &str_field(topology, "order_digest")?.to_owned(),
+    )?;
+    let sizes = object_field(case, "size_bounds")?;
+    let want_bounds = decisions::example_size_bounds(
+        layered_n_layers(case, &params)?,
+        u64::try_from(nodes.len()).map_err(|e| e.to_string())?,
+        u64::try_from(edges.len()).map_err(|e| e.to_string())?,
+        topology_max_degree(&nodes, &edges),
+    );
+    compare(
+        case,
+        "size_bounds",
+        &want_bounds,
+        &Some((
+            u64_decimal(sizes, "nodes")?,
+            u64_decimal(sizes, "edges")?,
+            u64_decimal(sizes, "degree")?,
+        )),
+    )?;
+    Ok((descriptor, order))
+}
+
+fn check_layered_case(case: &Value) -> Result<(), String> {
+    use quip_protocol::lease::{Generator, LeaseSpec};
+    let (descriptor, order) = check_layered_identity(case)?;
+    let lease = object_field(case, "lease")?;
+    let spec = LeaseSpec::new(
+        Generator::Blake3Chacha8V1,
+        codec::hex32(str_field(lease, "last_proof_block_hash")?)?,
+        codec::hex32(str_field(lease, "miner_account")?)?,
+        codec::hex32(str_field(lease, "base_salt")?)?,
+        u64_decimal(lease, "salt_start")?,
+        u64_decimal(lease, "salt_count")?,
+    )
+    .map_err(|e| format!("{}: lease: {e:?}", case_name(case)))?;
+    let nonce_of = |entry: &Value| -> Result<String, String> {
+        let slot = u64_decimal(entry, "index")?;
+        let salt = spec.salt(slot).ok_or("slot outside the lease")?;
+        Ok(codec::hex_encode(&ising_generators::random::derive_nonce(
+            spec.last_proof_block_hash,
+            spec.miner_account,
+            salt,
+        )))
+    };
+    let kinds = contract_kinds(case, "metadata_kinds")?;
+    let bound = case
+        .get("coefficient_bound_milli")
+        .and_then(Value::as_i64)
+        .ok_or("no coefficient_bound_milli")?;
+    let mut slots = Vec::new();
+    for entry in entries_of(case, "skipped")? {
+        let code = entry.get("skip_code").and_then(Value::as_u64);
+        compare(
+            case,
+            "skip_code is 13 or 14",
+            &matches!(code, Some(13 | 14)),
+            &true,
+        )?;
+        compare(
+            case,
+            "skipped nonce",
+            &nonce_of(entry)?,
+            &str_field(entry, "nonce")?.to_owned(),
+        )?;
+        slots.push(u64_decimal(entry, "index")?);
+    }
+    for entry in entries_of(case, "instances")? {
+        compare(
+            case,
+            "instance nonce",
+            &nonce_of(entry)?,
+            &str_field(entry, "nonce")?.to_owned(),
+        )?;
+        check_layered_instance(case, entry, descriptor, order, &kinds, bound)?;
+        slots.push(u64_decimal(entry, "index")?);
+    }
+    slots.sort_unstable();
+    compare(
+        case,
+        "skipped and generated slots",
+        &slots,
+        &(0..spec.salt_count).collect::<Vec<u64>>(),
+    )
+}
+
+fn check_layered(doc: &Value) -> Result<(), String> {
+    validate(&schema()?, doc)?;
+    check_names_unique(doc)?;
+    for case in section(doc, "layered")? {
+        check_layered_case(case)?;
+    }
+    Ok(())
+}
+
+/// Generate every slot of one case with the Rust construction and compare it
+/// with the Python port.
+fn check_layered_against_rust(case: &Value) -> Result<(), String> {
+    use ising_generators::descriptor::{admit, params_digest};
+    use ising_generators::family::{admit_topology, generate_instance, BaseTopology, SaltFault};
+    use quip_solver_conformance::families::layered::{RESTRICTED_V1, UNIFORM_V1};
+    let family = str_field(case, "family_id")?;
+    let contract = match family {
+        "vectors/uniform-field" => UNIFORM_V1,
+        "vectors/restricted-field" => RESTRICTED_V1,
+        other => return Err(format!("{}: unknown family {other}", case_name(case))),
+    };
+    let params = codec::hex_decode(str_field(case, "params_hex")?)?;
+    let contracts = [contract];
+    let admitted = admit(
+        &contracts,
+        family.as_bytes(),
+        u32_field(case, "revision")?,
+        &params,
+        &params_digest(&params),
+    )
+    .map_err(|c| format!("{}: admit failed with {c}", case_name(case)))?;
+    let (nodes, edges) = topology_inputs(object_field(case, "topology")?)?;
+    let topology = BaseTopology::new(nodes, &edges).map_err(|e| format!("{e:?}"))?;
+    let bounds = admit_topology(
+        &admitted,
+        &topology,
+        topology.order_digest(),
+        &ising_generators::descriptor::AdvertisedLimits {
+            max_nodes: 0,
+            max_edges: 0,
+            max_degree: 0,
+        },
+    )
+    .map_err(|c| format!("{}: admit_topology failed with {c}", case_name(case)))?;
+    let mut slots = Vec::new();
+    for entry in entries_of(case, "skipped")? {
+        let nonce = codec::hex32(str_field(entry, "nonce")?)?;
+        let want = entry
+            .get("skip_code")
+            .and_then(Value::as_u64)
+            .and_then(|n| u8::try_from(n).ok())
+            .ok_or("bad skip_code")?;
+        match generate_instance(&admitted, &topology, &bounds, nonce) {
+            Err(SaltFault::Skip(code)) => compare(case, "skip code", &code.value(), &want)?,
+            other => return Err(format!("{}: skipped slot gave {other:?}", case_name(case))),
+        }
+        slots.push(u64_decimal(entry, "index")?);
+    }
+    for entry in entries_of(case, "instances")? {
+        let nonce = codec::hex32(str_field(entry, "nonce")?)?;
+        let built = generate_instance(&admitted, &topology, &bounds, nonce)
+            .map_err(|fault| format!("{}: generation gave {fault:?}", case_name(case)))?;
+        let canonical = built.canonical_bytes().map_err(|e| e.to_string())?;
+        compare(
+            case,
+            "canonical bytes",
+            &codec::hex_encode(&canonical),
+            &str_field(entry, "canonical_hex")?.to_owned(),
+        )?;
+        compare(
+            case,
+            "instance digest",
+            &codec::hex_encode(&built.digest()),
+            &str_field(entry, "instance_digest")?.to_owned(),
+        )?;
+        slots.push(u64_decimal(entry, "index")?);
+    }
+    slots.sort_unstable();
+    let count = u64_decimal(object_field(case, "lease")?, "salt_count")?;
+    compare(case, "slots", &slots, &(0..count).collect::<Vec<u64>>())
+}
+
+#[test]
+fn layered_fixture_matches_schema() -> Result<(), String> {
+    validate(&schema()?, &layered_doc()?)?;
+    match layered_doc()?.get("provenance").and_then(Value::as_str) {
+        Some("test-construction") => {}
+        other => {
+            return Err(format!(
+                "provenance is {other:?}, expected test-construction"
+            ))
+        }
+    }
+    check_names_unique(&layered_doc()?)
+}
+
+#[test]
+fn layered_vectors_recompute() -> Result<(), String> {
+    check_layered(&layered_doc()?)
+}
+
+#[test]
+fn layered_vectors_match_the_rust_construction() -> Result<(), String> {
+    for case in section(&layered_doc()?, "layered")? {
+        check_layered_against_rust(case)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn uniform_p_spec_skips_match_the_session_capture() -> Result<(), String> {
+    let doc = layered_doc()?;
+    let case = find_named(&doc, "layered", "uniform-p-spec-sparse")?;
+    let mut skipped = Vec::new();
+    for entry in entries_of(case, "skipped")? {
+        skipped.push(u64_decimal(entry, "index")?);
+    }
+    skipped.sort_unstable();
+    compare(case, "skipped slots", &skipped, &vec![0, 3, 9, 13])
+}
+
+#[test]
+fn changed_layered_coupling_fails() -> Result<(), String> {
+    let doc = layered_doc()?;
+    let pointer = "/layered/0/instances/0/j/0";
+    let was = doc
+        .pointer(pointer)
+        .and_then(Value::as_i64)
+        .ok_or("no coupling")?;
+    let broken = mutate(&doc, pointer, json!(was + 1000));
+    expect_err(&check_layered(&broken), "a changed coupling")
+}

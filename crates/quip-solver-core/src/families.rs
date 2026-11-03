@@ -653,11 +653,11 @@ mod context_tests {
     static CONTRACT: Contract = Contract {
         family_id: "vectors/uniform-field",
         revision: 1,
-        schema: crate::layered::UNIFORM_FIELD,
+        schema: quip_solver_conformance::families::layered::UNIFORM_FIELD,
         metadata_kinds: &[1, 3],
         limits: InstanceLimits::FAM_37,
-        size_bounds: crate::layered::example_size_bounds,
-        construction: Some(&crate::layered::LAYERED),
+        size_bounds: quip_solver_conformance::families::layered::example_size_bounds,
+        construction: Some(&quip_solver_conformance::families::layered::LAYERED),
     };
 
     /// Two sections: kind 1 with `[7, 8, 9]` and kind 3 with `[5]`.

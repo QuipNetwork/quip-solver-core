@@ -3556,7 +3556,7 @@ mod tests {
         use crate::ising_generators::family::{BaseTopology, Construction, InstanceBody, Streams};
         use crate::ising_generators::instance::{Instance, InstanceLimits};
         use crate::ising_generators::Code;
-        use crate::layered::{example_size_bounds, UNIFORM_FIELD};
+        use quip_solver_conformance::families::layered::{example_size_bounds, UNIFORM_FIELD};
         use std::sync::atomic::AtomicBool;
 
         const ZERO_FIELD_PARAMS: [u8; 19] =

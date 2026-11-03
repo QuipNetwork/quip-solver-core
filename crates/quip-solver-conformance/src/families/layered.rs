@@ -1,20 +1,19 @@
-//! The layered test construction shared by the family tests and examples.
-//! Not an example target: Cargo discovers only `examples/*.rs` and
-//! `examples/*/main.rs`. Every includer must use every `pub(crate)` item.
+//! The layered test construction: a test family on `vectors/uniform-field`
+//! and `vectors/restricted-field`, not a registered family. The family tests,
+//! the example binaries, the vectors, and the `--family` gate use it.
 
 use core::num::NonZeroU32;
 
-use quip_solver_core::ising_generators::descriptor::{
-    FieldSpec, Params, SizeBounds, TopologyStats, Value as ParamValue, ValueType,
+use ising_generators::descriptor::{
+    Contract, FieldSpec, Params, SizeBounds, TopologyStats, Value as ParamValue, ValueType,
 };
-use quip_solver_core::ising_generators::family::{
-    BaseTopology, Construction, InstanceBody, Streams,
-};
-use quip_solver_core::ising_generators::instance::Instance;
-use quip_solver_core::ising_generators::rng::uniform;
-use quip_solver_core::ising_generators::Code;
+use ising_generators::family::{BaseTopology, Construction, InstanceBody, Streams};
+use ising_generators::instance::{Instance, InstanceLimits};
+use ising_generators::rng::uniform;
+use ising_generators::Code;
 
-pub(crate) const UNIFORM_FIELD: &[FieldSpec] = &[
+/// Parameter schema: `n_layers` (tag 1) and `field_milli` (tag 2).
+pub const UNIFORM_FIELD: &[FieldSpec] = &[
     FieldSpec {
         tag: 1,
         kind: ValueType::U16,
@@ -29,10 +28,13 @@ pub(crate) const UNIFORM_FIELD: &[FieldSpec] = &[
     },
 ];
 
-pub(crate) fn example_size_bounds(
-    params: &Params<'_>,
-    stats: &TopologyStats,
-) -> Result<SizeBounds, Code> {
+/// Size bounds of the layered construction for `n_layers` layers of the base
+/// topology.
+///
+/// # Errors
+///
+/// `ParamsMalformed` without an unsigned tag 1, `BoundsExceeded` on overflow.
+pub fn example_size_bounds(params: &Params<'_>, stats: &TopologyStats) -> Result<SizeBounds, Code> {
     let Some(ParamValue::Unsigned(layers)) = params.get(1) else {
         return Err(Code::ParamsMalformed);
     };
@@ -53,7 +55,9 @@ pub(crate) fn example_size_bounds(
     })
 }
 
-pub(crate) static LAYERED: Construction = Construction {
+/// The layered construction: `n_layers` copies of the base topology joined
+/// layer to layer.
+pub static LAYERED: Construction = Construction {
     labels: &["salt", "couplings"],
     check_topology: layered_check_topology,
     generate: layered_generate,
@@ -175,3 +179,33 @@ fn layered_check_metadata(params: &Params<'_>, instance: &Instance) -> bool {
     };
     instance.metadata() == layered_region(layers32, n) && n.checked_mul(layers32) == Some(len)
 }
+
+/// Instance limits of the layered families. Only the coefficient bound (2000)
+/// differs from the FAM-37 limits.
+pub const TIGHT_LIMITS: InstanceLimits = match InstanceLimits::new(
+    16_777_216,
+    67_108_864,
+    2000,
+    72_057_594_037_927_936,
+    67_108_864,
+) {
+    Some(limits) => limits,
+    None => InstanceLimits::FAM_37,
+};
+
+/// Revision 1 of `vectors/uniform-field`, bound to [`LAYERED`].
+pub const UNIFORM_V1: Contract = Contract {
+    family_id: "vectors/uniform-field",
+    revision: 1,
+    schema: UNIFORM_FIELD,
+    metadata_kinds: &[1],
+    limits: TIGHT_LIMITS,
+    size_bounds: example_size_bounds,
+    construction: Some(&LAYERED),
+};
+
+/// Revision 1 of `vectors/restricted-field`: [`UNIFORM_V1`] under another id.
+pub const RESTRICTED_V1: Contract = Contract {
+    family_id: "vectors/restricted-field",
+    ..UNIFORM_V1
+};

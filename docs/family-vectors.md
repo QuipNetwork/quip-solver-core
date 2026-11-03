@@ -14,7 +14,7 @@ A pytest drift test checks that the fixture is still the exact output of the ora
 
 | Check | Command | What it proves |
 |---|---|---|
-| Rust recompute | `cargo test -p quip-solver-conformance --test family_vectors` | Rust code agrees with the fixture |
+| Rust recompute | `cargo test -p quip-solver-conformance --test family_vectors` | Rust code in `tests/family_vectors.rs` agrees with `core.json`, `legacy.json`, and `layered.json` |
 | Drift | `python -m pytest conformance/test_family_vectors_drift.py` | The fixture is the oracle output, and the sources have not changed |
 | Oracle | `python -m pytest conformance/test_family_oracle.py` | The oracle matches the existing goldens and the examples in the contract |
 
@@ -27,13 +27,15 @@ All files are under `crates/quip-solver-conformance/vectors/families/`.
 | `schema.json` | none | JSON Schema for every fixture file |
 | `core.json` | `specified` | Every vector that SC-2 provides |
 | `legacy.json` | `legacy-production` | References to the production legacy draw vectors, by case hash |
+| `layered.json` | `test-construction` | Generated instances of the layered test construction for fixed lease nonces |
 
-The `provenance` field has three values.
+The `provenance` field has four values.
 
 | Value | Meaning |
 |---|---|
 | `specified` | The vector follows from `docs/problem-families.md` |
 | `legacy-production` | The vector pins a production legacy draw |
+| `test-construction` | The vector follows a test construction that only the tests and the conformance crate use |
 | `archived-research` | Reserved for later files that hold archived research instances |
 
 No file uses `archived-research` yet.
@@ -63,7 +65,7 @@ Every file has these top-level keys:
 | Key | Content |
 |---|---|
 | `schema_revision` | The constant `1` |
-| `provenance` | One of the three preceding values |
+| `provenance` | One of the four preceding values |
 | `about` | Array of strings, at least one |
 | `sources` | Array of `{path, blake3}` for the contract and each oracle file |
 | other keys | Optional sections, listed in `schema.json` |
@@ -111,11 +113,11 @@ The `evidence` section of `core.json` records the same split, and the drift test
 | `family-support-entry-validity-and-duplicate-id` | `family_support` | provided |
 | `solver-id-grammar-and-length` | `solver_ids` | provided |
 | `legacy-replay-bit-for-bit` | `legacy.json` | provided |
-| `instance-bounds-exceeded-salt-skipped` | `instance_bounds` | partial. The vectors check the bound. The solver session tests in `crates/quip-solver-core/tests/family_session.rs` cover the salt skip. |
+| `instance-bounds-exceeded-salt-skipped` | `instance_bounds` | partial. The vectors check the bound. The solver session tests in `crates/quip-solver-core/tests/family_session.rs` cover the salt skip. A vector of the skip waits for SC-8, SC-12, and SC-13. |
 | `no-instance-salt-skipped` | none | deferred to SC-8, SC-12, and SC-13. Needs a construction with a retried step (FAM-25). |
 | `generation-overflow-salt-skipped` | none | deferred to SC-8, SC-12, and SC-13. Needs a construction whose arithmetic can overflow. |
 | `metadata-invalid-against-instance` | none | deferred to SC-8, SC-12, and SC-13. Only a family contract defines payload layouts (FAM-34, FAM-36). |
-| `skipped-salt-lease-continues-best-energy-with-offset` | none | partial. The solver session tests in `crates/quip-solver-core/tests/family_session.rs` cover the skip and the offset. A vector with a real construction waits for SC-8, SC-12, and SC-13. |
+| `skipped-salt-lease-continues-best-energy-with-offset` | none | deferred to SC-8, SC-12, and SC-13. The solver session tests in `crates/quip-solver-core/tests/family_session.rs` cover the skip and the offset. |
 
 ## Rulings
 
@@ -155,13 +157,14 @@ The fixture format makes these decisions.
 | F4 | `sources` holds BLAKE3 hashes of the contract and each oracle `.py` file, and only the drift test checks them | A contract or oracle edit needs an explicit, reviewed regeneration commit |
 | F5 | `legacy.json` hashes the canonical JSON of each referenced case | A case change fails, but a new section does not |
 | F6 | The Rust test re-derives every expected code with its own decision functions | A Python bug in a code cannot ship unchecked |
-| F7 | `src/vectors.rs` exports `FAMILY_SCHEMA`, `FAMILY_CORE`, and `FAMILY_LEGACY` | Later family crates read the same bytes |
+| F7 | `src/vectors.rs` exports `FAMILY_SCHEMA`, `FAMILY_CORE`, `FAMILY_LEGACY`, and `FAMILY_LAYERED` | Later family crates read the same bytes |
 | F8 | ChaCha8 checkpoints stop at word 1002, and "large counters" means salt counters near `u64::MAX` | `ChaCha8Rng` has no seek, and a seek would change the scalar reference in `ising-generators` |
 | F9 | CI runs the drift test in the `conformance` job, with no `.gitlab-ci.yml` change | That job already installs `blake3` |
+| F10 | `layered.json` cites `SC-7:` ids and has its own section | The SC-2 evidence model reads `core.json` and `legacy.json` only |
 
 ## Regenerating
 
-Run `make family-vectors` to rewrite `core.json` and `legacy.json`.
+Run `make family-vectors` to rewrite `core.json`, `legacy.json`, and `layered.json`.
 The target needs the `blake3` package, which the `dev` extra installs.
 Run `cd conformance && python -m family_oracle check` to compare the files with the oracle output without writing.
 

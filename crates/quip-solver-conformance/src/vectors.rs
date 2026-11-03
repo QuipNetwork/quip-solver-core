@@ -171,3 +171,10 @@ pub const FAMILY_LEGACY: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/vectors/families/legacy.json"
 ));
+
+/// Generated instances of the layered test construction for fixed lease
+/// nonces (schema revision 1, provenance `test-construction`).
+pub const FAMILY_LAYERED: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/vectors/families/layered.json"
+));

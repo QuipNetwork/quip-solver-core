@@ -25,10 +25,7 @@ use quip_solver_core::{
 use serde_json::Value;
 use std::process::Command;
 
-#[path = "../examples/support/layered_family.rs"]
-mod layered;
-
-use layered::{example_size_bounds, UNIFORM_FIELD};
+use quip_solver_conformance::families::layered::{self, example_size_bounds, UNIFORM_FIELD};
 
 const ZERO_FIELD_SCHEMA: &[FieldSpec] = &[
     FieldSpec {

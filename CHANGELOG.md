@@ -47,6 +47,14 @@ encodings do not change.
   must also override `sample_stream_warm`.
 - `WarmStreamJob.family`. It holds the context for an opted-in sampler.
 - `ising_generators::instance::InstanceParts::check_bounds`, the bounds step of `Instance::new`.
+- `quip_solver_conformance::families`, with the `layered` module. The module holds
+  `LAYERED`, `UNIFORM_FIELD`, `example_size_bounds`, `TIGHT_LIMITS`, `UNIFORM_V1`,
+  and `RESTRICTED_V1`. The instance checker adds `export_instances`,
+  `parse_vector_cases`, `first_diff`, `compare`, and `check_case`. It also adds the
+  types `VectorCase`, `ExpectedSalt`, `Expected`, `Component`, `FirstDiff`, and
+  `CaseMismatch`. A mismatch names the first differing component of the instance bytes.
+- `FAMILY_LAYERED` and `vectors/families/layered.json`, the oracle vectors for the
+  layered construction. Their provenance is `test-construction`.
 
 ### Changed
 
@@ -80,6 +88,11 @@ encodings do not change.
 - `Generator` and `VerifyError` have new variants, so an exhaustive `match`
   on them fails to compile.
 - `Contract` has the new `construction` field, so a struct literal needs it.
+- `ising-generators` is a normal dependency of `quip-solver-conformance`.
+- The layered construction moved from the `quip-solver-core` examples into
+  `quip-solver-conformance`.
+- Two evidence entries in the family vectors no longer defer to SC-5. They defer to
+  SC-8, SC-12, and SC-13.
 
 ## 0.0.4
 
