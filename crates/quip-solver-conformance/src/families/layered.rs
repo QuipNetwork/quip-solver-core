@@ -1,6 +1,7 @@
 //! The layered test construction: a test family on `vectors/uniform-field`
-//! and `vectors/restricted-field`, not a registered family. The family tests,
-//! the example binaries, the vectors, and the `--family` gate use it.
+//! and `vectors/restricted-field`. It is registered with status `research` and
+//! is not a production family. The family tests, the example binaries, the
+//! vectors, and the `--family` gate use it.
 
 use core::num::NonZeroU32;
 
@@ -102,7 +103,11 @@ fn layered_generate(
         return Err(Code::NoInstance);
     }
     if w == 2 {
-        let _wide = field.checked_mul(1 << 21).ok_or(overflow)?;
+        // Contract step 2: `field * 2^21` must fit in `i32`. Only the
+        // overflow matters, and the product is not used.
+        if field.checked_mul(1 << 21).is_none() {
+            return Err(overflow);
+        }
     }
     let scale = if w == 1 { 2 } else { 1 };
     let h_value = field.checked_mul(scale).ok_or(overflow)?;
