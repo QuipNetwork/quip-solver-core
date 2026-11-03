@@ -110,11 +110,8 @@ pub(crate) fn plan_subjects(
     caps: &Capabilities,
 ) -> Vec<(String, Option<&'static ReferenceRevision>)> {
     let mut subjects: Vec<(String, Option<&'static ReferenceRevision>)> = Vec::new();
-    for entry in caps
-        .generated_families
-        .iter()
-        .chain(&caps.accepted_families)
-    {
+    // FAM-72 sends a family lease only for a pair in `generated_families`.
+    for entry in &caps.generated_families {
         for &revision in &entry.revisions {
             let subject = format!("{}@{revision}", entry.family_id);
             if subjects.iter().all(|(known, _)| *known != subject) {
@@ -402,12 +399,15 @@ fn check_result(
     for solution in &result.solutions {
         let spins = decode_spins_packed(&solution.spins, instance.node_ids().len())
             .map_err(|fault| format!("slot {index}: spins do not decode: {fault:?}"))?;
-        let want = instance.offset_milli().saturating_add(energy_from_milli(
-            &spins,
-            instance.h(),
-            instance.j(),
-            &edges,
-        ));
+        let want = instance
+            .offset_milli()
+            .checked_add(energy_from_milli(
+                &spins,
+                instance.h(),
+                instance.j(),
+                &edges,
+            ))
+            .ok_or_else(|| format!("slot {index}: offset plus energy overflows i64"))?;
         if solution.energy_milli != want {
             return Err(format!(
                 "slot {index}: energy_milli is {}, the instance scores {want} with its offset",
@@ -429,6 +429,7 @@ pub(crate) fn grade_stale(slice: &[miner_msg::Msg], job_id: &[u8]) -> CaseOutcom
 }
 
 fn check_stale(slice: &[miner_msg::Msg], job_id: &[u8]) -> Result<(), String> {
+    let mut lease_dones = 0_u32;
     for msg in slice {
         match msg {
             miner_msg::Msg::Result(result) if result.job_id == job_id => {
@@ -437,11 +438,17 @@ fn check_stale(slice: &[miner_msg::Msg], job_id: &[u8]) -> Result<(), String> {
             miner_msg::Msg::Reject(reject) if reject.job_id == job_id => {
                 return Err("a Reject for a stale lease".to_owned());
             }
-            miner_msg::Msg::LeaseDone(done) if done.job_id == job_id && done.salts_done != 0 => {
-                return Err(format!(
-                    "a stale LeaseDone reports {} salts done",
-                    done.salts_done
-                ));
+            miner_msg::Msg::LeaseDone(done) if done.job_id == job_id => {
+                lease_dones += 1;
+                if lease_dones > 1 {
+                    return Err("a second LeaseDone for a stale lease".to_owned());
+                }
+                if done.salts_done != 0 {
+                    return Err(format!(
+                        "a stale LeaseDone reports {} salts done",
+                        done.salts_done
+                    ));
+                }
             }
             _ => {}
         }
@@ -876,5 +883,117 @@ mod tests {
             Some(&CaseOutcome::Failed("why".to_owned()))
         );
         assert_eq!(report.outcome("b", None), None);
+    }
+
+    fn lease_failure(slice: &[miner_msg::Msg], expected: &ExpectedLease) -> bool {
+        failed(&grade_lease(slice, JOB, expected))
+    }
+
+    fn with_result(
+        expected: &ExpectedLease,
+        edit: impl FnOnce(&mut quip_proto::v1::Result),
+    ) -> Vec<miner_msg::Msg> {
+        let mut slice = good_transcript(expected);
+        if let Some(miner_msg::Msg::Result(result)) = slice.first_mut() {
+            edit(result);
+        }
+        slice
+    }
+
+    #[test]
+    fn a_result_after_the_lease_done_fails() {
+        let expected = expected_lease();
+        let mut slice = good_transcript(&expected);
+        slice.insert(7, result_of(&expected, 1, true));
+        assert!(lease_failure(&slice, &expected));
+    }
+
+    #[test]
+    fn a_repeated_salt_fails() {
+        let expected = expected_lease();
+        let mut slice = good_transcript(&expected);
+        slice.insert(0, result_of(&expected, 1, true));
+        assert!(lease_failure(&slice, &expected));
+    }
+
+    #[test]
+    fn a_nonce_mismatch_fails() {
+        let expected = expected_lease();
+        let slice = with_result(&expected, |result| result.nonce = vec![0; 32]);
+        assert!(lease_failure(&slice, &expected));
+    }
+
+    #[test]
+    fn a_generated_slot_without_a_result_fails() {
+        let expected = expected_lease();
+        let mut slice = good_transcript(&expected);
+        let _ = slice.remove(0);
+        assert!(lease_failure(&slice, &expected));
+    }
+
+    #[test]
+    fn a_wrong_best_energy_fails() {
+        let expected = expected_lease();
+        let mut slice = good_transcript(&expected);
+        if let Some(miner_msg::Msg::LeaseDone(done)) = slice.get_mut(6) {
+            done.best_energy_milli += 1;
+        }
+        assert!(lease_failure(&slice, &expected));
+    }
+
+    #[test]
+    fn undecodable_spins_fail() {
+        let expected = expected_lease();
+        let slice = with_result(&expected, |result| {
+            if let Some(solution) = result.solutions.first_mut() {
+                solution.spins = vec![];
+            }
+        });
+        assert!(lease_failure(&slice, &expected));
+    }
+
+    #[test]
+    fn a_stale_lease_done_with_work_fails() {
+        let done = |salts_done| {
+            miner_msg::Msg::LeaseDone(LeaseDone {
+                job_id: JOB.to_vec(),
+                salts_done,
+                best_energy_milli: i64::MAX,
+            })
+        };
+        assert!(failed(&grade_stale(&[done(1), msg_request(1)], JOB)));
+        assert_eq!(
+            grade_stale(&[done(0), msg_request(1)], JOB),
+            CaseOutcome::Passed
+        );
+        assert!(failed(&grade_stale(
+            &[done(0), done(0), msg_request(1)],
+            JOB
+        )));
+    }
+
+    #[test]
+    fn a_reject_in_a_stale_slice_fails() {
+        let slice = [msg_reject(RejectReason::Malformed), msg_request(1)];
+        assert!(failed(&grade_stale(&slice, JOB)));
+    }
+
+    #[test]
+    fn a_result_in_a_reject_slice_fails() {
+        let expected = expected_lease();
+        let slice = [
+            msg_reject(RejectReason::Malformed),
+            result_of(&expected, 1, true),
+            msg_request(1),
+        ];
+        let want = RejectReason::Malformed as i32;
+        assert!(failed(&grade_reject(&slice, JOB, want)));
+    }
+
+    #[test]
+    fn an_accepted_only_pair_has_no_subject() {
+        let mut caps = mock_caps();
+        caps.generated_families = vec![];
+        assert!(plan_subjects(&caps).is_empty());
     }
 }

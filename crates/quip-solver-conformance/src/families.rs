@@ -31,7 +31,8 @@ pub struct ReferenceRevision {
 }
 
 /// Every revision the gate can drive: `UNIFORM_V1` and `RESTRICTED_V1`, each
-/// with the parameter sets `P_SPEC`, `P_L2_F0`, and `P_L3_F0`.
+/// with params `[P_SPEC, P_L2_F0, P_L3_F0]` and `out_of_bounds_params`
+/// `P_F5000`.
 pub static REFERENCE_REVISIONS: &[ReferenceRevision] = &[
     ReferenceRevision {
         contract: &UNIFORM_V1,
