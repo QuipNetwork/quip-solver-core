@@ -7,7 +7,7 @@ use quip_solver_conformance::families::registry::{
     parse_registry, unregistered_quip_ids, RegistryEntry, Status,
 };
 use quip_solver_conformance::families::REFERENCE_REVISIONS;
-use quip_solver_conformance::{FAMILY_LAYERED, FAMILY_REGISTRY};
+use quip_solver_conformance::FAMILY_REGISTRY;
 use serde_json::Value;
 
 fn registry() -> Result<Vec<RegistryEntry>, String> {
@@ -20,6 +20,41 @@ fn vectors_of(entry: &RegistryEntry) -> Result<Value, String> {
     let text = std::fs::read_to_string(root.join(&entry.vectors))
         .map_err(|e| format!("{}: {e}", entry.vectors))?;
     serde_json::from_str(&text).map_err(|e| e.to_string())
+}
+
+/// Every distinct vectors file named by a registry entry.
+fn registered_vector_docs(registry: &[RegistryEntry]) -> Result<Vec<Value>, String> {
+    let mut paths: Vec<&str> = registry.iter().map(|e| e.vectors.as_str()).collect();
+    paths.sort_unstable();
+    paths.dedup();
+    let mut docs = Vec::new();
+    for path in paths {
+        let entry = registry
+            .iter()
+            .find(|e| e.vectors == path)
+            .ok_or("path without entry")?;
+        docs.push(vectors_of(entry)?);
+    }
+    Ok(docs)
+}
+
+/// Fails when a case in any registered vectors file has a revision that is
+/// not in the registry.
+fn check_cases_are_registered(registry: &[RegistryEntry], docs: &[Value]) -> Result<(), String> {
+    for doc in docs {
+        for case in layered_cases(doc)? {
+            let (id, revision) = case_key(case)?;
+            if !registry
+                .iter()
+                .any(|e| e.family_id == id && e.revision == revision)
+            {
+                return Err(format!(
+                    "{id}@{revision} is in a vectors file, not registered"
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn layered_cases(doc: &Value) -> Result<&Vec<Value>, String> {
@@ -112,19 +147,18 @@ fn every_registered_revision_has_vectors() -> Result<(), String> {
             return Err(format!("{}@{}: no cases", entry.family_id, entry.revision));
         }
     }
-    let layered: Value = serde_json::from_str(FAMILY_LAYERED).map_err(|e| e.to_string())?;
-    for case in layered_cases(&layered)? {
-        let (id, revision) = case_key(case)?;
-        if !registry
-            .iter()
-            .any(|e| e.family_id == id && e.revision == revision)
-        {
-            return Err(format!(
-                "{id}@{revision} is in layered.json, not registered"
-            ));
-        }
-    }
-    Ok(())
+    check_cases_are_registered(&registry, &registered_vector_docs(&registry)?)
+}
+
+#[test]
+fn an_unregistered_revision_in_a_registered_vectors_file_fails() -> Result<(), String> {
+    let registry = registry()?;
+    let docs = registered_vector_docs(&registry)?;
+    let fewer: Vec<RegistryEntry> = registry.into_iter().skip(1).collect();
+    expect_err(
+        check_cases_are_registered(&fewer, &docs),
+        "a vectors file with an unregistered revision",
+    )
 }
 
 /// SC-7 #4. The digest function takes no status, so each status gives the
@@ -337,6 +371,11 @@ fn check_items(doc: &ContractDoc) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether a schema type is on the allow list (FAM-13, FAM-14).
+fn is_allowed_type(kind: &str) -> bool {
+    SCHEMA_TYPES.contains(&kind)
+}
+
 /// SC-7 #5 and #6.
 fn check_schema(rows: &[SchemaRow]) -> Result<(), String> {
     let mut previous: Option<u16> = None;
@@ -345,7 +384,7 @@ fn check_schema(rows: &[SchemaRow]) -> Result<(), String> {
         if name.is_empty() {
             return Err(format!("tag {}: no name", row.tag));
         }
-        if !SCHEMA_TYPES.contains(&row.kind.as_str()) {
+        if !is_allowed_type(&row.kind) {
             return Err(format!(
                 "{name}: type {} is not allowed (FAM-13, FAM-14)",
                 row.kind
@@ -543,8 +582,11 @@ fn contract_status_equals_the_registry_status() -> Result<(), String> {
 fn parameter_schemas_use_no_float_type() -> Result<(), String> {
     for (entry, doc) in contracts()? {
         for row in schema_rows(&doc)? {
-            if row.kind.starts_with('f') {
-                return Err(format!("{}: float type {}", entry.family_id, row.kind));
+            if !is_allowed_type(&row.kind) {
+                return Err(format!(
+                    "{}: type {} not allowed",
+                    entry.family_id, row.kind
+                ));
             }
         }
     }
@@ -653,9 +695,10 @@ fn quip_ids_in_vectors_and_contracts_are_registered() -> Result<(), String> {
     for (_, doc) in contracts()? {
         ids.push(first_value(&doc, "ID")?);
     }
-    let layered: Value = serde_json::from_str(FAMILY_LAYERED).map_err(|e| e.to_string())?;
-    for case in layered_cases(&layered)? {
-        ids.push(case_key(case)?.0);
+    for doc in registered_vector_docs(&registry)? {
+        for case in layered_cases(&doc)? {
+            ids.push(case_key(case)?.0);
+        }
     }
     for reference in REFERENCE_REVISIONS {
         ids.push(reference.contract.family_id.to_owned());

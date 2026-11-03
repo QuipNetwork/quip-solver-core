@@ -128,6 +128,12 @@ fn all_declared() -> Result<(Vec<RegistryEntry>, Vec<Declared>), String> {
         .iter()
         .map(|name| declared(name))
         .collect::<Result<Vec<_>, _>>()?;
+    if !declared.iter().any(|d| !d.advertised.is_empty()) {
+        return Err("no example advertises a family".to_owned());
+    }
+    if !declared.iter().any(|d| !d.generated.is_empty()) {
+        return Err("no example generates a family".to_owned());
+    }
     Ok((registry, declared))
 }
 

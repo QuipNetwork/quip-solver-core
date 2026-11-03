@@ -2594,15 +2594,20 @@ fn changed_registered_case_fails_the_pin() -> Result<(), String> {
     let registry = quip_solver_conformance::families::registry::parse_registry(
         quip_solver_conformance::FAMILY_REGISTRY,
     )?;
-    let entry = registry.first().ok_or("empty registry")?;
-    let mut cases = registered_cases(entry)?;
-    let pointer = "/instances/0/j/0";
-    let first = cases.first().ok_or("no cases")?.clone();
-    let was = first
-        .pointer(pointer)
-        .and_then(Value::as_i64)
-        .ok_or("no coupling")?;
-    let slot = cases.first_mut().ok_or("no cases")?;
-    *slot = mutate(&first, pointer, json!(was + 1000));
-    expect_err(&check_pin(entry, &cases), "a changed registered case")
+    if registry.is_empty() {
+        return Err("empty registry".to_owned());
+    }
+    for entry in &registry {
+        let mut cases = registered_cases(entry)?;
+        let pointer = "/instances/0/j/0";
+        let first = cases.first().ok_or("no cases")?.clone();
+        let was = first
+            .pointer(pointer)
+            .and_then(Value::as_i64)
+            .ok_or("no coupling")?;
+        let slot = cases.first_mut().ok_or("no cases")?;
+        *slot = mutate(&first, pointer, json!(was + 1000));
+        expect_err(&check_pin(entry, &cases), "a changed registered case")?;
+    }
+    Ok(())
 }

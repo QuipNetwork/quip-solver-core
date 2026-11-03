@@ -500,7 +500,10 @@ fn faulty_j_fails_at_the_j_component_with_equal_energy() -> Result<(), String> {
 #[test]
 fn faulty_metadata_fails_at_metadata_section_0() -> Result<(), String> {
     let mismatch = mismatch_of(&FAULTY_METADATA_V1)?;
-    if mismatch.diff.component == Component::MetadataSection && mismatch.diff.index == Some(0) {
+    if mismatch.salt_index == Some(1)
+        && mismatch.diff.component == Component::MetadataSection
+        && mismatch.diff.index == Some(0)
+    {
         Ok(())
     } else {
         Err(format!("{:?} {}", mismatch.salt_index, mismatch.diff))
@@ -788,6 +791,17 @@ fn coverage_rows_follow_the_status_rules() -> Result<(), String> {
     Ok(())
 }
 
+/// Whether `source` has `fn name(` directly after a `#[test]` or
+/// `#[tokio::test]` attribute line.
+fn is_test_fn(source: &str, name: &str) -> bool {
+    let signature = format!("fn {name}(");
+    let lines: Vec<&str> = source.lines().map(str::trim).collect();
+    lines.windows(2).any(|pair| {
+        matches!(pair, [attr, def]
+            if matches!(*attr, "#[test]" | "#[tokio::test]") && def.contains(&signature))
+    })
+}
+
 #[test]
 fn covered_rows_cite_tests_that_exist() -> Result<(), String> {
     for row in coverage_rows()?
@@ -809,8 +823,8 @@ fn covered_rows_cite_tests_that_exist() -> Result<(), String> {
                 .split_once("::")
                 .ok_or_else(|| format!("{}: bad item {item}", row.id))?;
             let source = read_repo_file(path).map_err(|e| format!("{}: {e}", row.id))?;
-            if !source.contains(&format!("fn {name}(")) {
-                return Err(format!("{}: {path} has no `fn {name}(`", row.id));
+            if !is_test_fn(&source, name) {
+                return Err(format!("{}: {path} has no test `fn {name}(`", row.id));
             }
         }
     }
