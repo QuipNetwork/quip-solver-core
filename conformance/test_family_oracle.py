@@ -592,3 +592,39 @@ def test_field_length_codes():
     assert [f(ids, k, 5) for k in (5, 4, 6)] == [None, 15, 15]
     with pytest.raises(ValueError):
         f("Nope.field", 1, None)
+
+
+def test_layered_p_spec_skips_match_the_session_capture():
+    from family_oracle import layered
+    from family_oracle.digests import lease_salts
+
+    nodes = [907, 41, 0, 4294967295, 12, 3]
+    edges = [
+        (907, 41),
+        (41, 0),
+        (0, 4294967295),
+        (4294967295, 12),
+        (12, 3),
+        (3, 907),
+        (41, 12),
+    ]
+    params = bytes.fromhex("01010002000000020002000400000024faffff")
+    lease = lease_salts(
+        bytes([0x11]) * 32,
+        bytes([0x22]) * 32,
+        bytes(8) + bytes([0x33]) * 24,
+        5,
+        16,
+    )
+    assert lease is not None
+    skipped = set()
+    for index, (_, _, nonce) in enumerate(lease):
+        code, instance = layered.generate(
+            b"vectors/uniform-field", 1, params, nodes, edges, nonce
+        )
+        if code is not None:
+            assert instance is None
+            skipped.add(index)
+        else:
+            assert instance is not None
+    assert skipped == {0, 3, 9, 13}

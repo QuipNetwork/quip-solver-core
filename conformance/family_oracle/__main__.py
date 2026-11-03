@@ -9,6 +9,7 @@ def _targets() -> dict:
     return {
         build.CORE_PATH: build.render(build.build_core()),
         build.LEGACY_PATH: build.render(build.build_legacy()),
+        build.LAYERED_PATH: build.render(build.build_layered()),
     }
 
 

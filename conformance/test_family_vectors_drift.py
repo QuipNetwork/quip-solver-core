@@ -25,12 +25,20 @@ def _legacy_doc() -> dict:
     return json.loads(build.LEGACY_PATH.read_text())
 
 
+def _layered_doc() -> dict:
+    return json.loads(build.LAYERED_PATH.read_text())
+
+
 def test_core_fixture_matches_oracle():
     assert build.render(build.build_core()) == build.CORE_PATH.read_text()
 
 
 def test_legacy_fixture_matches_oracle():
     assert build.render(build.build_legacy()) == build.LEGACY_PATH.read_text()
+
+
+def test_layered_fixture_matches_oracle():
+    assert build.render(build.build_layered()) == build.LAYERED_PATH.read_text()
 
 
 def test_canonical_json_is_sorted_compact_and_rejects_floats():
@@ -69,7 +77,7 @@ def test_every_provided_id_has_a_case():
         assert tag.startswith("SC-2:")
 
 
-@pytest.mark.parametrize("load", [_core_doc, _legacy_doc])
+@pytest.mark.parametrize("load", [_core_doc, _legacy_doc, _layered_doc])
 def test_sources_hash_spec_and_oracle(load):
     doc = load()
     root = build.SPEC_PATH.parents[1]
@@ -87,3 +95,13 @@ def test_sources_hash_spec_and_oracle(load):
 def test_no_evidence_item_waits_for_a_finished_ticket():
     items = build.EVIDENCE["partial"] + build.EVIDENCE["deferred"]
     assert all("SC-5" not in item["deferred_to"] for item in items)
+
+
+def test_layered_evidence_is_sc7():
+    text = build.SPEC_PATH.read_text()
+    table = set(re.findall(r"SC-7:([a-z0-9-]+)", text.split("## Traceability", 1)[1]))
+    tagged = [tag for case in _layered_doc()["layered"] for tag in case["evidence"]]
+    assert tagged
+    for tag in tagged:
+        assert tag.startswith("SC-7:")
+        assert tag.removeprefix("SC-7:") in table

@@ -588,6 +588,248 @@
       ],
       "type": "object"
     },
+    "layered_case": {
+      "additionalProperties": false,
+      "properties": {
+        "coefficient_bound_milli": {
+          "type": "integer"
+        },
+        "descriptor_digest": {
+          "$ref": "#/$defs/hex32"
+        },
+        "evidence": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "family_id": {
+          "type": "string"
+        },
+        "instances": {
+          "items": {
+            "$ref": "#/$defs/layered_instance"
+          },
+          "type": "array"
+        },
+        "lease": {
+          "additionalProperties": false,
+          "properties": {
+            "base_salt": {
+              "$ref": "#/$defs/hex32"
+            },
+            "last_proof_block_hash": {
+              "$ref": "#/$defs/hex32"
+            },
+            "miner_account": {
+              "$ref": "#/$defs/hex32"
+            },
+            "salt_count": {
+              "$ref": "#/$defs/u64s"
+            },
+            "salt_start": {
+              "$ref": "#/$defs/u64s"
+            }
+          },
+          "required": [
+            "last_proof_block_hash",
+            "miner_account",
+            "base_salt",
+            "salt_start",
+            "salt_count"
+          ],
+          "type": "object"
+        },
+        "metadata_kinds": {
+          "items": {
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        },
+        "params_digest": {
+          "$ref": "#/$defs/hex32"
+        },
+        "params_hex": {
+          "$ref": "#/$defs/hex"
+        },
+        "revision": {
+          "type": "integer"
+        },
+        "size_bounds": {
+          "additionalProperties": false,
+          "properties": {
+            "degree": {
+              "$ref": "#/$defs/u64s"
+            },
+            "edges": {
+              "$ref": "#/$defs/u64s"
+            },
+            "nodes": {
+              "$ref": "#/$defs/u64s"
+            }
+          },
+          "required": [
+            "nodes",
+            "edges",
+            "degree"
+          ],
+          "type": "object"
+        },
+        "skipped": {
+          "items": {
+            "$ref": "#/$defs/layered_skipped"
+          },
+          "type": "array"
+        },
+        "topology": {
+          "additionalProperties": false,
+          "properties": {
+            "edges": {
+              "items": {
+                "items": {
+                  "type": "integer"
+                },
+                "maxItems": 2,
+                "minItems": 2,
+                "type": "array"
+              },
+              "type": "array"
+            },
+            "name": {
+              "type": "string"
+            },
+            "nodes": {
+              "items": {
+                "type": "integer"
+              },
+              "type": "array"
+            },
+            "order_digest": {
+              "$ref": "#/$defs/hex32"
+            }
+          },
+          "required": [
+            "name",
+            "nodes",
+            "edges",
+            "order_digest"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "name",
+        "evidence",
+        "family_id",
+        "revision",
+        "params_hex",
+        "params_digest",
+        "descriptor_digest",
+        "metadata_kinds",
+        "coefficient_bound_milli",
+        "topology",
+        "lease",
+        "size_bounds",
+        "skipped",
+        "instances"
+      ],
+      "type": "object"
+    },
+    "layered_instance": {
+      "additionalProperties": false,
+      "properties": {
+        "canonical_hex": {
+          "$ref": "#/$defs/hex"
+        },
+        "edges": {
+          "items": {
+            "items": {
+              "type": "integer"
+            },
+            "maxItems": 2,
+            "minItems": 2,
+            "type": "array"
+          },
+          "type": "array"
+        },
+        "energy_all_up_milli": {
+          "$ref": "#/$defs/i64s"
+        },
+        "h": {
+          "items": {
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "index": {
+          "$ref": "#/$defs/u64s"
+        },
+        "instance_digest": {
+          "$ref": "#/$defs/hex32"
+        },
+        "j": {
+          "items": {
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "metadata_hex": {
+          "$ref": "#/$defs/hex"
+        },
+        "node_ids": {
+          "items": {
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "nonce": {
+          "$ref": "#/$defs/hex32"
+        },
+        "offset_milli": {
+          "$ref": "#/$defs/i64s"
+        }
+      },
+      "required": [
+        "index",
+        "nonce",
+        "node_ids",
+        "edges",
+        "h",
+        "j",
+        "offset_milli",
+        "metadata_hex",
+        "canonical_hex",
+        "instance_digest",
+        "energy_all_up_milli"
+      ],
+      "type": "object"
+    },
+    "layered_skipped": {
+      "additionalProperties": false,
+      "properties": {
+        "index": {
+          "$ref": "#/$defs/u64s"
+        },
+        "nonce": {
+          "$ref": "#/$defs/hex32"
+        },
+        "skip_code": {
+          "enum": [
+            13,
+            14
+          ]
+        }
+      },
+      "required": [
+        "index",
+        "nonce",
+        "skip_code"
+      ],
+      "type": "object"
+    },
     "lease_admission_case": {
       "additionalProperties": false,
       "properties": {
@@ -1442,6 +1684,12 @@
       },
       "type": "array"
     },
+    "layered": {
+      "items": {
+        "$ref": "#/$defs/layered_case"
+      },
+      "type": "array"
+    },
     "lease_admission": {
       "items": {
         "$ref": "#/$defs/lease_admission_case"
@@ -1488,7 +1736,8 @@
       "enum": [
         "specified",
         "legacy-production",
-        "archived-research"
+        "archived-research",
+        "test-construction"
       ]
     },
     "revisions": {
