@@ -184,3 +184,38 @@ pub(crate) fn tiles_payload(tiles: &[Tile]) -> Result<Vec<u8>, Code> {
     }
     Ok(payload)
 }
+
+/// The payload of local gauges: the tile count, then four bytes per tile,
+/// `0x00` for +1 and `0x01` for -1.
+pub(crate) fn gauges_payload(gauges: &[[i8; 4]]) -> Result<Vec<u8>, Code> {
+    let mut payload = u32::try_from(gauges.len())
+        .map_err(|_| Code::BoundsExceeded)?
+        .to_le_bytes()
+        .to_vec();
+    for gauge in gauges {
+        payload.extend(gauge.iter().map(|&g| u8::from(g < 0)));
+    }
+    Ok(payload)
+}
+
+/// The local gauges of a kind 2 payload: four signs per tile, `tiles` tiles.
+pub(crate) fn parse_gauges(payload: &[u8], tiles: usize) -> Option<Vec<[i8; 4]>> {
+    let mut reader = Reader::new(payload);
+    let count = usize::try_from(reader.u32()?).ok()?;
+    if count != tiles || reader.rest().len() != count.checked_mul(4)? {
+        return None;
+    }
+    let sign = |byte: u8| match byte {
+        0 => Some(1),
+        1 => Some(-1),
+        _ => None,
+    };
+    reader
+        .rest()
+        .chunks_exact(4)
+        .map(|chunk| match *chunk {
+            [a, b, c, d] => Some([sign(a)?, sign(b)?, sign(c)?, sign(d)?]),
+            _ => None,
+        })
+        .collect()
+}
