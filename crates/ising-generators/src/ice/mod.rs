@@ -8,10 +8,12 @@
 pub(crate) mod build;
 pub mod glass;
 pub mod matching;
+pub mod obstructions;
 pub mod topology;
 
 pub use glass::{ICE_GLASS, ICE_GLASS_SCHEMA, ICE_GLASS_V1, STRONG_MILLI};
 pub use matching::{select, sides, Sides};
+pub use obstructions::{gauge_obstructions, Obstructions};
 pub use topology::{
     candidates, zephyr_coordinates, zephyr_coupler, zephyr_lattice, Candidates, Tile,
 };
