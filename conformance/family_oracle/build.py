@@ -2178,6 +2178,13 @@ def _twisted_cases() -> list[dict]:
         _twisted_case(
             "twisted-dimer-shortfall", _twisted_params(2, 2, 62, half), 4, *z22, "z22"
         ),
+        _twisted_case(
+            "twisted-dimer-zephyr-z22-permuted",
+            _twisted_params(2, 2, 62, 8),
+            2,
+            *_permuted(*z22),
+            "z22-permuted",
+        ),
     ]
     by_name = {case["name"]: case for case in cases}
     if not by_name["twisted-dimer-shortfall"]["skipped"]:

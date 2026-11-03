@@ -196,6 +196,6 @@ The parameters do not change the sizes. If `max_degree(T)` is more than 32, the 
 
 `none`
 
-No step retries. The pair walk is a single bounded attempt, and its exhaustion is the retry exhaustion of FAM-26. A salt whose greedy pair walk ends with fewer than `pairs` pairs gives code 14, and the miner skips it.
+No step retries. The pair walk is a single bounded try, and its exhaustion is the retry exhaustion of FAM-26. A salt whose greedy pair walk ends with fewer than `pairs` pairs gives code 14, and the miner skips it.
 Every other salt gives an instance when the topology passes admission.
 A topology that fails admission gets code 12 or code 13, and no salt gives a draw.

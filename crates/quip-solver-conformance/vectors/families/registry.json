@@ -30,7 +30,7 @@
       "revision": 1,
       "status": "research",
       "vectors": "crates/quip-solver-conformance/vectors/families/twisted_dimer.json",
-      "vectors_blake3": "d38c54a468cf0964f9cdcfb0160521487c138eca1f1359dfe2c1644f1596c3fb"
+      "vectors_blake3": "b7f96cd53c0826854b2f176c0d278d3467d8e19fa30e907176e588eb8c1aeed8"
     },
     {
       "adapted_from": null,

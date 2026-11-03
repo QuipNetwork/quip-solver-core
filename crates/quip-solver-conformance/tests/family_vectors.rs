@@ -2845,7 +2845,7 @@ fn twisted_params_constants_match_the_vectors() -> Result<(), String> {
             &codec::hex_encode(&want),
         )?;
     }
-    compare(&doc, "case count", &section(&doc, "cases")?.len(), &4)
+    compare(&doc, "case count", &section(&doc, "cases")?.len(), &5)
 }
 
 #[test]

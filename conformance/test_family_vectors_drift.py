@@ -162,6 +162,37 @@ def test_twisted_dimer_evidence_matches_the_registry():
         assert tagged == set(entry["evidence"]), section
 
 
+def _decoded_params(params_hex: str) -> dict[int, int]:
+    """The tag-to-value map of canonical parameter bytes."""
+    data = bytes.fromhex(params_hex)
+    assert data[0] == 1
+    at, values = 1, {}
+    while at < len(data):
+        tag = int.from_bytes(data[at : at + 2], "little")
+        size = int.from_bytes(data[at + 2 : at + 6], "little")
+        values[tag] = int.from_bytes(data[at + 6 : at + 6 + size], "little")
+        at += 6 + size
+    return values
+
+
+def test_twisted_contract_recipe_table_matches_the_vectors():
+    text = (build.ROOT / "docs/families/quip-twisted-ice-dimer-1.md").read_text()
+    row = re.compile(
+        r"^\| `([^`]+)` \| `([^`]+)` \| (\d+) \| (\d+) \| `([0-9a-f]{64})` \|$",
+        re.MULTILINE,
+    )
+    table = row.findall(text)
+    recipes = _twisted_doc()["recipes"]
+    assert len(table) == len(recipes) > 0
+    for (alias, cell, weak, pairs, digest), recipe in zip(table, recipes, strict=True):
+        values = _decoded_params(recipe["params_hex"])
+        assert alias == recipe["alias"]
+        assert cell == recipe["cell"]
+        assert int(weak) == values[3]
+        assert int(pairs) == values[4]
+        assert digest == recipe["params_digest"]
+
+
 def test_canonical_json_is_sorted_compact_and_rejects_floats():
     assert build.canonical_json({"b": [1, "x"], "a": None}) == '{"a":null,"b":[1,"x"]}'
     with pytest.raises(TypeError):
