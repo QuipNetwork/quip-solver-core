@@ -11,6 +11,7 @@
 //! - [`descriptor`]: family ids, parameter schemas, descriptors, and admission.
 //! - [`family`]: base topologies, substreams, and canonical instance
 //!   generation for family leases.
+//! - [`ice`]: ice tiles, the 4-clique motifs of a base topology.
 //! - [`instance`]: canonical instance bytes, limits, and metadata validation.
 
 #![no_std]
@@ -21,6 +22,7 @@ mod digest;
 
 pub mod descriptor;
 pub mod family;
+pub mod ice;
 pub mod instance;
 pub mod random;
 pub mod rng;
