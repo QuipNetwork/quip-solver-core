@@ -1,6 +1,96 @@
 {
   "$comment": "Name uniqueness within a section, parallel array lengths, and the nonce length of 0 or 64 hex characters are checked by the Rust tests, not by this schema.",
   "$defs": {
+    "admission_case": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "expected_code": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "family_id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "params_hex": {
+          "$ref": "#/$defs/hex"
+        },
+        "revision": {
+          "type": "integer"
+        },
+        "topology": {
+          "$ref": "#/$defs/blob_topology"
+        }
+      },
+      "required": [
+        "name",
+        "evidence",
+        "family_id",
+        "revision",
+        "params_hex",
+        "topology",
+        "expected_code"
+      ],
+      "type": "object"
+    },
+    "blob_topology": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "order_digest": {
+          "$ref": "#/$defs/hex32"
+        },
+        "topology": {
+          "$ref": "#/$defs/topology_ref"
+        }
+      },
+      "required": [
+        "name",
+        "topology",
+        "order_digest"
+      ],
+      "type": "object"
+    },
+    "case_lease": {
+      "additionalProperties": false,
+      "properties": {
+        "base_salt": {
+          "$ref": "#/$defs/hex32"
+        },
+        "last_proof_block_hash": {
+          "$ref": "#/$defs/hex32"
+        },
+        "miner_account": {
+          "$ref": "#/$defs/hex32"
+        },
+        "salt_count": {
+          "$ref": "#/$defs/u64s"
+        },
+        "salt_start": {
+          "$ref": "#/$defs/u64s"
+        }
+      },
+      "required": [
+        "last_proof_block_hash",
+        "miner_account",
+        "base_salt",
+        "salt_start",
+        "salt_count"
+      ],
+      "type": "object"
+    },
     "code_row": {
       "additionalProperties": false,
       "properties": {
@@ -1262,6 +1352,85 @@
       ],
       "type": "object"
     },
+    "obstruction_case": {
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "type": "string"
+        },
+        "error_detail": {
+          "items": {
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "evidence": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "expected": {
+          "$ref": "#/$defs/obstruction_values"
+        },
+        "gauges": {
+          "items": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array"
+          },
+          "type": "array"
+        },
+        "n": {
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "tiles": {
+          "items": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "name",
+        "evidence",
+        "tiles",
+        "gauges",
+        "n"
+      ],
+      "type": "object"
+    },
+    "obstruction_values": {
+      "additionalProperties": false,
+      "properties": {
+        "components": {
+          "type": "integer"
+        },
+        "cycle_rank": {
+          "type": "integer"
+        },
+        "frustrated_cycles": {
+          "type": "integer"
+        },
+        "gauge_equivalent": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "components",
+        "cycle_rank",
+        "frustrated_cycles",
+        "gauge_equivalent"
+      ],
+      "type": "object"
+    },
     "params_case": {
       "additionalProperties": false,
       "properties": {
@@ -1784,6 +1953,96 @@
       "pattern": "^\\.\\./topologies/[a-z0-9-]+\\.bin\\.gz$",
       "type": "string"
     },
+    "twisted_recipe": {
+      "additionalProperties": false,
+      "properties": {
+        "alias": {
+          "type": "string"
+        },
+        "cell": {
+          "type": "string"
+        },
+        "evidence": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "family_id": {
+          "type": "string"
+        },
+        "lease": {
+          "$ref": "#/$defs/case_lease"
+        },
+        "name": {
+          "type": "string"
+        },
+        "params_digest": {
+          "$ref": "#/$defs/hex32"
+        },
+        "params_hex": {
+          "$ref": "#/$defs/hex"
+        },
+        "revision": {
+          "type": "integer"
+        },
+        "salts": {
+          "items": {
+            "$ref": "#/$defs/twisted_salt"
+          },
+          "type": "array"
+        },
+        "topology": {
+          "$ref": "#/$defs/blob_topology"
+        }
+      },
+      "required": [
+        "name",
+        "evidence",
+        "alias",
+        "cell",
+        "family_id",
+        "revision",
+        "params_hex",
+        "params_digest",
+        "topology",
+        "lease",
+        "salts"
+      ],
+      "type": "object"
+    },
+    "twisted_salt": {
+      "additionalProperties": false,
+      "properties": {
+        "canonical_blake3": {
+          "$ref": "#/$defs/hex32"
+        },
+        "index": {
+          "$ref": "#/$defs/u64s"
+        },
+        "nonce": {
+          "$ref": "#/$defs/hex32"
+        },
+        "obstructions": {
+          "$ref": "#/$defs/obstruction_values"
+        },
+        "pairs": {
+          "type": "integer"
+        },
+        "tiles": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "index",
+        "nonce",
+        "canonical_blake3",
+        "tiles",
+        "pairs",
+        "obstructions"
+      ],
+      "type": "object"
+    },
     "u64s": {
       "pattern": "^(0|[1-9][0-9]*)$",
       "type": "string"
@@ -1922,6 +2181,12 @@
       "minItems": 1,
       "type": "array"
     },
+    "admission": {
+      "items": {
+        "$ref": "#/$defs/admission_case"
+      },
+      "type": "array"
+    },
     "cases": {
       "items": {
         "$ref": "#/$defs/layered_case"
@@ -2039,6 +2304,12 @@
       },
       "type": "array"
     },
+    "obstructions": {
+      "items": {
+        "$ref": "#/$defs/obstruction_case"
+      },
+      "type": "array"
+    },
     "params": {
       "items": {
         "$ref": "#/$defs/params_case"
@@ -2052,6 +2323,12 @@
         "archived-research",
         "test-construction"
       ]
+    },
+    "recipes": {
+      "items": {
+        "$ref": "#/$defs/twisted_recipe"
+      },
+      "type": "array"
     },
     "registry": {
       "items": {

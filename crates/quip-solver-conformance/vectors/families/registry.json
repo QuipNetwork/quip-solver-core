@@ -21,6 +21,19 @@
     },
     {
       "adapted_from": null,
+      "contract": "docs/families/quip-twisted-ice-dimer-1.md",
+      "evidence": [
+        "SC-9:twisted-ice-dimer-vectors-frozen"
+      ],
+      "family_id": "quip/twisted-ice-dimer",
+      "name": "quip/twisted-ice-dimer@1",
+      "revision": 1,
+      "status": "research",
+      "vectors": "crates/quip-solver-conformance/vectors/families/twisted_dimer.json",
+      "vectors_blake3": "d38c54a468cf0964f9cdcfb0160521487c138eca1f1359dfe2c1644f1596c3fb"
+    },
+    {
+      "adapted_from": null,
       "contract": "docs/families/vectors-restricted-field-1.md",
       "evidence": [
         "SC-7:revision-vectors-frozen"

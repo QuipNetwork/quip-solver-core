@@ -63,6 +63,17 @@ ICE_GLASS = Schema(
     ),
 )
 
+TWISTED_DIMER = Schema(
+    "quip/twisted-ice-dimer",
+    1,
+    (
+        Field(1, "zephyr_m", "u16", 1, 0, 32),
+        Field(2, "zephyr_t", "u8", 1, 0, 8),
+        Field(3, "weak_milli", "u16", 1, 1, 999),
+        Field(4, "pairs", "u32", 1, 0, 65536),
+    ),
+)
+
 ALL_TYPES = Schema(
     "example/all-types",
     1,

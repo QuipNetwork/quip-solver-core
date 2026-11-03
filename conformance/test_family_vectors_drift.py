@@ -45,6 +45,15 @@ def _ice_doc() -> dict:
     return json.loads(build.ICE_STRUCTURE_PATH.read_text())
 
 
+def _twisted_doc() -> dict:
+    return json.loads(build.TWISTED_DIMER_PATH.read_text())
+
+
+def test_twisted_dimer_fixture_matches_oracle():
+    text = build.render(build.build_twisted_dimer())
+    assert text == build.TWISTED_DIMER_PATH.read_text()
+
+
 def test_ice_structure_fixture_matches_oracle():
     text = build.render(build.build_ice_structure())
     assert text == build.ICE_STRUCTURE_PATH.read_text()
@@ -110,7 +119,7 @@ def test_every_json_topology_reference_names_an_indexed_file():
             for item in value.values():
                 walk(item)
 
-    for load in (_core_doc, _layered_doc, _ice_doc):
+    for load in (_core_doc, _layered_doc, _ice_doc, _twisted_doc):
         walk(load())
     assert refs
     # Every topology file is referenced by a JSON file and indexed.
@@ -140,6 +149,17 @@ def test_ice_glass_cases_evidence_matches_the_registry():
     tagged = {tag for case in _ice_doc()["cases"] for tag in case["evidence"]}
     assert tagged
     assert tagged == set(entry["evidence"])
+
+
+def test_twisted_dimer_evidence_matches_the_registry():
+    registry = json.loads((build.FAMILIES_DIR / "registry.json").read_text())[
+        "registry"
+    ]
+    entry = next(e for e in registry if e["name"] == "quip/twisted-ice-dimer@1")
+    doc = _twisted_doc()
+    for section in ("cases", "recipes", "obstructions", "admission"):
+        tagged = {tag for case in doc[section] for tag in case["evidence"]}
+        assert tagged == set(entry["evidence"]), section
 
 
 def test_canonical_json_is_sorted_compact_and_rejects_floats():
@@ -178,7 +198,9 @@ def test_every_provided_id_has_a_case():
         assert tag.startswith("SC-2:")
 
 
-@pytest.mark.parametrize("load", [_core_doc, _legacy_doc, _layered_doc, _ice_doc])
+@pytest.mark.parametrize(
+    "load", [_core_doc, _legacy_doc, _layered_doc, _ice_doc, _twisted_doc]
+)
 def test_sources_hash_spec_and_oracle(load):
     doc = load()
     root = build.SPEC_PATH.parents[1]

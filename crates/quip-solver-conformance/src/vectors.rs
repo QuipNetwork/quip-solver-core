@@ -225,6 +225,7 @@ pub const TOPOLOGY_FILES: &[(&str, &[u8])] = topology_files![
     "sparse-nodes-reordered.bin.gz",
     "t-sparse.bin.gz",
     "tie-ring-4.bin.gz",
+    "twisted-dimer-adjacency-z22-sparse.bin.gz",
     "z12-zephyr.bin.gz",
     "z22-cut-edge-zephyr.bin.gz",
     "z22-permuted-order-zephyr.bin.gz",

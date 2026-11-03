@@ -104,7 +104,7 @@
       "path": "conformance/family_oracle/__main__.py"
     },
     {
-      "blake3": "2520b919f2083629756de5643d0c64f9dfb87343dc854107dd490d40541e0e99",
+      "blake3": "b732688057ff1ed2ce85f7275b40b6affdac725f634551625f320cb24e8d5baf",
       "path": "conformance/family_oracle/build.py"
     },
     {
@@ -136,12 +136,16 @@
       "path": "conformance/family_oracle/layered.py"
     },
     {
-      "blake3": "08eaaced697c05f3ff70ddefb2fcd102745712ab22e7b4012c967b00c9b609ba",
+      "blake3": "3b26016ad598231417d7445c00ea40f1b9e8754e456167e5229101f85f7430b7",
       "path": "conformance/family_oracle/params.py"
     },
     {
       "blake3": "4c0c3d18b5151431b25d5c450bc8347e31a4802e6a3152adf417b2218047cde2",
       "path": "conformance/family_oracle/topology_blob.py"
+    },
+    {
+      "blake3": "a69f1b6f925d2084316968a86ee8752f30f1eb8e3c8e6a64d7226c1c5398f208",
+      "path": "conformance/family_oracle/twisted.py"
     },
     {
       "blake3": "a1954919b87214bb0a6fda4e1418c99a1f7ca1c8fb8892037a4016bdbe2d0df1",
