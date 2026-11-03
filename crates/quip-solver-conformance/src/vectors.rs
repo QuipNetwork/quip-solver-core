@@ -178,3 +178,9 @@ pub const FAMILY_LAYERED: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/vectors/families/layered.json"
 ));
+
+/// The family registry: status, contract, and frozen vectors of each family revision (FAM-08, FAM-09).
+pub const FAMILY_REGISTRY: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/vectors/families/registry.json"
+));

@@ -1127,6 +1127,60 @@
       ],
       "type": "object"
     },
+    "registry_entry": {
+      "additionalProperties": false,
+      "properties": {
+        "adapted_from": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "contract": {
+          "type": "string"
+        },
+        "evidence": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "family_id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "integer"
+        },
+        "status": {
+          "enum": [
+            "research",
+            "archived",
+            "chain-authorized"
+          ]
+        },
+        "vectors": {
+          "type": "string"
+        },
+        "vectors_blake3": {
+          "$ref": "#/$defs/hex32"
+        }
+      },
+      "required": [
+        "name",
+        "family_id",
+        "revision",
+        "status",
+        "adapted_from",
+        "contract",
+        "vectors",
+        "vectors_blake3",
+        "evidence"
+      ],
+      "type": "object"
+    },
     "revision_case": {
       "additionalProperties": false,
       "properties": {
@@ -1739,6 +1793,12 @@
         "archived-research",
         "test-construction"
       ]
+    },
+    "registry": {
+      "items": {
+        "$ref": "#/$defs/registry_entry"
+      },
+      "type": "array"
     },
     "revisions": {
       "items": {

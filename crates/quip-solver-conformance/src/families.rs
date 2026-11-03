@@ -13,6 +13,7 @@ use serde_json::Value;
 
 mod drive;
 pub mod layered;
+pub mod registry;
 
 pub(crate) use drive::run_family_script;
 pub use drive::{drive_miner_family, FamilyCase, FamilyReport};

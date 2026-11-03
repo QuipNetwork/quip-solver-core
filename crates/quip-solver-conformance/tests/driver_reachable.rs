@@ -104,3 +104,15 @@ fn the_family_gate_surface_is_exported() {
     assert!(reference_revision("vectors/uniform-field", 1).is_some());
     assert!(reference_revision("vectors/uniform-field", 2).is_none());
 }
+
+#[test]
+fn the_family_registry_is_exported() {
+    use quip_solver_conformance::families::registry::{
+        archived_among, parse_registry, unregistered_quip_ids, RegistryEntry, Status,
+    };
+    let registry = parse_registry(quip_solver_conformance::FAMILY_REGISTRY);
+    let _ = archived_among;
+    assert_eq!(unregistered_quip_ids(&[], ["quip/ice"]), ["quip/ice"]);
+    let _: Option<(RegistryEntry, Status)> = None;
+    assert!(registry.is_ok_and(|entries| !entries.is_empty()));
+}
