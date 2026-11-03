@@ -126,7 +126,7 @@ encodings do not change.
   topology field in a vectors file is now a path. The `vectors_blake3` pins of
   `vectors/restricted-field@1` and `vectors/uniform-field@1` in `registry.json`
   changed because the topology field became a file reference. The instance bytes
-  did not change. Every `T_SPARSE` copy in the tests loads the shared file.
+  did not change. The Rust tests load `T_SPARSE` from the shared file.
 
 ## 0.0.4
 
