@@ -14,9 +14,13 @@ categories = ["no-std", "algorithms", "cryptography"]
 default = ["std"]
 # Runtime SIMD detection in blake3. No API change: the crate is no_std either way.
 std = ["blake3/std"]
+# The topology blob codec (gzip plus varints). no_std: it needs only miniz_oxide
+# with its `with-alloc` feature.
+blob = ["dep:miniz_oxide"]
 
 [dependencies]
 blake3 = { version = "1", default-features = false }
+miniz_oxide = { version = "0.9.1", default-features = false, features = ["with-alloc"], optional = true }
 
 [dev-dependencies]
 # Path-only and unversioned, as in crates/quip-protocol: quip-protocol depends on
