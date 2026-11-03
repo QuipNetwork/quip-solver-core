@@ -16,11 +16,14 @@ A revision passes SC-7 conformance on a solver when both of these hold:
    Run it once for each generation path that the binary uses.
    The default session path and a local path are separate runs.
 2. The instances of the generator that the solver runs equal the checked-in vectors of the revision.
-   Use `families::check_case` for a Rust `Contract`, or `families::compare` per salt for any other generator.
+   Use `families::check_case` for a Rust `Contract`.
+   For any other generator, the canonical bytes, the instance digest, and the skip code of each salt equal the vector case.
+   `families::first_diff` names the first differing component of two canonical byte strings.
    Third-party optimized implementations use the same vectors.
 
 A `Skipped` case is not a pass.
 A revision without a reference contract in `quip-solver-conformance` cannot pass yet, so a solver must not list it (FAM-57).
+If a binary lists a revision in `generated_families` that the gate cannot drive, the `supported-revision` case of that revision fails, and the gate fails.
 
 ## Running the gate
 
@@ -35,6 +38,7 @@ The driver prints the header `--family conformance report for <solver-binary>:` 
 If the miner wrote a log, the driver prints the line `miner stderr:` and then the log on standard error.
 The report is conformant when at least one case passed and no case failed.
 A report of skipped cases alone is not conformant.
+A revision that the binary lists but the gate cannot drive fails its `supported-revision` case, so that report is not conformant.
 If the report is conformant, the exit status is 0.
 Otherwise the driver prints `conformance failed for <solver-binary>` on standard error and exits with status 1.
 The driver starts the solver binary with no extra arguments.
@@ -42,7 +46,11 @@ A solver whose local path needs a flag must start in that path from a wrapper sc
 A Rust test may call `families::drive_miner_family(bin, args, socket)` and pass the flags in `args`.
 
 For condition 2, a Rust solver calls `families::check_case` with its `Contract` and each `VectorCase` that `families::parse_vector_cases` reads from `FAMILY_LAYERED`.
-A solver in another language computes its instances for each salt of a vector case and calls `families::compare` on each one.
+A solver in another language reads the vector file in its own language.
+For each salt of a vector case, its canonical bytes and instance digest must equal the vector case.
+A skipped salt must give the skip code of the vector case.
+It can also write its canonical bytes for each salt to a file.
+A Rust harness then calls `families::first_diff` on the expected and the written byte slices.
 
 ## Cases of the family gate
 
@@ -64,10 +72,19 @@ Per-revision cases carry the subject `family_id@revision`.
 
 ### Cases of each revision
 
-The gate runs these ten cases for each advertised `(family_id, revision)` that has a reference revision.
+The gate runs these ten cases for each `(family_id, revision)` that the binary lists in `generated_families`.
 At present the reference revisions are `vectors/uniform-field@1` and `vectors/restricted-field@1`.
+If the gate cannot drive a listed revision, `supported-revision` fails and states the reason.
+The reason is one of these:
+
+- The revision has no reference contract.
+- No reference params set admits under the advertised limits. The reason gives the result of each params set.
+- The `generated_families` entry breaks FAM-61. The reason names the broken rule.
+
+If the revision has a reference contract, the gate skips the other nine cases with the same reason.
 A case needs a reference params set that gives the admission code the case tests.
 If no set gives that code, the gate skips the case and states the reason.
+If the binary lists the next revision, the gate skips `revision-plus-one`.
 
 | Case | What the case sends | Pass when |
 |---|---|---|
