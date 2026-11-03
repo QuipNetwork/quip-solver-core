@@ -14,7 +14,7 @@ A pytest drift test checks that the fixture is still the exact output of the ora
 
 | Check | Command | What it proves |
 |---|---|---|
-| Rust recompute | `cargo test -p quip-solver-conformance --test family_vectors` | Rust code in `tests/family_vectors.rs` agrees with `core.json`, `legacy.json`, and `layered.json`, and checks `ice_structure.json` against the schema |
+| Rust recompute | `cargo test -p quip-solver-conformance --test family_vectors` | Rust code in `tests/family_vectors.rs` agrees with `core.json`, `legacy.json`, `layered.json`, and the `cases` of `ice_structure.json`, and checks `ice_structure.json` against the schema |
 | Ice structure | `cargo test -p ising-generators --test ice_structure` | The ice code agrees with `ice_structure.json`, the live topology, and the archived tiles |
 | Drift | `python -m pytest conformance/test_family_vectors_drift.py` | The fixture is the oracle output, and the sources have not changed |
 | Oracle | `python -m pytest conformance/test_family_oracle.py` | The oracle matches the existing goldens and the examples in the contract |
@@ -29,7 +29,7 @@ All files are under `crates/quip-solver-conformance/vectors/families/`.
 | `core.json` | `specified` | Every vector that SC-2 provides |
 | `legacy.json` | `legacy-production` | References to the production legacy draw vectors, by case hash |
 | `layered.json` | `test-construction` | Generated instances of the layered test construction for fixed lease nonces |
-| `ice_structure.json` | `specified` | The ice tile structure (Zephyr lattice, candidate tiles, spines, sides, and the order-driven selection) on small topologies and on the live topology |
+| `ice_structure.json` | `specified` | The ice tile structure (Zephyr lattice, candidate tiles, spines, sides, and the order-driven selection) on small topologies and on the live topology. Its `cases` section holds the registered vectors of `quip/ice-glass@1`, in the case format of `layered.json` |
 | `ice/archived-tiles.bin` and `ice/archived-tiles.json` | `archived-research` | Tiles of two archived research models, and their sidecar |
 | `registry.json` | `specified` | The family registry, maintained by hand |
 

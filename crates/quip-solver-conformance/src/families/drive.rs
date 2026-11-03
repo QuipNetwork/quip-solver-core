@@ -26,6 +26,7 @@ use quip_protocol::wire::decode_spins_packed;
 use tokio::sync::mpsc;
 use tonic::{Status, Streaming};
 
+use super::ice::{P_ICE_ADJ_125, P_ICE_GLASS_1000, P_ICE_Z12_200};
 use super::layered::P_L2_F0;
 use super::layered::{P_F5000, P_L3_F0, P_SPEC};
 use super::{export_instances, reference_revision, ReferenceRevision, REFERENCE_REVISIONS};
@@ -459,8 +460,8 @@ const SESSION_BARRIERS: u32 = 1 + 2 + 2 * 2 + 1;
 /// barrier times out must still finish, so the report names every case.
 ///
 /// Each reference revision runs at most `REVISION_CASES.len()` cases of two
-/// barriers each. With 10 cases and 2 reference revisions the budget is
-/// `(8 + 2 * 20 + 1) * 10 s = 490 s`, the `+ 1` being one phase of slack so
+/// barriers each. With 10 cases and 3 reference revisions the budget is
+/// `(8 + 3 * 20 + 1) * 10 s = 690 s`, the `+ 1` being one phase of slack so
 /// the script ends before the child is killed.
 fn family_child_timeout() -> Duration {
     let per_revision = u32::try_from(REVISION_CASES.len() * 2).unwrap_or(u32::MAX);
@@ -797,6 +798,9 @@ fn params_name(params: &[u8]) -> String {
         ("P_L2_F0", &P_L2_F0[..]),
         ("P_L3_F0", &P_L3_F0[..]),
         ("P_F5000", &P_F5000[..]),
+        ("P_ICE_ADJ_125", &P_ICE_ADJ_125[..]),
+        ("P_ICE_Z12_200", &P_ICE_Z12_200[..]),
+        ("P_ICE_GLASS_1000", &P_ICE_GLASS_1000[..]),
     ] {
         if params == known {
             return name.to_owned();
@@ -1744,6 +1748,26 @@ mod tests {
         for (_, outcome) in cases.iter().skip(1) {
             assert_eq!(outcome, &CaseOutcome::Skipped(why.to_owned()));
         }
+    }
+
+    #[test]
+    fn ice_glass_on_t_sparse_fails_supported_revision_with_code_12() {
+        let mut caps = mock_caps();
+        caps.generated_families.push(FamilySupport {
+            family_id: "quip/ice-glass".to_owned(),
+            revisions: vec![1],
+            params_digests: vec![],
+        });
+        let reference = reference_revision("quip/ice-glass", 1).expect("a reference revision");
+        let cases = select_supported(&caps, "quip/ice-glass@1", Some(reference), &t_sparse(false))
+            .expect_err("T_SPARSE carries no ice tiles");
+        let why = "no reference params set admits under the advertised limits \
+                   (P_ICE_ADJ_125 gives code 12, P_ICE_Z12_200 gives code 12)";
+        assert_eq!(cases.len(), 10);
+        assert_eq!(
+            cases.first(),
+            Some(&("supported-revision", CaseOutcome::Failed(why.to_owned())))
+        );
     }
 
     #[test]

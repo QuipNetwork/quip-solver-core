@@ -7,17 +7,20 @@ use core::fmt;
 
 use ising_generators::descriptor::{admit, params_digest, AdvertisedLimits, Contract};
 use ising_generators::family::{admit_topology, generate_instance, BaseTopology, SaltFault};
+use ising_generators::ice::ICE_GLASS_V1;
 use ising_generators::instance::Instance;
 use ising_generators::Code;
 use serde_json::Value;
 
 mod drive;
+pub mod ice;
 pub mod layered;
 pub mod registry;
 
 pub(crate) use drive::run_family_script;
 pub use drive::{drive_miner_family, FamilyCase, FamilyReport};
 
+use ice::{P_ICE_ADJ_125, P_ICE_GLASS_1000, P_ICE_Z12_200};
 use layered::{P_F5000, P_L2_F0, P_L3_F0, P_SPEC, RESTRICTED_V1, UNIFORM_V1};
 
 /// A family revision the `--family` gate can drive.
@@ -34,7 +37,13 @@ pub struct ReferenceRevision {
 
 /// Every revision the gate can drive: `UNIFORM_V1` and `RESTRICTED_V1`, each
 /// with params `[P_SPEC, P_L2_F0, P_L3_F0]` and `out_of_bounds_params`
-/// `P_F5000`.
+/// `P_F5000`, and `ICE_GLASS_V1` with params `[P_ICE_ADJ_125, P_ICE_Z12_200]`
+/// and `out_of_bounds_params` `P_ICE_GLASS_1000`.
+///
+/// The gate sends its fixed topology `T_SPARSE`, which carries no ice tiles.
+/// A solver that lists `quip/ice-glass` therefore fails `supported-revision`
+/// with the admission code 12 (`TopologyIncompatible`), because no params set
+/// admits.
 pub static REFERENCE_REVISIONS: &[ReferenceRevision] = &[
     ReferenceRevision {
         contract: &UNIFORM_V1,
@@ -45,6 +54,11 @@ pub static REFERENCE_REVISIONS: &[ReferenceRevision] = &[
         contract: &RESTRICTED_V1,
         params: &[&P_SPEC, &P_L2_F0, &P_L3_F0],
         out_of_bounds_params: &P_F5000,
+    },
+    ReferenceRevision {
+        contract: &ICE_GLASS_V1,
+        params: &[&P_ICE_ADJ_125, &P_ICE_Z12_200],
+        out_of_bounds_params: &P_ICE_GLASS_1000,
     },
 ];
 

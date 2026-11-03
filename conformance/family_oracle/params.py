@@ -53,6 +53,16 @@ UNIFORM_FIELD = Schema(
     ),
 )
 
+ICE_GLASS = Schema(
+    "quip/ice-glass",
+    1,
+    (
+        Field(1, "zephyr_m", "u16", 1, 0, 32),
+        Field(2, "zephyr_t", "u8", 1, 0, 8),
+        Field(3, "glass_milli", "u16", 1, 1, 999),
+    ),
+)
+
 ALL_TYPES = Schema(
     "example/all-types",
     1,
