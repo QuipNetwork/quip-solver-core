@@ -603,16 +603,11 @@ def test_layered_p_spec_skips_match_the_session_capture():
     from family_oracle import layered
     from family_oracle.digests import lease_salts
 
-    nodes = [907, 41, 0, 4294967295, 12, 3]
-    edges = [
-        (907, 41),
-        (41, 0),
-        (0, 4294967295),
-        (4294967295, 12),
-        (12, 3),
-        (3, 907),
-        (41, 12),
-    ]
+    shared = topology_blob.decode(
+        (VECTORS / "topologies" / "t-sparse.bin.gz").read_bytes()
+    )
+    nodes = shared["nodes"]
+    edges = [tuple(edge) for edge in shared["edges"]]
     params = bytes.fromhex("01010002000000020002000400000024faffff")
     lease = lease_salts(
         bytes([0x11]) * 32,
@@ -751,6 +746,58 @@ def _file_error(data):
     with pytest.raises(topology_blob.BlobError) as info:
         topology_blob.decode(data)
     return info.value.code
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"kind": "explicit", "nodes": [True], "edges": []},
+        {"kind": "explicit", "nodes": [1], "edges": [[1, False]]},
+        {"kind": "explicit", "nodes": (1,), "edges": []},
+        {"kind": "explicit", "nodes": [1], "edges": {"a": 1}},
+        {"kind": "explicit", "nodes": [1], "edges": [[1, 2, 3]]},
+        {"kind": "explicit", "nodes": [1], "edges": [5]},
+        {
+            "kind": "zephyr-removed",
+            "m": True,
+            "t": 1,
+            "removed_nodes": [],
+            "removed_edges": [],
+        },
+        {
+            "kind": "zephyr-removed",
+            "m": 1,
+            "t": True,
+            "removed_nodes": [],
+            "removed_edges": [],
+        },
+        {
+            "kind": "zephyr-removed",
+            "m": 1,
+            "t": 1,
+            "removed_nodes": "ab",
+            "removed_edges": [],
+        },
+        {
+            "kind": "zephyr-removed",
+            "m": 1,
+            "t": 1,
+            "removed_nodes": [],
+            "removed_edges": {},
+        },
+        {
+            "kind": "zephyr-removed",
+            "m": 1,
+            "t": 1,
+            "removed_nodes": [],
+            "removed_edges": [[1]],
+        },
+    ],
+)
+def test_blob_encoder_rejects_what_the_rust_encoder_rejects(body):
+    with pytest.raises(topology_blob.BlobError) as info:
+        topology_blob.encode_payload(body)
+    assert info.value.code == "shape"
 
 
 def test_blob_payload_bytes_are_pinned():

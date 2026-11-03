@@ -50,7 +50,7 @@ Each file in `topologies/` has an index entry. A vectors file refers to it.
 The index entry of the live topology also holds `sources`, with the SHA-256 of the external specification file that the rebuild matches.
 The oracle writes every topology file except the live one, and it writes `index.json`.
 The live file holds archived research data, and the oracle reads it.
-The Rust function `quip_solver_conformance::vectors::topology` decodes a reference.
+The Rust function `quip_solver_conformance::topology` decodes a reference.
 
 The `provenance` field has four values.
 

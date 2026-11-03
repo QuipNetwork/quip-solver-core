@@ -27,6 +27,8 @@ The same topology MUST give the same file bytes from the same writer. Different 
 
 The payload ends exactly after the body. A decoder MUST reject trailing bytes.
 
+A reader must reject a version other than 1 and a kind that it does not know. A new kind keeps version 1. A change to the gzip framing or to an existing kind raises the version.
+
 ### Varint
 
 A varint is an unsigned LEB128 integer. It has at most 10 bytes, and its value is at most 2^64 - 1. A decoder MUST reject a varint that has a final group of `00` after the first byte (a non-minimal encoding).
@@ -111,6 +113,26 @@ The exit codes are:
 
 ## Library entry points
 
-The Rust crate `ising-generators` has the module `ising_generators::blob` behind the `blob` feature. The feature needs no standard library. The module holds `encode`, `decode`, and the types `Body` and `Topology`. The function `decode` returns a `Body`. The method `Body::topology` expands it into a `Topology`, which holds the node list and the edge list.
+The Rust crate `ising-generators` has the module `ising_generators::blob` behind the `blob` feature. The feature needs no standard library. The module has these public items.
 
-The crate `quip-solver-conformance` has two functions at its root. The function `topology` decodes the embedded file that a vectors reference names. The function `t_sparse` returns the shared T_SPARSE topology.
+- `Body`: the stored form of a topology, either explicit or zephyr-removed. A later kind can extend the enum, so add a wildcard arm to every `match`.
+- `Topology`: the node list and the edge list in native ids.
+- `BlobError`: why a blob failed to encode or decode. It has a `Display` text and is a `core::error::Error`.
+- `MAX_PAYLOAD`: the payload limit of 64 MiB.
+- `encode`: turns a `Body` into the file bytes.
+- `decode`: turns the file bytes into a `Body`.
+- `encode_payload`: turns a `Body` into the payload bytes, with no gzip framing.
+- `decode_payload`: turns the payload bytes into a `Body`.
+- `compress`: wraps payload bytes in the gzip framing.
+- `decompress`: checks the gzip framing and returns the payload bytes.
+
+The method `Body::topology` expands a `Body` into a `Topology`. Decoding without expansion stays fast. Expanding the largest kind 1 lattice, z(32, 8) with 66,560 nodes, takes about 1 s in an optimized build.
+
+The crate `quip-solver-conformance` has these items at its root.
+
+- `topology`: decodes the embedded file that a vectors reference names and expands it.
+- `topology_bytes`: returns the embedded file bytes for a vectors reference.
+- `t_sparse`: returns the shared T_SPARSE topology.
+- `TopologyError`: a reference that names no file, or a file that does not decode.
+- `TOPOLOGY_FILES`: every embedded file, paired with its reference.
+- `TOPOLOGY_INDEX`: the text of the topology index.

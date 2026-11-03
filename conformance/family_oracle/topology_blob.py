@@ -97,6 +97,32 @@ class _Reader:
 # ---- payload ----
 
 
+def _int(value: object, what: str) -> int:
+    """A JSON integer. A bool is not one, although Python makes it an int."""
+    if type(value) is not int:
+        raise BlobError("shape", f"{what} must be an integer")
+    return value
+
+
+def _list(value: object, what: str) -> list:
+    if not isinstance(value, list):
+        raise BlobError("shape", f"{what} must be a list")
+    return value
+
+
+def _pairs(value: object, what: str) -> list[tuple[int, int]]:
+    pairs = []
+    for pair in _list(value, what):
+        if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+            raise BlobError("shape", f"{what} must hold pairs")
+        pairs.append((_int(pair[0], what), _int(pair[1], what)))
+    return pairs
+
+
+def _ints(value: object, what: str) -> list[int]:
+    return [_int(item, what) for item in _list(value, what)]
+
+
 def _check_id(value: int, what: str) -> int:
     if not 0 <= value <= MAX_ID:
         raise BlobError("id-range", f"{what} {value} outside 0..=4294967295")
@@ -118,7 +144,8 @@ def encode_payload(body: Body) -> bytes:
     kind = body.get("kind")
     if kind == "explicit":
         out.append(KIND_EXPLICIT)
-        nodes, edges = body["nodes"], body["edges"]
+        nodes = _ints(body["nodes"], "nodes")
+        edges = _pairs(body["edges"], "edges")
         put_varint(out, len(nodes))
         previous = 0
         for node in nodes:
@@ -134,12 +161,12 @@ def encode_payload(body: Body) -> bytes:
             prev_u = u
     elif kind == "zephyr-removed":
         out.append(KIND_ZEPHYR)
-        m, t = body["m"], body["t"]
+        m, t = _int(body["m"], "m"), _int(body["t"], "t")
         _check_lattice(m, t)
         put_varint(out, m)
         put_varint(out, t)
-        removed_nodes = body["removed_nodes"]
-        removed_edges = [tuple(edge) for edge in body["removed_edges"]]
+        removed_nodes = _ints(body["removed_nodes"], "removed_nodes")
+        removed_edges = _pairs(body["removed_edges"], "removed_edges")
         _check_removals(m, t, removed_nodes, removed_edges)
         put_varint(out, len(removed_nodes))
         previous = 0
