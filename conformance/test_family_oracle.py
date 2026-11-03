@@ -1193,6 +1193,8 @@ def test_charged_single_tile_penalty_for_all_sixteen_states():
                 "gauges": [gauge],
                 "charges": [q],
                 "scale": 250,
+                "background_milli": 31,
+                "background_signs": {},
                 "edges": [(a, b) for a in range(4) for b in range(a + 1, 4)],
                 "j": [
                     250 * gauge[a] * gauge[b] for a in range(4) for b in range(a + 1, 4)
@@ -1227,3 +1229,20 @@ def test_charged_admission_codes():
         == 12
     )
     assert charge.admission_code(b"\x01", nodes, edges) == 7
+
+
+def test_charged_direct_energy_ignores_the_encoded_background_couplings():
+    from family_oracle import charge
+
+    nodes, edges = ice.lattice(2, 2)
+    inst = _charged(2, 2, 250, 31, 128, nodes, edges)
+    spins = charge.energy_states(bytes(range(32)), len(nodes))[3][1]
+    direct = charge.direct_energy(inst, spins)
+    encoded = charge.encoded_energy(inst, spins)
+    assert direct == encoded
+    (u, v), _ = next(iter(inst["background_signs"].items()))
+    at = inst["edges"].index((u, v))
+    broken = dict(inst, j=list(inst["j"]))
+    broken["j"][at] = -broken["j"][at]
+    assert charge.direct_energy(broken, spins) == direct
+    assert charge.encoded_energy(broken, spins) != direct

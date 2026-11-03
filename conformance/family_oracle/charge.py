@@ -167,11 +167,14 @@ def generate(
 
     background_rng = stream(LABELS[4])
     j = []
+    background_signs: dict[tuple[int, int], int] = {}
     for edge in edges:
         if edge in strong:
             j.append(strong[edge])
         else:
-            j.append(background if uniform(background_rng, 2) == 0 else -background)
+            sign = 1 if uniform(background_rng, 2) == 0 else -1
+            background_signs[edge] = sign
+            j.append(sign * background)
 
     meta = metadata(chosen, gauges, charges)
     canonical = canonical_bytes(
@@ -191,6 +194,8 @@ def generate(
         "gauges": gauges,
         "charges": charges,
         "scale": scale,
+        "background_milli": background,
+        "background_signs": background_signs,
     }
 
 
@@ -222,7 +227,8 @@ def direct_energy(inst: dict, spins: list[int]) -> int:
     """The sum of the tile penalties and the background couplings.
 
     A tile contributes `(A / 2) * (charge - q) ** 2`. The result never reads `h`,
-    the offset, or the `J` of a tile edge. Only `J` of non-tile edges is read.
+    the offset, or any `J`. The background term uses the signs drawn on the
+    `background` stream, kept in `background_signs`, and `background_milli`.
     """
     scale = inst["scale"]
     total = 0
@@ -231,10 +237,8 @@ def direct_energy(inst: dict, spins: list[int]) -> int:
         if square % 2:
             raise ValueError("a tile penalty is not an integer in milli units")
         total += square // 2
-    tile_edges = {pair for tile in inst["tiles"] for pair in combinations(tile, 2)}
-    for (u, v), coupling in zip(inst["edges"], inst["j"], strict=True):
-        if (u, v) not in tile_edges:
-            total += coupling * spins[u] * spins[v]
+    for (u, v), sign in inst["background_signs"].items():
+        total += inst["background_milli"] * sign * spins[u] * spins[v]
     return total
 
 

@@ -3438,7 +3438,7 @@
       "path": "conformance/family_oracle/chacha8.py"
     },
     {
-      "blake3": "0c759294cd3b1526ee75ad5a63c4de5f9efa1d0e895547313655745d230a05ff",
+      "blake3": "d137ce6a2f8791ffa6f094c9d5dc9f7f4cbb187772d52ad822da600c6c9b2aa4",
       "path": "conformance/family_oracle/charge.py"
     },
     {
