@@ -417,6 +417,33 @@ fn check_membership(
     tiles: &[Tile],
     spines: &[Option<[(u32, u32); 2]>],
 ) -> Result<(), StructureError> {
+    let slots = slot_counts(topology, tiles, spines)?;
+    for (&id, &slot) in topology.node_ids().iter().zip(&slots) {
+        if slot > 2 {
+            return Err(StructureError::MembershipAboveTwo(id));
+        }
+    }
+    Ok(())
+}
+
+/// The number of nodes with exactly two slots in `found`. A node in two
+/// selected tiles has two slots, so this bounds the nodes a selection can
+/// share.
+pub(crate) fn two_slot_nodes(
+    topology: &BaseTopology,
+    found: &Candidates,
+) -> Result<usize, StructureError> {
+    let slots = slot_counts(topology, &found.tiles, &found.spines)?;
+    Ok(slots.iter().filter(|&&slot| slot == 2).count())
+}
+
+/// The slots of every node: one per distinct spine edge it ends and one per
+/// free tile it belongs to.
+fn slot_counts(
+    topology: &BaseTopology,
+    tiles: &[Tile],
+    spines: &[Option<[(u32, u32); 2]>],
+) -> Result<Vec<u32>, StructureError> {
     let mut slots = vec![0u32; topology.node_ids().len()];
     let mut spine_edges = BTreeSet::new();
     let mut add = |node: u32| -> Result<(), StructureError> {
@@ -441,10 +468,5 @@ fn check_membership(
         add(a)?;
         add(b)?;
     }
-    for (&id, &slot) in topology.node_ids().iter().zip(&slots) {
-        if slot > 2 {
-            return Err(StructureError::MembershipAboveTwo(id));
-        }
-    }
-    Ok(())
+    Ok(slots)
 }
