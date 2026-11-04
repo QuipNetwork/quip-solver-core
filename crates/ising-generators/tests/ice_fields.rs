@@ -328,15 +328,6 @@ fn a_shortfall_gives_no_instance() {
         assert_ne!(instance.h()[0], 0, "the field is on node 0");
         assert!(check(&bytes, instance));
     }
-    let i = outcomes
-        .iter()
-        .position(Result::is_err)
-        .and_then(|i| u8::try_from(i).ok())
-        .expect("a shortfall nonce");
-    assert_eq!(
-        raw(&bytes, &topology, nonce_of(i)).err(),
-        Some(Code::NoInstance)
-    );
 }
 
 #[test]

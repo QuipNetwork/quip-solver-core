@@ -198,7 +198,7 @@ fn generate(
                 .ok()
                 .and_then(|pos| memberships.get_mut(pos))
                 .ok_or(Code::TopologyIncompatible)?;
-            *slot = slot.saturating_add(1);
+            *slot = slot.checked_add(1).ok_or(Code::BoundsExceeded)?;
         }
     }
     let mut eligible: Vec<u32> = Vec::new();
@@ -266,7 +266,7 @@ fn check_instance(params: &Params<'_>, instance: &Instance) -> Option<()> {
     for tile in &tiles {
         for pos in tile {
             let slot = memberships.get_mut(usize::try_from(*pos).ok()?)?;
-            *slot = slot.saturating_add(1);
+            *slot = slot.checked_add(1)?;
         }
     }
     let mut fields = 0usize;
