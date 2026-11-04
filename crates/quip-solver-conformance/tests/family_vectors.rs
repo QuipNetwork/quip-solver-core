@@ -2477,7 +2477,7 @@ fn check_layered(doc: &Value) -> Result<(), String> {
 fn check_layered_against_rust(case: &Value) -> Result<(), String> {
     use ising_generators::descriptor::{admit, params_digest};
     use ising_generators::family::{admit_topology, generate_instance, BaseTopology, SaltFault};
-    use ising_generators::ice::{CHARGED_ICE_V1, ICE_GLASS_V1, TWISTED_DIMER_V1};
+    use ising_generators::ice::{CHARGED_ICE_V1, ICE_FIELDS_V1, ICE_GLASS_V1, TWISTED_DIMER_V1};
     use quip_solver_conformance::families::layered::{RESTRICTED_V1, UNIFORM_V1};
     let family = str_field(case, "family_id")?;
     let contract = match family {
@@ -2486,6 +2486,7 @@ fn check_layered_against_rust(case: &Value) -> Result<(), String> {
         "quip/ice-glass" => ICE_GLASS_V1,
         "quip/twisted-ice-dimer" => TWISTED_DIMER_V1,
         "quip/charged-ice" => CHARGED_ICE_V1,
+        "quip/ice-fields" => ICE_FIELDS_V1,
         other => return Err(format!("{}: unknown family {other}", case_name(case))),
     };
     let params = codec::hex_decode(str_field(case, "params_hex")?)?;
@@ -3261,8 +3262,10 @@ fn charge_params_constants_match_the_vectors() -> Result<(), String> {
 }
 
 /// Build the instance of one lease slot of a case or recipe with the Rust
-/// construction, and give it to `check` together with the admitted params.
-fn with_charge_instance<T>(
+/// construction of `contract`, and give it to `check` together with the
+/// admitted params.
+fn with_ice_instance<T>(
+    contract: ising_generators::descriptor::Contract,
     case: &Value,
     slot: u64,
     check: impl FnOnce(
@@ -3272,9 +3275,8 @@ fn with_charge_instance<T>(
 ) -> Result<T, String> {
     use ising_generators::descriptor::{admit, params_digest, AdvertisedLimits};
     use ising_generators::family::{admit_topology, generate_instance, BaseTopology};
-    use ising_generators::ice::CHARGED_ICE_V1;
     let params = codec::hex_decode(str_field(case, "params_hex")?)?;
-    let contracts = [CHARGED_ICE_V1];
+    let contracts = [contract];
     let admitted = admit(
         &contracts,
         str_field(case, "family_id")?.as_bytes(),
@@ -3343,7 +3345,7 @@ fn spins_of_hex(hex: &str) -> Result<Vec<i8>, String> {
 /// compare them with the recorded values. The encoded and direct energies in
 /// the file must be equal.
 fn check_charge_energies(doc: &Value) -> Result<(), String> {
-    use ising_generators::ice::charge_defects;
+    use ising_generators::ice::{charge_defects, CHARGED_ICE_V1};
     for entry in section(doc, "energies")? {
         let case = find_named(doc, "cases", str_field(entry, "case")?)?;
         let slot = u64_decimal(entry, "index")?;
@@ -3355,7 +3357,7 @@ fn check_charge_energies(doc: &Value) -> Result<(), String> {
         )?;
         for state in entries_of(entry, "states")? {
             let spins = spins_of_hex(str_field(state, "spins_hex")?)?;
-            let encoded = with_charge_instance(case, slot, |params, built| {
+            let encoded = with_ice_instance(CHARGED_ICE_V1, case, slot, |params, built| {
                 let defects =
                     charge_defects(params, built, &spins).ok_or("charge_defects gave None")?;
                 Ok((encoded_energy(built, &spins)?, defects))
@@ -3428,6 +3430,7 @@ fn charge_counts(built: &ising_generators::instance::Instance) -> Result<(u64, u
 /// hash and the counts.
 fn check_charge_recipe(recipe: &Value) -> Result<(), String> {
     use ising_generators::descriptor::params_digest;
+    use ising_generators::ice::CHARGED_ICE_V1;
     let params = codec::hex_decode(str_field(recipe, "params_hex")?)?;
     compare(
         recipe,
@@ -3450,7 +3453,7 @@ fn check_charge_recipe(recipe: &Value) -> Result<(), String> {
             &lease_nonce(recipe, slot)?,
             &str_field(salt, "nonce")?.to_owned(),
         )?;
-        let (hash, counts) = with_charge_instance(recipe, slot, |_, built| {
+        let (hash, counts) = with_ice_instance(CHARGED_ICE_V1, recipe, slot, |_, built| {
             let canonical = built.canonical_bytes().map_err(|e| e.to_string())?;
             Ok((
                 blake3::hash(&canonical).to_hex().to_string(),
@@ -3601,6 +3604,395 @@ fn a_changed_charge_recipe_hash_fails_the_recompute() -> Result<(), String> {
     );
     let recipe = section(&broken, "recipe")?.first().ok_or("no recipe")?;
     expect_err(&check_charge_recipe(recipe), "a changed recipe hash")
+}
+
+// ---- ice fields vectors (ice_fields.json) ----
+
+fn fields_doc() -> Result<Value, String> {
+    serde_json::from_str(include_str!("../vectors/families/ice_fields.json"))
+        .map_err(|e| e.to_string())
+}
+
+/// Recompute the digests, nonces, and instance bytes of every registered
+/// `quip/ice-fields` case with Rust code that does not call the construction.
+fn check_fields(doc: &Value) -> Result<(), String> {
+    validate(&schema()?, doc)?;
+    check_names_unique(doc)?;
+    for case in section(doc, "cases")? {
+        check_layered_case(case, ice_glass_size_bounds)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn fields_fixture_matches_schema() -> Result<(), String> {
+    let doc = fields_doc()?;
+    validate(&schema()?, &doc)?;
+    match doc.get("provenance").and_then(Value::as_str) {
+        Some("specified") => {}
+        other => return Err(format!("provenance is {other:?}, expected specified")),
+    }
+    check_names_unique(&doc)?;
+    for name in ["cases", "selection", "field_recipes", "admission"] {
+        section(&doc, name).map(|_| ())?;
+    }
+    Ok(())
+}
+
+#[test]
+fn fields_cases_recompute() -> Result<(), String> {
+    check_fields(&fields_doc()?)
+}
+
+#[test]
+fn fields_cases_match_the_rust_construction() -> Result<(), String> {
+    for case in section(&fields_doc()?, "cases")? {
+        check_layered_against_rust(case)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn fields_params_constants_match_the_vectors() -> Result<(), String> {
+    use quip_solver_conformance::families::fields::{
+        P_FIELDS_ADJ_G45_F1000_D16, P_FIELDS_F1001, P_FIELDS_Z22_G125_F500_D16,
+    };
+    let doc = fields_doc()?;
+    for (section_name, name, want) in [
+        ("cases", "ice-fields-zephyr-z22", P_FIELDS_Z22_G125_F500_D16),
+        (
+            "cases",
+            "ice-fields-adjacency-z22",
+            P_FIELDS_ADJ_G45_F1000_D16,
+        ),
+        ("admission", "field-1001-is-out-of-bounds", P_FIELDS_F1001),
+    ] {
+        let case = find_named(&doc, section_name, name)?;
+        compare(
+            case,
+            "params_hex",
+            &str_field(case, "params_hex")?.to_owned(),
+            &codec::hex_encode(&want),
+        )?;
+    }
+    compare(&doc, "case count", &section(&doc, "cases")?.len(), &5)
+}
+
+/// The dense positions and values of the nonzero fields of an instance.
+fn field_nodes(built: &ising_generators::instance::Instance) -> (Vec<u64>, Vec<i64>) {
+    let mut nodes = Vec::new();
+    let mut values = Vec::new();
+    for (at, &h) in (0u64..).zip(built.h()) {
+        if h != 0 {
+            nodes.push(at);
+            values.push(i64::from(h));
+        }
+    }
+    (nodes, values)
+}
+
+/// The tile count of a built instance, from the kind 1 section.
+fn tile_count(built: &ising_generators::instance::Instance) -> Result<u64, String> {
+    let metadata = built.metadata();
+    match (metadata.get(2..4), metadata.get(8..12)) {
+        (Some([1, 0]), Some(count)) => Ok(u64::from(u32::from_le_bytes(
+            count.try_into().map_err(|_| "count")?,
+        ))),
+        _ => Err("no tile section first".to_owned()),
+    }
+}
+
+fn u64_array(entry: &Value, key: &str) -> Result<Vec<u64>, String> {
+    entries_of(entry, key)?
+        .iter()
+        .map(|v| v.as_u64().ok_or_else(|| format!("{key}: not a u64")))
+        .collect()
+}
+
+fn i64_array(entry: &Value, key: &str) -> Result<Vec<i64>, String> {
+    entries_of(entry, key)?
+        .iter()
+        .map(|v| v.as_i64().ok_or_else(|| format!("{key}: not an i64")))
+        .collect()
+}
+
+/// Rebuild every salt of every selection entry with the Rust construction and
+/// compare the field nodes and their values. Every salt that builds has an
+/// entry, and the entries are in the order of the instances.
+fn check_fields_selection(doc: &Value) -> Result<(), String> {
+    use ising_generators::ice::ICE_FIELDS_V1;
+    let mut seen = 0usize;
+    for case in section(doc, "cases")? {
+        for instance in entries_of(case, "instances")? {
+            let slot = u64_decimal(instance, "index")?;
+            let name = format!("{}-salt-{slot}", case_name(case));
+            let entry = find_named(doc, "selection", &name)?;
+            compare(entry, "case", &str_field(entry, "case")?, &case_name(case))?;
+            compare(entry, "index", &u64_decimal(entry, "index")?, &slot)?;
+            compare(
+                entry,
+                "nonce",
+                &lease_nonce(case, slot)?,
+                &str_field(entry, "nonce")?.to_owned(),
+            )?;
+            let (nodes, values) = with_ice_instance(ICE_FIELDS_V1, case, slot, |params, built| {
+                check_fields_metadata(params, built)?;
+                Ok(field_nodes(built))
+            })?;
+            compare(entry, "field nodes", &nodes, &u64_array(entry, "nodes")?)?;
+            compare(entry, "field values", &values, &i64_array(entry, "h")?)?;
+            seen += 1;
+        }
+    }
+    compare(
+        doc,
+        "selection count",
+        &section(doc, "selection")?.len(),
+        &seen,
+    )
+}
+
+/// The Rust metadata check must accept every built instance.
+fn check_fields_metadata(
+    params: &ising_generators::descriptor::Params<'_>,
+    built: &ising_generators::instance::Instance,
+) -> Result<(), String> {
+    use ising_generators::ice::ICE_FIELDS;
+    if (ICE_FIELDS.check_metadata)(params, built) {
+        Ok(())
+    } else {
+        Err("check_metadata rejected a built instance".to_owned())
+    }
+}
+
+#[test]
+fn fields_selection_matches_the_rust_construction() -> Result<(), String> {
+    check_fields_selection(&fields_doc()?)
+}
+
+#[test]
+fn the_shortfall_case_skips_some_salts_and_builds_others() -> Result<(), String> {
+    let doc = fields_doc()?;
+    let case = find_named(&doc, "cases", "ice-fields-shortfall")?;
+    let skipped = entries_of(case, "skipped")?;
+    compare(case, "a skipped salt exists", &skipped.is_empty(), &false)?;
+    compare(
+        case,
+        "a built salt exists",
+        &entries_of(case, "instances")?.is_empty(),
+        &false,
+    )?;
+    for entry in skipped {
+        compare(
+            case,
+            "skip_code",
+            &entry.get("skip_code"),
+            &Some(&json!(14)),
+        )?;
+    }
+    Ok(())
+}
+
+/// Rebuild every salt of a recipe with the Rust construction and compare the
+/// hash and the counts.
+fn check_fields_recipe(recipe: &Value) -> Result<(), String> {
+    use ising_generators::descriptor::params_digest;
+    use ising_generators::ice::ICE_FIELDS_V1;
+    let params = codec::hex_decode(str_field(recipe, "params_hex")?)?;
+    compare(
+        recipe,
+        "params_digest",
+        &codec::hex_encode(&params_digest(&params)),
+        &str_field(recipe, "params_digest")?.to_owned(),
+    )?;
+    let salts = entries_of(recipe, "salts")?;
+    compare(
+        recipe,
+        "salts",
+        &u64::try_from(salts.len()).map_err(|e| e.to_string())?,
+        &u64_decimal(object_field(recipe, "lease")?, "salt_count")?,
+    )?;
+    for salt in salts {
+        let slot = u64_decimal(salt, "index")?;
+        compare(
+            recipe,
+            "nonce",
+            &lease_nonce(recipe, slot)?,
+            &str_field(salt, "nonce")?.to_owned(),
+        )?;
+        let (hash, tiles, values) = with_ice_instance(ICE_FIELDS_V1, recipe, slot, |_, built| {
+            let canonical = built.canonical_bytes().map_err(|e| e.to_string())?;
+            Ok((
+                blake3::hash(&canonical).to_hex().to_string(),
+                tile_count(built)?,
+                field_nodes(built).1,
+            ))
+        })?;
+        compare(
+            recipe,
+            "canonical_blake3",
+            &hash,
+            &str_field(salt, "canonical_blake3")?.to_owned(),
+        )?;
+        let field = |key: &str| {
+            salt.get(key)
+                .and_then(Value::as_u64)
+                .ok_or_else(|| format!("no {key}"))
+        };
+        let count = |keep: fn(&i64) -> bool| {
+            u64::try_from(values.iter().filter(|v| keep(v)).count()).map_err(|e| e.to_string())
+        };
+        compare(recipe, "tiles", &tiles, &field("tiles")?)?;
+        compare(
+            recipe,
+            "fields",
+            &u64::try_from(values.len()).map_err(|e| e.to_string())?,
+            &field("fields")?,
+        )?;
+        compare(
+            recipe,
+            "positive_fields",
+            &count(|v| *v > 0)?,
+            &field("positive_fields")?,
+        )?;
+        compare(
+            recipe,
+            "negative_fields",
+            &count(|v| *v < 0)?,
+            &field("negative_fields")?,
+        )?;
+    }
+    Ok(())
+}
+
+#[test]
+fn fields_recipes_match_the_rust_construction() -> Result<(), String> {
+    let doc = fields_doc()?;
+    for recipe in section(&doc, "field_recipes")? {
+        check_fields_recipe(recipe)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn fields_recipes_match_the_rust_constants() -> Result<(), String> {
+    use ising_generators::descriptor::params_digest;
+    use ising_generators::ice::ICE_FIELDS_RECIPES;
+    let doc = fields_doc()?;
+    let recipes = section(&doc, "field_recipes")?;
+    compare(
+        &doc,
+        "recipe count",
+        &recipes.len(),
+        &ICE_FIELDS_RECIPES.len(),
+    )?;
+    for (recipe, want) in recipes.iter().zip(ICE_FIELDS_RECIPES) {
+        compare(recipe, "alias", &str_field(recipe, "alias")?, &want.alias)?;
+        compare(recipe, "cell", &str_field(recipe, "cell")?, &want.cell)?;
+        compare(
+            recipe,
+            "params_hex",
+            &str_field(recipe, "params_hex")?.to_owned(),
+            &codec::hex_encode(want.params),
+        )?;
+        compare(
+            recipe,
+            "params_digest",
+            &str_field(recipe, "params_digest")?.to_owned(),
+            &codec::hex_encode(&params_digest(want.params)),
+        )?;
+    }
+    Ok(())
+}
+
+#[test]
+fn fields_admission_codes_match_the_rust_admission() -> Result<(), String> {
+    use ising_generators::descriptor::{admit, params_digest, AdvertisedLimits};
+    use ising_generators::family::{admit_topology, BaseTopology};
+    use ising_generators::ice::ICE_FIELDS_V1;
+    let doc = fields_doc()?;
+    let contracts = [ICE_FIELDS_V1];
+    let mut codes = Vec::new();
+    for case in section(&doc, "admission")? {
+        let params = codec::hex_decode(str_field(case, "params_hex")?)?;
+        let (nodes, edges) = topology_inputs(object_field(case, "topology")?)?;
+        let topology = BaseTopology::new(nodes, &edges).map_err(|e| format!("{e:?}"))?;
+        let got = admit(
+            &contracts,
+            str_field(case, "family_id")?.as_bytes(),
+            u32_field(case, "revision")?,
+            &params,
+            &params_digest(&params),
+        )
+        .and_then(|admitted| {
+            admit_topology(
+                &admitted,
+                &topology,
+                topology.order_digest(),
+                &AdvertisedLimits {
+                    max_nodes: 0,
+                    max_edges: 0,
+                    max_degree: 0,
+                },
+            )
+        });
+        let got = got.err().map(ising_generators::Code::value);
+        compare(case, "admission code", &got, &expected_code(case)?)?;
+        codes.push(got);
+    }
+    compare(&doc, "codes 9 present", &codes.contains(&Some(9)), &true)?;
+    compare(&doc, "code 12 present", &codes.contains(&Some(12)), &true)?;
+    compare(&doc, "an admitted request", &codes.contains(&None), &true)
+}
+
+#[test]
+fn a_changed_fields_coupling_fails_the_recompute() -> Result<(), String> {
+    let doc = fields_doc()?;
+    let pointer = "/cases/0/instances/0/j/0";
+    let was = doc
+        .pointer(pointer)
+        .and_then(Value::as_i64)
+        .ok_or("no coupling")?;
+    let broken = mutate(&doc, pointer, json!(was + 1000));
+    expect_err(&check_fields(&broken), "a changed coupling")
+}
+
+#[test]
+fn a_changed_fields_selection_fails_the_check() -> Result<(), String> {
+    let doc = fields_doc()?;
+    let pointer = "/selection/0/h/0";
+    let was = doc
+        .pointer(pointer)
+        .and_then(Value::as_i64)
+        .ok_or("no field value")?;
+    let broken = mutate(&doc, pointer, json!(-was));
+    expect_err(&check_fields_selection(&broken), "a changed field value")?;
+    let pointer = "/selection/0/nodes/0";
+    let was = doc
+        .pointer(pointer)
+        .and_then(Value::as_u64)
+        .ok_or("no field node")?;
+    let broken = mutate(&doc, pointer, json!(was + 1));
+    expect_err(&check_fields_selection(&broken), "a changed field node")
+}
+
+#[test]
+fn a_changed_fields_recipe_hash_fails_the_recompute() -> Result<(), String> {
+    let doc = fields_doc()?;
+    let recipe = section(&doc, "field_recipes")?.first().ok_or("no recipe")?;
+    let was = str_field(
+        recipe.pointer("/salts/0").ok_or("no salt")?,
+        "canonical_blake3",
+    )?;
+    let broken = mutate(
+        &doc,
+        "/field_recipes/0/salts/0/canonical_blake3",
+        json!(flip_last_hex_digit(was)),
+    );
+    let recipe = section(&broken, "field_recipes")?
+        .first()
+        .ok_or("no recipe")?;
+    expect_err(&check_fields_recipe(recipe), "a changed recipe hash")
 }
 
 // ---- topology files (vectors/topologies/) ----

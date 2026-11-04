@@ -27,6 +27,7 @@ use tokio::sync::mpsc;
 use tonic::{Status, Streaming};
 
 use super::charge::{P_CHARGED_A251, P_CHARGED_ADJ_A100_B45_C256, P_CHARGED_Z22_A250_B31_C128};
+use super::fields::{P_FIELDS_ADJ_G45_F1000_D16, P_FIELDS_F1001, P_FIELDS_Z22_G125_F500_D16};
 use super::ice::{P_ICE_ADJ_125, P_ICE_GLASS_1000, P_ICE_Z12_200};
 use super::layered::P_L2_F0;
 use super::layered::{P_F5000, P_L3_F0, P_SPEC};
@@ -815,6 +816,15 @@ fn params_name(params: &[u8]) -> String {
             &P_CHARGED_ADJ_A100_B45_C256[..],
         ),
         ("P_CHARGED_A251", &P_CHARGED_A251[..]),
+        (
+            "P_FIELDS_Z22_G125_F500_D16",
+            &P_FIELDS_Z22_G125_F500_D16[..],
+        ),
+        (
+            "P_FIELDS_ADJ_G45_F1000_D16",
+            &P_FIELDS_ADJ_G45_F1000_D16[..],
+        ),
+        ("P_FIELDS_F1001", &P_FIELDS_F1001[..]),
     ] {
         if params == known {
             return name.to_owned();
@@ -1829,6 +1839,32 @@ mod tests {
         let why = "no reference params set admits under the advertised limits \
                    (P_CHARGED_Z22_A250_B31_C128 gives code 12, \
                    P_CHARGED_ADJ_A100_B45_C256 gives code 12)";
+        assert_eq!(cases.len(), 10);
+        assert_eq!(
+            cases.first(),
+            Some(&("supported-revision", CaseOutcome::Failed(why.to_owned())))
+        );
+    }
+
+    #[test]
+    fn ice_fields_on_t_sparse_fails_supported_revision_with_code_12() {
+        let mut caps = mock_caps();
+        caps.generated_families.push(FamilySupport {
+            family_id: "quip/ice-fields".to_owned(),
+            revisions: vec![1],
+            params_digests: vec![],
+        });
+        let reference = reference_revision("quip/ice-fields", 1).expect("a reference revision");
+        let cases = select_supported(
+            &caps,
+            "quip/ice-fields@1",
+            Some(reference),
+            &t_sparse(false),
+        )
+        .expect_err("T_SPARSE carries no ice tiles");
+        let why = "no reference params set admits under the advertised limits \
+                   (P_FIELDS_Z22_G125_F500_D16 gives code 12, \
+                   P_FIELDS_ADJ_G45_F1000_D16 gives code 12)";
         assert_eq!(cases.len(), 10);
         assert_eq!(
             cases.first(),

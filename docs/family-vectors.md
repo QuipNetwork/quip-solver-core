@@ -14,7 +14,7 @@ A pytest drift test checks that the fixture is still the exact output of the ora
 
 | Check | Command | What it proves |
 |---|---|---|
-| Rust recompute | `cargo test -p quip-solver-conformance --test family_vectors` | Rust code in `tests/family_vectors.rs` agrees with `core.json`, `legacy.json`, `layered.json`, the `cases` of `ice_structure.json`, every section of `twisted_dimer.json`, and every section of `ice_charge.json`, and checks every file against the schema |
+| Rust recompute | `cargo test -p quip-solver-conformance --test family_vectors` | Rust code in `tests/family_vectors.rs` agrees with `core.json`, `legacy.json`, `layered.json`, the `cases` of `ice_structure.json`, every section of `twisted_dimer.json`, and every section of `ice_charge.json` and `ice_fields.json`, and checks every file against the schema |
 | Ice structure | `cargo test -p ising-generators --test ice_structure` | The ice code agrees with `ice_structure.json`, the live topology, and the archived tiles |
 | Drift | `python -m pytest conformance/test_family_vectors_drift.py` | The fixture is the oracle output, and the sources have not changed |
 | Oracle | `python -m pytest conformance/test_family_oracle.py` | The oracle matches the existing goldens and the examples in the contract |
@@ -32,6 +32,7 @@ All files are under `crates/quip-solver-conformance/vectors/families/`.
 | `ice_structure.json` | `specified` | The ice tile structure (Zephyr lattice, candidate tiles, spines, sides, and the order-driven selection) on small topologies and on the live topology. Its `cases` section holds the registered vectors of `quip/ice-glass@1`, in the case format of `layered.json` |
 | `twisted_dimer.json` | `specified` | The registered vectors of `quip/twisted-ice-dimer@1`. The `cases` section holds full canonical instances in the case format of `layered.json`. The `recipes` section holds two salts for each of the three live z(12, 4) parameter sets, stored as hashes, counts, and obstruction values. The `obstructions` section holds inputs and outputs of the gauge obstruction diagnostic. The `admission` section holds requests with their expected codes. Evidence id `SC-9:twisted-ice-dimer-vectors-frozen` |
 | `ice_charge.json` | `specified` | The registered vectors of `quip/charged-ice@1`. The `cases` section holds full canonical instances in the case format of `layered.json`. The `energies` section holds four spin states for each salt of each case, with the encoded energy, the direct penalty energy, and the charge defect count. The `recipe` section holds two salts of the live z(12, 4) parameter set. It stores a hash, counts, and the largest field. The `admission` section holds requests with their expected codes. Evidence id `SC-10:charged-ice-vectors-frozen` |
+| `ice_fields.json` | `specified` | The registered vectors of `quip/ice-fields@1`. The `cases` section holds full canonical instances in the case format of `layered.json`. A case lists the salts that give code 14 in `skipped`. The `selection` section holds the field nodes and their `h` values for each salt that builds. The `field_recipes` section holds two salts for each of the two live z(12, 4) parameter sets, stored as hashes, tile counts, and field counts. The `admission` section holds requests with their expected codes. Evidence id `SC-11:ice-fields-vectors-frozen` |
 | `ice/archived-tiles.bin` and `ice/archived-tiles.json` | `archived-research` | Tiles of two archived research models, and their sidecar |
 | `registry.json` | `specified` | The family registry, maintained by hand |
 
@@ -45,7 +46,7 @@ Each one is a file under `crates/quip-solver-conformance/vectors/topologies/`, i
 | `topologies/zephyr-z12t4-live.bin.gz` | `archived-research`. The live z(12, 4) topology as the lattice minus its removed nodes and removed edges (kind 1) |
 
 A topology field in a vectors file holds a string path that starts at the directory of that file. One path is `../topologies/t-sparse.bin.gz`.
-A file takes the name of the first case that uses it, in the order `core.json`, `layered.json`, `ice_structure.json`, `twisted_dimer.json`, `ice_charge.json`.
+A file takes the name of the first case that uses it, in the order `core.json`, `layered.json`, `ice_structure.json`, `twisted_dimer.json`, `ice_charge.json`, `ice_fields.json`.
 The T_SPARSE file is `t-sparse.bin.gz`.
 A path starts at `vectors/families/`, the only directory with topology references today.
 Each file in `topologies/` has an index entry. A vectors file refers to it.
@@ -204,7 +205,7 @@ The fixture format makes these decisions.
 
 ## Regenerating
 
-Run `make family-vectors` to rewrite `core.json`, `legacy.json`, `layered.json`, `ice_structure.json`, `twisted_dimer.json`, and `ice_charge.json`.
+Run `make family-vectors` to rewrite `core.json`, `legacy.json`, `layered.json`, `ice_structure.json`, `twisted_dimer.json`, `ice_charge.json`, and `ice_fields.json`.
 The `sources` pins of every file hash the oracle modules, so a new oracle module changes the pins of every file.
 The target needs the `blake3` package, which the `dev` extra installs.
 Run `cd conformance && python -m family_oracle check` to compare the files with the oracle output without writing.

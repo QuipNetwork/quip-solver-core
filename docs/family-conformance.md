@@ -73,8 +73,8 @@ Per-revision cases carry the subject `family_id@revision`.
 ### Cases of each revision
 
 The gate runs these ten cases for each `(family_id, revision)` that the binary lists in `generated_families`.
-At present the reference revisions are `vectors/uniform-field@1`, `vectors/restricted-field@1`, `quip/ice-glass@1`, `quip/twisted-ice-dimer@1`, and `quip/charged-ice@1`.
-The gate sends the fixed topology `T_SPARSE`, which carries no ice tiles. A binary that lists `quip/ice-glass@1`, `quip/twisted-ice-dimer@1`, or `quip/charged-ice@1` fails `supported-revision`, because every reference params set gets code 12 (`TopologyIncompatible`). No solver in this repository lists either one.
+At present the reference revisions are `vectors/uniform-field@1`, `vectors/restricted-field@1`, `quip/ice-glass@1`, `quip/twisted-ice-dimer@1`, `quip/charged-ice@1`, and `quip/ice-fields@1`.
+The gate sends the fixed topology `T_SPARSE`, which carries no ice tiles. A binary that lists `quip/ice-glass@1`, `quip/twisted-ice-dimer@1`, `quip/charged-ice@1`, or `quip/ice-fields@1` fails `supported-revision`, because every reference params set gets code 12 (`TopologyIncompatible`). No solver in this repository lists either one.
 If the gate cannot drive a listed revision, `supported-revision` fails and states the reason.
 The reason is one of these:
 
