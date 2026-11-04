@@ -219,6 +219,7 @@ pub const TOPOLOGY_FILES: &[(&str, &[u8])] = topology_files![
     "error-spine-conflict.bin.gz",
     "first-check-duplicate-before-coupler.bin.gz",
     "first-check-node-before-coupler.bin.gz",
+    "ice-fields-self-loop-and-degree.bin.gz",
     "ice-fields-shortfall-mixed.bin.gz",
     "ice-fields-shortfall.bin.gz",
     "reverse-ten.bin.gz",

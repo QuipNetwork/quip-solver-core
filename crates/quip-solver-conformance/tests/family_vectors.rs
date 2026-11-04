@@ -3949,6 +3949,7 @@ fn fields_admission_codes_match_the_rust_admission() -> Result<(), String> {
     }
     compare(&doc, "codes 9 present", &codes.contains(&Some(9)), &true)?;
     compare(&doc, "code 12 present", &codes.contains(&Some(12)), &true)?;
+    compare(&doc, "code 13 present", &codes.contains(&Some(13)), &true)?;
     compare(&doc, "an admitted request", &codes.contains(&None), &true)
 }
 

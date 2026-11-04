@@ -129,6 +129,51 @@
         "order_digest": "81842870ddfbc7038395e8851a5ca3e85178ddaa959c1d037c432ca00d199e47",
         "topology": "../topologies/z22-zephyr.bin.gz"
       }
+    },
+    {
+      "evidence": [
+        "SC-11:ice-fields-vectors-frozen"
+      ],
+      "expected_code": 12,
+      "family_id": "quip/ice-fields",
+      "name": "shape-does-not-match-the-topology",
+      "params_hex": "010100020000000100020001000000020300020000007d00040002000000f4010500020000001000",
+      "revision": 1,
+      "topology": {
+        "name": "z22",
+        "order_digest": "81842870ddfbc7038395e8851a5ca3e85178ddaa959c1d037c432ca00d199e47",
+        "topology": "../topologies/z22-zephyr.bin.gz"
+      }
+    },
+    {
+      "evidence": [
+        "SC-11:ice-fields-vectors-frozen"
+      ],
+      "expected_code": 13,
+      "family_id": "quip/ice-fields",
+      "name": "degree-33-gives-code-13-over-the-count-bound",
+      "params_hex": "010100020000000000020001000000000300020000007d00040002000000f4010500020000000100",
+      "revision": 1,
+      "topology": {
+        "name": "error-degree-above-limit",
+        "order_digest": "3f81d50484a7963bbc6c75137849a635ec4991f0159ef157d2c72f8f62e848a9",
+        "topology": "../topologies/error-degree-above-limit.bin.gz"
+      }
+    },
+    {
+      "evidence": [
+        "SC-11:ice-fields-vectors-frozen"
+      ],
+      "expected_code": 12,
+      "family_id": "quip/ice-fields",
+      "name": "self-loop-wins-over-degree-33",
+      "params_hex": "010100020000000000020001000000000300020000007d00040002000000f4010500020000001000",
+      "revision": 1,
+      "topology": {
+        "name": "ice-fields-self-loop-and-degree",
+        "order_digest": "005fdeb1e43af7ec08c3288e58fab91a2eb4001ab5f3d53e604e24d5b118c19d",
+        "topology": "../topologies/ice-fields-self-loop-and-degree.bin.gz"
+      }
     }
   ],
   "cases": [
@@ -17786,7 +17831,7 @@
       "path": "conformance/family_oracle/__main__.py"
     },
     {
-      "blake3": "62079232c5ce7d7bb40241cfba8697bf4cd8491c21f9543feb83d57decb9bacd",
+      "blake3": "0eadcc29f11e42c7be8fd0903cee00b69b9e746cf993e1e91b9bf0e7b2874d99",
       "path": "conformance/family_oracle/build.py"
     },
     {

@@ -110,6 +110,17 @@
     "provenance": "specified"
   },
   {
+    "about": "Explicit topology first used by the case ice-fields-self-loop-and-degree in ice_fields.json cases.",
+    "edges": 34,
+    "file": "ice-fields-self-loop-and-degree.bin.gz",
+    "kind": "explicit",
+    "name": "ice-fields-self-loop-and-degree",
+    "nodes": 34,
+    "order_digest": "005fdeb1e43af7ec08c3288e58fab91a2eb4001ab5f3d53e604e24d5b118c19d",
+    "payload_blake3": "bd123f29bbbfe2d91ca160030513e05adfa329fdd2e1ece35e9533884549abe7",
+    "provenance": "specified"
+  },
+  {
     "about": "Explicit topology first used by the case ice-fields-shortfall in ice_fields.json cases.",
     "edges": 23,
     "file": "ice-fields-shortfall.bin.gz",

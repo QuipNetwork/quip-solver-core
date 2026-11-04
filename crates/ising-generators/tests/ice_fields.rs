@@ -402,18 +402,18 @@ fn a_large_divisor_gives_no_fields() {
 fn generation_is_repeatable() {
     let topology = lattice_topology(2, 2);
     let bytes = params(2, 2, 125, 500, 16);
-    let mut seen = Vec::new();
+    let mut bodies = Vec::new();
     for nonce in [nonce_of(1), nonce_of(2)] {
-        let first = build(&bytes, &topology, nonce)
-            .canonical_bytes()
-            .expect("bytes");
-        let again = build(&bytes, &topology, nonce)
-            .canonical_bytes()
-            .expect("bytes");
-        assert_eq!(first, again);
-        seen.push(first);
+        let first = build(&bytes, &topology, nonce);
+        let again = build(&bytes, &topology, nonce);
+        assert_eq!(first.canonical_bytes(), again.canonical_bytes());
+        bodies.push((
+            first.j().to_vec(),
+            first.h().to_vec(),
+            first.metadata().to_vec(),
+        ));
     }
-    assert_ne!(seen[0], seen[1], "the nonce changes the instance");
+    assert_ne!(bodies[0], bodies[1], "the nonce changes the body");
 }
 
 #[test]

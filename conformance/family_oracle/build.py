@@ -2619,11 +2619,23 @@ def _four_k4() -> tuple[list[int], list[tuple[int, int]]]:
     )
 
 
+def _star(leaves: int) -> tuple[list[int], list[tuple[int, int]]]:
+    """One hub joined to every leaf. With 33 leaves the hub has degree 33."""
+    return list(range(leaves + 1)), [(0, i) for i in range(1, leaves + 1)]
+
+
+def _star_with_self_loop() -> tuple[list[int], list[tuple[int, int]]]:
+    """The 33 leaf star plus a self-loop on the hub."""
+    nodes, edges = _star(33)
+    return nodes, sorted([*edges, (0, 0)])
+
+
 def _fields_topologies() -> list[_StructureInput]:
     """The topologies the fields cases use that no earlier file holds."""
     return [
         ("ice-fields-shortfall", 0, 0, *_four_k4()),
         ("ice-fields-shortfall-mixed", 0, 0, *_three_k4()),
+        ("ice-fields-self-loop-and-degree", 0, 0, *_star_with_self_loop()),
     ]
 
 
@@ -2793,6 +2805,8 @@ def _fields_recipes(nodes: list[int], edges: list[tuple[int, int]]) -> list[dict
 def _fields_admission_cases() -> list[dict]:
     z22 = ice.lattice(2, 2)
     k4 = _three_k4()
+    star = _star(33)
+    looped = _star_with_self_loop()
     cases = []
     for name, params, topology_name, (nodes, edges) in (
         (
@@ -2833,6 +2847,24 @@ def _fields_admission_cases() -> list[dict]:
             k4,
         ),
         ("mixed-shape-is-incompatible", _fields_params(2, 0, 125, 500, 16), "z22", z22),
+        (
+            "shape-does-not-match-the-topology",
+            _fields_params(1, 2, 125, 500, 16),
+            "z22",
+            z22,
+        ),
+        (
+            "degree-33-gives-code-13-over-the-count-bound",
+            _fields_params(0, 0, 125, 500, 1),
+            "error-degree-above-limit",
+            star,
+        ),
+        (
+            "self-loop-wins-over-degree-33",
+            _fields_params(0, 0, 125, 500, 16),
+            "ice-fields-self-loop-and-degree",
+            looped,
+        ),
     ):
         cases.append(
             _case(
