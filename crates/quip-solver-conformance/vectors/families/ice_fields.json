@@ -95,9 +95,9 @@
       "params_hex": "010100020000000000020001000000000300020000007d00040002000000f4010500020000000900",
       "revision": 1,
       "topology": {
-        "name": "ice-fields-shortfall",
+        "name": "ice-fields-shortfall-mixed",
         "order_digest": "8bb72c7bfe31da27914b4ce721c35e01befd73b5429f5eb49faa52e4bbe84ed3",
-        "topology": "../topologies/ice-fields-shortfall.bin.gz"
+        "topology": "../topologies/ice-fields-shortfall-mixed.bin.gz"
       }
     },
     {
@@ -110,9 +110,9 @@
       "params_hex": "010100020000000000020001000000000300020000007d00040002000000f4010500020000000400",
       "revision": 1,
       "topology": {
-        "name": "ice-fields-shortfall",
+        "name": "ice-fields-shortfall-mixed",
         "order_digest": "8bb72c7bfe31da27914b4ce721c35e01befd73b5429f5eb49faa52e4bbe84ed3",
-        "topology": "../topologies/ice-fields-shortfall.bin.gz"
+        "topology": "../topologies/ice-fields-shortfall-mixed.bin.gz"
       }
     },
     {
@@ -12874,6 +12874,62 @@
     },
     {
       "coefficient_bound_milli": 1000,
+      "descriptor_digest": "98fb5a0e9795846088405af52f481a59461863cde65744c0bf248c359f137943",
+      "evidence": [
+        "SC-11:ice-fields-vectors-frozen"
+      ],
+      "family_id": "quip/ice-fields",
+      "instances": [],
+      "lease": {
+        "base_salt": "0000000000000000333333333333333333333333333333333333333333333333",
+        "last_proof_block_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+        "miner_account": "2222222222222222222222222222222222222222222222222222222222222222",
+        "salt_count": "4",
+        "salt_start": "5"
+      },
+      "metadata_kinds": [
+        1,
+        2
+      ],
+      "name": "ice-fields-shortfall",
+      "params_digest": "5ad1d4663bec25d1793e3cc39ad85589e20abbf8976473091b9498b9b1cdbb8c",
+      "params_hex": "010100020000000000020001000000000300020000007d00040002000000f4010500020000000600",
+      "revision": 1,
+      "size_bounds": {
+        "degree": "6",
+        "edges": "23",
+        "nodes": "12"
+      },
+      "skipped": [
+        {
+          "index": "0",
+          "nonce": "f0e3ae9a44bc0fad366f72552eade4d81ff343e79aba6744480a8aca061ebdd5",
+          "skip_code": 14
+        },
+        {
+          "index": "1",
+          "nonce": "c859a7aecf125a88c46377b8e818b4953656699ee8851962e44a065baae799c0",
+          "skip_code": 14
+        },
+        {
+          "index": "2",
+          "nonce": "8cf62329d6f6f2ecc9315d7a4d94c9a06fdc794e0ed86d8cef6aff9172ca13b0",
+          "skip_code": 14
+        },
+        {
+          "index": "3",
+          "nonce": "0dd308565789824399e447abdc76b8b4a094ba1614d9a60718c3c96de4bbde17",
+          "skip_code": 14
+        }
+      ],
+      "topology": {
+        "name": "ice-fields-shortfall",
+        "order_digest": "7af61132a38b37ffeb706cfd683bf0847f6ed79992907a61a424f19005d10e35",
+        "topology": "../topologies/ice-fields-shortfall.bin.gz"
+      }
+    },
+    {
+      "coefficient_bound_milli": 1000,
       "descriptor_digest": "d61c381d018d2165f2d55ba6ab6102e323613c7174433a4072acd3bd16c3f02f",
       "evidence": [
         "SC-11:ice-fields-vectors-frozen"
@@ -13372,7 +13428,7 @@
         1,
         2
       ],
-      "name": "ice-fields-shortfall",
+      "name": "ice-fields-shortfall-mixed",
       "params_digest": "db803e8f3b351848d74de29aa09e6bfd7a784238dbc30da6494982bd4b57cf02",
       "params_hex": "010100020000000000020001000000000300020000007d00040002000000f4010500020000000900",
       "revision": 1,
@@ -13404,9 +13460,9 @@
         }
       ],
       "topology": {
-        "name": "ice-fields-shortfall",
+        "name": "ice-fields-shortfall-mixed",
         "order_digest": "8bb72c7bfe31da27914b4ce721c35e01befd73b5429f5eb49faa52e4bbe84ed3",
-        "topology": "../topologies/ice-fields-shortfall.bin.gz"
+        "topology": "../topologies/ice-fields-shortfall-mixed.bin.gz"
       }
     },
     {
@@ -17614,7 +17670,7 @@
       "nonce": "c859a7aecf125a88c46377b8e818b4953656699ee8851962e44a065baae799c0"
     },
     {
-      "case": "ice-fields-shortfall",
+      "case": "ice-fields-shortfall-mixed",
       "evidence": [
         "SC-11:ice-fields-vectors-frozen"
       ],
@@ -17622,14 +17678,14 @@
         500
       ],
       "index": "1",
-      "name": "ice-fields-shortfall-salt-1",
+      "name": "ice-fields-shortfall-mixed-salt-1",
       "nodes": [
         0
       ],
       "nonce": "c859a7aecf125a88c46377b8e818b4953656699ee8851962e44a065baae799c0"
     },
     {
-      "case": "ice-fields-shortfall",
+      "case": "ice-fields-shortfall-mixed",
       "evidence": [
         "SC-11:ice-fields-vectors-frozen"
       ],
@@ -17637,14 +17693,14 @@
         500
       ],
       "index": "2",
-      "name": "ice-fields-shortfall-salt-2",
+      "name": "ice-fields-shortfall-mixed-salt-2",
       "nodes": [
         0
       ],
       "nonce": "8cf62329d6f6f2ecc9315d7a4d94c9a06fdc794e0ed86d8cef6aff9172ca13b0"
     },
     {
-      "case": "ice-fields-shortfall",
+      "case": "ice-fields-shortfall-mixed",
       "evidence": [
         "SC-11:ice-fields-vectors-frozen"
       ],
@@ -17652,14 +17708,14 @@
         500
       ],
       "index": "3",
-      "name": "ice-fields-shortfall-salt-3",
+      "name": "ice-fields-shortfall-mixed-salt-3",
       "nodes": [
         0
       ],
       "nonce": "0dd308565789824399e447abdc76b8b4a094ba1614d9a60718c3c96de4bbde17"
     },
     {
-      "case": "ice-fields-shortfall",
+      "case": "ice-fields-shortfall-mixed",
       "evidence": [
         "SC-11:ice-fields-vectors-frozen"
       ],
@@ -17667,7 +17723,7 @@
         500
       ],
       "index": "6",
-      "name": "ice-fields-shortfall-salt-6",
+      "name": "ice-fields-shortfall-mixed-salt-6",
       "nodes": [
         0
       ],
@@ -17730,7 +17786,7 @@
       "path": "conformance/family_oracle/__main__.py"
     },
     {
-      "blake3": "e663e2f7b2860256029d03576716715047f203ada947a464573484ee14f5a902",
+      "blake3": "62079232c5ce7d7bb40241cfba8697bf4cd8491c21f9543feb83d57decb9bacd",
       "path": "conformance/family_oracle/build.py"
     },
     {

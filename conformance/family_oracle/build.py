@@ -2605,9 +2605,26 @@ def _three_k4() -> tuple[list[int], list[tuple[int, int]]]:
     )
 
 
+def _four_k4() -> tuple[list[int], list[tuple[int, int]]]:
+    """Four 4-cliques on twelve nodes. The tiles {0,1,2,3} and {2,3,4,5} share the
+    edge (2, 3), and the tiles {0,6,7,8} and {4,9,10,11} are free. Nodes 0 and 4
+    have two slots, so a count of 2 passes admission. Either tile that competes
+    for the edge (2, 3) leaves exactly one of nodes 0 and 4 in two selected
+    tiles, so every salt has a shortfall."""
+    return list(range(12)), _union(
+        _clique([0, 1, 2, 3]),
+        _clique([2, 3, 4, 5]),
+        _clique([0, 6, 7, 8]),
+        _clique([4, 9, 10, 11]),
+    )
+
+
 def _fields_topologies() -> list[_StructureInput]:
     """The topologies the fields cases use that no earlier file holds."""
-    return [("ice-fields-shortfall", 0, 0, *_three_k4())]
+    return [
+        ("ice-fields-shortfall", 0, 0, *_four_k4()),
+        ("ice-fields-shortfall-mixed", 0, 0, *_three_k4()),
+    ]
 
 
 def _fields_instances(
@@ -2693,10 +2710,17 @@ def _fields_cases_and_selection() -> tuple[list[dict], list[dict]]:
         ("ice-fields-no-fields", _fields_params(1, 2, 125, 500, 25), 2, z12, "z12"),
         (
             "ice-fields-shortfall",
+            _fields_params(0, 0, 125, 500, 6),
+            4,
+            _four_k4(),
+            "ice-fields-shortfall",
+        ),
+        (
+            "ice-fields-shortfall-mixed",
             _fields_params(0, 0, 125, 500, 9),
             8,
             _three_k4(),
-            "ice-fields-shortfall",
+            "ice-fields-shortfall-mixed",
         ),
         (
             "ice-fields-zephyr-z22-permuted",
@@ -2713,9 +2737,13 @@ def _fields_cases_and_selection() -> tuple[list[dict], list[dict]]:
         )
         cases.append(case)
         selection += chosen
-    shortfall = next(c for c in cases if c["name"] == "ice-fields-shortfall")
-    if not shortfall["skipped"] or not shortfall["instances"]:
-        raise ValueError("the shortfall case needs a skipped and a built salt")
+    by_name = {c["name"]: c for c in cases}
+    shortfall = by_name["ice-fields-shortfall"]
+    if shortfall["instances"] or not shortfall["skipped"]:
+        raise ValueError("the shortfall case needs every salt skipped")
+    mixed = by_name["ice-fields-shortfall-mixed"]
+    if not mixed["skipped"] or not mixed["instances"]:
+        raise ValueError("the mixed shortfall case needs a skipped and a built salt")
     return cases, selection
 
 
@@ -2795,13 +2823,13 @@ def _fields_admission_cases() -> list[dict]:
         (
             "count-at-the-two-slot-nodes",
             _fields_params(0, 0, 125, 500, 9),
-            "ice-fields-shortfall",
+            "ice-fields-shortfall-mixed",
             k4,
         ),
         (
             "count-two-above-one-slot-node",
             _fields_params(0, 0, 125, 500, 4),
-            "ice-fields-shortfall",
+            "ice-fields-shortfall-mixed",
             k4,
         ),
         ("mixed-shape-is-incompatible", _fields_params(2, 0, 125, 500, 16), "z22", z22),

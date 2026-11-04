@@ -236,13 +236,16 @@ def test_ice_fields_pin_matches_the_cases():
     assert digest.hexdigest() == entry["vectors_blake3"]
 
 
-def test_ice_fields_shortfall_case_has_skipped_and_built_salts():
-    case = next(
-        c for c in _fields_doc()["cases"] if c["name"] == "ice-fields-shortfall"
-    )
-    assert case["skipped"]
-    assert case["instances"]
-    assert {entry["skip_code"] for entry in case["skipped"]} == {14}
+def test_ice_fields_shortfall_cases_skip_every_or_some_salt():
+    cases = {c["name"]: c for c in _fields_doc()["cases"]}
+    every = cases["ice-fields-shortfall"]
+    assert every["skipped"]
+    assert not every["instances"]
+    mixed = cases["ice-fields-shortfall-mixed"]
+    assert mixed["skipped"]
+    assert mixed["instances"]
+    for case in (every, mixed):
+        assert {entry["skip_code"] for entry in case["skipped"]} == {14}
 
 
 def _decoded_params(params_hex: str) -> dict[int, int]:

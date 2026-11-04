@@ -62,9 +62,9 @@ A dense position is the index of a node in the registration order of the base to
 3. Set `right_order` to the identity order of the right spine edges. Shuffle it the same way on the stream `right`. The shuffle of the left order draws first. The two streams are independent.
 4. Select the tiles as `quip/ice-glass` revision 1 does. The result is the sorted list of tiles. Each tile is four dense positions in ascending order. Tile edges are the 6 edges of each selected tile.
 5. List the nodes in registration order. List every edge of the base topology as `(min, max)` of its dense positions, in ascending order.
-6. Give each tile edge the coupling `+1000`. Visit every other edge in ascending order. Draw `d = uniform(glass, 2)`. If `d = 0`, set the coupling to `+g`. If `d = 1`, set the coupling to `-g`.
+6. Give each tile edge the coupling `+1000`. Visit every other edge in ascending order. Draw `r = uniform(glass, 2)`. If `r = 0`, set the coupling to `+g`. If `r = 1`, set the coupling to `-g`.
 7. For each node in registration order, draw `uniform(gauge, 2)`. The value 0 gives the gauge `+1` and the value 1 gives `-1`. Then multiply each coupling `J(u, v)` by the gauge of `u` and the gauge of `v`.
-8. Count the selected tiles that contain each node. A node is eligible when it is in exactly two selected tiles. List the eligible nodes as dense positions in ascending order. Set the field count `c` to `n / d`, with integer division.
+8. Count the selected tiles that contain each node. A node is eligible when exactly two selected tiles contain it. List the eligible nodes as dense positions in ascending order. Set the field count `c` to `n / d`, with integer division.
 9. If the number of eligible nodes is below `c`, the salt gives no instance. The construction returns code 14, `NoInstance`, and the miner skips the salt (FAM-26). Nothing draws on the stream `field` before this check.
 10. Shuffle the eligible list with the Fisher-Yates shuffle (FAM-24) on the stream `field`. Keep the first `c` entries and sort them in ascending order. These are the field nodes.
 11. For each field node in ascending order, draw `s = uniform(field_sign, 2)`. The value 0 gives the sign `+1` and the value 1 gives `-1`. Set `h[i]` to `sign * f * gauge[i]`, where `gauge[i]` is the gauge of the node from step 7. Set `h = 0` for every other node.
@@ -79,14 +79,14 @@ The field is the drawn sign times the gauge. The metadata gives the tiles and th
 
 ### The shortfall
 
-A selection of tiles can leave fewer eligible nodes than `c`. Competing candidate tiles share a spine edge, so only one of them is kept. The node with two slots from those spine edges then has one selected tile.
+A selection of tiles can leave fewer eligible nodes than `c`. Competing candidate tiles share a spine edge, so the selection keeps only one of them. The node with two slots from those spine edges then has one selected tile.
 
 The nonce decides the shortfall. Its salt gets code 14 and the miner skips it. Admission has no say here. Admission rejects only a field count that no selection can reach, as the topology admission rules below state.
 
 This revision differs from the research generator in these ways:
 
 - The streams are ChaCha8 streams from the stream seed of the family (FAM-22) and the shuffles are FAM-24 shuffles. The research generator used one NumPy PCG64 generator seeded from the SHA-256 of the nonce, and a separate field nonce from the SHA-256 of the nonce and `ice-fields-v1`.
-- The field sign is drawn only for the selected nodes. The research generator drew a value for every node and kept the selected ones.
+- The generator draws a field sign only for the selected nodes. The research generator drew a value for every node and kept the selected ones.
 - A shortfall of eligible nodes gives code 14. The research generator raised an error.
 - Any topology that passes admission is valid. The research generator required the live 4575 node topology.
 
@@ -189,7 +189,7 @@ Topology admission then applies these checks in this order. The first failure de
 8. In the adjacency mode, a tile whose shared edges are not inside one perfect matching gives code 12 (`SpineConflict`).
 9. A node in more than 2 tile slots gives code 12 (`MembershipAboveTwo`).
 10. A spine graph with an odd cycle gives code 12 (`NotBipartite`).
-11. A field count `n / field_divisor` greater than the number of nodes with exactly two tile slots in the candidate structure gives code 12. A node in two selected tiles has two slots, so no selection can reach a larger count. The registry never admits a parameter set that can never give an instance on the topology.
+11. A field count `n / field_divisor` greater than the number of nodes with exactly two tile slots in the candidate structure gives code 12. A node in two selected tiles has two slots, so no selection can reach a larger count. This is a necessary bound. Admission can still accept parameters when the tile selection leaves too few eligible nodes. Generation then returns code 14 for that salt.
 
 After these checks, the size bounds give code 13 for a degree of more than 32 and for any other bound that the topology breaks.
 A count within the bound can still miss the selection of a nonce. That gives code 14 for the salt, not an admission code.

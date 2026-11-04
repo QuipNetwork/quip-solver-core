@@ -3675,7 +3675,7 @@ fn fields_params_constants_match_the_vectors() -> Result<(), String> {
             &codec::hex_encode(&want),
         )?;
     }
-    compare(&doc, "case count", &section(&doc, "cases")?.len(), &5)
+    compare(&doc, "case count", &section(&doc, "cases")?.len(), &6)
 }
 
 /// The dense positions and values of the nonzero fields of an instance.
@@ -3770,18 +3770,15 @@ fn fields_selection_matches_the_rust_construction() -> Result<(), String> {
     check_fields_selection(&fields_doc()?)
 }
 
-#[test]
-fn the_shortfall_case_skips_some_salts_and_builds_others() -> Result<(), String> {
+/// Every skipped slot of a shortfall case has code 14. The slot lists are
+/// compared with the Rust construction by `fields_cases_match_the_rust_construction`.
+fn check_shortfall_case(name: &str, every_slot: bool) -> Result<(), String> {
     let doc = fields_doc()?;
-    let case = find_named(&doc, "cases", "ice-fields-shortfall")?;
+    let case = find_named(&doc, "cases", name)?;
     let skipped = entries_of(case, "skipped")?;
+    let built = entries_of(case, "instances")?;
     compare(case, "a skipped salt exists", &skipped.is_empty(), &false)?;
-    compare(
-        case,
-        "a built salt exists",
-        &entries_of(case, "instances")?.is_empty(),
-        &false,
-    )?;
+    compare(case, "no built salt", &built.is_empty(), &every_slot)?;
     for entry in skipped {
         compare(
             case,
@@ -3791,6 +3788,16 @@ fn the_shortfall_case_skips_some_salts_and_builds_others() -> Result<(), String>
         )?;
     }
     Ok(())
+}
+
+#[test]
+fn the_shortfall_case_skips_every_salt_with_code_14() -> Result<(), String> {
+    check_shortfall_case("ice-fields-shortfall", true)
+}
+
+#[test]
+fn the_mixed_shortfall_case_skips_some_salts_and_builds_others() -> Result<(), String> {
+    check_shortfall_case("ice-fields-shortfall-mixed", false)
 }
 
 /// Rebuild every salt of a recipe with the Rust construction and compare the

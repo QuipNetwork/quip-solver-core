@@ -30,7 +30,7 @@
       "revision": 1,
       "status": "research",
       "vectors": "crates/quip-solver-conformance/vectors/families/ice_fields.json",
-      "vectors_blake3": "82eab6149fd957c88e1ec5f36246bf9e773bee79eb452f04dbfe3c0cf6a3042c"
+      "vectors_blake3": "72bcc8c5187d2b54250ca989782f0911ce33af5a8aecdff84d123c7fafdcaaaf"
     },
     {
       "adapted_from": null,

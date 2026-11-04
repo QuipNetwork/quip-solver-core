@@ -1304,7 +1304,7 @@ def test_fields_instance_follows_the_contract_rules():
     assert inst["offset_milli"] == 0
 
 
-def test_fields_streams_leave_the_glass_unchanged():
+def test_fields_count_and_magnitude_follow_the_parameters():
     nodes, edges = ice.lattice(2, 2)
     _, a = _fields(2, 2, 125, 500, 16, nodes, edges)
     _, b = _fields(2, 2, 125, 1000, 8, nodes, edges)

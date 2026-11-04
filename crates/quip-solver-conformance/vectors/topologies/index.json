@@ -111,10 +111,21 @@
   },
   {
     "about": "Explicit topology first used by the case ice-fields-shortfall in ice_fields.json cases.",
-    "edges": 17,
+    "edges": 23,
     "file": "ice-fields-shortfall.bin.gz",
     "kind": "explicit",
     "name": "ice-fields-shortfall",
+    "nodes": 12,
+    "order_digest": "7af61132a38b37ffeb706cfd683bf0847f6ed79992907a61a424f19005d10e35",
+    "payload_blake3": "4b89df883c244c1514f9dfc45c65f9b9d3ec7cccded0f43fa4dd46d8be05d5a8",
+    "provenance": "specified"
+  },
+  {
+    "about": "Explicit topology first used by the case ice-fields-shortfall-mixed in ice_fields.json cases.",
+    "edges": 17,
+    "file": "ice-fields-shortfall-mixed.bin.gz",
+    "kind": "explicit",
+    "name": "ice-fields-shortfall-mixed",
     "nodes": 9,
     "order_digest": "8bb72c7bfe31da27914b4ce721c35e01befd73b5429f5eb49faa52e4bbe84ed3",
     "payload_blake3": "ddca4a3c7aacebc576e4e6e29e28855f8a6d0a273edaa9a4cae67ddab9c78d16",
