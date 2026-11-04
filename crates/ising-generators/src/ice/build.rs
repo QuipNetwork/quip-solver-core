@@ -4,10 +4,45 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
+use crate::descriptor::{Params, SizeBounds, TopologyStats, Value};
 use crate::family::{BaseTopology, Streams};
-use crate::ice::{candidates, select, sides, Lattice, Tile};
+use crate::ice::{candidates, select, sides, Lattice, StructureError, Tile, MAX_DEGREE};
 use crate::rng::shuffle;
 use crate::Code;
+
+/// Tag of the Zephyr grid size parameter.
+const TAG_M: u16 = 1;
+/// Tag of the Zephyr tile size parameter.
+const TAG_T: u16 = 2;
+
+/// The lattice the parameters name.
+pub(crate) fn lattice(params: &Params<'_>) -> Result<Lattice, StructureError> {
+    let m = match params.get(TAG_M) {
+        Some(Value::Unsigned(m)) => u16::try_from(m).ok(),
+        _ => None,
+    };
+    let t = match params.get(TAG_T) {
+        Some(Value::Unsigned(t)) => u8::try_from(t).ok(),
+        _ => None,
+    };
+    match (m, t) {
+        (Some(m), Some(t)) => Lattice::from_shape(m, t),
+        _ => Err(StructureError::Overflow),
+    }
+}
+
+/// The sizes of an instance: the topology itself. A degree above the limit
+/// gives [`Code::BoundsExceeded`].
+pub(crate) fn topology_bounds(stats: &TopologyStats) -> Result<SizeBounds, Code> {
+    if stats.max_degree > MAX_DEGREE {
+        return Err(Code::BoundsExceeded);
+    }
+    Ok(SizeBounds {
+        nodes: stats.n_nodes,
+        edges: stats.n_edges,
+        degree: stats.max_degree,
+    })
+}
 
 /// A shuffled `0..len`, drawn from the stream `label`.
 pub(crate) fn shuffled_order(
@@ -183,4 +218,39 @@ pub(crate) fn tiles_payload(tiles: &[Tile]) -> Result<Vec<u8>, Code> {
         }
     }
     Ok(payload)
+}
+
+/// The payload of local gauges: the tile count, then four bytes per tile,
+/// `0x00` for +1 and `0x01` for -1.
+pub(crate) fn gauges_payload(gauges: &[[i8; 4]]) -> Result<Vec<u8>, Code> {
+    let mut payload = u32::try_from(gauges.len())
+        .map_err(|_| Code::BoundsExceeded)?
+        .to_le_bytes()
+        .to_vec();
+    for gauge in gauges {
+        payload.extend(gauge.iter().map(|&g| u8::from(g < 0)));
+    }
+    Ok(payload)
+}
+
+/// The local gauges of a kind 2 payload: four signs per tile, `tiles` tiles.
+pub(crate) fn parse_gauges(payload: &[u8], tiles: usize) -> Option<Vec<[i8; 4]>> {
+    let mut reader = Reader::new(payload);
+    let count = usize::try_from(reader.u32()?).ok()?;
+    if count != tiles || reader.rest().len() != count.checked_mul(4)? {
+        return None;
+    }
+    let sign = |byte: u8| match byte {
+        0 => Some(1),
+        1 => Some(-1),
+        _ => None,
+    };
+    reader
+        .rest()
+        .chunks_exact(4)
+        .map(|chunk| match *chunk {
+            [a, b, c, d] => Some([sign(a)?, sign(b)?, sign(c)?, sign(d)?]),
+            _ => None,
+        })
+        .collect()
 }

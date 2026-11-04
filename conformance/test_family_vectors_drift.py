@@ -49,6 +49,15 @@ def _twisted_doc() -> dict:
     return json.loads(build.TWISTED_DIMER_PATH.read_text())
 
 
+def _charge_doc() -> dict:
+    return json.loads(build.ICE_CHARGE_PATH.read_text())
+
+
+def test_ice_charge_fixture_matches_oracle():
+    text = build.render(build.build_ice_charge())
+    assert text == build.ICE_CHARGE_PATH.read_text()
+
+
 def test_twisted_dimer_fixture_matches_oracle():
     text = build.render(build.build_twisted_dimer())
     assert text == build.TWISTED_DIMER_PATH.read_text()
@@ -119,7 +128,7 @@ def test_every_json_topology_reference_names_an_indexed_file():
             for item in value.values():
                 walk(item)
 
-    for load in (_core_doc, _layered_doc, _ice_doc, _twisted_doc):
+    for load in (_core_doc, _layered_doc, _ice_doc, _twisted_doc, _charge_doc):
         walk(load())
     assert refs
     # Every topology file is referenced by a JSON file and indexed.
@@ -162,6 +171,35 @@ def test_twisted_dimer_evidence_matches_the_registry():
         assert tagged == set(entry["evidence"]), section
 
 
+def test_charged_ice_evidence_matches_the_registry():
+    registry = json.loads((build.FAMILIES_DIR / "registry.json").read_text())[
+        "registry"
+    ]
+    entry = next(e for e in registry if e["name"] == "quip/charged-ice@1")
+    doc = _charge_doc()
+    for section in ("cases", "energies", "recipe", "admission"):
+        tagged = {tag for case in doc[section] for tag in case["evidence"]}
+        assert tagged == set(entry["evidence"]), section
+
+
+def test_charged_ice_pin_matches_the_cases():
+    registry = json.loads((build.FAMILIES_DIR / "registry.json").read_text())[
+        "registry"
+    ]
+    entry = next(e for e in registry if e["name"] == "quip/charged-ice@1")
+    digest = blake3.blake3(build.canonical_json(_charge_doc()["cases"]).encode())
+    assert digest.hexdigest() == entry["vectors_blake3"]
+
+
+def test_charged_ice_encoded_energy_equals_direct_energy():
+    energies = _charge_doc()["energies"]
+    assert energies
+    for entry in energies:
+        assert len(entry["states"]) == 4
+        for state in entry["states"]:
+            assert state["encoded_milli"] == state["direct_milli"]
+
+
 def _decoded_params(params_hex: str) -> dict[int, int]:
     """The tag-to-value map of canonical parameter bytes."""
     data = bytes.fromhex(params_hex)
@@ -190,6 +228,27 @@ def test_twisted_contract_recipe_table_matches_the_vectors():
         assert cell == recipe["cell"]
         assert int(weak) == values[3]
         assert int(pairs) == values[4]
+        assert digest == recipe["params_digest"]
+
+
+def test_charged_ice_contract_recipe_table_matches_the_vectors():
+    text = (build.ROOT / "docs/families/quip-charged-ice-1.md").read_text()
+    row = re.compile(
+        r"^\| `([^`]+)` \| `([^`]+)` \| (\d+) \| (\d+) \| (\d+) \| `([0-9a-f]{64})` \|$",
+        re.MULTILINE,
+    )
+    table = row.findall(text)
+    recipes = _charge_doc()["recipe"]
+    assert len(table) == len(recipes) > 0
+    for (alias, cell, scale, bg, charged, digest), recipe in zip(
+        table, recipes, strict=True
+    ):
+        values = _decoded_params(recipe["params_hex"])
+        assert alias == recipe["alias"]
+        assert cell == recipe["cell"]
+        assert int(scale) == values[3]
+        assert int(bg) == values[4]
+        assert int(charged) == values[5]
         assert digest == recipe["params_digest"]
 
 
@@ -226,11 +285,12 @@ def test_every_provided_id_has_a_case():
     wanted |= {item["id"] for item in build.EVIDENCE["partial"]}
     assert wanted <= {tag.removeprefix("SC-2:") for tag in tagged}
     for tag in tagged:
-        assert tag.startswith("SC-2:")
+        assert tag.startswith(("SC-2:", "SC-10:"))
 
 
 @pytest.mark.parametrize(
-    "load", [_core_doc, _legacy_doc, _layered_doc, _ice_doc, _twisted_doc]
+    "load",
+    [_core_doc, _legacy_doc, _layered_doc, _ice_doc, _twisted_doc, _charge_doc],
 )
 def test_sources_hash_spec_and_oracle(load):
     doc = load()

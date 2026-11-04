@@ -15,9 +15,10 @@ use core::num::NonZeroU32;
 use crate::descriptor::{Contract, FieldSpec, Params, SizeBounds, TopologyStats, Value, ValueType};
 use crate::family::{BaseTopology, Construction, InstanceBody, Streams};
 use crate::ice::build::{
-    mark_tiles, parse_tiles, region, sections, select_tiles, sorted_edges, tiles_payload, Reader,
+    gauges_payload, lattice, mark_tiles, parse_gauges, parse_tiles, region, sections, select_tiles,
+    sorted_edges, tiles_payload, topology_bounds, Reader,
 };
-use crate::ice::{candidates, Lattice, StructureError, MAX_DEGREE, STRONG_MILLI};
+use crate::ice::{candidates, StructureError, STRONG_MILLI};
 use crate::instance::{Instance, InstanceLimits};
 use crate::rng::{shuffle, uniform};
 use crate::Code;
@@ -53,10 +54,6 @@ pub const TWISTED_DIMER_SCHEMA: &[FieldSpec] = &[
     },
 ];
 
-/// Tag of the Zephyr grid size parameter.
-const TAG_M: u16 = 1;
-/// Tag of the Zephyr tile size parameter.
-const TAG_T: u16 = 2;
 /// Tag of the weak coupling magnitude parameter.
 const TAG_WEAK: u16 = 3;
 /// Tag of the pair count parameter.
@@ -157,30 +154,7 @@ pub const RECIPES: [Recipe; 3] = [
 
 /// The sizes of an instance: the topology itself.
 fn twisted_dimer_size_bounds(_: &Params<'_>, stats: &TopologyStats) -> Result<SizeBounds, Code> {
-    if stats.max_degree > MAX_DEGREE {
-        return Err(Code::BoundsExceeded);
-    }
-    Ok(SizeBounds {
-        nodes: stats.n_nodes,
-        edges: stats.n_edges,
-        degree: stats.max_degree,
-    })
-}
-
-/// The lattice the parameters name.
-fn lattice(params: &Params<'_>) -> Result<Lattice, StructureError> {
-    let m = match params.get(TAG_M) {
-        Some(Value::Unsigned(m)) => u16::try_from(m).ok(),
-        _ => None,
-    };
-    let t = match params.get(TAG_T) {
-        Some(Value::Unsigned(t)) => u8::try_from(t).ok(),
-        _ => None,
-    };
-    match (m, t) {
-        (Some(m), Some(t)) => Lattice::from_shape(m, t),
-        _ => Err(StructureError::Overflow),
-    }
+    topology_bounds(stats)
 }
 
 /// The weak magnitude, `None` when the parameter is missing or out of range.
@@ -356,13 +330,6 @@ fn metadata_region(
     gauges: &[[i8; 4]],
     pairs: &[(u32, u32)],
 ) -> Result<Vec<u8>, Code> {
-    let mut gauge_payload = u32::try_from(gauges.len())
-        .map_err(|_| Code::BoundsExceeded)?
-        .to_le_bytes()
-        .to_vec();
-    for gauge in gauges {
-        gauge_payload.extend(gauge.iter().map(|&g| u8::from(g < 0)));
-    }
     let mut pair_payload = u32::try_from(pairs.len())
         .map_err(|_| Code::BoundsExceeded)?
         .to_le_bytes()
@@ -373,31 +340,9 @@ fn metadata_region(
     }
     region(&[
         (KIND_TILES, tiles.to_vec()),
-        (KIND_GAUGES, gauge_payload),
+        (KIND_GAUGES, gauges_payload(gauges)?),
         (KIND_PAIRS, pair_payload),
     ])
-}
-
-/// The local gauges of a kind 2 payload: four signs per tile.
-fn parse_gauges(payload: &[u8], tiles: usize) -> Option<Vec<[i8; 4]>> {
-    let mut reader = Reader::new(payload);
-    let count = usize::try_from(reader.u32()?).ok()?;
-    if count != tiles || reader.rest().len() != count.checked_mul(4)? {
-        return None;
-    }
-    let sign = |byte: u8| match byte {
-        0 => Some(1),
-        1 => Some(-1),
-        _ => None,
-    };
-    reader
-        .rest()
-        .chunks_exact(4)
-        .map(|chunk| match *chunk {
-            [a, b, c, d] => Some([sign(a)?, sign(b)?, sign(c)?, sign(d)?]),
-            _ => None,
-        })
-        .collect()
 }
 
 /// The pairs of a kind 3 payload: ascending, distinct, `a < b < n`.

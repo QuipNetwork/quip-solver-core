@@ -15,6 +15,9 @@ from itertools import combinations
 from .chacha8 import ChaCha8, shuffle
 
 MAX_DEGREE = 32
+MAX_NODES = 131_072
+MAX_EDGES = 2_097_152
+CODE_BOUNDS_EXCEEDED = 13
 
 Edge = tuple[int, int]
 Spine = tuple[Edge, Edge]
@@ -135,6 +138,27 @@ def _max_degree(count: int, dense: Sequence[Edge]) -> int:
         degree[a] += 1
         degree[b] += 1
     return max(degree, default=0)
+
+
+def has_self_loop(edges: Sequence[Edge]) -> bool:
+    return any(a == b for a, b in edges)
+
+
+def size_code(nodes: Sequence[int], native_edges: Sequence[Edge]) -> int | None:
+    """Code 13 when the topology breaks a size limit, else None.
+
+    The limits are the node count, the edge count, and the maximum degree of the
+    ice families. Every ice family shares them.
+    """
+    position = {node: i for i, node in enumerate(nodes)}
+    dense = [(position[a], position[b]) for a, b in native_edges]
+    if (
+        len(nodes) > MAX_NODES
+        or len(native_edges) > MAX_EDGES
+        or _max_degree(len(nodes), dense) > MAX_DEGREE
+    ):
+        return CODE_BOUNDS_EXCEEDED
+    return None
 
 
 def _tile_edges(tile: Sequence[int]) -> list[Edge]:

@@ -104,12 +104,16 @@
       "path": "conformance/family_oracle/__main__.py"
     },
     {
-      "blake3": "972ce7f5e3c58786ffc6726fc04cc3ac1069d58fd228095abf979edceded2bc3",
+      "blake3": "688ad5022f33d78b290253993e2098c5241539317ecd21f39f883610abbf1227",
       "path": "conformance/family_oracle/build.py"
     },
     {
       "blake3": "4795384476baa0cce2cc1c38c7d647e3c96ce3324e38803d22d0af9ab74c8fad",
       "path": "conformance/family_oracle/chacha8.py"
+    },
+    {
+      "blake3": "1a17bd517cbcce5abad939fb5342add1533d29eca33c8c637b92a446beaf10f8",
+      "path": "conformance/family_oracle/charge.py"
     },
     {
       "blake3": "807e3ed3db9ca03717672ba7fa85becd2d53f4e7895a0ba17580e1b407c96d5b",
@@ -124,11 +128,11 @@
       "path": "conformance/family_oracle/glass.py"
     },
     {
-      "blake3": "67f4c34fcd3798d8512e6dc0889b83e5b290fce8abb5d7e99e788bfc5f06e423",
+      "blake3": "778f9e4fede8cc90d23e3684ea2ccec23b6b7c89ed20bf4b2081d8117a712183",
       "path": "conformance/family_oracle/ice.py"
     },
     {
-      "blake3": "3e21fb7e7efe2d6d391a207b161e34f80f682d6adaa70101beea3b330b444b67",
+      "blake3": "d354a18c65f12f29bfde450b14fab5e52b825af2ba3290e85c880a05dd4b2ed4",
       "path": "conformance/family_oracle/instance.py"
     },
     {
@@ -136,7 +140,7 @@
       "path": "conformance/family_oracle/layered.py"
     },
     {
-      "blake3": "3b26016ad598231417d7445c00ea40f1b9e8754e456167e5229101f85f7430b7",
+      "blake3": "7bf57e98c9dca7b53e5c2879240961f701fdae4d76156ca2f66a02ea71842d4e",
       "path": "conformance/family_oracle/params.py"
     },
     {
@@ -144,11 +148,11 @@
       "path": "conformance/family_oracle/topology_blob.py"
     },
     {
-      "blake3": "a69f1b6f925d2084316968a86ee8752f30f1eb8e3c8e6a64d7226c1c5398f208",
+      "blake3": "1f38f1356e7ee4893c92d96c5441672f908f950dc3e447cf4382ff521985cb4b",
       "path": "conformance/family_oracle/twisted.py"
     },
     {
-      "blake3": "a1954919b87214bb0a6fda4e1418c99a1f7ca1c8fb8892037a4016bdbe2d0df1",
+      "blake3": "13f8f88715699784e9994c39dbec8fd262485076f0f32b614de7a387d03b7bd3",
       "path": "docs/problem-families.md"
     }
   ]

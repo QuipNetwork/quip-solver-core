@@ -91,6 +91,96 @@
       ],
       "type": "object"
     },
+    "charge_recipe": {
+      "additionalProperties": false,
+      "properties": {
+        "alias": {
+          "type": "string"
+        },
+        "cell": {
+          "type": "string"
+        },
+        "evidence": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "family_id": {
+          "type": "string"
+        },
+        "lease": {
+          "$ref": "#/$defs/case_lease"
+        },
+        "name": {
+          "type": "string"
+        },
+        "params_digest": {
+          "$ref": "#/$defs/hex32"
+        },
+        "params_hex": {
+          "$ref": "#/$defs/hex"
+        },
+        "revision": {
+          "type": "integer"
+        },
+        "salts": {
+          "items": {
+            "$ref": "#/$defs/charge_salt"
+          },
+          "type": "array"
+        },
+        "topology": {
+          "$ref": "#/$defs/blob_topology"
+        }
+      },
+      "required": [
+        "name",
+        "evidence",
+        "alias",
+        "cell",
+        "family_id",
+        "revision",
+        "params_hex",
+        "params_digest",
+        "topology",
+        "lease",
+        "salts"
+      ],
+      "type": "object"
+    },
+    "charge_salt": {
+      "additionalProperties": false,
+      "properties": {
+        "canonical_blake3": {
+          "$ref": "#/$defs/hex32"
+        },
+        "charged_tiles": {
+          "type": "integer"
+        },
+        "index": {
+          "$ref": "#/$defs/u64s"
+        },
+        "max_abs_h": {
+          "type": "integer"
+        },
+        "nonce": {
+          "$ref": "#/$defs/hex32"
+        },
+        "tiles": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "index",
+        "nonce",
+        "canonical_blake3",
+        "tiles",
+        "charged_tiles",
+        "max_abs_h"
+      ],
+      "type": "object"
+    },
     "code_row": {
       "additionalProperties": false,
       "properties": {
@@ -179,6 +269,77 @@
         "params_digest",
         "material_hex",
         "descriptor_digest"
+      ],
+      "type": "object"
+    },
+    "energy_case": {
+      "additionalProperties": false,
+      "properties": {
+        "case": {
+          "type": "string"
+        },
+        "evidence": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "index": {
+          "$ref": "#/$defs/u64s"
+        },
+        "name": {
+          "type": "string"
+        },
+        "nonce": {
+          "$ref": "#/$defs/hex32"
+        },
+        "states": {
+          "items": {
+            "$ref": "#/$defs/energy_state"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "name",
+        "evidence",
+        "case",
+        "index",
+        "nonce",
+        "states"
+      ],
+      "type": "object"
+    },
+    "energy_state": {
+      "additionalProperties": false,
+      "properties": {
+        "charge_defects": {
+          "type": "integer"
+        },
+        "direct_milli": {
+          "$ref": "#/$defs/i64s"
+        },
+        "encoded_milli": {
+          "$ref": "#/$defs/i64s"
+        },
+        "name": {
+          "enum": [
+            "all-up",
+            "all-down",
+            "alternating",
+            "seeded"
+          ]
+        },
+        "spins_hex": {
+          "$ref": "#/$defs/hex"
+        }
+      },
+      "required": [
+        "name",
+        "spins_hex",
+        "encoded_milli",
+        "direct_milli",
+        "charge_defects"
       ],
       "type": "object"
     },
@@ -2205,6 +2366,12 @@
       },
       "type": "array"
     },
+    "energies": {
+      "items": {
+        "$ref": "#/$defs/energy_case"
+      },
+      "type": "array"
+    },
     "evidence": {
       "$ref": "#/$defs/evidence"
     },
@@ -2323,6 +2490,12 @@
         "archived-research",
         "test-construction"
       ]
+    },
+    "recipe": {
+      "items": {
+        "$ref": "#/$defs/charge_recipe"
+      },
+      "type": "array"
     },
     "recipes": {
       "items": {

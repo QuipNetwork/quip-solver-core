@@ -6,12 +6,16 @@
 //! the tiles and [`matching`] splits the spine edges into two sides.
 
 pub(crate) mod build;
+pub mod charge;
 pub mod glass;
 pub mod matching;
 pub mod obstructions;
 pub mod topology;
 pub mod twisted_dimer;
 
+pub use charge::{
+    charge_defects, CHARGED_ICE, CHARGED_ICE_SCHEMA, CHARGED_ICE_V1, CHARGE_UNIT, ICE_CHARGE_RECIPE,
+};
 pub use glass::{ICE_GLASS, ICE_GLASS_SCHEMA, ICE_GLASS_V1, STRONG_MILLI};
 pub use matching::{select, sides, Sides};
 pub use obstructions::{gauge_obstructions, Obstructions};

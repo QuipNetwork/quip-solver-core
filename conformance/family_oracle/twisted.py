@@ -22,11 +22,12 @@ from .digests import (
     topology_order_digest,
 )
 from .ice import (
-    MAX_DEGREE,
     StructureError,
     candidates,
+    has_self_loop,
     select,
     sides,
+    size_code,
     zephyr_coordinates,
 )
 from .instance import canonical_bytes
@@ -37,7 +38,6 @@ STRONG_MILLI = 1000
 PAIR_MILLI = -1000
 COEFFICIENT_BOUND = STRONG_MILLI
 CODE_TOPOLOGY_INCOMPATIBLE = 12
-CODE_BOUNDS_EXCEEDED = 13
 CODE_NO_INSTANCE = 14
 _KIND_TILES = 1
 _KIND_GAUGES = 2
@@ -82,6 +82,8 @@ def admission_code(
     code, values = decode_params(TWISTED_DIMER, params)
     if values is None:
         return code
+    if has_self_loop(native_edges):
+        return CODE_TOPOLOGY_INCOMPATIBLE
     m, t, pairs = values["zephyr_m"], values["zephyr_t"], values["pairs"]
     try:
         candidates(m, t, nodes, native_edges)
@@ -90,14 +92,7 @@ def admission_code(
             return CODE_TOPOLOGY_INCOMPATIBLE
     if pairs > len(nodes) // 2:
         return CODE_TOPOLOGY_INCOMPATIBLE
-    degree = [0] * len(nodes)
-    position = {node: i for i, node in enumerate(nodes)}
-    for a, b in native_edges:
-        degree[position[a]] += 1
-        degree[position[b]] += 1
-    if max(degree, default=0) > MAX_DEGREE:
-        return CODE_BOUNDS_EXCEEDED
-    return None
+    return size_code(nodes, native_edges)
 
 
 def gauge_obstructions(
