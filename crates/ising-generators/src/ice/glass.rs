@@ -127,10 +127,67 @@ fn generate(
     topology: &BaseTopology,
     streams: &mut Streams<'_>,
 ) -> Result<InstanceBody, Code> {
+    let base = glass_base(
+        params,
+        topology,
+        streams,
+        &GlassStreams {
+            left: LEFT,
+            right: RIGHT,
+            glass: GLASS,
+            gauge: GAUGE,
+        },
+    )?;
+    let metadata = metadata_region(&base.tiles, &base.gauge)?;
+    Ok(InstanceBody {
+        h: vec![0; base.node_ids.len()],
+        node_ids: base.node_ids,
+        edges: base.edges,
+        j: base.j,
+        offset_milli: 0,
+        metadata,
+    })
+}
+
+/// The labels of the four glass streams. Each family that builds on the glass
+/// registers its own labels.
+pub(crate) struct GlassStreams<'a> {
+    /// Orders the left spine edges.
+    pub(crate) left: &'a str,
+    /// Orders the right spine edges.
+    pub(crate) right: &'a str,
+    /// Draws the glass signs.
+    pub(crate) glass: &'a str,
+    /// Draws the gauge.
+    pub(crate) gauge: &'a str,
+}
+
+/// The globally gauged glass: steps 1 to 5 of the ice-glass construction.
+pub(crate) struct GlassBase {
+    /// The selected tiles.
+    pub(crate) tiles: Vec<Tile>,
+    /// Node ids in output order.
+    pub(crate) node_ids: Vec<u32>,
+    /// Edges as dense positions, sorted ascending.
+    pub(crate) edges: Vec<(u32, u32)>,
+    /// The gauged couplings, in milli.
+    pub(crate) j: Vec<i32>,
+    /// The gauge sign of every node.
+    pub(crate) gauge: Vec<i64>,
+}
+
+/// Select the tiles, give the tile edges the strong coupling and every other
+/// edge a glass coupling, then multiply a global gauge into every coupling.
+pub(crate) fn glass_base(
+    params: &Params<'_>,
+    topology: &BaseTopology,
+    streams: &mut Streams<'_>,
+    labels: &GlassStreams<'_>,
+) -> Result<GlassBase, Code> {
     let defect = Code::TopologyIncompatible;
     let glass_value = glass_milli(params).ok_or(Code::ParamsMalformed)?;
     let lattice = lattice(params).map_err(|_| defect)?;
-    let tiles = select_tiles(lattice, topology, streams, LEFT, RIGHT)?;
+    let tiles = select_tiles(lattice, topology, streams, labels.left, labels.right)?;
 
     let n = u32::try_from(topology.node_ids().len()).map_err(|_| Code::BoundsExceeded)?;
     let node_ids = topology.node_ids().to_vec();
@@ -141,7 +198,7 @@ fn generate(
         .collect();
 
     let two = NonZeroU32::MIN.saturating_add(1);
-    let mut glass = streams.open(GLASS).ok_or(Code::NoInstance)?;
+    let mut glass = streams.open(labels.glass).ok_or(Code::NoInstance)?;
     let mut j: Vec<i32> = Vec::with_capacity(edges.len());
     for edge in &edges {
         if strong.contains(edge) {
@@ -153,7 +210,7 @@ fn generate(
         }
     }
 
-    let mut gauge_stream = streams.open(GAUGE).ok_or(Code::NoInstance)?;
+    let mut gauge_stream = streams.open(labels.gauge).ok_or(Code::NoInstance)?;
     let gauge: Vec<i64> = (0..n)
         .map(|_| {
             if uniform(&mut gauge_stream, two) == 0 {
@@ -172,20 +229,17 @@ fn generate(
             .ok_or(Code::BoundsExceeded)?;
         *coupling = i32::try_from(signed).map_err(|_| Code::BoundsExceeded)?;
     }
-
-    let metadata = metadata_region(&tiles, &gauge)?;
-    Ok(InstanceBody {
+    Ok(GlassBase {
+        tiles,
         node_ids,
         edges,
-        h: vec![0; topology.node_ids().len()],
         j,
-        offset_milli: 0,
-        metadata,
+        gauge,
     })
 }
 
 /// The metadata region: tiles (kind 1) then gauge (kind 2).
-fn metadata_region(tiles: &[Tile], gauge: &[i64]) -> Result<Vec<u8>, Code> {
+pub(crate) fn metadata_region(tiles: &[Tile], gauge: &[i64]) -> Result<Vec<u8>, Code> {
     let mut gauge_payload = u32::try_from(gauge.len())
         .map_err(|_| Code::BoundsExceeded)?
         .to_le_bytes()
@@ -220,6 +274,14 @@ fn check_metadata(params: &Params<'_>, instance: &Instance) -> bool {
 
 /// `Some` when the instance is a valid ice-glass instance.
 fn check_instance(params: &Params<'_>, instance: &Instance) -> Option<()> {
+    let all_zero = instance.h().iter().all(|&h| h == 0) && instance.offset_milli() == 0;
+    (check_glass(params, instance).is_some() && all_zero).then_some(())
+}
+
+/// The tiles of an instance whose layout, tile list, gauge, and coupling
+/// magnitudes are those of a globally gauged glass. `None` otherwise. The
+/// fields and the offset are left to the caller.
+pub(crate) fn check_glass(params: &Params<'_>, instance: &Instance) -> Option<Vec<[u32; 4]>> {
     let glass = i64::from(glass_milli(params)?);
     let n = instance.node_ids().len();
     let [tile_payload, gauge_payload] = sections(instance.metadata(), [KIND_TILES, KIND_GAUGE])?;
@@ -229,8 +291,7 @@ fn check_instance(params: &Params<'_>, instance: &Instance) -> Option<()> {
 
     let strong = mark_tiles(&tiles, edges, n)?;
 
-    let all_zero = instance.h().iter().all(|&h| h == 0) && instance.offset_milli() == 0;
-    if !all_zero || instance.j().len() != edges.len() {
+    if instance.j().len() != edges.len() {
         return None;
     }
     for ((edge, &coupling), &is_strong) in edges.iter().zip(instance.j()).zip(&strong) {
@@ -247,5 +308,5 @@ fn check_instance(params: &Params<'_>, instance: &Instance) -> Option<()> {
             return None;
         }
     }
-    Some(())
+    Some(tiles)
 }

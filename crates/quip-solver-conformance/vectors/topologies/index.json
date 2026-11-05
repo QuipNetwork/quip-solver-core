@@ -110,6 +110,39 @@
     "provenance": "specified"
   },
   {
+    "about": "Explicit topology first used by the case ice-fields-self-loop-and-degree in ice_fields.json cases.",
+    "edges": 34,
+    "file": "ice-fields-self-loop-and-degree.bin.gz",
+    "kind": "explicit",
+    "name": "ice-fields-self-loop-and-degree",
+    "nodes": 34,
+    "order_digest": "005fdeb1e43af7ec08c3288e58fab91a2eb4001ab5f3d53e604e24d5b118c19d",
+    "payload_blake3": "bd123f29bbbfe2d91ca160030513e05adfa329fdd2e1ece35e9533884549abe7",
+    "provenance": "specified"
+  },
+  {
+    "about": "Explicit topology first used by the case ice-fields-shortfall in ice_fields.json cases.",
+    "edges": 23,
+    "file": "ice-fields-shortfall.bin.gz",
+    "kind": "explicit",
+    "name": "ice-fields-shortfall",
+    "nodes": 12,
+    "order_digest": "7af61132a38b37ffeb706cfd683bf0847f6ed79992907a61a424f19005d10e35",
+    "payload_blake3": "4b89df883c244c1514f9dfc45c65f9b9d3ec7cccded0f43fa4dd46d8be05d5a8",
+    "provenance": "specified"
+  },
+  {
+    "about": "Explicit topology first used by the case ice-fields-shortfall-mixed in ice_fields.json cases.",
+    "edges": 17,
+    "file": "ice-fields-shortfall-mixed.bin.gz",
+    "kind": "explicit",
+    "name": "ice-fields-shortfall-mixed",
+    "nodes": 9,
+    "order_digest": "8bb72c7bfe31da27914b4ce721c35e01befd73b5429f5eb49faa52e4bbe84ed3",
+    "payload_blake3": "ddca4a3c7aacebc576e4e6e29e28855f8a6d0a273edaa9a4cae67ddab9c78d16",
+    "provenance": "specified"
+  },
+  {
     "about": "Explicit topology first used by the case reverse-ten in core.json topologies.",
     "edges": 9,
     "file": "reverse-ten.bin.gz",

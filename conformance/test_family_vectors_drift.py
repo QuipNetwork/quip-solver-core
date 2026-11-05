@@ -53,6 +53,15 @@ def _charge_doc() -> dict:
     return json.loads(build.ICE_CHARGE_PATH.read_text())
 
 
+def _fields_doc() -> dict:
+    return json.loads(build.ICE_FIELDS_PATH.read_text())
+
+
+def test_ice_fields_fixture_matches_oracle():
+    text = build.render(build.build_ice_fields())
+    assert text == build.ICE_FIELDS_PATH.read_text()
+
+
 def test_ice_charge_fixture_matches_oracle():
     text = build.render(build.build_ice_charge())
     assert text == build.ICE_CHARGE_PATH.read_text()
@@ -128,7 +137,14 @@ def test_every_json_topology_reference_names_an_indexed_file():
             for item in value.values():
                 walk(item)
 
-    for load in (_core_doc, _layered_doc, _ice_doc, _twisted_doc, _charge_doc):
+    for load in (
+        _core_doc,
+        _layered_doc,
+        _ice_doc,
+        _twisted_doc,
+        _charge_doc,
+        _fields_doc,
+    ):
         walk(load())
     assert refs
     # Every topology file is referenced by a JSON file and indexed.
@@ -200,6 +216,38 @@ def test_charged_ice_encoded_energy_equals_direct_energy():
             assert state["encoded_milli"] == state["direct_milli"]
 
 
+def test_ice_fields_evidence_matches_the_registry():
+    registry = json.loads((build.FAMILIES_DIR / "registry.json").read_text())[
+        "registry"
+    ]
+    entry = next(e for e in registry if e["name"] == "quip/ice-fields@1")
+    doc = _fields_doc()
+    for section in ("cases", "selection", "field_recipes", "admission"):
+        tagged = {tag for case in doc[section] for tag in case["evidence"]}
+        assert tagged == set(entry["evidence"]), section
+
+
+def test_ice_fields_pin_matches_the_cases():
+    registry = json.loads((build.FAMILIES_DIR / "registry.json").read_text())[
+        "registry"
+    ]
+    entry = next(e for e in registry if e["name"] == "quip/ice-fields@1")
+    digest = blake3.blake3(build.canonical_json(_fields_doc()["cases"]).encode())
+    assert digest.hexdigest() == entry["vectors_blake3"]
+
+
+def test_ice_fields_shortfall_cases_skip_every_or_some_salt():
+    cases = {c["name"]: c for c in _fields_doc()["cases"]}
+    every = cases["ice-fields-shortfall"]
+    assert every["skipped"]
+    assert not every["instances"]
+    mixed = cases["ice-fields-shortfall-mixed"]
+    assert mixed["skipped"]
+    assert mixed["instances"]
+    for case in (every, mixed):
+        assert {entry["skip_code"] for entry in case["skipped"]} == {14}
+
+
 def _decoded_params(params_hex: str) -> dict[int, int]:
     """The tag-to-value map of canonical parameter bytes."""
     data = bytes.fromhex(params_hex)
@@ -252,6 +300,27 @@ def test_charged_ice_contract_recipe_table_matches_the_vectors():
         assert digest == recipe["params_digest"]
 
 
+def test_ice_fields_contract_recipe_table_matches_the_vectors():
+    text = (build.ROOT / "docs/families/quip-ice-fields-1.md").read_text()
+    row = re.compile(
+        r"^\| `([^`]+)` \| `([^`]+)` \| (\d+) \| (\d+) \| (\d+) \| `([0-9a-f]{64})` \|$",
+        re.MULTILINE,
+    )
+    table = row.findall(text)
+    recipes = _fields_doc()["field_recipes"]
+    assert len(table) == len(recipes) > 0
+    for (alias, cell, glass, field, divisor, digest), recipe in zip(
+        table, recipes, strict=True
+    ):
+        values = _decoded_params(recipe["params_hex"])
+        assert alias == recipe["alias"]
+        assert cell == recipe["cell"]
+        assert int(glass) == values[3]
+        assert int(field) == values[4]
+        assert int(divisor) == values[5]
+        assert digest == recipe["params_digest"]
+
+
 def test_canonical_json_is_sorted_compact_and_rejects_floats():
     assert build.canonical_json({"b": [1, "x"], "a": None}) == '{"a":null,"b":[1,"x"]}'
     with pytest.raises(TypeError):
@@ -290,7 +359,15 @@ def test_every_provided_id_has_a_case():
 
 @pytest.mark.parametrize(
     "load",
-    [_core_doc, _legacy_doc, _layered_doc, _ice_doc, _twisted_doc, _charge_doc],
+    [
+        _core_doc,
+        _legacy_doc,
+        _layered_doc,
+        _ice_doc,
+        _twisted_doc,
+        _charge_doc,
+        _fields_doc,
+    ],
 )
 def test_sources_hash_spec_and_oracle(load):
     doc = load()

@@ -598,6 +598,100 @@
       ],
       "type": "object"
     },
+    "fields_recipe": {
+      "additionalProperties": false,
+      "properties": {
+        "alias": {
+          "type": "string"
+        },
+        "cell": {
+          "type": "string"
+        },
+        "evidence": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "family_id": {
+          "type": "string"
+        },
+        "lease": {
+          "$ref": "#/$defs/case_lease"
+        },
+        "name": {
+          "type": "string"
+        },
+        "params_digest": {
+          "$ref": "#/$defs/hex32"
+        },
+        "params_hex": {
+          "$ref": "#/$defs/hex"
+        },
+        "revision": {
+          "type": "integer"
+        },
+        "salts": {
+          "items": {
+            "$ref": "#/$defs/fields_salt"
+          },
+          "type": "array"
+        },
+        "topology": {
+          "$ref": "#/$defs/blob_topology"
+        }
+      },
+      "required": [
+        "name",
+        "evidence",
+        "alias",
+        "cell",
+        "family_id",
+        "revision",
+        "params_hex",
+        "params_digest",
+        "topology",
+        "lease",
+        "salts"
+      ],
+      "type": "object"
+    },
+    "fields_salt": {
+      "additionalProperties": false,
+      "properties": {
+        "canonical_blake3": {
+          "$ref": "#/$defs/hex32"
+        },
+        "fields": {
+          "type": "integer"
+        },
+        "index": {
+          "$ref": "#/$defs/u64s"
+        },
+        "negative_fields": {
+          "type": "integer"
+        },
+        "nonce": {
+          "$ref": "#/$defs/hex32"
+        },
+        "positive_fields": {
+          "type": "integer"
+        },
+        "tiles": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "index",
+        "nonce",
+        "canonical_blake3",
+        "tiles",
+        "fields",
+        "positive_fields",
+        "negative_fields"
+      ],
+      "type": "object"
+    },
     "hex": {
       "contentEncoding": "base16",
       "type": "string"
@@ -1796,6 +1890,51 @@
       ],
       "type": "object"
     },
+    "selection_case": {
+      "additionalProperties": false,
+      "properties": {
+        "case": {
+          "type": "string"
+        },
+        "evidence": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "h": {
+          "items": {
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "index": {
+          "$ref": "#/$defs/u64s"
+        },
+        "name": {
+          "type": "string"
+        },
+        "nodes": {
+          "items": {
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "nonce": {
+          "$ref": "#/$defs/hex32"
+        }
+      },
+      "required": [
+        "name",
+        "evidence",
+        "case",
+        "index",
+        "nonce",
+        "nodes",
+        "h"
+      ],
+      "type": "object"
+    },
     "shuffle_case": {
       "additionalProperties": false,
       "properties": {
@@ -2405,6 +2544,12 @@
       },
       "type": "array"
     },
+    "field_recipes": {
+      "items": {
+        "$ref": "#/$defs/fields_recipe"
+      },
+      "type": "array"
+    },
     "instance_bounds": {
       "items": {
         "$ref": "#/$defs/instance_bound_case"
@@ -2521,6 +2666,12 @@
     "schemas": {
       "items": {
         "$ref": "#/$defs/schema_def"
+      },
+      "type": "array"
+    },
+    "selection": {
+      "items": {
+        "$ref": "#/$defs/selection_case"
       },
       "type": "array"
     },

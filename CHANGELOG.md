@@ -107,6 +107,17 @@ encodings do not change.
   Rust contract is `ising_generators::ice::CHARGED_ICE_V1`. The tile charges are
   synthetic and the family is not adapted. The diagnostic `charge_defects` never
   decides acceptance. The research cohort is not regenerated.
+- `quip/ice-fields@1`, a registered family with status `research`. It is the
+  globally gauged glass of `quip/ice-glass@1` with a sparse random field on
+  `n / field_divisor` of the nodes that sit in exactly two selected tiles. The
+  field is a drawn sign times the gauge, so a verifier cannot check its sign. The
+  parameters are the Zephyr shape, `glass_milli`, `field_milli`, and
+  `field_divisor`. The metadata is the ice-glass metadata. A nonce whose tile
+  selection has too few eligible nodes gives code 14 and the miner skips the
+  salt. The contract registers two parameter sets on z(12, 4) as recipes. The
+  contract is `docs/families/quip-ice-fields-1.md`, the vectors are
+  `ice_fields.json`, and the Rust contract is
+  `ising_generators::ice::ICE_FIELDS_V1`. The research cohort is not regenerated.
 
 ### Changed
 

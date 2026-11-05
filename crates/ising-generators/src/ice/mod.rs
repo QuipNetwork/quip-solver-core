@@ -7,6 +7,7 @@
 
 pub(crate) mod build;
 pub mod charge;
+pub mod fields;
 pub mod glass;
 pub mod matching;
 pub mod obstructions;
@@ -16,6 +17,7 @@ pub mod twisted_dimer;
 pub use charge::{
     charge_defects, CHARGED_ICE, CHARGED_ICE_SCHEMA, CHARGED_ICE_V1, CHARGE_UNIT, ICE_CHARGE_RECIPE,
 };
+pub use fields::{ICE_FIELDS, ICE_FIELDS_RECIPES, ICE_FIELDS_SCHEMA, ICE_FIELDS_V1};
 pub use glass::{ICE_GLASS, ICE_GLASS_SCHEMA, ICE_GLASS_V1, STRONG_MILLI};
 pub use matching::{select, sides, Sides};
 pub use obstructions::{gauge_obstructions, Obstructions};

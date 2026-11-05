@@ -86,6 +86,18 @@ CHARGED_ICE = Schema(
     ),
 )
 
+ICE_FIELDS = Schema(
+    "quip/ice-fields",
+    1,
+    (
+        Field(1, "zephyr_m", "u16", 1, 0, 32),
+        Field(2, "zephyr_t", "u8", 1, 0, 8),
+        Field(3, "glass_milli", "u16", 1, 1, 999),
+        Field(4, "field_milli", "u16", 1, 1, 1000),
+        Field(5, "field_divisor", "u16", 1, 1, 65535),
+    ),
+)
+
 ALL_TYPES = Schema(
     "example/all-types",
     1,

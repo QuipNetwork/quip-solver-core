@@ -21,6 +21,19 @@
     },
     {
       "adapted_from": null,
+      "contract": "docs/families/quip-ice-fields-1.md",
+      "evidence": [
+        "SC-11:ice-fields-vectors-frozen"
+      ],
+      "family_id": "quip/ice-fields",
+      "name": "quip/ice-fields@1",
+      "revision": 1,
+      "status": "research",
+      "vectors": "crates/quip-solver-conformance/vectors/families/ice_fields.json",
+      "vectors_blake3": "72bcc8c5187d2b54250ca989782f0911ce33af5a8aecdff84d123c7fafdcaaaf"
+    },
+    {
+      "adapted_from": null,
       "contract": "docs/families/quip-ice-glass-1.md",
       "evidence": [
         "SC-8:ice-glass-vectors-frozen"

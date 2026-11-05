@@ -289,10 +289,12 @@ def candidates(
     return tiles, spines
 
 
-def _check_slots(
-    nodes: Sequence[int], tiles: list[tuple[int, ...]], spines: list[Spine | None]
-) -> None:
-    slots = [0] * len(nodes)
+def slot_counts(
+    count: int, tiles: list[tuple[int, ...]], spines: list[Spine | None]
+) -> list[int]:
+    """The slots of every dense node: one per distinct spine edge it ends and one
+    per free tile it belongs to."""
+    slots = [0] * count
     spine_edges: set[Edge] = set()
     for tile, spine in zip(tiles, spines, strict=True):
         if spine is None:
@@ -303,6 +305,13 @@ def _check_slots(
     for a, b in spine_edges:
         slots[a] += 1
         slots[b] += 1
+    return slots
+
+
+def _check_slots(
+    nodes: Sequence[int], tiles: list[tuple[int, ...]], spines: list[Spine | None]
+) -> None:
+    slots = slot_counts(len(nodes), tiles, spines)
     for node, slot in zip(nodes, slots, strict=True):
         if slot > 2:
             raise StructureError("membership-above-two", [node])

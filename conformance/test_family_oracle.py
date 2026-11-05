@@ -1270,3 +1270,81 @@ def test_ice_admission_self_loop_wins_over_degree():
     nodes = list(range(34))
     assert _ice_admission_codes(nodes, star) == (13, 13)
     assert _ice_admission_codes(nodes, [*star, (0, 0)]) == (12, 12)
+
+
+# ---- quip/ice-fields ----
+
+
+def _fields(m, t, glass, field, divisor, nodes, edges, nonce=bytes(range(32))):
+    from family_oracle import fields
+
+    params = build._fields_params(m, t, glass, field, divisor)
+    return fields.generate(b"quip/ice-fields", 1, params, nodes, edges, nonce)
+
+
+def test_fields_instance_follows_the_contract_rules():
+    nodes, edges = ice.lattice(2, 2)
+    code, inst = _fields(2, 2, 125, 500, 16, nodes, edges)
+    assert code == 0
+    gauge = inst["gauge"]
+    in_tile = {e for tile in inst["tiles"] for e in ice._tile_edges(tile)}
+    for (a, b), value in zip(inst["edges"], inst["j"], strict=True):
+        product = value * gauge[a] * gauge[b]
+        assert product == (1000 if (a, b) in in_tile else product)
+        if (a, b) not in in_tile:
+            assert abs(product) == 125
+    seen = [0] * len(nodes)
+    for tile in inst["tiles"]:
+        for node in tile:
+            seen[node] += 1
+    nonzero = [i for i, v in enumerate(inst["h"]) if v]
+    assert nonzero == inst["selected"]
+    assert len(nonzero) == len(nodes) // 16
+    assert all(seen[i] == 2 and abs(inst["h"][i]) == 500 for i in nonzero)
+    assert inst["offset_milli"] == 0
+
+
+def test_fields_count_and_magnitude_follow_the_parameters():
+    nodes, edges = ice.lattice(2, 2)
+    _, a = _fields(2, 2, 125, 500, 16, nodes, edges)
+    _, b = _fields(2, 2, 125, 1000, 8, nodes, edges)
+    # The parameters differ, so the descriptor digest and every stream differ. The
+    # field count and size follow the parameters.
+    assert len(b["selected"]) == 2 * len(a["selected"])
+    assert {abs(v) for v in b["h"] if v} == {1000}
+
+
+def test_fields_no_fields_and_shortfall():
+    nodes, edges = ice.lattice(1, 2)
+    code, inst = _fields(1, 2, 125, 500, 25, nodes, edges)
+    assert code == 0
+    assert set(inst["h"]) == {0}
+    k4_nodes, k4_edges = build._three_k4()
+    codes = [
+        _fields(0, 0, 125, 500, 9, k4_nodes, k4_edges, bytes([i]) * 32)[0]
+        for i in range(16)
+    ]
+    assert set(codes) == {0, 14}
+
+
+def test_fields_admission_codes():
+    from family_oracle import fields
+
+    nodes, edges = ice.lattice(2, 2)
+
+    def code(m, t, glass, field, divisor):
+        return fields.admission_code(
+            build._fields_params(m, t, glass, field, divisor), nodes, edges
+        )
+
+    assert code(2, 2, 125, 500, 4) is None
+    assert code(2, 2, 125, 500, 3) == 12
+    assert code(2, 2, 125, 1001, 16) == 9
+    assert code(2, 2, 1000, 500, 16) == 9
+    assert code(2, 2, 125, 500, 0) == 9
+    assert code(2, 0, 125, 500, 16) == 12
+    assert fields.admission_code(b"\x01", nodes, edges) == 7
+    k4_nodes, k4_edges = build._three_k4()
+    for divisor, want in ((9, None), (4, 12)):
+        params = build._fields_params(0, 0, 125, 500, divisor)
+        assert fields.admission_code(params, k4_nodes, k4_edges) == want

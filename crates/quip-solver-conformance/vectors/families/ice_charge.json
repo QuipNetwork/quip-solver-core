@@ -14161,7 +14161,7 @@
       "path": "conformance/family_oracle/__main__.py"
     },
     {
-      "blake3": "688ad5022f33d78b290253993e2098c5241539317ecd21f39f883610abbf1227",
+      "blake3": "0eadcc29f11e42c7be8fd0903cee00b69b9e746cf993e1e91b9bf0e7b2874d99",
       "path": "conformance/family_oracle/build.py"
     },
     {
@@ -14181,11 +14181,15 @@
       "path": "conformance/family_oracle/digests.py"
     },
     {
+      "blake3": "e3e004ac65f29c1b7e8231de37814012369949b21a70fc143d5e4aa857345654",
+      "path": "conformance/family_oracle/fields.py"
+    },
+    {
       "blake3": "d68f3b15cecc90ec667748ab7150d3491d7a742b32b7862e1e6faa36be9c910b",
       "path": "conformance/family_oracle/glass.py"
     },
     {
-      "blake3": "778f9e4fede8cc90d23e3684ea2ccec23b6b7c89ed20bf4b2081d8117a712183",
+      "blake3": "d06804795aee3fb09ee45bef0437449d31bd66fc1c98ca0f2d03b22f22c8978a",
       "path": "conformance/family_oracle/ice.py"
     },
     {
@@ -14197,7 +14201,7 @@
       "path": "conformance/family_oracle/layered.py"
     },
     {
-      "blake3": "7bf57e98c9dca7b53e5c2879240961f701fdae4d76156ca2f66a02ea71842d4e",
+      "blake3": "e803a3394e0515f2733096029e902666d22c31d987b94615557e003848120f2c",
       "path": "conformance/family_oracle/params.py"
     },
     {
