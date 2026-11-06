@@ -1348,3 +1348,98 @@ def test_fields_admission_codes():
     for divisor, want in ((9, None), (4, 12)):
         params = build._fields_params(0, 0, 125, 500, divisor)
         assert fields.admission_code(params, k4_nodes, k4_edges) == want
+
+
+# ---- quip/two-commodity-routing ----
+
+
+def _routing(m, t, divisor, nodes, edges, nonce=bytes(range(32))):
+    from family_oracle import routing
+
+    params = build._routing_params(m, t, divisor)
+    return routing.generate(
+        b"quip/two-commodity-routing", 1, params, nodes, edges, nonce
+    )
+
+
+def test_routing_instance_follows_the_contract_rules():
+    nodes, edges = ice.lattice(3, 4)
+    code, inst = _routing(3, 4, 8, nodes, edges)
+    assert code == 0
+    cells, arcs, supply = inst["cells"], inst["arcs"], inst["supply"]
+    assert inst["node_ids"] == sorted(inst["node_ids"], key=nodes.index)
+    assert len(inst["node_ids"]) == 3 * len(arcs)
+    pairs = len(cells) // 8
+    for k in (0, 1):
+        assert sum(1 for s in supply if s[k] == 1) == pairs
+        assert sum(1 for s in supply if s[k] == -1) == pairs
+    assert all(not (s[0] and s[1]) for s in supply)
+    assert {c for a in arcs for c in a["cost"]} <= {62, 124}
+    assert 1 <= inst["strength"] <= 1000
+    # The chain strength is the largest load of a chain spin, plus one.
+    load = [abs(v) for v in inst["h"]]
+    for (a, b), value in zip(inst["edges"], inst["j"], strict=True):
+        load[a] += abs(value)
+        load[b] += abs(value)
+    chain_edge = {(min(a["chain"]), max(a["chain"])) for a in arcs}
+    for edge, value in zip(inst["edges"], inst["j"], strict=True):
+        if edge in chain_edge:
+            assert value == -inst["strength"]
+
+
+def test_routing_energy_is_the_structured_energy():
+    from family_oracle import routing
+
+    nodes, edges = ice.lattice(2, 4)
+    code, inst = _routing(2, 4, 4, nodes, edges)
+    assert code == 0
+    arcs, supply = inst["arcs"], inst["supply"]
+    n = len(inst["node_ids"])
+    import random
+
+    rng = random.Random(7)
+    for _ in range(200):
+        spins = [rng.choice((-1, 1)) for _ in range(n)]
+        x = [(1 - s) // 2 for s in spins]
+        total = 0
+        for v, b in enumerate(supply):
+            for k in (0, 1):
+                net = sum(x[routing._spin(a, v, k)] for a in arcs if a["tail"] == v)
+                net -= sum(x[routing._spin(a, v, k)] for a in arcs if a["head"] == v)
+                total += 248 * (net - b[k]) ** 2
+        for a in arcs:
+            total += 496 * x[a["x1"]] * x[a["chain"][0]]
+            total += a["cost"][0] * x[a["x1"]] + a["cost"][1] * x[a["chain"][0]]
+            total -= inst["strength"] * spins[a["chain"][0]] * spins[a["chain"][1]]
+        energy = (
+            energy_plain(inst["h"], inst["j"], inst["edges"], spins)
+            + inst["offset_milli"]
+        )
+        assert energy == total
+
+
+def test_routing_admission_codes():
+    from family_oracle import routing
+
+    nodes, edges = ice.lattice(3, 4)
+
+    def code(m, t, divisor, nodes=nodes, edges=edges):
+        return routing.admission_code(
+            build._routing_params(m, t, divisor), nodes, edges
+        )
+
+    assert code(3, 4, 8) is None
+    assert code(3, 4, 3) == 9
+    assert code(3, 2, 8) == 9
+    assert code(2, 4, 8) == 12
+    assert routing.admission_code(b"\x01", nodes, edges) == 7
+    assert code(3, 4, 8, *build._routing_no_arc()) == 12
+    assert code(3, 4, 8, *build._routing_self_loop()) == 12
+
+
+def test_routing_retry_and_no_instance_cases_exist():
+    cases, terminals = build._routing_cases_and_terminals()
+    by_name = {c["name"]: c for c in cases}
+    assert not by_name["routing-no-instance"]["instances"]
+    assert {s["skip_code"] for s in by_name["routing-no-instance"]["skipped"]} == {14}
+    assert any(t["try"] > 1 for t in terminals)

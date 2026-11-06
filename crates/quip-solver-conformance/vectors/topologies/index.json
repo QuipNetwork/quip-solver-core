@@ -154,6 +154,61 @@
     "provenance": "specified"
   },
   {
+    "about": "Explicit topology first used by the case routing-no-arc in two_commodity.json cases.",
+    "edges": 3,
+    "file": "routing-no-arc.bin.gz",
+    "kind": "explicit",
+    "name": "routing-no-arc",
+    "nodes": 4,
+    "order_digest": "b2d85ccb57a54c35a358799d57a56f094e0ef006c27511fb88d37603569ad943",
+    "payload_blake3": "022a230bcbc259faf3c2476e3ff5cbe7325511a2d05b31df87939abf07fea7d9",
+    "provenance": "specified"
+  },
+  {
+    "about": "Explicit topology first used by the case routing-no-instance in two_commodity.json cases.",
+    "edges": 5032,
+    "file": "routing-no-instance.bin.gz",
+    "kind": "explicit",
+    "name": "routing-no-instance",
+    "nodes": 576,
+    "order_digest": "51a46f2ce736071b5c54932e98a38f081d8dd691a663314872d22bc9b589c889",
+    "payload_blake3": "2a47e71e5fd5096987cb1be3cf37938539dd39d07953d755bb4665cc7fd17d89",
+    "provenance": "specified"
+  },
+  {
+    "about": "Explicit topology first used by the case routing-self-loop in two_commodity.json cases.",
+    "edges": 2,
+    "file": "routing-self-loop.bin.gz",
+    "kind": "explicit",
+    "name": "routing-self-loop",
+    "nodes": 4,
+    "order_digest": "fb7b6aa51fc7e028f5a0d4c5f99cc8bfb024d4639609cf8073a61ea3059296cb",
+    "payload_blake3": "e4c7bd5bef69fd345bec3b0a5a4d83ac8d211c335d1c304acd4ba433f22f3961",
+    "provenance": "specified"
+  },
+  {
+    "about": "Explicit topology first used by the case routing-small in two_commodity.json cases.",
+    "edges": 2808,
+    "file": "routing-small.bin.gz",
+    "kind": "explicit",
+    "name": "routing-small",
+    "nodes": 336,
+    "order_digest": "64a30f8eeed2f9f8e85dd5fe4bf773829fa0a8438b12b98fca4c06f5c460850c",
+    "payload_blake3": "b600ef4865fb077594b81808ab51751948b8350530cedb83d7fb8d2aa2e7a46e",
+    "provenance": "specified"
+  },
+  {
+    "about": "Explicit topology first used by the case routing-small-permuted in two_commodity.json cases.",
+    "edges": 2808,
+    "file": "routing-small-permuted.bin.gz",
+    "kind": "explicit",
+    "name": "routing-small-permuted",
+    "nodes": 336,
+    "order_digest": "2aae948cb893aa79affa6d402cf6d61a857ef82322512a41cdbdbbeb17b3a109",
+    "payload_blake3": "efee80b6a27659264f40d64ee2b1a3f67e9da309251676791b2fc0444e633b14",
+    "provenance": "specified"
+  },
+  {
     "about": "Explicit topology first used by the case sparse-edge-flipped in core.json topologies.",
     "edges": 7,
     "file": "sparse-edge-flipped.bin.gz",

@@ -98,6 +98,16 @@ ICE_FIELDS = Schema(
     ),
 )
 
+TWO_COMMODITY = Schema(
+    "quip/two-commodity-routing",
+    1,
+    (
+        Field(1, "zephyr_m", "u16", 1, 1, 32),
+        Field(2, "zephyr_t", "u8", 1, 3, 8),
+        Field(3, "pairs_divisor", "u16", 1, 4, 65535),
+    ),
+)
+
 ALL_TYPES = Schema(
     "example/all-types",
     1,

@@ -2478,6 +2478,7 @@ fn check_layered_against_rust(case: &Value) -> Result<(), String> {
     use ising_generators::descriptor::{admit, params_digest};
     use ising_generators::family::{admit_topology, generate_instance, BaseTopology, SaltFault};
     use ising_generators::ice::{CHARGED_ICE_V1, ICE_FIELDS_V1, ICE_GLASS_V1, TWISTED_DIMER_V1};
+    use ising_generators::routing::ROUTING_V1;
     use quip_solver_conformance::families::layered::{RESTRICTED_V1, UNIFORM_V1};
     let family = str_field(case, "family_id")?;
     let contract = match family {
@@ -2487,6 +2488,7 @@ fn check_layered_against_rust(case: &Value) -> Result<(), String> {
         "quip/twisted-ice-dimer" => TWISTED_DIMER_V1,
         "quip/charged-ice" => CHARGED_ICE_V1,
         "quip/ice-fields" => ICE_FIELDS_V1,
+        "quip/two-commodity-routing" => ROUTING_V1,
         other => return Err(format!("{}: unknown family {other}", case_name(case))),
     };
     let params = codec::hex_decode(str_field(case, "params_hex")?)?;
@@ -4001,6 +4003,652 @@ fn a_changed_fields_recipe_hash_fails_the_recompute() -> Result<(), String> {
         .first()
         .ok_or("no recipe")?;
     expect_err(&check_fields_recipe(recipe), "a changed recipe hash")
+}
+
+// ---- two-commodity routing vectors (two_commodity.json) ----
+
+fn routing_doc() -> Result<Value, String> {
+    serde_json::from_str(include_str!("../vectors/families/two_commodity.json"))
+        .map_err(|e| e.to_string())
+}
+
+/// Recompute the digests, nonces, and instance bytes of every registered
+/// `quip/two-commodity-routing` case with Rust code that does not call the
+/// construction.
+fn check_routing(doc: &Value) -> Result<(), String> {
+    validate(&schema()?, doc)?;
+    check_names_unique(doc)?;
+    for case in section(doc, "cases")? {
+        check_layered_case(case, ice_glass_size_bounds)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn routing_fixture_matches_schema() -> Result<(), String> {
+    let doc = routing_doc()?;
+    validate(&schema()?, &doc)?;
+    match doc.get("provenance").and_then(Value::as_str) {
+        Some("specified") => {}
+        other => return Err(format!("provenance is {other:?}, expected specified")),
+    }
+    check_names_unique(&doc)?;
+    for name in ["cases", "terminals", "routing_recipes", "admission"] {
+        section(&doc, name).map(|_| ())?;
+    }
+    Ok(())
+}
+
+#[test]
+fn routing_cases_recompute() -> Result<(), String> {
+    check_routing(&routing_doc()?)
+}
+
+#[test]
+fn routing_cases_match_the_rust_construction() -> Result<(), String> {
+    for case in section(&routing_doc()?, "cases")? {
+        check_layered_against_rust(case)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn routing_params_constants_match_the_vectors() -> Result<(), String> {
+    use quip_solver_conformance::families::routing::{
+        P_ROUTING_D3, P_ROUTING_Z34_D6, P_ROUTING_Z34_D8,
+    };
+    let doc = routing_doc()?;
+    for (section_name, name, want) in [
+        ("cases", "routing-small", P_ROUTING_Z34_D8),
+        ("cases", "routing-retry", P_ROUTING_Z34_D6),
+        ("admission", "divisor-3-is-out-of-bounds", P_ROUTING_D3),
+    ] {
+        let case = find_named(&doc, section_name, name)?;
+        compare(
+            case,
+            "params_hex",
+            &str_field(case, "params_hex")?.to_owned(),
+            &codec::hex_encode(&want),
+        )?;
+    }
+    compare(&doc, "case count", &section(&doc, "cases")?.len(), &5)
+}
+
+/// The routing section of a built instance, decoded by hand from the kind 7
+/// layout: the supplies of every node and the end nodes of every arc.
+struct RoutingMeta {
+    supply: Vec<[i64; 2]>,
+    cells: Vec<(u16, u16)>,
+    arcs: Vec<[u32; 5]>,
+    strength: u16,
+}
+
+fn le_u16(bytes: &[u8], at: usize) -> Result<u16, String> {
+    let raw = bytes.get(at..at + 2).ok_or("short metadata")?;
+    Ok(u16::from_le_bytes(raw.try_into().map_err(|_| "short")?))
+}
+
+fn le_u32(bytes: &[u8], at: usize) -> Result<u32, String> {
+    let raw = bytes.get(at..at + 4).ok_or("short metadata")?;
+    Ok(u32::from_le_bytes(raw.try_into().map_err(|_| "short")?))
+}
+
+fn routing_meta(built: &ising_generators::instance::Instance) -> Result<RoutingMeta, String> {
+    let meta = built.metadata();
+    if le_u16(meta, 0)? != 1 || le_u16(meta, 2)? != 7 {
+        return Err("the region is not one kind 7 section".to_owned());
+    }
+    let length = usize::try_from(le_u32(meta, 4)?).map_err(|e| e.to_string())?;
+    let payload = meta.get(8..8 + length).ok_or("section past the region")?;
+    let n = usize::try_from(le_u32(payload, 0)?).map_err(|e| e.to_string())?;
+    let (mut supply, mut cells) = (Vec::new(), Vec::new());
+    for i in 0..n {
+        let at = 4 + 6 * i;
+        cells.push((le_u16(payload, at)?, le_u16(payload, at + 2)?));
+        let raw = payload.get(at + 4..at + 6).ok_or("short node record")?;
+        let [first, second] = <[u8; 2]>::try_from(raw).map_err(|_| "short node record")?;
+        supply.push([
+            i64::from(i8::from_le_bytes([first])),
+            i64::from(i8::from_le_bytes([second])),
+        ]);
+    }
+    let base = 4 + 6 * n;
+    let a = usize::try_from(le_u32(payload, base)?).map_err(|e| e.to_string())?;
+    let mut arcs = Vec::new();
+    for i in 0..a {
+        let at = base + 4 + 24 * i;
+        let mut words = [0u32; 5];
+        for (k, word) in words.iter_mut().enumerate() {
+            *word = le_u32(payload, at + 4 * k)?;
+        }
+        arcs.push(words);
+    }
+    let strength = le_u16(payload, base + 4 + 24 * a)?;
+    if payload.len() != base + 4 + 24 * a + 2 {
+        return Err("trailing bytes in the routing section".to_owned());
+    }
+    Ok(RoutingMeta {
+        supply,
+        cells,
+        arcs,
+        strength,
+    })
+}
+
+/// The unit-capacity maximum flow from `sources` to `sinks`, by augmenting
+/// paths on a map of residual capacities.
+fn unit_flow(n: usize, arcs: &[[u32; 5]], sources: &[usize], sinks: &[usize]) -> usize {
+    use std::collections::{BTreeMap, VecDeque};
+    let (source, sink) = (n, n + 1);
+    let mut cap: BTreeMap<(usize, usize), i32> = BTreeMap::new();
+    let mut add = |from: usize, to: usize| {
+        *cap.entry((from, to)).or_insert(0) += 1;
+        let _ = cap.entry((to, from)).or_insert(0);
+    };
+    for arc in arcs {
+        add(
+            arc.first().map_or(0, |&v| v as usize),
+            arc.get(1).map_or(0, |&v| v as usize),
+        );
+    }
+    for &v in sources {
+        add(source, v);
+    }
+    for &v in sinks {
+        add(v, sink);
+    }
+    let mut flow = 0;
+    loop {
+        let mut parent: BTreeMap<usize, usize> = BTreeMap::from([(source, source)]);
+        let mut queue = VecDeque::from([source]);
+        while let Some(v) = queue.pop_front() {
+            for (&(from, to), &room) in cap.range((v, 0)..(v + 1, 0)) {
+                if from == v && room > 0 && !parent.contains_key(&to) {
+                    let _ = parent.insert(to, v);
+                    queue.push_back(to);
+                }
+            }
+        }
+        if !parent.contains_key(&sink) {
+            return flow;
+        }
+        let mut w = sink;
+        while w != source {
+            let Some(&v) = parent.get(&w) else {
+                return flow;
+            };
+            *cap.entry((v, w)).or_insert(0) -= 1;
+            *cap.entry((w, v)).or_insert(0) += 1;
+            w = v;
+        }
+        flow += 1;
+    }
+}
+
+/// The try that passed and its supply.
+type Replay = (u64, Vec<[i64; 2]>);
+
+/// Replay the `terminal` stream of one salt with the FAM-24 shuffle and the
+/// maximum flow check. Returns the try that passed and its supply, or `None`
+/// when all four tries fail. `meta` holds the template, which does not depend
+/// on the nonce, and `divisor` is the `pairs_divisor` parameter.
+fn replay_terminals(
+    case: &Value,
+    slot: u64,
+    meta: &RoutingMeta,
+    divisor: usize,
+) -> Result<Option<Replay>, String> {
+    use ising_generators::family::Streams;
+    use ising_generators::rng::shuffle;
+    let (nodes, edges) = topology_inputs(object_field(case, "topology")?)?;
+    let order = digests::topology_order_digest(&nodes, &edges);
+    let mut streams = Streams::new(
+        codec::hex32(&lease_nonce(case, slot)?)?,
+        digests::descriptor_digest(
+            str_field(case, "family_id")?.as_bytes(),
+            u32_field(case, "revision")?,
+            &digests::params_digest(&codec::hex_decode(str_field(case, "params_hex")?)?),
+        ),
+        order,
+        ising_generators::routing::ROUTING.labels,
+    );
+    let mut stream = streams.open("terminal").ok_or("no terminal stream")?;
+    let n = meta.cells.len();
+    let pairs = n / divisor;
+    for attempt in 1..=4u64 {
+        let mut list: Vec<u32> = (0..u32::try_from(n).map_err(|e| e.to_string())?).collect();
+        shuffle(&mut stream, &mut list).map_err(|e| format!("{e:?}"))?;
+        let at = |i: usize| -> Result<usize, String> {
+            list.get(i)
+                .map(|&v| v as usize)
+                .ok_or_else(|| "short list".to_owned())
+        };
+        let mut supply = vec![[0i64; 2]; n];
+        let mut routes = true;
+        for (k, start) in [0, 2 * pairs].into_iter().enumerate() {
+            let (mut sources, mut sinks) = (Vec::new(), Vec::new());
+            for i in 0..pairs {
+                sources.push(at(start + 2 * i)?);
+                sinks.push(at(start + 2 * i + 1)?);
+            }
+            routes &= unit_flow(n, &meta.arcs, &sources, &sinks) == pairs;
+            for (nodes, value) in [(&sources, 1i64), (&sinks, -1)] {
+                for &v in nodes {
+                    let row = supply.get_mut(v).ok_or("a terminal outside the template")?;
+                    let slot = row.get_mut(k).ok_or("a commodity outside 0 and 1")?;
+                    *slot = value;
+                }
+            }
+        }
+        if routes {
+            return Ok(Some((attempt, supply)));
+        }
+    }
+    Ok(None)
+}
+
+/// The `pairs_divisor` of canonical routing params: the last two bytes.
+fn routing_divisor(params: &[u8]) -> Result<usize, String> {
+    Ok(usize::from(le_u16(params, params.len().saturating_sub(2))?))
+}
+
+/// Rebuild every salt that builds with the Rust construction, replay the
+/// terminal draw, and compare the try and the supply with the entries. Every
+/// salt that builds has an entry, in the order of the instances.
+fn check_routing_terminals(doc: &Value) -> Result<(), String> {
+    use ising_generators::routing::ROUTING_V1;
+    let mut seen = 0usize;
+    for case in section(doc, "cases")? {
+        let params = codec::hex_decode(str_field(case, "params_hex")?)?;
+        for instance in entries_of(case, "instances")? {
+            let slot = u64_decimal(instance, "index")?;
+            let name = format!("{}-salt-{slot}", case_name(case));
+            let entry = find_named(doc, "terminals", &name)?;
+            compare(entry, "case", &str_field(entry, "case")?, &case_name(case))?;
+            compare(entry, "index", &u64_decimal(entry, "index")?, &slot)?;
+            compare(
+                entry,
+                "nonce",
+                &lease_nonce(case, slot)?,
+                &str_field(entry, "nonce")?.to_owned(),
+            )?;
+            let (meta, passed) = with_ice_instance(ROUTING_V1, case, slot, |params, built| {
+                check_routing_metadata(params, built)?;
+                routing_meta(built)
+            })
+            .map(|meta| {
+                let replay = replay_terminals(case, slot, &meta, routing_divisor(&params)?)?;
+                Ok::<_, String>((meta, replay))
+            })??;
+            let (attempt, supply) = passed.ok_or("a salt that builds has a passing try")?;
+            compare(
+                entry,
+                "try",
+                &attempt,
+                &entry.get("try").and_then(Value::as_u64).ok_or("no try")?,
+            )?;
+            compare(entry, "metadata supply", &meta.supply, &supply)?;
+            let recorded: Vec<[i64; 2]> = entries_of(entry, "supply")?
+                .iter()
+                .map(|row| {
+                    let pair = row.as_array().ok_or("a supply row is not an array")?;
+                    match pair.as_slice() {
+                        [a, b] => Ok([
+                            a.as_i64().ok_or("supply is not an integer")?,
+                            b.as_i64().ok_or("supply is not an integer")?,
+                        ]),
+                        _ => Err("a supply row is not a pair".to_owned()),
+                    }
+                })
+                .collect::<Result<_, String>>()?;
+            compare(entry, "recorded supply", &recorded, &supply)?;
+            seen += 1;
+        }
+    }
+    compare(
+        doc,
+        "terminals count",
+        &section(doc, "terminals")?.len(),
+        &seen,
+    )
+}
+
+/// The Rust metadata check must accept every built instance.
+fn check_routing_metadata(
+    params: &ising_generators::descriptor::Params<'_>,
+    built: &ising_generators::instance::Instance,
+) -> Result<(), String> {
+    use ising_generators::routing::ROUTING;
+    if (ROUTING.check_metadata)(params, built) {
+        Ok(())
+    } else {
+        Err("check_metadata rejected a built instance".to_owned())
+    }
+}
+
+#[test]
+fn routing_terminals_match_a_replay_of_the_terminal_stream() -> Result<(), String> {
+    check_routing_terminals(&routing_doc()?)
+}
+
+#[test]
+fn the_retry_case_has_a_salt_that_passes_after_a_failed_try() -> Result<(), String> {
+    let doc = routing_doc()?;
+    let tries: Vec<u64> = section(&doc, "terminals")?
+        .iter()
+        .filter(|entry| entry.get("case").and_then(Value::as_str) == Some("routing-retry"))
+        .filter_map(|entry| entry.get("try").and_then(Value::as_u64))
+        .collect();
+    compare(
+        &doc,
+        "a later try exists",
+        &tries.iter().any(|&t| t > 1),
+        &true,
+    )?;
+    compare(&doc, "the first try exists", &tries.contains(&1), &true)
+}
+
+#[test]
+fn the_no_instance_case_skips_every_salt_with_code_14() -> Result<(), String> {
+    let doc = routing_doc()?;
+    let case = find_named(&doc, "cases", "routing-no-instance")?;
+    compare(
+        case,
+        "no instance builds",
+        &entries_of(case, "instances")?.len(),
+        &0,
+    )?;
+    let skipped = entries_of(case, "skipped")?;
+    compare(case, "a skipped salt exists", &skipped.is_empty(), &false)?;
+    for entry in skipped {
+        compare(
+            case,
+            "skip_code",
+            &entry.get("skip_code"),
+            &Some(&json!(14)),
+        )?;
+    }
+    Ok(())
+}
+
+#[test]
+fn the_no_pairs_case_has_no_terminals() -> Result<(), String> {
+    let doc = routing_doc()?;
+    for entry in section(&doc, "terminals")? {
+        if entry.get("case").and_then(Value::as_str) == Some("routing-no-pairs") {
+            for row in entries_of(entry, "supply")? {
+                compare(entry, "supply row", row, &json!([0, 0]))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Rebuild every salt of a recipe with the Rust construction and compare the
+/// hash, the counts, the chain strength, and the try that passed.
+fn check_routing_recipe(recipe: &Value) -> Result<(), String> {
+    use ising_generators::descriptor::params_digest;
+    use ising_generators::routing::ROUTING_V1;
+    let params = codec::hex_decode(str_field(recipe, "params_hex")?)?;
+    compare(
+        recipe,
+        "params_digest",
+        &codec::hex_encode(&params_digest(&params)),
+        &str_field(recipe, "params_digest")?.to_owned(),
+    )?;
+    let salts = entries_of(recipe, "salts")?;
+    compare(
+        recipe,
+        "salts",
+        &u64::try_from(salts.len()).map_err(|e| e.to_string())?,
+        &u64_decimal(object_field(recipe, "lease")?, "salt_count")?,
+    )?;
+    for salt in salts {
+        let slot = u64_decimal(salt, "index")?;
+        compare(
+            recipe,
+            "nonce",
+            &lease_nonce(recipe, slot)?,
+            &str_field(salt, "nonce")?.to_owned(),
+        )?;
+        let (hash, meta) = with_ice_instance(ROUTING_V1, recipe, slot, |params, built| {
+            check_routing_metadata(params, built)?;
+            let canonical = built.canonical_bytes().map_err(|e| e.to_string())?;
+            Ok((
+                blake3::hash(&canonical).to_hex().to_string(),
+                routing_meta(built)?,
+            ))
+        })?;
+        compare(
+            recipe,
+            "canonical_blake3",
+            &hash,
+            &str_field(salt, "canonical_blake3")?.to_owned(),
+        )?;
+        let field = |key: &str| {
+            salt.get(key)
+                .and_then(Value::as_u64)
+                .ok_or_else(|| format!("no {key}"))
+        };
+        let count = |len: usize| u64::try_from(len).map_err(|e| e.to_string());
+        compare(recipe, "cells", &count(meta.cells.len())?, &field("cells")?)?;
+        compare(recipe, "arcs", &count(meta.arcs.len())?, &field("arcs")?)?;
+        compare(
+            recipe,
+            "strength",
+            &u64::from(meta.strength),
+            &field("strength")?,
+        )?;
+        let replay = replay_terminals(recipe, slot, &meta, routing_divisor(&params)?)?;
+        let (attempt, supply) = replay.ok_or("a salt that builds has a passing try")?;
+        compare(recipe, "try", &attempt, &field("try")?)?;
+        compare(recipe, "supply", &meta.supply, &supply)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn routing_recipes_match_the_rust_construction() -> Result<(), String> {
+    let doc = routing_doc()?;
+    for recipe in section(&doc, "routing_recipes")? {
+        check_routing_recipe(recipe)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn routing_recipes_match_the_rust_constants() -> Result<(), String> {
+    use ising_generators::descriptor::params_digest;
+    use ising_generators::routing::ROUTING_RECIPES;
+    let doc = routing_doc()?;
+    let recipes = section(&doc, "routing_recipes")?;
+    compare(&doc, "recipe count", &recipes.len(), &ROUTING_RECIPES.len())?;
+    for (recipe, want) in recipes.iter().zip(ROUTING_RECIPES) {
+        compare(recipe, "alias", &str_field(recipe, "alias")?, &want.alias)?;
+        compare(recipe, "cell", &str_field(recipe, "cell")?, &want.cell)?;
+        compare(
+            recipe,
+            "params_hex",
+            &str_field(recipe, "params_hex")?.to_owned(),
+            &codec::hex_encode(want.params),
+        )?;
+        compare(
+            recipe,
+            "params_digest",
+            &str_field(recipe, "params_digest")?.to_owned(),
+            &codec::hex_encode(&params_digest(want.params)),
+        )?;
+    }
+    Ok(())
+}
+
+/// The template of the research model, from `conformance/fixtures`. The fixture
+/// holds native Zephyr ids, so CI never reads the research data root.
+fn research_template() -> Result<Value, String> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../conformance/fixtures/two_commodity_research_template.json");
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    serde_json::from_str(&text).map_err(|e| e.to_string())
+}
+
+/// The nodes, arcs, arc spins, and chain spins of the Rust template on the
+/// live topology equal the research template (D8). The instance spins map back
+/// to native ids through the node list of the instance.
+fn check_research_template(fixture: &Value) -> Result<(), String> {
+    use ising_generators::routing::ROUTING_V1;
+    let doc = routing_doc()?;
+    let recipe = section(&doc, "routing_recipes")?
+        .first()
+        .ok_or("no recipe")?;
+    let (cells, arcs, native) = with_ice_instance(ROUTING_V1, recipe, 0, |_, built| {
+        let meta = routing_meta(built)?;
+        let native = built.node_ids().to_vec();
+        Ok((meta.cells, meta.arcs, native))
+    })?;
+    let id_at = |position: u32| -> Result<u64, String> {
+        native
+            .get(usize::try_from(position).map_err(|e| e.to_string())?)
+            .map(|&id| u64::from(id))
+            .ok_or_else(|| "a spin outside the instance".to_owned())
+    };
+    let want_cells: Vec<Value> = cells.iter().map(|&(c, r)| json!([c, r])).collect();
+    let want_nodes: Vec<Value> = arcs.iter().map(|a| json!([a[0], a[1]])).collect();
+    let want_x1 = arcs
+        .iter()
+        .map(|a| id_at(a[2]))
+        .collect::<Result<Vec<_>, _>>()?;
+    let want_chain = arcs
+        .iter()
+        .map(|a| Ok(json!([id_at(a[3])?, id_at(a[4])?])))
+        .collect::<Result<Vec<Value>, String>>()?;
+    compare(
+        fixture,
+        "nodes_cell",
+        &entries_of(fixture, "nodes_cell")?.to_vec(),
+        &want_cells,
+    )?;
+    compare(
+        fixture,
+        "arc_nodes",
+        &entries_of(fixture, "arc_nodes")?.to_vec(),
+        &want_nodes,
+    )?;
+    compare(
+        fixture,
+        "arc_spin_commodity1",
+        &u64_array(fixture, "arc_spin_commodity1")?,
+        &want_x1,
+    )?;
+    compare(
+        fixture,
+        "arc_chain_commodity2",
+        &entries_of(fixture, "arc_chain_commodity2")?.to_vec(),
+        &want_chain,
+    )
+}
+
+#[test]
+fn the_rust_template_matches_the_research_template_on_the_live_topology() -> Result<(), String> {
+    check_research_template(&research_template()?)
+}
+
+#[test]
+fn a_changed_research_template_fails_the_parity_check() -> Result<(), String> {
+    let fixture = research_template()?;
+    let was = fixture
+        .pointer("/arc_spin_commodity1/0")
+        .and_then(Value::as_u64)
+        .ok_or("no arc spin")?;
+    let broken = mutate(&fixture, "/arc_spin_commodity1/0", json!(was + 1));
+    expect_err(&check_research_template(&broken), "a changed arc spin")
+}
+
+#[test]
+fn routing_admission_codes_match_the_rust_admission() -> Result<(), String> {
+    use ising_generators::descriptor::{admit, params_digest, AdvertisedLimits};
+    use ising_generators::family::{admit_topology, BaseTopology};
+    use ising_generators::routing::ROUTING_V1;
+    let doc = routing_doc()?;
+    let contracts = [ROUTING_V1];
+    let mut codes = Vec::new();
+    for case in section(&doc, "admission")? {
+        let params = codec::hex_decode(str_field(case, "params_hex")?)?;
+        let (nodes, edges) = topology_inputs(object_field(case, "topology")?)?;
+        let topology = BaseTopology::new(nodes, &edges).map_err(|e| format!("{e:?}"))?;
+        let got = admit(
+            &contracts,
+            str_field(case, "family_id")?.as_bytes(),
+            u32_field(case, "revision")?,
+            &params,
+            &params_digest(&params),
+        )
+        .and_then(|admitted| {
+            admit_topology(
+                &admitted,
+                &topology,
+                topology.order_digest(),
+                &AdvertisedLimits {
+                    max_nodes: 0,
+                    max_edges: 0,
+                    max_degree: 0,
+                },
+            )
+        });
+        let got = got.err().map(ising_generators::Code::value);
+        compare(case, "admission code", &got, &expected_code(case)?)?;
+        codes.push(got);
+    }
+    compare(&doc, "codes 9 present", &codes.contains(&Some(9)), &true)?;
+    compare(&doc, "code 12 present", &codes.contains(&Some(12)), &true)?;
+    compare(&doc, "an admitted request", &codes.contains(&None), &true)
+}
+
+#[test]
+fn a_changed_routing_coupling_fails_the_recompute() -> Result<(), String> {
+    let doc = routing_doc()?;
+    let pointer = "/cases/0/instances/0/j/0";
+    let was = doc
+        .pointer(pointer)
+        .and_then(Value::as_i64)
+        .ok_or("no coupling")?;
+    let broken = mutate(&doc, pointer, json!(was + 4));
+    expect_err(&check_routing(&broken), "a changed coupling")
+}
+
+#[test]
+fn a_changed_routing_supply_fails_the_replay() -> Result<(), String> {
+    let doc = routing_doc()?;
+    let pointer = "/terminals/0/supply/0/0";
+    let was = doc
+        .pointer(pointer)
+        .and_then(Value::as_i64)
+        .ok_or("no supply")?;
+    let broken = mutate(&doc, pointer, json!(was + 1));
+    expect_err(&check_routing_terminals(&broken), "a changed supply")?;
+    let pointer = "/terminals/0/try";
+    let broken = mutate(&doc, pointer, json!(4));
+    expect_err(&check_routing_terminals(&broken), "a changed try")
+}
+
+#[test]
+fn a_changed_routing_recipe_hash_fails_the_recompute() -> Result<(), String> {
+    let doc = routing_doc()?;
+    let recipe = section(&doc, "routing_recipes")?
+        .first()
+        .ok_or("no recipe")?;
+    let was = str_field(
+        recipe.pointer("/salts/0").ok_or("no salt")?,
+        "canonical_blake3",
+    )?;
+    let broken = mutate(
+        &doc,
+        "/routing_recipes/0/salts/0/canonical_blake3",
+        json!(flip_last_hex_digit(was)),
+    );
+    let recipe = section(&broken, "routing_recipes")?
+        .first()
+        .ok_or("no recipe")?;
+    expect_err(&check_routing_recipe(recipe), "a changed recipe hash")
 }
 
 // ---- topology files (vectors/topologies/) ----

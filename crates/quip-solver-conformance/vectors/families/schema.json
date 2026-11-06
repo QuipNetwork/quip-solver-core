@@ -1825,6 +1825,100 @@
       ],
       "type": "object"
     },
+    "routing_recipe": {
+      "additionalProperties": false,
+      "properties": {
+        "alias": {
+          "type": "string"
+        },
+        "cell": {
+          "type": "string"
+        },
+        "evidence": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "family_id": {
+          "type": "string"
+        },
+        "lease": {
+          "$ref": "#/$defs/case_lease"
+        },
+        "name": {
+          "type": "string"
+        },
+        "params_digest": {
+          "$ref": "#/$defs/hex32"
+        },
+        "params_hex": {
+          "$ref": "#/$defs/hex"
+        },
+        "revision": {
+          "type": "integer"
+        },
+        "salts": {
+          "items": {
+            "$ref": "#/$defs/routing_salt"
+          },
+          "type": "array"
+        },
+        "topology": {
+          "$ref": "#/$defs/blob_topology"
+        }
+      },
+      "required": [
+        "name",
+        "evidence",
+        "alias",
+        "cell",
+        "family_id",
+        "revision",
+        "params_hex",
+        "params_digest",
+        "topology",
+        "lease",
+        "salts"
+      ],
+      "type": "object"
+    },
+    "routing_salt": {
+      "additionalProperties": false,
+      "properties": {
+        "arcs": {
+          "type": "integer"
+        },
+        "canonical_blake3": {
+          "$ref": "#/$defs/hex32"
+        },
+        "cells": {
+          "type": "integer"
+        },
+        "index": {
+          "$ref": "#/$defs/u64s"
+        },
+        "nonce": {
+          "$ref": "#/$defs/hex32"
+        },
+        "strength": {
+          "type": "integer"
+        },
+        "try": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "index",
+        "nonce",
+        "canonical_blake3",
+        "cells",
+        "arcs",
+        "strength",
+        "try"
+      ],
+      "type": "object"
+    },
     "schema_def": {
       "additionalProperties": false,
       "properties": {
@@ -2141,6 +2235,51 @@
         "label_hex",
         "seed",
         "checkpoints"
+      ],
+      "type": "object"
+    },
+    "terminals_case": {
+      "additionalProperties": false,
+      "properties": {
+        "case": {
+          "type": "string"
+        },
+        "evidence": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "index": {
+          "$ref": "#/$defs/u64s"
+        },
+        "name": {
+          "type": "string"
+        },
+        "nonce": {
+          "$ref": "#/$defs/hex32"
+        },
+        "supply": {
+          "items": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array"
+          },
+          "type": "array"
+        },
+        "try": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name",
+        "evidence",
+        "case",
+        "index",
+        "nonce",
+        "try",
+        "supply"
       ],
       "type": "object"
     },
@@ -2660,6 +2799,12 @@
       },
       "type": "array"
     },
+    "routing_recipes": {
+      "items": {
+        "$ref": "#/$defs/routing_recipe"
+      },
+      "type": "array"
+    },
     "schema_revision": {
       "const": 1
     },
@@ -2721,6 +2866,12 @@
     "structure": {
       "items": {
         "$ref": "#/$defs/ice_structure_case"
+      },
+      "type": "array"
+    },
+    "terminals": {
+      "items": {
+        "$ref": "#/$defs/terminals_case"
       },
       "type": "array"
     },

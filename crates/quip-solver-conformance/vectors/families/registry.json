@@ -60,6 +60,19 @@
     },
     {
       "adapted_from": null,
+      "contract": "docs/families/quip-two-commodity-routing-1.md",
+      "evidence": [
+        "SC-12:two-commodity-vectors-frozen"
+      ],
+      "family_id": "quip/two-commodity-routing",
+      "name": "quip/two-commodity-routing@1",
+      "revision": 1,
+      "status": "research",
+      "vectors": "crates/quip-solver-conformance/vectors/families/two_commodity.json",
+      "vectors_blake3": "6bc05111953c9dc6b3df6aabb2996a09310897ff47c19dcf0af998e6308ac348"
+    },
+    {
+      "adapted_from": null,
       "contract": "docs/families/vectors-restricted-field-1.md",
       "evidence": [
         "SC-7:revision-vectors-frozen"

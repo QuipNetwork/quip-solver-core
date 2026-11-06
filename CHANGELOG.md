@@ -118,6 +118,17 @@ encodings do not change.
   contract is `docs/families/quip-ice-fields-1.md`, the vectors are
   `ice_fields.json`, and the Rust contract is
   `ising_generators::ice::ICE_FIELDS_V1`. The research cohort is not regenerated.
+- `quip/two-commodity-routing@1`, a registered family with status `research`. It
+  is a two-commodity unit routing problem on a Manhattan-street template of
+  Zephyr cells. The parameters are the Zephyr shape and `pairs_divisor`. The
+  terminals draw from a ChaCha8 stream with at most four tries, and a salt with
+  no routable terminals gives code 14 and the miner skips it. The metadata is the
+  new kind 7, `routing`. The diagnostic `routing_defects` never decides
+  acceptance. On the live z(12, 4) topology the template equals the template of
+  the research generator. The contract registers one parameter set on z(12, 4) as
+  a recipe. The contract is `docs/families/quip-two-commodity-routing-1.md`, the
+  vectors are `two_commodity.json`, and the Rust contract is
+  `ising_generators::routing::ROUTING_V1`. The research cohort is not regenerated.
 
 ### Changed
 

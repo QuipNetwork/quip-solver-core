@@ -17831,7 +17831,7 @@
       "path": "conformance/family_oracle/__main__.py"
     },
     {
-      "blake3": "0eadcc29f11e42c7be8fd0903cee00b69b9e746cf993e1e91b9bf0e7b2874d99",
+      "blake3": "c9b1bd081df02960e98bca68b7bbbd3079840feec984dd981ee3e7378fde6e52",
       "path": "conformance/family_oracle/build.py"
     },
     {
@@ -17863,7 +17863,7 @@
       "path": "conformance/family_oracle/ice.py"
     },
     {
-      "blake3": "d354a18c65f12f29bfde450b14fab5e52b825af2ba3290e85c880a05dd4b2ed4",
+      "blake3": "af0253961b2af4299fd16da736d5e48084a6c182d78ec84ffadc9d4f5ee7d000",
       "path": "conformance/family_oracle/instance.py"
     },
     {
@@ -17871,8 +17871,12 @@
       "path": "conformance/family_oracle/layered.py"
     },
     {
-      "blake3": "e803a3394e0515f2733096029e902666d22c31d987b94615557e003848120f2c",
+      "blake3": "5400c08b99bdbc82fec1cf53d39b3788896226340f800c3c4fc479856e942155",
       "path": "conformance/family_oracle/params.py"
+    },
+    {
+      "blake3": "2536448acf03cc691db09f4bad3212fd921d8c25593a0f12de5191083df59799",
+      "path": "conformance/family_oracle/routing.py"
     },
     {
       "blake3": "4c0c3d18b5151431b25d5c450bc8347e31a4802e6a3152adf417b2218047cde2",
@@ -17883,7 +17887,7 @@
       "path": "conformance/family_oracle/twisted.py"
     },
     {
-      "blake3": "13f8f88715699784e9994c39dbec8fd262485076f0f32b614de7a387d03b7bd3",
+      "blake3": "0c798accec28a62d3829d300ad60e6338ffec7913160108e4e41ef204d7835ff",
       "path": "docs/problem-families.md"
     }
   ]
