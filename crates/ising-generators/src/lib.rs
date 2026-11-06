@@ -12,6 +12,7 @@
 //! - [`family`]: base topologies, substreams, and canonical instance
 //!   generation for family leases.
 //! - [`ice`]: ice tiles, the 4-clique motifs of a base topology.
+//! - [`routing`]: the two-commodity unit routing family.
 //! - `blob` (feature `blob`): the gzip varint topology file format.
 //! - [`instance`]: canonical instance bytes, limits, and metadata validation.
 
@@ -29,6 +30,7 @@ pub mod ice;
 pub mod instance;
 pub mod random;
 pub mod rng;
+pub mod routing;
 
 use core::fmt;
 

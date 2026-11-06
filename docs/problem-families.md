@@ -322,6 +322,7 @@ These metadata faults give code 16, `MetadataInvalid`:
 | 4 | `charges` |
 | 5 | `incidence` |
 | 6 | `tile_charges` |
+| 7 | `routing` |
 
 Kind 6 holds synthetic charges of tiles. Kind 4 holds physical vertex charges.
 
