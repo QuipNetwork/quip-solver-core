@@ -5,6 +5,77 @@ This file documents changes to the Quip solver contract.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.0.6
+
+Topology blob files and four ice families. `ising-generators` adds the ice tile
+structure, the `quip/ice-glass`, `quip/twisted-ice-dimer`, `quip/charged-ice`,
+and `quip/ice-fields` revision 1 constructions, and the optional `blob` and `cli`
+features. The conformance crate adds their contracts and vectors.
+`protocol_version` stays 2, and the default features do not change.
+
+### Added
+
+- The topology blob format, defined in `docs/topology-format.md`. A `.bin.gz` file
+  holds an explicit topology or a Zephyr lattice minus removals.
+- `ising-generators` features `blob` and `cli`. The `blob` feature is `no_std` and
+  adds `ising_generators::blob::{encode, decode, Body, Topology, BlobError}`. It
+  depends on `miniz_oxide`. The `cli` feature adds the `quip-topology` binary, with
+  `encode` and `decode [--expand]`, and depends on `serde_json`. The default
+  features do not change.
+- `python -m family_oracle topology encode|decode`, the Python codec for the same
+  format.
+- `quip_solver_conformance::{topology, topology_bytes, t_sparse, TopologyError,
+  TOPOLOGY_FILES, TOPOLOGY_INDEX}`. They decode the embedded topology files.
+- SC-8 ice structure in `ising-generators`: the FAM-24 shuffle, ice tile candidates
+  from Zephyr coordinates or adjacency, a maximum edge-disjoint tile selection in a
+  fixed order, and the vectors `ice_structure.json` with the archived tile fixtures.
+- `quip/ice-glass@1`, a registered family with status `research`. It plants
+  edge-disjoint ice tiles in a spin glass and hides them with a random gauge. The
+  parameters are the Zephyr shape and `glass_milli`. The metadata holds the tiles
+  and the gauge. The contract is `docs/families/quip-ice-glass-1.md`, the vectors
+  are the `cases` of `ice_structure.json`, and the Rust contract is
+  `ising_generators::ice::ICE_GLASS_V1`. The research cohort is not regenerated.
+- `quip/twisted-ice-dimer@1`, a registered family with status `research`. It gives
+  each ice tile its own local gauge, adds a weak signed layer, and sets disjoint
+  ferromagnetic pairs. The parameters are the Zephyr shape, `weak_milli`, and
+  `pairs`. The metadata holds the tiles, the local gauges, and the pairs. The
+  contract registers three parameter sets on z(12, 4) as recipes. The contract is
+  `docs/families/quip-twisted-ice-dimer-1.md`, the vectors are `twisted_dimer.json`,
+  and the Rust contract is `ising_generators::ice::TWISTED_DIMER_V1`. The gauge
+  obstruction diagnostic `gauge_obstructions` describes an instance and never
+  decides acceptance. The research cohort is not regenerated.
+- `quip/charged-ice@1`, a registered family with status `research`. It gives each
+  ice tile a local gauge and a prescribed synthetic charge of `0`, `+2`, or `-2`, writes
+  the squared charge penalty into the couplings, the fields, and the offset, and
+  adds a weak signed background. The parameters are the Zephyr shape,
+  `scale_milli`, `background_milli`, and `charged_per_256`. The metadata holds the
+  tiles, the local gauges, and the tile charges (kind 6). The contract registers
+  one parameter set on z(12, 4) as a recipe. The contract is
+  `docs/families/quip-charged-ice-1.md`, the vectors are `ice_charge.json`, and the
+  Rust contract is `ising_generators::ice::CHARGED_ICE_V1`. The tile charges are
+  synthetic and the family is not adapted. The diagnostic `charge_defects` never
+  decides acceptance. The research cohort is not regenerated.
+- `quip/ice-fields@1`, a registered family with status `research`. It is the
+  globally gauged glass of `quip/ice-glass@1` with a sparse random field on
+  `n / field_divisor` of the nodes that sit in exactly two selected tiles. The
+  field is a drawn sign times the gauge, so a verifier cannot check its sign. The
+  parameters are the Zephyr shape, `glass_milli`, `field_milli`, and
+  `field_divisor`. The metadata is the ice-glass metadata. A nonce whose tile
+  selection has too few eligible nodes gives code 14 and the miner skips the
+  salt. The contract registers two parameter sets on z(12, 4) as recipes. The
+  contract is `docs/families/quip-ice-fields-1.md`, the vectors are
+  `ice_fields.json`, and the Rust contract is
+  `ising_generators::ice::ICE_FIELDS_V1`. The research cohort is not regenerated.
+
+### Changed
+
+- The family vectors store each topology as a file under
+  `crates/quip-solver-conformance/vectors/topologies/`, with `index.json`. A
+  topology field in a vectors file is now a path. The `vectors_blake3` pins of
+  `vectors/restricted-field@1` and `vectors/uniform-field@1` in `registry.json`
+  changed because the topology field became a file reference. The instance bytes
+  did not change. The Rust tests load `T_SPARSE` from the shared file.
+
 ## 0.0.5
 
 The wire fields for problem families, and the declaration that advertises
@@ -67,57 +138,6 @@ encodings do not change.
 - `families::registry::{Status, RegistryEntry, parse_registry, unregistered_quip_ids,
   archived_among}`.
 - The contracts in `docs/families/`, one for each registered revision.
-- The topology blob format, defined in `docs/topology-format.md`. A `.bin.gz` file
-  holds an explicit topology or a Zephyr lattice minus removals.
-- `ising-generators` features `blob` and `cli`. The `blob` feature is `no_std` and
-  adds `ising_generators::blob::{encode, decode, Body, Topology, BlobError}`. It
-  depends on `miniz_oxide`. The `cli` feature adds the `quip-topology` binary, with
-  `encode` and `decode [--expand]`, and depends on `serde_json`. The default
-  features do not change.
-- `python -m family_oracle topology encode|decode`, the Python codec for the same
-  format.
-- `quip_solver_conformance::{topology, topology_bytes, t_sparse, TopologyError,
-  TOPOLOGY_FILES, TOPOLOGY_INDEX}`. They decode the embedded topology files.
-- SC-8 ice structure in `ising-generators`: the FAM-24 shuffle, ice tile candidates
-  from Zephyr coordinates or adjacency, a maximum edge-disjoint tile selection in a
-  fixed order, and the vectors `ice_structure.json` with the archived tile fixtures.
-- `quip/ice-glass@1`, a registered family with status `research`. It plants
-  edge-disjoint ice tiles in a spin glass and hides them with a random gauge. The
-  parameters are the Zephyr shape and `glass_milli`. The metadata holds the tiles
-  and the gauge. The contract is `docs/families/quip-ice-glass-1.md`, the vectors
-  are the `cases` of `ice_structure.json`, and the Rust contract is
-  `ising_generators::ice::ICE_GLASS_V1`. The research cohort is not regenerated.
-- `quip/twisted-ice-dimer@1`, a registered family with status `research`. It gives
-  each ice tile its own local gauge, adds a weak signed layer, and sets disjoint
-  ferromagnetic pairs. The parameters are the Zephyr shape, `weak_milli`, and
-  `pairs`. The metadata holds the tiles, the local gauges, and the pairs. The
-  contract registers three parameter sets on z(12, 4) as recipes. The contract is
-  `docs/families/quip-twisted-ice-dimer-1.md`, the vectors are `twisted_dimer.json`,
-  and the Rust contract is `ising_generators::ice::TWISTED_DIMER_V1`. The gauge
-  obstruction diagnostic `gauge_obstructions` describes an instance and never
-  decides acceptance. The research cohort is not regenerated.
-- `quip/charged-ice@1`, a registered family with status `research`. It gives each
-  ice tile a local gauge and a prescribed synthetic charge of `0`, `+2`, or `-2`, writes
-  the squared charge penalty into the couplings, the fields, and the offset, and
-  adds a weak signed background. The parameters are the Zephyr shape,
-  `scale_milli`, `background_milli`, and `charged_per_256`. The metadata holds the
-  tiles, the local gauges, and the tile charges (kind 6). The contract registers
-  one parameter set on z(12, 4) as a recipe. The contract is
-  `docs/families/quip-charged-ice-1.md`, the vectors are `ice_charge.json`, and the
-  Rust contract is `ising_generators::ice::CHARGED_ICE_V1`. The tile charges are
-  synthetic and the family is not adapted. The diagnostic `charge_defects` never
-  decides acceptance. The research cohort is not regenerated.
-- `quip/ice-fields@1`, a registered family with status `research`. It is the
-  globally gauged glass of `quip/ice-glass@1` with a sparse random field on
-  `n / field_divisor` of the nodes that sit in exactly two selected tiles. The
-  field is a drawn sign times the gauge, so a verifier cannot check its sign. The
-  parameters are the Zephyr shape, `glass_milli`, `field_milli`, and
-  `field_divisor`. The metadata is the ice-glass metadata. A nonce whose tile
-  selection has too few eligible nodes gives code 14 and the miner skips the
-  salt. The contract registers two parameter sets on z(12, 4) as recipes. The
-  contract is `docs/families/quip-ice-fields-1.md`, the vectors are
-  `ice_fields.json`, and the Rust contract is
-  `ising_generators::ice::ICE_FIELDS_V1`. The research cohort is not regenerated.
 
 ### Changed
 
@@ -158,12 +178,6 @@ encodings do not change.
   `quip-solver-conformance`.
 - Two evidence entries in the family vectors no longer defer to SC-5. They defer to
   SC-8, SC-12, and SC-13.
-- The family vectors store each topology as a file under
-  `crates/quip-solver-conformance/vectors/topologies/`, with `index.json`. A
-  topology field in a vectors file is now a path. The `vectors_blake3` pins of
-  `vectors/restricted-field@1` and `vectors/uniform-field@1` in `registry.json`
-  changed because the topology field became a file reference. The instance bytes
-  did not change. The Rust tests load `T_SPARSE` from the shared file.
 
 ## 0.0.4
 
