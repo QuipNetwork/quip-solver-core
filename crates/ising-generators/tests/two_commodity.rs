@@ -1251,6 +1251,63 @@ fn check_metadata_rejects_each_rule() {
     assert!(!check(&bytes, &empty), "no section");
 }
 
+/// One valid cell with no supply, no arc, and an instance of no spin: only
+/// the arc count guard rejects it.
+#[test]
+fn the_arc_count_guard_rejects_alone() {
+    let topology = lattice_topology(2, 4);
+    let bytes = params(2, 4, 4);
+    let instance = build(&bytes, &topology, nonce_of(0));
+    let meta = Meta {
+        cells: vec![(1, 1)],
+        supply: vec![[0, 0]],
+        arcs: Vec::new(),
+        strength: 1,
+    };
+    let parts = InstanceParts {
+        descriptor_digest: *instance.descriptor_digest(),
+        topology_order_digest: *instance.topology_order_digest(),
+        nonce: instance.nonce().copied(),
+        node_ids: Vec::new(),
+        edges: Vec::new(),
+        h: Vec::new(),
+        j: Vec::new(),
+        offset_milli: 0,
+        metadata: encode(&meta),
+    };
+    let none = Instance::new(parts, &ROUTING_V1.limits, ROUTING_V1.metadata_kinds, None)
+        .expect("an instance of no spin");
+    assert!(!check(&bytes, &none));
+}
+
+/// An arc whose end cells are node indices past the last node, with the
+/// energy rebuilt for the mutated metadata: only the range check rejects it.
+#[test]
+fn the_node_range_check_rejects_alone() {
+    let topology = lattice_topology(2, 4);
+    let bytes = params(2, 4, 4);
+    let instance = build(&bytes, &topology, nonce_of(0));
+    let meta = decode(&instance);
+    let n = instance.node_ids().len();
+    let past = meta.cells.len() as u32;
+    let mut accepted = Vec::new();
+    for (what, tail, head) in [
+        ("both ends past the last node", past, past + 1),
+        ("the tail past the last node", past, meta.arcs[0].head),
+        ("the head past the last node", meta.arcs[0].tail, past),
+    ] {
+        let mut edited = meta.clone();
+        edited.arcs[0].tail = tail;
+        edited.arcs[0].head = head;
+        let (edited, (h, edges, j, offset)) = consistent(&edited, n);
+        let bad = make(&instance, edges, h, j, offset, encode(&edited));
+        if check(&bytes, &bad) {
+            accepted.push(what);
+        }
+    }
+    assert!(accepted.is_empty(), "accepted: {accepted:?}");
+}
+
 #[test]
 fn oversized_counts_are_rejected_without_allocation() {
     let topology = lattice_topology(3, 4);
