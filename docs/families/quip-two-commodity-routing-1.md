@@ -1,6 +1,6 @@
 # quip/two-commodity-routing revision 1
 
-This contract describes a two-commodity unit routing problem on a Manhattan-street template of Zephyr cells. Each cell of the Zephyr grid is a node of a routing graph. Arcs join the neighbours of a cell, with one direction for each row and column. Two commodities each route a set of source and sink pairs over the arcs. Each arc holds one unit of each commodity, and the two commodities need separate arcs. Each pair needs a route. A shared arc or a high cost raises the energy.
+This contract describes a two-commodity unit routing problem on a Manhattan-street template of Zephyr cells. Each cell of the Zephyr grid is a node of a routing graph. Arcs join the neighbours of a cell, with one direction for each row and column. Each of the two commodities has a set of sources and a set of sinks of equal size, and it routes one unit from each source to some sink over the arcs. Each arc holds one unit of each commodity, and the two commodities need separate arcs. The sinks of a commodity are interchangeable, so a source does not have a particular sink. A shared arc or a high cost raises the energy.
 The Rust contract is `ising_generators::routing::ROUTING_V1`.
 The vectors are the `cases` section of `crates/quip-solver-conformance/vectors/families/two_commodity.json`. The same file holds the terminals, routing recipe, and admission sections.
 
@@ -31,7 +31,7 @@ The registry holds the status (FAM-09). This line must equal the registry status
 
 The bounds are inclusive and apply to the stored integer.
 The pair `zephyr_m` and `zephyr_t` gives the lattice `z(zephyr_m, zephyr_t)`, and the base topology is a subgraph of that lattice.
-The parameter `pairs_divisor` gives the pair count of each commodity. With `N` template nodes, the pair count is `N / pairs_divisor` with integer division. A divisor greater than `N` gives 0 pairs and an instance with no terminals. That is valid.
+The parameter `pairs_divisor` gives the number of sources of each commodity, and the same number of sinks. With `N` template nodes, the number is `N / pairs_divisor` with integer division. A divisor greater than `N` gives 0 sources and 0 sinks, and an instance with no terminals. That is valid.
 The weights, the costs, and the street pattern are constants of this contract and not parameters.
 
 ### Constants
@@ -83,7 +83,7 @@ The template depends on the base topology and the parameters. It does not depend
 
 Let `N` be the number of template nodes and `pairs` be `N / pairs_divisor`.
 
-6. **Terminals.** For try 1 to 4, shuffle the list `0..N` with the Fisher-Yates shuffle (FAM-24) on the stream `terminal`. Commodity 1 gets the supply `+1` on the entries `2i` and `-1` on the entries `2i + 1` of the shuffled list, for `i < pairs`. Commodity 2 does the same on the entries that start at `2 * pairs`. When both commodities pass the feasibility check below, stop and keep this try. After 4 failed tries the salt gives no instance. The construction returns code 14, `NoInstance`, and the miner skips the salt (FAM-26). With `pairs` equal to 0, try 1 passes. Each try still shuffles.
+6. **Terminals.** For try 1 to 4, shuffle the list `0..N` with the Fisher-Yates shuffle (FAM-24) on the stream `terminal`. Commodity 1 gets the supply `+1` on the entries `2i` and `-1` on the entries `2i + 1` of the shuffled list, for `i < pairs`. This only fixes which nodes are sources and which are sinks. A source does not have a particular sink. Commodity 2 does the same on the entries that start at `2 * pairs`. When both commodities pass the feasibility check below, stop and keep this try. After 4 failed tries the salt gives no instance. The construction returns code 14, `NoInstance`, and the miner skips the salt (FAM-26). With `pairs` equal to 0, try 1 passes. Each try still shuffles.
 7. **Costs.** For each arc in template order, draw `uniform(cost, 2)` for commodity 1 and then for commodity 2. The value 0 gives 62 and the value 1 gives 124.
 8. **Spins.** The instance nodes are every `x1` spin and every chain spin of the template arcs, in the registration order of the base topology (FAM-31). No spin repeats.
 9. **Energy.** The energy has the form `x = (1 - s) / 2` in quarter-milli integers `h4`, `j4`, and `c4`, with these operations.
@@ -100,7 +100,7 @@ Let `N` be the number of template nodes and `pairs` be `N / pairs_divisor`.
 
 ### Feasibility check
 
-The check of each try runs on each commodity alone. The check is a unit-capacity max flow from a super source, joined to every source, to a super sink, joined from every sink, over the arcs in their directions. The try passes for a commodity when the flow value equals `pairs`. The flow value is unique, so the choice of algorithm does not change the output.
+The check of each try runs on each commodity alone. The check is a unit-capacity max flow from a super source, joined to every source, to a super sink, joined from every sink, over the arcs in their directions. The try passes for a commodity when the flow value equals `pairs`. The flow can send a source to any sink, so the check does not match sources with sinks. The flow value is unique, so the choice of algorithm does not change the output.
 
 Two commodities that each pass alone are not a joint feasibility certificate. A routing of commodity 1 may use an arc that every routing of commodity 2 needs. An instance can have no state with zero violations. A verifier must not read the check as proof that a zero-violation state exists.
 

@@ -69,7 +69,7 @@
       "revision": 1,
       "status": "research",
       "vectors": "crates/quip-solver-conformance/vectors/families/two_commodity.json",
-      "vectors_blake3": "6bc05111953c9dc6b3df6aabb2996a09310897ff47c19dcf0af998e6308ac348"
+      "vectors_blake3": "0cad2295c069d3b5df0723f376e2b9c2bcf9319b1e4bf6d4963d32af84712a4e"
     },
     {
       "adapted_from": null,

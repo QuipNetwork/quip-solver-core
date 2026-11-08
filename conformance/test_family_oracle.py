@@ -1376,15 +1376,19 @@ def test_routing_instance_follows_the_contract_rules():
     assert all(not (s[0] and s[1]) for s in supply)
     assert {c for a in arcs for c in a["cost"]} <= {62, 124}
     assert 1 <= inst["strength"] <= 1000
-    # The chain strength is the largest load of a chain spin, plus one.
-    load = [abs(v) for v in inst["h"]]
-    for (a, b), value in zip(inst["edges"], inst["j"], strict=True):
-        load[a] += abs(value)
-        load[b] += abs(value)
+    # The loads are the sum of |J| and |h| of each spin without the chain couplers.
     chain_edge = {(min(a["chain"]), max(a["chain"])) for a in arcs}
+    load = [abs(v) for v in inst["h"]]
     for edge, value in zip(inst["edges"], inst["j"], strict=True):
         if edge in chain_edge:
-            assert value == -inst["strength"]
+            continue
+        load[edge[0]] += abs(value)
+        load[edge[1]] += abs(value)
+    chain_spins = [s for a in arcs for s in a["chain"]]
+    assert inst["strength"] == 1 + max(load[s] for s in chain_spins)
+    coupling = dict(zip(inst["edges"], inst["j"], strict=True))
+    for edge in chain_edge:
+        assert coupling[edge] == -inst["strength"]
 
 
 def test_routing_energy_is_the_structured_energy():
@@ -1433,8 +1437,20 @@ def test_routing_admission_codes():
     assert code(3, 2, 8) == 9
     assert code(2, 4, 8) == 12
     assert routing.admission_code(b"\x01", nodes, edges) == 7
-    assert code(3, 4, 8, *build._routing_no_arc()) == 12
-    assert code(3, 4, 8, *build._routing_self_loop()) == 12
+    no_arc = build._routing_no_arc()
+    lattice = routing._lattice_edge_set(3, 4)
+    assert all((min(e), max(e)) in lattice for e in no_arc[1])
+    assert routing.template(3, 4, *no_arc) is None
+    assert code(3, 4, 8, *no_arc) == 12
+    looped = build._routing_self_loop()
+    nodes24, edges24 = ice.lattice(2, 4)
+    params24 = build._routing_params(2, 4, 4)
+    assert routing.admission_code(params24, nodes24, edges24) is None
+    assert routing.admission_code(params24, *looped) == 12
+    nodes28, edges28 = ice.lattice(2, 8)
+    assert (
+        routing.admission_code(build._routing_params(2, 8, 4), nodes28, edges28) is None
+    )
 
 
 def test_routing_retry_and_no_instance_cases_exist():

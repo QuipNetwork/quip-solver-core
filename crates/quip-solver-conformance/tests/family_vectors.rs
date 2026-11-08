@@ -4055,11 +4055,11 @@ fn routing_cases_match_the_rust_construction() -> Result<(), String> {
 #[test]
 fn routing_params_constants_match_the_vectors() -> Result<(), String> {
     use quip_solver_conformance::families::routing::{
-        P_ROUTING_D3, P_ROUTING_Z34_D6, P_ROUTING_Z34_D8,
+        P_ROUTING_D3, P_ROUTING_Z24_D4, P_ROUTING_Z34_D6,
     };
     let doc = routing_doc()?;
     for (section_name, name, want) in [
-        ("cases", "routing-small", P_ROUTING_Z34_D8),
+        ("cases", "routing-small", P_ROUTING_Z24_D4),
         ("cases", "routing-retry", P_ROUTING_Z34_D6),
         ("admission", "divisor-3-is-out-of-bounds", P_ROUTING_D3),
     ] {

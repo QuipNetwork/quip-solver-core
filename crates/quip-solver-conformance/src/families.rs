@@ -29,7 +29,7 @@ use charge::{P_CHARGED_A251, P_CHARGED_ADJ_A100_B45_C256, P_CHARGED_Z22_A250_B31
 use fields::{P_FIELDS_ADJ_G45_F1000_D16, P_FIELDS_F1001, P_FIELDS_Z22_G125_F500_D16};
 use ice::{P_ICE_ADJ_125, P_ICE_GLASS_1000, P_ICE_Z12_200};
 use layered::{P_F5000, P_L2_F0, P_L3_F0, P_SPEC, RESTRICTED_V1, UNIFORM_V1};
-use routing::{P_ROUTING_D3, P_ROUTING_Z34_D6, P_ROUTING_Z34_D8};
+use routing::{P_ROUTING_D3, P_ROUTING_Z24_D4, P_ROUTING_Z34_D6};
 use twisted::{P_TWISTED_ADJ_W45_P6, P_TWISTED_W1000, P_TWISTED_Z22_W62_P8};
 
 /// A family revision the `--family` gate can drive.
@@ -54,7 +54,7 @@ pub struct ReferenceRevision {
 /// `out_of_bounds_params` `P_CHARGED_A251`, and `ICE_FIELDS_V1` with params
 /// `[P_FIELDS_Z22_G125_F500_D16, P_FIELDS_ADJ_G45_F1000_D16]` and
 /// `out_of_bounds_params` `P_FIELDS_F1001`, and `ROUTING_V1` with params
-/// `[P_ROUTING_Z34_D8, P_ROUTING_Z34_D6]` and `out_of_bounds_params`
+/// `[P_ROUTING_Z24_D4, P_ROUTING_Z34_D6]` and `out_of_bounds_params`
 /// `P_ROUTING_D3`.
 ///
 /// The gate sends its fixed topology `T_SPARSE`, which carries no ice tiles.
@@ -96,7 +96,7 @@ pub static REFERENCE_REVISIONS: &[ReferenceRevision] = &[
     },
     ReferenceRevision {
         contract: &ROUTING_V1,
-        params: &[&P_ROUTING_Z34_D8, &P_ROUTING_Z34_D6],
+        params: &[&P_ROUTING_Z24_D4, &P_ROUTING_Z34_D6],
         out_of_bounds_params: &P_ROUTING_D3,
     },
 ];

@@ -158,7 +158,12 @@ def _arcs(grid: _Grid, rows: dict, cols: dict) -> list[dict]:
     return arcs
 
 
-def _spin(arc: dict, v: Cell, k: int) -> int:
+def _spin(arc: dict, v: Cell | int, k: int) -> int:
+    """The spin of commodity `k` in the K4 of the endpoint `v` of `arc`.
+
+    `v` and the `tail` and `head` of the arc must use the same representation,
+    either cells or template node indices. Node indices follow cell order, so the
+    smaller endpoint is the same in both."""
     if k == 0:
         return arc["x1"]
     return arc["chain"][0] if v == min(arc["tail"], arc["head"]) else arc["chain"][1]

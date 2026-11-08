@@ -155,13 +155,13 @@
   },
   {
     "about": "Explicit topology first used by the case routing-no-arc in two_commodity.json cases.",
-    "edges": 3,
+    "edges": 2,
     "file": "routing-no-arc.bin.gz",
     "kind": "explicit",
     "name": "routing-no-arc",
-    "nodes": 4,
-    "order_digest": "b2d85ccb57a54c35a358799d57a56f094e0ef006c27511fb88d37603569ad943",
-    "payload_blake3": "022a230bcbc259faf3c2476e3ff5cbe7325511a2d05b31df87939abf07fea7d9",
+    "nodes": 3,
+    "order_digest": "f8ae33892f1ff429197b5c3b1e8d193144f4c162fe57bf9097807780e2531c1a",
+    "payload_blake3": "2ae8420c4093ec2b177e5b7982b51024c8a73f37a0c29d63b4965c1d5a4855ad",
     "provenance": "specified"
   },
   {
@@ -176,36 +176,58 @@
     "provenance": "specified"
   },
   {
-    "about": "Explicit topology first used by the case routing-self-loop in two_commodity.json cases.",
-    "edges": 2,
-    "file": "routing-self-loop.bin.gz",
-    "kind": "explicit",
-    "name": "routing-self-loop",
-    "nodes": 4,
-    "order_digest": "fb7b6aa51fc7e028f5a0d4c5f99cc8bfb024d4639609cf8073a61ea3059296cb",
-    "payload_blake3": "e4c7bd5bef69fd345bec3b0a5a4d83ac8d211c335d1c304acd4ba433f22f3961",
-    "provenance": "specified"
-  },
-  {
-    "about": "Explicit topology first used by the case routing-small in two_commodity.json cases.",
+    "about": "Explicit topology first used by the case routing-no-pairs in two_commodity.json cases.",
     "edges": 2808,
-    "file": "routing-small.bin.gz",
+    "file": "routing-no-pairs.bin.gz",
     "kind": "explicit",
-    "name": "routing-small",
+    "name": "routing-no-pairs",
     "nodes": 336,
     "order_digest": "64a30f8eeed2f9f8e85dd5fe4bf773829fa0a8438b12b98fca4c06f5c460850c",
     "payload_blake3": "b600ef4865fb077594b81808ab51751948b8350530cedb83d7fb8d2aa2e7a46e",
     "provenance": "specified"
   },
   {
+    "about": "Explicit topology first used by the case routing-self-loop in two_commodity.json cases.",
+    "edges": 1225,
+    "file": "routing-self-loop.bin.gz",
+    "kind": "explicit",
+    "name": "routing-self-loop",
+    "nodes": 160,
+    "order_digest": "81265cd8c223f063bb93cad8f1261426845b023ab45469a88a054d940f1b960e",
+    "payload_blake3": "ddcc37b80a09cdf641fa1c268dc1305e286d1b084bc2c2f7fa2fae406ce2504c",
+    "provenance": "specified"
+  },
+  {
+    "about": "Explicit topology first used by the case routing-small in two_commodity.json cases.",
+    "edges": 1224,
+    "file": "routing-small.bin.gz",
+    "kind": "explicit",
+    "name": "routing-small",
+    "nodes": 160,
+    "order_digest": "2e78ba454c3b6561e87b9fe92cf91ac5840c630f701192ba044d11f75f781996",
+    "payload_blake3": "cc64e5017ab8e94d23fbfc8f6da1f819cf1f355cc7c99c2a4e6603776625f3dc",
+    "provenance": "specified"
+  },
+  {
     "about": "Explicit topology first used by the case routing-small-permuted in two_commodity.json cases.",
-    "edges": 2808,
+    "edges": 1224,
     "file": "routing-small-permuted.bin.gz",
     "kind": "explicit",
     "name": "routing-small-permuted",
-    "nodes": 336,
-    "order_digest": "2aae948cb893aa79affa6d402cf6d61a857ef82322512a41cdbdbbeb17b3a109",
-    "payload_blake3": "efee80b6a27659264f40d64ee2b1a3f67e9da309251676791b2fc0444e633b14",
+    "nodes": 160,
+    "order_digest": "9fd82fc10f598aabf46e7de24945d86783c37701e3fb0d1e0081d4de3034a534",
+    "payload_blake3": "646faf92c16bc5096cf9b78207411f2e3034acb2ec43b01c48c17003033cb28f",
+    "provenance": "specified"
+  },
+  {
+    "about": "Explicit topology first used by the case routing-z28 in two_commodity.json cases.",
+    "edges": 4496,
+    "file": "routing-z28.bin.gz",
+    "kind": "explicit",
+    "name": "routing-z28",
+    "nodes": 320,
+    "order_digest": "e93957be8a7d4f0546d9d114119fa89ed5e4175ed4c959a6b0f7a7f717a12cfc",
+    "payload_blake3": "a9eea0ea4daff45949bed74532e9eb4b9840021d894543d7d35f0b4b28d337cd",
     "provenance": "specified"
   },
   {

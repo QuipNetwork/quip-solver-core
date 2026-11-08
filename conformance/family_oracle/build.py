@@ -2941,24 +2941,29 @@ def _routing_params(m: int, t: int, divisor: int) -> bytes:
 
 
 def _routing_no_arc() -> tuple[list[int], list[tuple[int, int]]]:
-    """Four z(3, 4) nodes on one line. No cell has four segments, so no arc exists."""
-    return list(range(4)), [(0, 1), (1, 2), (2, 3)]
+    """Three z(3, 4) nodes on one line, joined by real couplers. No cell has four
+    segments, so the template has no arc and only that check refuses the topology."""
+    return list(range(3)), [(0, 1), (1, 2)]
 
 
 def _routing_self_loop() -> tuple[list[int], list[tuple[int, int]]]:
-    """Four z(3, 4) nodes with a self-loop on the first."""
-    return list(range(4)), [(0, 0), (0, 1)]
+    """The full z(2, 4) lattice plus a self-loop on the first node. Without the
+    loop the template has arcs, so only the loop check refuses the topology."""
+    nodes, edges = ice.lattice(2, 4)
+    return nodes, sorted([*edges, (0, 0)])
 
 
 def _routing_topologies() -> list[_StructureInput]:
     """The topologies the routing cases use that no earlier file holds."""
-    z34 = ice.lattice(3, 4)
+    z24 = ice.lattice(2, 4)
     return [
-        ("routing-small", 3, 4, *z34),
+        ("routing-small", 2, 4, *z24),
+        ("routing-no-pairs", 3, 4, *ice.lattice(3, 4)),
         ("routing-no-instance", 4, 4, *ice.lattice(4, 4)),
-        ("routing-small-permuted", 3, 4, *_permuted(*z34)),
+        ("routing-small-permuted", 2, 4, *_permuted(*z24)),
         ("routing-no-arc", 3, 4, *_routing_no_arc()),
-        ("routing-self-loop", 3, 4, *_routing_self_loop()),
+        ("routing-self-loop", 2, 4, *_routing_self_loop()),
+        ("routing-z28", 2, 8, *ice.lattice(2, 8)),
     ]
 
 
@@ -3039,11 +3044,12 @@ def _routing_case(
 
 
 def _routing_cases_and_terminals() -> tuple[list[dict], list[dict]]:
+    z24 = ice.lattice(2, 4)
     z34 = ice.lattice(3, 4)
     rows = [
-        ("routing-small", _routing_params(3, 4, 8), 4, z34, "z34"),
-        ("routing-no-pairs", _routing_params(3, 4, 1000), 2, z34, "z34"),
-        ("routing-retry", _routing_params(3, 4, 6), 5, z34, "z34"),
+        ("routing-small", _routing_params(2, 4, 4), 4, z24, "routing-small"),
+        ("routing-no-pairs", _routing_params(3, 4, 1000), 2, z34, "routing-no-pairs"),
+        ("routing-retry", _routing_params(3, 4, 6), 5, z34, "routing-no-pairs"),
         (
             "routing-no-instance",
             _routing_params(4, 4, 4),
@@ -3053,9 +3059,9 @@ def _routing_cases_and_terminals() -> tuple[list[dict], list[dict]]:
         ),
         (
             "routing-small-permuted",
-            _routing_params(3, 4, 8),
+            _routing_params(2, 4, 4),
             2,
-            _permuted(*z34),
+            _permuted(*z24),
             "routing-small-permuted",
         ),
     ]
@@ -3115,20 +3121,19 @@ def _routing_recipes(nodes: list[int], edges: list[tuple[int, int]]) -> list[dic
 
 def _routing_admission_cases() -> list[dict]:
     z34 = ice.lattice(3, 4)
+    z24 = ice.lattice(2, 4)
+    z28 = ice.lattice(2, 8)
+    n34 = "routing-no-pairs"
     rows = [
-        ("divisor-3-is-out-of-bounds", _routing_params(3, 4, 3), "routing-small", z34),
-        ("zephyr-t-2-is-out-of-bounds", _routing_params(3, 2, 8), "routing-small", z34),
-        (
-            "zephyr-m-33-is-out-of-bounds",
-            _routing_params(33, 4, 8),
-            "routing-small",
-            z34,
-        ),
-        ("full-lattice-is-admitted", _routing_params(3, 4, 8), "routing-small", z34),
+        ("divisor-3-is-out-of-bounds", _routing_params(3, 4, 3), n34, z34),
+        ("zephyr-t-2-is-out-of-bounds", _routing_params(3, 2, 8), n34, z34),
+        ("zephyr-m-33-is-out-of-bounds", _routing_params(33, 4, 8), n34, z34),
+        ("full-lattice-is-admitted", _routing_params(3, 4, 8), n34, z34),
+        ("degree-35-is-admitted", _routing_params(2, 8, 4), "routing-z28", z28),
         (
             "shape-does-not-match-the-topology",
             _routing_params(2, 4, 8),
-            "routing-small",
+            n34,
             z34,
         ),
         (
@@ -3139,9 +3144,15 @@ def _routing_admission_cases() -> list[dict]:
         ),
         (
             "topology-with-a-self-loop",
-            _routing_params(3, 4, 8),
+            _routing_params(2, 4, 4),
             "routing-self-loop",
             _routing_self_loop(),
+        ),
+        (
+            "z24-without-the-loop-is-admitted",
+            _routing_params(2, 4, 4),
+            "routing-small",
+            z24,
         ),
     ]
     return [
