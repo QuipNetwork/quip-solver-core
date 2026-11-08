@@ -27,7 +27,7 @@ use core::num::NonZeroU32;
 
 use crate::descriptor::{Contract, FieldSpec, Params, SizeBounds, TopologyStats, Value, ValueType};
 use crate::family::{BaseTopology, Construction, InstanceBody, Streams};
-use crate::ice::build::{region, sections, topology_bounds, Reader};
+use crate::ice::build::{region, sections, Reader};
 use crate::ice::topology::{zephyr_coordinates, zephyr_coupler, zephyr_id};
 use crate::ice::twisted_dimer::Recipe;
 use crate::instance::{Instance, InstanceLimits};
@@ -124,9 +124,20 @@ pub const ROUTING_RECIPES: [Recipe; 1] = [Recipe {
     params: PARAMS_R32,
 }];
 
-/// The sizes of an instance: the topology itself.
+/// The sizes of an instance: `N` is the node count of the topology, `E` its
+/// edge count, and `D` its largest degree, at most `N - 1`. The family has no
+/// ceiling on the degree.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the contract size bound returns a Result"
+)]
 fn routing_size_bounds(_: &Params<'_>, stats: &TopologyStats) -> Result<SizeBounds, Code> {
-    topology_bounds(stats)
+    let simple_degree = stats.n_nodes.saturating_sub(1);
+    Ok(SizeBounds {
+        nodes: stats.n_nodes,
+        edges: stats.n_edges,
+        degree: stats.max_degree.min(simple_degree),
+    })
 }
 
 /// An unsigned parameter, `None` when it is missing or out of range.
@@ -481,8 +492,9 @@ fn neighbours(adjacency: &[Vec<usize>], v: usize) -> &[usize] {
 
 /// The nodes of the largest strongly connected component of the graph on
 /// `n` nodes with directed `arcs`. Among components of equal size, the one
-/// with the smallest node index wins. The result flags each node.
-fn largest_component(n: usize, arcs: &[(usize, usize)]) -> Vec<bool> {
+/// with the smallest node index wins. The result flags each node. `None` on
+/// a counter overflow.
+fn largest_component(n: usize, arcs: &[(usize, usize)]) -> Option<Vec<bool>> {
     let mut forward: Vec<Vec<usize>> = vec![Vec::new(); n];
     let mut backward: Vec<Vec<usize>> = vec![Vec::new(); n];
     for &(from, to) in arcs {
@@ -504,7 +516,7 @@ fn largest_component(n: usize, arcs: &[(usize, usize)]) -> Vec<bool> {
         while let Some(&(v, next)) = stack.last() {
             if let Some(&w) = neighbours(&forward, v).get(next) {
                 if let Some(top) = stack.last_mut() {
-                    top.1 += 1;
+                    top.1 = top.1.checked_add(1)?;
                 }
                 if mark(&mut seen, w) {
                     stack.push((w, 0));
@@ -536,13 +548,13 @@ fn largest_component(n: usize, arcs: &[(usize, usize)]) -> Vec<bool> {
                 }
             }
         }
-        count += 1;
+        count = count.checked_add(1)?;
     }
     let mut size = vec![0usize; count];
     let mut smallest = vec![usize::MAX; count];
     for (v, &id) in component.iter().enumerate() {
         if let Some(slot) = size.get_mut(id) {
-            *slot += 1;
+            *slot = slot.checked_add(1)?;
         }
         if let Some(slot) = smallest.get_mut(id) {
             *slot = (*slot).min(v);
@@ -560,7 +572,7 @@ fn largest_component(n: usize, arcs: &[(usize, usize)]) -> Vec<bool> {
             best = Some(id);
         }
     }
-    component.iter().map(|&id| Some(id) == best).collect()
+    Some(component.iter().map(|&id| Some(id) == best).collect())
 }
 
 /// An arc of the template: node indices and topology positions of the spins.
@@ -590,7 +602,7 @@ fn template(grid: &Grid) -> Option<Template> {
         .iter()
         .map(|arc| Some((index(arc.tail)?, index(arc.head)?)))
         .collect::<Option<Vec<(usize, usize)>>>()?;
-    let in_core = largest_component(nodes.len(), &edges);
+    let in_core = largest_component(nodes.len(), &edges)?;
     let cells: Vec<Cell> = nodes
         .iter()
         .zip(&in_core)
@@ -631,77 +643,70 @@ fn check_topology(params: &Params<'_>, topology: &BaseTopology) -> bool {
 }
 
 /// The unit-capacity maximum flow from `sources` to `sinks` over the arcs
-/// reaches `sources.len()`.
+/// reaches `sources.len()`. A failed index or overflow is not a route.
 fn routes(n: usize, arcs: &[Arc], sources: &[usize], sinks: &[usize]) -> bool {
+    max_flow(n, arcs, sources, sinks) == Some(sources.len())
+}
+
+/// The value of the unit-capacity maximum flow, found by breadth-first
+/// augmenting paths. `None` on an index or counter overflow.
+fn max_flow(n: usize, arcs: &[Arc], sources: &[usize], sinks: &[usize]) -> Option<usize> {
     let source = n;
-    let sink = n + 1;
+    let sink = n.checked_add(1)?;
+    let total = n.checked_add(2)?;
     let mut to: Vec<usize> = Vec::new();
     let mut capacity: Vec<u8> = Vec::new();
-    let mut adjacent: Vec<Vec<usize>> = vec![Vec::new(); n + 2];
-    let mut add = |from: usize, into: usize| {
+    let mut adjacent: Vec<Vec<usize>> = vec![Vec::new(); total];
+    let mut add = |from: usize, into: usize| -> Option<()> {
         let forward = to.len();
+        let backward = forward.checked_add(1)?;
         to.push(into);
         capacity.push(1);
         to.push(from);
         capacity.push(0);
-        if let Some(list) = adjacent.get_mut(from) {
-            list.push(forward);
-        }
-        if let Some(list) = adjacent.get_mut(into) {
-            list.push(forward + 1);
-        }
+        adjacent.get_mut(from)?.push(forward);
+        adjacent.get_mut(into)?.push(backward);
+        Some(())
     };
     for arc in arcs {
-        if let (Ok(tail), Ok(head)) = (usize::try_from(arc.tail), usize::try_from(arc.head)) {
-            add(tail, head);
-        }
+        add(
+            usize::try_from(arc.tail).ok()?,
+            usize::try_from(arc.head).ok()?,
+        )?;
     }
     for &v in sources {
-        add(source, v);
+        add(source, v)?;
     }
     for &v in sinks {
-        add(v, sink);
+        add(v, sink)?;
     }
     let mut flow = 0usize;
     loop {
         // Breadth-first search for an augmenting path, by arrival edge.
-        let mut arrival: Vec<Option<usize>> = vec![None; n + 2];
-        let mut seen = vec![false; n + 2];
+        let mut arrival: Vec<Option<usize>> = vec![None; total];
+        let mut seen = vec![false; total];
         let _ = mark(&mut seen, source);
         let mut queue = alloc::collections::VecDeque::from([source]);
         while let Some(v) = queue.pop_front() {
             for &edge in neighbours(&adjacent, v) {
-                let (Some(&next), Some(&room)) = (to.get(edge), capacity.get(edge)) else {
-                    continue;
-                };
+                let (&next, &room) = (to.get(edge)?, capacity.get(edge)?);
                 if room > 0 && mark(&mut seen, next) {
-                    if let Some(slot) = arrival.get_mut(next) {
-                        *slot = Some(edge);
-                    }
+                    *arrival.get_mut(next)? = Some(edge);
                     queue.push_back(next);
                 }
             }
         }
         if seen.get(sink) != Some(&true) {
-            return flow == sources.len();
+            return Some(flow);
         }
         let mut at = sink;
         while at != source {
-            let Some(Some(edge)) = arrival.get(at).copied() else {
-                return false;
-            };
-            if let Some(room) = capacity.get_mut(edge) {
-                *room = 0;
-            }
-            if let Some(back) = capacity.get_mut(edge ^ 1) {
-                *back = 1;
-            }
-            let Some(&previous) = to.get(edge ^ 1) else {
-                return false;
-            };
-            at = previous;
+            let edge = (*arrival.get(at)?)?;
+            *capacity.get_mut(edge)? = 0;
+            *capacity.get_mut(edge ^ 1)? = 1;
+            at = *to.get(edge ^ 1)?;
         }
-        flow += 1;
+        flow = flow.checked_add(1)?;
     }
 }
 
@@ -1467,5 +1472,32 @@ mod tests {
         // A second arc out of the shared cell makes both units feasible.
         let wide = [arc(0, 1), arc(4, 1), arc(1, 2), arc(1, 5)];
         assert!(routes(6, &wide, &[0, 4], &[2, 5]));
+    }
+
+    #[test]
+    fn size_bounds_follow_the_pinned_formulas() {
+        let params = Params::parse(ROUTING_SCHEMA, PARAMS_R32).expect("params");
+        let bounds = |n_nodes, n_edges, max_degree| {
+            routing_size_bounds(
+                &params,
+                &TopologyStats {
+                    n_nodes,
+                    n_edges,
+                    max_degree,
+                },
+            )
+        };
+        let sized = bounds(320, 4496, 35).expect("no degree ceiling");
+        assert_eq!((sized.nodes, sized.edges, sized.degree), (320, 4496, 35));
+        // The degree is at most N - 1.
+        assert_eq!(bounds(3, 3, 35).expect("bounds").degree, 2);
+        assert_eq!(bounds(1, 0, 4).expect("bounds").degree, 0);
+        assert_eq!(bounds(0, 0, 0).expect("bounds").degree, 0);
+    }
+
+    #[test]
+    fn flow_refuses_a_counter_overflow() {
+        assert!(!routes(usize::MAX, &[], &[], &[]));
+        assert_eq!(max_flow(usize::MAX, &[], &[], &[]), None);
     }
 }

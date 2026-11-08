@@ -12,6 +12,7 @@
     clippy::expect_used,
     clippy::indexing_slicing,
     clippy::items_after_statements,
+    clippy::many_single_char_names,
     clippy::panic,
     clippy::too_many_lines,
     reason = "test code: a failed lookup is a test failure"
@@ -214,6 +215,108 @@ fn rebuilt(instance: &Instance, h: Vec<i32>, j: Vec<i32>, metadata: Vec<u8>) -> 
     };
     Instance::new(parts, &ROUTING_V1.limits, ROUTING_V1.metadata_kinds, None)
         .expect("rebuilt instance is well formed")
+}
+
+/// A copy of `instance` with every coefficient field replaced.
+fn make(
+    instance: &Instance,
+    edges: Vec<(u32, u32)>,
+    h: Vec<i32>,
+    j: Vec<i32>,
+    offset_milli: i64,
+    metadata: Vec<u8>,
+) -> Instance {
+    let parts = InstanceParts {
+        descriptor_digest: *instance.descriptor_digest(),
+        topology_order_digest: *instance.topology_order_digest(),
+        nonce: instance.nonce().copied(),
+        node_ids: instance.node_ids().to_vec(),
+        edges,
+        h,
+        j,
+        offset_milli,
+        metadata,
+    };
+    Instance::new(parts, &ROUTING_V1.limits, ROUTING_V1.metadata_kinds, None)
+        .expect("well formed instance")
+}
+
+/// Fields, edges, couplings, and offset of an energy, in milli.
+type Coefficients = (Vec<i32>, Vec<(u32, u32)>, Vec<i32>, i64);
+
+/// The Ising form of the structured energy of `meta` over `n` spins, found by
+/// finite differences from the all-up state, independent of the generator:
+/// `(h, edges, j, offset)`, with every pair of nonzero coupling as an edge.
+fn fit(meta: &Meta, n: usize) -> Coefficients {
+    let up = vec![1i64; n];
+    let flip = |flips: &[usize]| {
+        let mut state = up.clone();
+        for &i in flips {
+            state[i] = -1;
+        }
+        structured_energy(meta, &state)
+    };
+    let base = flip(&[]);
+    let single: Vec<i64> = (0..n).map(|i| flip(&[i])).collect();
+    let mut couplings = Vec::new();
+    let mut row = vec![0i64; n];
+    for i in 0..n {
+        for k in i + 1..n {
+            let sum = flip(&[i, k]) - single[i] - single[k] + base;
+            assert_eq!(sum % 4, 0, "coupling ({i}, {k})");
+            if sum != 0 {
+                couplings.push(((i as u32, k as u32), sum / 4));
+                row[i] += sum / 4;
+                row[k] += sum / 4;
+            }
+        }
+    }
+    let h: Vec<i64> = (0..n)
+        .map(|i| {
+            assert_eq!((base - single[i]) % 2, 0, "field {i}");
+            (base - single[i]) / 2 - row[i]
+        })
+        .collect();
+    let offset = base - h.iter().sum::<i64>() - couplings.iter().map(|c| c.1).sum::<i64>();
+    (
+        h.iter()
+            .map(|&v| i32::try_from(v).expect("field"))
+            .collect(),
+        couplings.iter().map(|c| c.0).collect(),
+        couplings
+            .iter()
+            .map(|c| i32::try_from(c.1).expect("coupling"))
+            .collect(),
+        offset,
+    )
+}
+
+/// `meta` with the chain strength its own energy implies, and the matching
+/// instance fields, so that only a structural rule can reject it.
+fn consistent(meta: &Meta, n: usize) -> (Meta, Coefficients) {
+    let mut bare = meta.clone();
+    bare.strength = 0;
+    let (h, edges, j, _) = fit(&bare, n);
+    let mut load = vec![0i64; n];
+    for (&(u, v), &value) in edges.iter().zip(&j) {
+        load[u as usize] += i64::from(value).abs();
+        load[v as usize] += i64::from(value).abs();
+    }
+    let worst = meta
+        .arcs
+        .iter()
+        .flat_map(|arc| arc.chain)
+        .map(|spin| load[spin as usize] + i64::from(h[spin as usize]).abs())
+        .max()
+        .expect("an arc");
+    let mut full = meta.clone();
+    full.strength = u16::try_from(worst + 1).expect("strength");
+    assert!(
+        full.strength <= 1000,
+        "the mutation keeps the strength in range"
+    );
+    let (h, edges, j, offset) = fit(&full, n);
+    (full, (h, edges, j, offset))
 }
 
 fn with_metadata(instance: &Instance, metadata: Vec<u8>) -> Instance {
@@ -848,6 +951,12 @@ fn admission_codes() {
             "{limits:?}"
         );
     }
+    // No degree ceiling: the full z(2, 8) has degree 35 and is admitted.
+    let wide = lattice_topology(2, 8);
+    let wide_bytes = params(2, 8, 4);
+    let wide_bounds = bounds(&admitted(&wide_bytes).expect("admit"), &wide).expect("z(2, 8)");
+    assert_eq!(wide_bounds.nodes, 320);
+    assert_eq!(wide_bounds.degree, 35);
     let sized = admit_tiny(&params(2, 4, 4)).expect("bounds");
     assert_eq!((sized.nodes, sized.edges), (12, 31));
 }
@@ -871,137 +980,260 @@ fn generation_is_repeatable() {
     assert_ne!(bodies[0], bodies[1], "the nonce changes the body");
 }
 
+/// Two arcs that share no cell.
+fn disjoint_arcs(meta: &Meta) -> (usize, usize) {
+    for (a, first) in meta.arcs.iter().enumerate() {
+        for (b, second) in meta.arcs.iter().enumerate().skip(a + 1) {
+            let shared = [first.tail, first.head]
+                .iter()
+                .any(|v| [second.tail, second.head].contains(v));
+            if !shared {
+                return (a, b);
+            }
+        }
+    }
+    panic!("two arcs without a shared cell");
+}
+
+#[test]
+fn a_rebuilt_energy_reproduces_the_instance() {
+    let topology = lattice_topology(2, 4);
+    let instance = build(&params(2, 4, 4), &topology, nonce_of(0));
+    let meta = decode(&instance);
+    let (full, (h, edges, j, offset)) = consistent(&meta, instance.node_ids().len());
+    assert_eq!(full, meta);
+    assert_eq!(h, instance.h());
+    assert_eq!(edges, instance.edges());
+    assert_eq!(j, instance.j());
+    assert_eq!(offset, instance.offset_milli());
+}
+
+/// Each rule rejects a mutation on its own. A structural mutation of the
+/// metadata comes with the energy rebuilt from the mutated metadata, so no
+/// coefficient mismatch can reject it. The coefficient rules get mutations of
+/// one coefficient group at a time.
 #[test]
 fn check_metadata_rejects_each_rule() {
-    let topology = lattice_topology(3, 4);
-    let bytes = params(3, 4, 8);
-    let instance = build(&bytes, &topology, nonce_of(6));
+    let topology = lattice_topology(2, 4);
+    let bytes = params(2, 4, 4);
+    let instance = build(&bytes, &topology, nonce_of(0));
     let meta = decode(&instance);
+    let n = instance.node_ids().len();
     assert!(check(&bytes, &instance), "positive control");
     assert_eq!(encode(&meta), instance.metadata(), "the codec round-trips");
 
-    let rejects = |what: &str, edit: &dyn Fn(&mut Meta)| {
+    let mut accepted: Vec<&str> = Vec::new();
+    // Mutated metadata with the matching energy.
+    let mut structural = |what: &'static str, edit: &dyn Fn(&mut Meta)| {
         let mut edited = meta.clone();
         edit(&mut edited);
-        let bad = with_metadata(&instance, encode(&edited));
-        assert!(!check(&bytes, &bad), "{what}");
+        let (edited, (h, edges, j, offset)) = consistent(&edited, n);
+        let bad = make(&instance, edges, h, j, offset, encode(&edited));
+        if check(&bytes, &bad) {
+            accepted.push(what);
+        }
     };
-    let source_1 = meta
+    let source_1 = meta.supply.iter().position(|s| s[0] == 1).expect("source");
+    let source_2 = meta.supply.iter().position(|s| s[1] == 1).expect("source");
+    let (first, second) = disjoint_arcs(&meta);
+    let far = meta
+        .cells
+        .iter()
+        .position(|cell| {
+            let tail = meta.cells[meta.arcs[0].tail as usize];
+            cell.0.abs_diff(tail.0) + cell.1.abs_diff(tail.1) > 1
+        })
+        .expect("a far cell") as u32;
+    structural("a missing source", &|m| m.supply[source_1][0] = 0);
+    let idle = meta
         .supply
         .iter()
-        .position(|s| s[0] == 1)
-        .expect("a source");
-    let source_2 = meta
-        .supply
-        .iter()
-        .position(|s| s[1] == 1)
-        .expect("a source");
-    rejects("a missing source", &|m| m.supply[source_1][0] = 0);
-    rejects("a supply of 2", &|m| m.supply[source_1][0] = 2);
-    rejects("a node in both commodities", &|m| {
+        .position(|s| *s == [0, 0])
+        .expect("a node without a terminal");
+    structural("a supply of 2", &|m| m.supply[idle][0] = 2);
+    structural("a node in both commodities", &|m| {
         m.supply[source_1][1] = 1;
         m.supply[source_2][1] = 0;
     });
-    rejects("a cost of 63", &|m| m.arcs[0].cost[0] = 63);
-    rejects("a cost of 0", &|m| m.arcs[3].cost[1] = 0);
-    rejects("a spin used twice", &|m| m.arcs[1].x1 = m.arcs[0].x1);
-    rejects("a chain spin used twice", &|m| {
-        m.arcs[1].chain[1] = m.arcs[0].chain[0];
+    structural("a cost of 64", &|m| m.arcs[0].cost[0] = 64);
+    structural("a cost of 0", &|m| m.arcs[3].cost[1] = 0);
+    structural("a commodity 1 spin used twice", &|m| {
+        m.arcs[second].x1 = m.arcs[first].x1;
     });
-    rejects("a spin out of range", &|m| m.arcs[0].x1 = u32::MAX);
-    rejects("a chain strength of one more", &|m| m.strength += 1);
-    rejects("a chain strength of one less", &|m| m.strength -= 1);
-    rejects("a chain strength of 0", &|m| m.strength = 0);
-    rejects("a chain strength above 1000", &|m| m.strength = 1001);
-    rejects("an arc against the street", &|m| {
+    structural("a chain spin used twice", &|m| {
+        m.arcs[second].chain[1] = m.arcs[first].chain[0];
+    });
+    structural("an arc against the street", &|m| {
         let arc = &mut m.arcs[0];
         std::mem::swap(&mut arc.tail, &mut arc.head);
     });
-    rejects("an arc between cells that are not neighbours", &|m| {
-        m.arcs[0].head = (m.arcs[0].tail + 2) % m.cells.len() as u32;
+    structural("an arc between cells that are not neighbours", &|m| {
+        m.arcs[0].head = far;
     });
-    rejects("an arc from a cell to itself", &|m| {
-        m.arcs[0].head = m.arcs[0].tail;
+    structural("a repeated cell pair", &|m| {
+        let template = m.arcs[0];
+        m.arcs[1].tail = template.tail;
+        m.arcs[1].head = template.head;
     });
-    rejects("a repeated cell pair", &|m| {
-        let first = m.arcs[0];
-        m.arcs[1].tail = first.tail;
-        m.arcs[1].head = first.head;
-    });
-    rejects("a node index out of range", &|m| m.arcs[0].tail = u32::MAX);
-    rejects("cells out of order", &|m| m.cells.swap(0, 1));
-    rejects("a repeated cell", &|m| m.cells[1] = m.cells[0]);
-    rejects("a cell outside the grid", &|m| m.cells[0] = (0, 1));
-    rejects("a cell past the grid", &|m| {
-        let last = m.cells.len() - 1;
-        m.cells[last] = (6, 1);
-    });
-    rejects("an arc dropped", &|m| {
+    structural("an arc dropped", &|m| {
         let _ = m.arcs.pop();
     });
-    rejects("no arc", &|m| m.arcs.clear());
-    rejects("no node", &|m| {
+    structural("cells shifted out of the grid", &|m| {
+        for cell in &mut m.cells {
+            *cell = (cell.0 + 2, cell.1 + 2);
+        }
+    });
+    structural("cells out of order", &|m| {
+        m.cells.swap(0, 1);
+        m.supply.swap(0, 1);
+        for arc in &mut m.arcs {
+            for end in [&mut arc.tail, &mut arc.head] {
+                *end = match *end {
+                    0 => 1,
+                    1 => 0,
+                    other => other,
+                };
+            }
+        }
+    });
+    // Metadata alone, with the instance unchanged.
+    let mut metadata_only = |what: &'static str, edit: &dyn Fn(&mut Meta)| {
+        let mut edited = meta.clone();
+        edit(&mut edited);
+        if check(&bytes, &with_metadata(&instance, encode(&edited))) {
+            accepted.push(what);
+        }
+    };
+    metadata_only("a chain strength of one more", &|m| m.strength += 1);
+    metadata_only("a chain strength of one less", &|m| m.strength -= 1);
+    metadata_only("a chain strength of 0", &|m| m.strength = 0);
+    metadata_only("a chain strength above 1000", &|m| m.strength = 1001);
+    metadata_only("an arc from a cell to itself", &|m| {
+        m.arcs[0].head = m.arcs[0].tail;
+    });
+    metadata_only("a node index out of range", &|m| m.arcs[0].tail = u32::MAX);
+    metadata_only("a spin out of range", &|m| m.arcs[0].x1 = u32::MAX);
+    metadata_only("a repeated cell", &|m| m.cells[1] = m.cells[0]);
+    metadata_only("no node", &|m| {
         m.cells.clear();
         m.supply.clear();
         m.arcs.clear();
     });
+    metadata_only("no arc", &|m| m.arcs.clear());
 
-    // A coefficient that differs from the rebuilt energy.
-    let mut h = instance.h().to_vec();
-    h[0] += 1;
-    let moved = rebuilt(
-        &instance,
-        h,
-        instance.j().to_vec(),
-        instance.metadata().to_vec(),
-    );
-    assert!(!check(&bytes, &moved), "a field off by one");
-    let mut j = instance.j().to_vec();
-    j[0] += 1;
-    let moved = rebuilt(
-        &instance,
+    // One coefficient group at a time, with the metadata unchanged.
+    let region = instance.metadata().to_vec();
+    let mut fields =
+        |what: &'static str, edges: Vec<(u32, u32)>, h: Vec<i32>, j: Vec<i32>, offset: i64| {
+            let bad = make(&instance, edges, h, j, offset, region.clone());
+            if check(&bytes, &bad) {
+                accepted.push(what);
+            }
+        };
+    let (edges, h, j, offset) = (
+        instance.edges().to_vec(),
         instance.h().to_vec(),
-        j,
-        instance.metadata().to_vec(),
+        instance.j().to_vec(),
+        instance.offset_milli(),
     );
-    assert!(!check(&bytes, &moved), "a coupling off by one");
+    let mut one_field = h.clone();
+    one_field[0] += 1;
+    fields(
+        "a field off by one",
+        edges.clone(),
+        one_field,
+        j.clone(),
+        offset,
+    );
+    let mut one_coupling = j.clone();
+    one_coupling[0] += 1;
+    fields(
+        "a coupling off by one",
+        edges.clone(),
+        h.clone(),
+        one_coupling,
+        offset,
+    );
     let pair = meta.arcs[0].chain;
-    let at = instance
-        .edges()
+    let at = edges
         .binary_search(&(pair[0].min(pair[1]), pair[0].max(pair[1])))
         .expect("chain coupler");
-    let mut j = instance.j().to_vec();
-    j[at] -= 1;
-    let moved = rebuilt(
-        &instance,
-        instance.h().to_vec(),
-        j,
-        instance.metadata().to_vec(),
+    let mut chain_coupling = j.clone();
+    chain_coupling[at] -= 1;
+    fields(
+        "a chain coupler off by one",
+        edges.clone(),
+        h.clone(),
+        chain_coupling,
+        offset,
     );
-    assert!(!check(&bytes, &moved), "a chain coupler off by one");
+    fields(
+        "an offset off by one",
+        edges.clone(),
+        h.clone(),
+        j.clone(),
+        offset + 1,
+    );
+    let moved = (0..edges.len())
+        .find_map(|k| {
+            let (u, v) = edges[k];
+            let candidate = (u, v + 1);
+            let after = edges.get(k + 1).is_none_or(|next| candidate < *next);
+            (v + 1 < n as u32 && after && !edges.contains(&candidate)).then(|| {
+                let mut moved = edges.clone();
+                moved[k] = candidate;
+                moved
+            })
+        })
+        .expect("an edge that can move");
+    fields(
+        "an edge moved with its coupling",
+        moved,
+        h.clone(),
+        j.clone(),
+        offset,
+    );
+    // An instance with no node: only the node and arc counts reject it.
+    let empty_meta = Meta {
+        cells: Vec::new(),
+        supply: Vec::new(),
+        arcs: Vec::new(),
+        strength: 1,
+    };
+    let none = InstanceParts {
+        descriptor_digest: *instance.descriptor_digest(),
+        topology_order_digest: *instance.topology_order_digest(),
+        nonce: instance.nonce().copied(),
+        node_ids: Vec::new(),
+        edges: Vec::new(),
+        h: Vec::new(),
+        j: Vec::new(),
+        offset_milli: 0,
+        metadata: encode(&empty_meta),
+    };
+    let none = Instance::new(none, &ROUTING_V1.limits, ROUTING_V1.metadata_kinds, None)
+        .expect("an empty instance");
+    if check(&bytes, &none) {
+        accepted.push("an instance with no node and no arc");
+    }
+    assert!(accepted.is_empty(), "accepted: {accepted:?}");
 
     // The section layout.
-    let region = instance.metadata().to_vec();
     let mut trailing = region.clone();
     trailing.push(0);
+    let parts = InstanceParts {
+        descriptor_digest: *instance.descriptor_digest(),
+        topology_order_digest: *instance.topology_order_digest(),
+        nonce: instance.nonce().copied(),
+        node_ids: instance.node_ids().to_vec(),
+        edges,
+        h,
+        j,
+        offset_milli: offset,
+        metadata: trailing,
+    };
     assert!(
-        Instance::new(
-            InstanceParts {
-                descriptor_digest: *instance.descriptor_digest(),
-                topology_order_digest: *instance.topology_order_digest(),
-                nonce: instance.nonce().copied(),
-                node_ids: instance.node_ids().to_vec(),
-                edges: instance.edges().to_vec(),
-                h: instance.h().to_vec(),
-                j: instance.j().to_vec(),
-                offset_milli: instance.offset_milli(),
-                metadata: trailing,
-            },
-            &ROUTING_V1.limits,
-            ROUTING_V1.metadata_kinds,
-            None
-        )
-        .is_err(),
+        Instance::new(parts, &ROUTING_V1.limits, ROUTING_V1.metadata_kinds, None).is_err(),
         "trailing bytes are code 16 at the instance layer"
     );
     // A payload with a byte too many or too few.
