@@ -134,7 +134,9 @@ encodings do not change.
   `2 <= L <= 64`. The charge of a vertex comes directly from the spins. A charge request has
   a shape check and a compatibility check. A witness holds packed bytes with labeled
   constraints and a canonical identity under the symmetries that preserve the
-  request. The modules register no family. The contract is `docs/square-links.md`.
+  request. A malformed request gives `WitnessError::Request` before any byte
+  check, so `constraints` and `symmetries` return a `Result`. The modules register
+  no family. The contract is `docs/square-links.md`.
 
 ### Changed
 

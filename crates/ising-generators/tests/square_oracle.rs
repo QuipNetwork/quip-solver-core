@@ -780,3 +780,18 @@ fn malformed_requests_fail_before_witness_and_symmetry_work() {
     // Reversal maps all up to all down, which packs to zero bytes.
     assert_eq!(canonical(&lat, &impossible, &witness), Ok(vec![0]));
 }
+
+#[test]
+fn canonical_checks_the_bytes_before_the_symmetries() {
+    // Periodic L = 64 with an empty request admits 65,536 candidates. Malformed
+    // bytes must fail before any of them is built.
+    let big = lattice(64, Boundary::Periodic);
+    let empty = request(vec![None; 4096], Vec::new());
+    assert_eq!(canonical(&big, &empty, &[]), Err(WitnessError::Length));
+    // A malformed request still wins over malformed bytes.
+    let bad = request(vec![None; 4096], vec![(0, 1), (0, 1)]);
+    assert_eq!(
+        canonical(&big, &bad, &[]),
+        Err(WitnessError::Request(RequestError::FixedNotAscending))
+    );
+}

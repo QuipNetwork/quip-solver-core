@@ -196,8 +196,9 @@ pub fn canonical(
     request: &Request,
     bytes: &[u8],
 ) -> Result<Vec<u8>, WitnessError> {
-    let group = symmetries(lattice, request).map_err(WitnessError::Request)?;
+    check_request_shape(lattice, request).map_err(WitnessError::Request)?;
     let spins = unpack(bytes, lattice.link_count())?;
+    let group = symmetries(lattice, request).map_err(WitnessError::Request)?;
     let mut least = bytes.to_vec();
     let mut image = Vec::new();
     let mut packed = Vec::new();
