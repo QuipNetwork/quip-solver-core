@@ -47,6 +47,7 @@
       "ALGORITHM_MFA": 8,
       "ALGORITHM_MPS": 7,
       "ALGORITHM_MSA": 5,
+      "ALGORITHM_OTSUKA": 19,
       "ALGORITHM_QUANTUM_ANNEAL": 3,
       "ALGORITHM_SA": 1,
       "ALGORITHM_SB": 9,

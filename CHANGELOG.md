@@ -15,6 +15,8 @@ features. The conformance crate adds their contracts and vectors.
 
 ### Added
 
+- `miner.proto`: the enum value `ALGORITHM_OTSUKA` = 19, named `otsuka`, for the
+  Otsuka cluster anneal. The Rust, Python, and TypeScript bindings include it.
 - The topology blob format, defined in `docs/topology-format.md`. A `.bin.gz` file
   holds an explicit topology or a Zephyr lattice minus removals.
 - `ising-generators` features `blob` and `cli`. The `blob` feature is `no_std` and
