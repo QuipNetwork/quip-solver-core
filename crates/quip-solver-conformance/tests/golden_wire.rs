@@ -334,7 +334,8 @@ fn enum_numbers_match_the_fixture() {
             Hdsb,
             Sbqa,
             Tedsb,
-            External
+            External,
+            Otsuka
         ]
     );
     pin_enum!(

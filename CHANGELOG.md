@@ -5,68 +5,58 @@ This file documents changes to the Quip solver contract.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## 0.0.5
-
-The wire fields for problem families, and the declaration that advertises
-them. A solver session admits and expands family leases for the revisions that
-it generates. The default output and bytes of a solver that declares nothing do
-not change. A solver that accepts a family checks the binding of each explicit
-job before its sampler sees the metadata. `protocol_version` stays 2, and old
-encodings do not change.
+## Unreleased
 
 ### Added
 
-- `miner.proto`: the enum values `GENERATOR_ALGORITHM_FAMILY_CHACHA8_V1` = 2
-  and `FAMILY_UNSUPPORTED` = 10. The messages `FamilyDescriptor`,
-  `FamilyBinding`, and `FamilySupport`. The fields
-  `IsingProblemGenerator.family` at tag 8, `IsingProblemGenerator.topology_order_digest`
-  at tag 9, `IsingProblem.family` at tag 17, `Capabilities.solver_id` at tag 17,
-  `Capabilities.generated_families` at tag 18, and `Capabilities.accepted_families`
-  at tag 19. The Rust, Python, and TypeScript bindings include them.
-- `quip_protocol::family::reject_reason` and `CodePhase`, behind the
-  `session` feature. They map a family rejection code to a wire reject reason.
-- `Sampler::declaration`, `families::{Declaration, FamilyClaim, FamilyList,
-  FamilyTable, DeclarationError}`, and `capabilities_for`. A Rust solver
-  declares its `solver_id` and family lists, and the session advertises them
-  in `Hello` and `GetCapabilities`.
-- `quip_protocol::family::{SolverIdClass, solver_id_class, entry_claims,
-  support_code}`.
-- The `--capabilities` keys `solverId`, `generatedFamilies`, and
-  `acceptedFamilies`. Each key is absent when its list is empty.
-- `ising_generators::family`: family constructions and canonical instance generation.
-- `Contract.construction`, and `FamilyTable::{generated_contract, accepted_contract}`.
-- `DeclarationError::{NoConstruction, InvalidLabel}`.
-- `FamilyLease`, `Lease::family`, and `LeaseSink::skip`. A local sampler reads the
-  family inputs of a lease and reports a skipped salt.
-- `Generator::FamilyChacha8V1`, `LeaseError::DescriptorMissing`, and
-  `VerifyError::FamilyLease`.
-- `families::{FamilyContext, FamilySource}`, `Sampler::accepts_family_metadata`,
-  and `Sampler::sample_family`. A sampler that opts in gets the validated family
-  structure of a lease salt or an explicit job. The session then feeds every
-  job through `sample_stream_warm`, so a sampler that overrides `sample_stream`
-  must also override `sample_stream_warm`.
-- `WarmStreamJob.family`. It holds the context for an opted-in sampler.
-- `ising_generators::instance::InstanceParts::check_bounds`, the bounds step of `Instance::new`.
-- `quip_solver_conformance::families`, with the `layered` module. The module holds
-  `LAYERED`, `UNIFORM_FIELD`, `example_size_bounds`, `TIGHT_LIMITS`, `UNIFORM_V1`,
-  and `RESTRICTED_V1`. The instance checker adds `export_instances`,
-  `parse_vector_cases`, `first_diff`, `compare`, and `check_case`. It also adds the
-  types `VectorCase`, `ExpectedSalt`, `Expected`, `Component`, `FirstDiff`, and
-  `CaseMismatch`. A mismatch names the first differing component of the instance bytes.
-- `FAMILY_LAYERED` and `vectors/families/layered.json`, the oracle vectors for the
-  layered construction. Their provenance is `test-construction`.
-- `quip-solver-drive --family <solver-binary> unix://<socket>`, the family gate.
-  It grades the session cases and ten cases for each reference revision.
-- `families::{drive_miner_family, FamilyReport, FamilyCase, ReferenceRevision,
-  REFERENCE_REVISIONS, reference_revision}`.
-- `families::layered::{P_SPEC, P_L2_F0, P_L3_F0, P_F5000}`.
-- `docs/family-conformance.md`. It defines the FAM-57 gate and the coverage of
-  the 44 SC-7 check ids.
-- `vectors/families/registry.json` and `FAMILY_REGISTRY`, the family registry. Each
-  entry pins the vectors of a revision with a BLAKE3 hash.
-- `families::registry::{Status, RegistryEntry, parse_registry, unregistered_quip_ids,
-  archived_among}`.
-- The contracts in `docs/families/`, one for each registered revision.
+- `quip/polariton-static@1`, a registered family with status `research` and the
+  first `hard` family. An open square-link lattice of side `L` sits natively on
+  Zephyr cells, where each vertex is a cell K4 and each link is one shared segment
+  qubit. The interior vertices carry balanced charges of `+2`, `-2`, and `0`, and
+  the instance holds the charge penalty `(U / 2) * (Q - q)^2` with `U` of 250
+  milli. A witness is valid only when every labeled charge holds. The charges draw
+  from a ChaCha8 stream with at most four tries, and a salt whose four draws
+  all fail the request check gives code 14. The metadata uses the registered kinds 4 and 5. The
+  contract registers three parameter sets on z(12, 4) as recipes, `l4`, `l8`, and
+  `l9`. A static pattern does not show optical preparation, retention, or
+  transport. The family has no research cohort. The contract is
+  `docs/families/quip-polariton-static-1.md`, the vectors are `polariton.json`,
+  and the Rust contract is `ising_generators::polariton::POLARITON_V1`. The new
+  hook `family::feasible` and the `feasible` field of `Construction` let a `hard`
+  family state its feasibility constraint. The coordinator does not call the hook
+  yet. The `--family` gate sends the revision the `routing-small` topology.
+- `ising_generators::dipolar`: exact integer coefficient tables for axis-aligned
+  square ice. A validator checks each entry with integers. The module also has the
+  truncation bound, BLAKE3 digests, and `physical_status`. No result of
+  `physical_status` is a physical-validation success. `docs/dipolar-numerics.md`
+  has the formula and the `u128` bound.
+
+## 0.0.6
+
+Topology blob files and four ice families. `ising-generators` adds the ice tile
+structure, the `quip/ice-glass`, `quip/twisted-ice-dimer`, `quip/charged-ice`,
+and `quip/ice-fields` revision 1 constructions, and the optional `blob` and `cli`
+features. The conformance crate adds their contracts and vectors.
+`protocol_version` stays 2, and the default features do not change.
+
+### Added
+
+- The `--family` gate of `quip-solver-drive` also sends explicit family jobs for
+  each revision that a binary lists in `accepted_families` and that has a reference
+  contract. It adds five cases after the lease cases: `explicit-supported`,
+  `explicit-digest-mismatch`, `explicit-metadata-invalid`,
+  `explicit-params-out-of-bounds`, and `explicit-topology-hash-form`. Each explicit
+  job must return exactly one credit. A binary that lists no accepted revision gets
+  the same report as before.
+- Each `ReferenceRevision` of `quip-solver-conformance` has a `topology` field, the
+  base topology the `--family` gate sends for that revision. The layered revisions
+  keep `T_SPARSE`. `quip/ice-glass@1` uses `z12-zephyr`, the other three ice
+  revisions use `z22-zephyr`, and `quip/two-commodity-routing@1` uses
+  `routing-small`, so these revisions pass `supported-revision` instead of failing
+  with admission code 12. The gate sends a new `Topology` message with its
+  own hash when a revision needs a topology that the session does not hold.
+- `miner.proto`: the enum value `ALGORITHM_OTSUKA` = 19, named `otsuka`, for the
+  Otsuka cluster anneal. The Rust, Python, and TypeScript bindings include it.
 - The topology blob format, defined in `docs/topology-format.md`. A `.bin.gz` file
   holds an explicit topology or a Zephyr lattice minus removals.
 - `ising-generators` features `blob` and `cli`. The `blob` feature is `no_std` and
@@ -129,22 +119,6 @@ encodings do not change.
   a recipe. The contract is `docs/families/quip-two-commodity-routing-1.md`, the
   vectors are `two_commodity.json`, and the Rust contract is
   `ising_generators::routing::ROUTING_V1`. The research cohort is not regenerated.
-- `quip/polariton-static@1`, a registered family with status `research` and the
-  first `hard` family. An open square-link lattice of side `L` sits natively on
-  Zephyr cells, where each vertex is a cell K4 and each link is one shared segment
-  qubit. The interior vertices carry balanced charges of `+2`, `-2`, and `0`, and
-  the instance holds the charge penalty `(U / 2) * (Q - q)^2` with `U` of 250
-  milli. A witness is valid only when every labeled charge holds. The charges draw
-  from a ChaCha8 stream with at most four tries, and a salt whose four draws
-  all fail the request check gives code 14. The metadata uses the registered kinds 4 and 5. The
-  contract registers three parameter sets on z(12, 4) as recipes, `l4`, `l8`, and
-  `l9`. A static pattern does not show optical preparation, retention, or
-  transport. The family has no research cohort. The contract is
-  `docs/families/quip-polariton-static-1.md`, the vectors are `polariton.json`,
-  and the Rust contract is `ising_generators::polariton::POLARITON_V1`. The new
-  hook `family::feasible` and the `feasible` field of `Construction` let a `hard`
-  family state its feasibility constraint. The coordinator does not call the hook
-  yet.
 - `ising_generators::square` and `ising_generators::witness`: the shared primitives
   for link-based families on a square lattice. The lattice is periodic or open with
   `2 <= L <= 64`. The charge of a vertex comes directly from the spins. A charge request has
@@ -153,7 +127,78 @@ encodings do not change.
   request. A malformed request gives `WitnessError::Request` before any byte
   check, so `constraints` and `symmetries` return a `Result`. The modules register
   no family. The contract is `docs/square-links.md`.
-- `ising_generators::dipolar`: exact integer coefficient tables for axis-aligned square ice. A validator checks each entry with integers. The module also has the truncation bound, BLAKE3 digests, and `physical_status`. No result of `physical_status` is a physical-validation success. `docs/dipolar-numerics.md` has the formula and the `u128` bound.
+
+### Changed
+
+- The family vectors store each topology as a file under
+  `crates/quip-solver-conformance/vectors/topologies/`, with `index.json`. A
+  topology field in a vectors file is now a path. The `vectors_blake3` pins of
+  `vectors/restricted-field@1` and `vectors/uniform-field@1` in `registry.json`
+  changed because the topology field became a file reference. The instance bytes
+  did not change. The Rust tests load `T_SPARSE` from the shared file.
+
+## 0.0.5
+
+The wire fields for problem families, and the declaration that advertises
+them. A solver session admits and expands family leases for the revisions that
+it generates. The default output and bytes of a solver that declares nothing do
+not change. A solver that accepts a family checks the binding of each explicit
+job before its sampler sees the metadata. `protocol_version` stays 2, and old
+encodings do not change.
+
+### Added
+
+- `miner.proto`: the enum values `GENERATOR_ALGORITHM_FAMILY_CHACHA8_V1` = 2
+  and `FAMILY_UNSUPPORTED` = 10. The messages `FamilyDescriptor`,
+  `FamilyBinding`, and `FamilySupport`. The fields
+  `IsingProblemGenerator.family` at tag 8, `IsingProblemGenerator.topology_order_digest`
+  at tag 9, `IsingProblem.family` at tag 17, `Capabilities.solver_id` at tag 17,
+  `Capabilities.generated_families` at tag 18, and `Capabilities.accepted_families`
+  at tag 19. The Rust, Python, and TypeScript bindings include them.
+- `quip_protocol::family::reject_reason` and `CodePhase`, behind the
+  `session` feature. They map a family rejection code to a wire reject reason.
+- `Sampler::declaration`, `families::{Declaration, FamilyClaim, FamilyList,
+  FamilyTable, DeclarationError}`, and `capabilities_for`. A Rust solver
+  declares its `solver_id` and family lists, and the session advertises them
+  in `Hello` and `GetCapabilities`.
+- `quip_protocol::family::{SolverIdClass, solver_id_class, entry_claims,
+  support_code}`.
+- The `--capabilities` keys `solverId`, `generatedFamilies`, and
+  `acceptedFamilies`. Each key is absent when its list is empty.
+- `ising_generators::family`: family constructions and canonical instance generation.
+- `Contract.construction`, and `FamilyTable::{generated_contract, accepted_contract}`.
+- `DeclarationError::{NoConstruction, InvalidLabel}`.
+- `FamilyLease`, `Lease::family`, and `LeaseSink::skip`. A local sampler reads the
+  family inputs of a lease and reports a skipped salt.
+- `Generator::FamilyChacha8V1`, `LeaseError::DescriptorMissing`, and
+  `VerifyError::FamilyLease`.
+- `families::{FamilyContext, FamilySource}`, `Sampler::accepts_family_metadata`,
+  and `Sampler::sample_family`. A sampler that opts in gets the validated family
+  structure of a lease salt or an explicit job. The session then feeds every
+  job through `sample_stream_warm`, so a sampler that overrides `sample_stream`
+  must also override `sample_stream_warm`.
+- `WarmStreamJob.family`. It holds the context for an opted-in sampler.
+- `ising_generators::instance::InstanceParts::check_bounds`, the bounds step of `Instance::new`.
+- `quip_solver_conformance::families`, with the `layered` module. The module holds
+  `LAYERED`, `UNIFORM_FIELD`, `example_size_bounds`, `TIGHT_LIMITS`, `UNIFORM_V1`,
+  and `RESTRICTED_V1`. The instance checker adds `export_instances`,
+  `parse_vector_cases`, `first_diff`, `compare`, and `check_case`. It also adds the
+  types `VectorCase`, `ExpectedSalt`, `Expected`, `Component`, `FirstDiff`, and
+  `CaseMismatch`. A mismatch names the first differing component of the instance bytes.
+- `FAMILY_LAYERED` and `vectors/families/layered.json`, the oracle vectors for the
+  layered construction. Their provenance is `test-construction`.
+- `quip-solver-drive --family <solver-binary> unix://<socket>`, the family gate.
+  It grades the session cases and ten cases for each reference revision.
+- `families::{drive_miner_family, FamilyReport, FamilyCase, ReferenceRevision,
+  REFERENCE_REVISIONS, reference_revision}`.
+- `families::layered::{P_SPEC, P_L2_F0, P_L3_F0, P_F5000}`.
+- `docs/family-conformance.md`. It defines the FAM-57 gate and the coverage of
+  the 44 SC-7 check ids.
+- `vectors/families/registry.json` and `FAMILY_REGISTRY`, the family registry. Each
+  entry pins the vectors of a revision with a BLAKE3 hash.
+- `families::registry::{Status, RegistryEntry, parse_registry, unregistered_quip_ids,
+  archived_among}`.
+- The contracts in `docs/families/`, one for each registered revision.
 
 ### Changed
 
@@ -194,12 +239,6 @@ encodings do not change.
   `quip-solver-conformance`.
 - Two evidence entries in the family vectors no longer defer to SC-5. They defer to
   SC-8, SC-12, and SC-13.
-- The family vectors store each topology as a file under
-  `crates/quip-solver-conformance/vectors/topologies/`, with `index.json`. A
-  topology field in a vectors file is now a path. The `vectors_blake3` pins of
-  `vectors/restricted-field@1` and `vectors/uniform-field@1` in `registry.json`
-  changed because the topology field became a file reference. The instance bytes
-  did not change. The Rust tests load `T_SPARSE` from the shared file.
 
 ## 0.0.4
 

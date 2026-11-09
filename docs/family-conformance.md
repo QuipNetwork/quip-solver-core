@@ -58,7 +58,7 @@ The gate runs against a mock coordinator.
 It reads the `Hello` capabilities first, then walks the cases in the order below.
 A case reports `pass`, `fail`, or `skip`.
 A skip carries its reason.
-Per-revision cases carry the subject `family_id@revision`.
+Per-revision and explicit-job cases carry the subject `family_id@revision`.
 
 ### Session cases
 
@@ -74,7 +74,16 @@ Per-revision cases carry the subject `family_id@revision`.
 
 The gate runs these ten cases for each `(family_id, revision)` that the binary lists in `generated_families`.
 At present the reference revisions are `vectors/uniform-field@1`, `vectors/restricted-field@1`, `quip/ice-glass@1`, `quip/twisted-ice-dimer@1`, `quip/charged-ice@1`, `quip/ice-fields@1`, `quip/two-commodity-routing@1`, and `quip/polariton-static@1`.
-The gate sends the fixed topology `T_SPARSE`, which carries no ice tiles. A binary that lists `quip/ice-glass@1`, `quip/twisted-ice-dimer@1`, `quip/charged-ice@1`, `quip/ice-fields@1`, `quip/two-commodity-routing@1`, or `quip/polariton-static@1` fails `supported-revision`, because every reference params set gets code 12 (`TopologyIncompatible`). No solver in this repository lists either one.
+The gate sends each reference revision its own base topology.
+The two layered revisions use `T_SPARSE`.
+`quip/ice-glass@1` uses the topology `z12-zephyr`, and the other three ice revisions use `z22-zephyr`.
+`quip/two-commodity-routing@1` and `quip/polariton-static@1` use `routing-small`, a z(2, 4) Zephyr topology.
+These are the topologies of the registered vectors, and at least one reference params set of each revision admits on its topology.
+A session holds one topology, the last one sent.
+The gate sends `T_SPARSE` in the setup.
+Before the first job of a revision whose topology differs from the one the session holds, the gate sends that topology in a new `Topology` message with its own hash.
+`T_SPARSE` keeps its hash, and every other topology uses its order digest as its hash.
+A revision run on `T_SPARSE`, which carries no ice tiles, gets admission code 12 (`TopologyIncompatible`) for every ice params set.
 If the gate cannot drive a listed revision, `supported-revision` fails and states the reason.
 The reason is one of these:
 
@@ -99,6 +108,27 @@ If the binary lists the next revision, the gate skips `revision-plus-one`.
 | `degree-bound-too-large` | Params whose degree exceeds the advertised bound | One `Reject` with the bounds-exceeded code (FAM-47) |
 | `stale-lease` | A generation at or below the `Cancel` watermark | The binary sends nothing for the lease except an optional `LeaseDone` with zero salts done, then refunds one credit |
 | `deadline-expired` | A deadline already past | One `Reject` with the expired reason |
+
+### Explicit-job cases of each accepted revision
+
+The gate runs these five cases for each `(family_id, revision)` that the binary lists in `accepted_families` and that has a reference contract.
+It runs them after every case of the previous section, so a binary that lists no accepted revision gets the same report as before.
+A pair in `accepted_families` without a reference contract gets no explicit-job case.
+The job is an `ISING_SAMPLE` job whose `IsingProblem.family` holds a `FamilyBinding` (FAM-64 to FAM-68).
+The gate builds it from the first reference params set that the accepted entry admits under the advertised limits.
+It regenerates the canonical instance of the first salt of the gate lease that this params set does not skip, on the base topology of the revision.
+The edges, `h`, `J`, node ids, nonce, metadata, offset, and instance digest of the job come from that instance.
+If no params set gives an instance, `explicit-supported` fails with the reason and the gate skips the other four cases with the same reason.
+If the gate cannot build the job of another case, that case fails with the reason.
+Each explicit job must also return exactly one credit, so `credit-ledger-balanced` counts these jobs.
+
+| Case | Rule | What the case sends | Pass when |
+|---|---|---|---|
+| `explicit-supported` | FAM-64, FAM-65 | A valid binding | The binary returns one `Result` and no `Reject`. The energy of each solution equals the plain-model energy of its spins, without the offset. The binary then refunds one credit. |
+| `explicit-digest-mismatch` | FAM-68 | The valid job with one byte of `instance_digest` changed | One `Reject` with the reason of code 15 (`MALFORMED`), no `Result`, and one refund |
+| `explicit-metadata-invalid` | FAM-36, FAM-67 | A job whose metadata fails the family check, with `instance_digest` computed over the changed bytes | One `Reject` with the reason of code 16 (`MALFORMED`), no `Result`, and one refund |
+| `explicit-params-out-of-bounds` | FAM-65 | The reference out-of-bounds params in the descriptor, with their digest | One `Reject` with the reason of code 9 (`MALFORMED`), no `Result`, and one refund |
+| `explicit-topology-hash-form` | FAM-64 | The valid binding with the graph in the `topology_hash` form instead of `edges` | One `Reject` with the reason of code 15 (`MALFORMED`), no `Result`, and one refund |
 
 ### Closing cases
 
