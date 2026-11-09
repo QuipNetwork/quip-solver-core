@@ -141,6 +141,7 @@ const fn labelled(labels: &'static [&'static str]) -> Construction {
         check_topology: accept_topology,
         generate: no_instance,
         check_metadata: accept_metadata,
+        feasible: None,
     }
 }
 

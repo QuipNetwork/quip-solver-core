@@ -75,6 +75,7 @@ pub static ICE_GLASS: Construction = Construction {
     check_topology,
     generate,
     check_metadata,
+    feasible: None,
 };
 
 /// The contract of `quip/ice-glass@1`.

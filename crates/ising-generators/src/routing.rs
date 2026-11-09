@@ -98,6 +98,7 @@ pub static ROUTING: Construction = Construction {
     check_topology,
     generate,
     check_metadata,
+    feasible: None,
 };
 
 /// The contract of `quip/two-commodity-routing@1`.

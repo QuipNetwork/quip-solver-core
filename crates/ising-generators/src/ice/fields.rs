@@ -90,6 +90,7 @@ pub static ICE_FIELDS: Construction = Construction {
     check_topology,
     generate,
     check_metadata,
+    feasible: None,
 };
 
 /// The contract of `quip/ice-fields@1`.

@@ -88,6 +88,7 @@ pub static TWISTED_DIMER: Construction = Construction {
     check_topology,
     generate,
     check_metadata,
+    feasible: None,
 };
 
 /// The contract of `quip/twisted-ice-dimer@1`.

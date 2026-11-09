@@ -101,6 +101,7 @@ pub static CHARGED_ICE: Construction = Construction {
     check_topology,
     generate,
     check_metadata,
+    feasible: None,
 };
 
 /// The contract of `quip/charged-ice@1`.
