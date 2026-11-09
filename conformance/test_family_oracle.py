@@ -1459,3 +1459,111 @@ def test_routing_retry_and_no_instance_cases_exist():
     assert not by_name["routing-no-instance"]["instances"]
     assert {s["skip_code"] for s in by_name["routing-no-instance"]["skipped"]} == {14}
     assert any(t["try"] > 1 for t in terminals)
+
+
+# ---- quip/polariton-static ----
+
+
+def _polariton(m, t, side, pairs, nodes, edges, nonce=bytes(range(32))):
+    from family_oracle import polariton
+
+    params = build._polariton_params(m, t, side, pairs)
+    return polariton.generate(b"quip/polariton-static", 1, params, nodes, edges, nonce)
+
+
+def test_polariton_energy_is_the_charge_loss_for_every_l2_state():
+    from family_oracle import polariton
+
+    nodes, edges = ice.lattice(2, 4)
+    code, inst = _polariton(2, 4, 2, 0, nodes, edges)
+    assert code == 0
+    assert len(inst["node_ids"]) == 12
+    for bits in range(4096):
+        spins = [1 if bits >> i & 1 else -1 for i in range(12)]
+        seen = polariton.observables(inst, spins)
+        assert polariton.encoded_energy(inst, spins) == seen["loss_milli"]
+        assert (seen["violations"] == 0) == (seen["loss_milli"] == 0)
+
+
+def test_polariton_instance_follows_the_contract_rules():
+    nodes, edges = ice.lattice(3, 4)
+    code, inst = _polariton(3, 4, 3, 2, nodes, edges)
+    assert code == 0
+    labels = inst["labels"]
+    assert sum(1 for q in labels if q == 2) == 2
+    assert sum(1 for q in labels if q == -2) == 2
+    side, width = 3, 4
+    for v, q in enumerate(labels):
+        x, y = v % width, v // width
+        on_border = x in (0, side) or y in (0, side)
+        assert (q is None) == on_border
+    assert inst["node_ids"] == sorted(inst["node_ids"], key=nodes.index)
+    assert sorted(inst["positions"]) == list(range(2 * side * (side + 1)))
+    assert inst["window"] == (1, 1)
+    assert max(abs(x) for x in (*inst["h"], *inst["j"])) <= 1000
+    native = {(min(a, b), max(a, b)) for a, b in edges}
+    for a, b in inst["edges"]:
+        pair = (inst["node_ids"][a], inst["node_ids"][b])
+        assert (min(pair), max(pair)) in native
+
+
+def test_polariton_witnesses_are_feasible_and_infeasible():
+    from family_oracle import polariton
+
+    nodes, edges = ice.lattice(3, 4)
+    code, inst = _polariton(3, 4, 3, 2, nodes, edges)
+    assert code == 0
+    good, bad = polariton.witnesses(inst)
+    assert polariton.observables(inst, good)["violations"] == 0
+    assert polariton.encoded_energy(inst, good) == 0
+    seen = polariton.observables(inst, bad)
+    assert seen["violations"] > 0
+    assert polariton.encoded_energy(inst, bad) == seen["loss_milli"] == 500
+
+
+def test_polariton_feasibility_finds_the_known_obstruction():
+    from family_oracle import polariton
+
+    lattice = polariton.Lattice(7)
+    labels = [None] * len(lattice.incident)
+    # A 2 by 3 block of +2 needs charge 12 from 10 leaving links.
+    for y in (2, 3):
+        for x in (2, 3, 4):
+            labels[y * lattice.width + x] = 2
+    assert polariton.check_request(lattice, labels) is None
+    labels[3 * lattice.width + 4] = 0
+    assert polariton.check_request(lattice, labels) is not None
+
+
+def test_polariton_admission_codes():
+    from family_oracle import polariton
+
+    z34 = ice.lattice(3, 4)
+
+    def code(m, t, side, pairs, nodes, edges):
+        return polariton.admission_code(
+            build._polariton_params(m, t, side, pairs), nodes, edges
+        )
+
+    assert code(3, 4, 3, 2, *z34) is None
+    assert code(3, 4, 3, 3, *z34) == 12
+    assert code(2, 4, 3, 0, *ice.lattice(2, 4)) == 12
+    assert code(2, 4, 1, 0, *ice.lattice(2, 4)) == 9
+    assert code(2, 4, 65, 0, *ice.lattice(2, 4)) == 9
+    assert code(2, 4, 2, 2049, *ice.lattice(2, 4)) == 9
+    assert polariton.admission_code(b"\x01", *z34) == 7
+    assert code(3, 1, 2, 0, *build._polariton_no_window()) == 12
+    assert code(3, 1, 3, 2, *build._polariton_dead_cell()) is None
+    looped = build._routing_self_loop()
+    assert code(3, 4, 3, 2, *looped) == 12
+
+
+def test_polariton_dead_cell_moves_the_window_and_the_retry_case_retries():
+    from family_oracle import polariton
+
+    placed = polariton.place(3, 1, 3, *build._polariton_dead_cell())
+    assert (placed["c0"], placed["r0"]) == (1, 2)
+    cases, witnesses = build._polariton_cases_and_witnesses()
+    by_name = {c["name"]: c for c in cases}
+    assert {s["skip_code"] for s in by_name["polariton-retry"]["skipped"]} == {14}
+    assert len(witnesses) == 2 * len(cases)

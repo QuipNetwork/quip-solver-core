@@ -108,6 +108,17 @@ TWO_COMMODITY = Schema(
     ),
 )
 
+POLARITON = Schema(
+    "quip/polariton-static",
+    1,
+    (
+        Field(1, "zephyr_m", "u16", 1, 1, 32),
+        Field(2, "zephyr_t", "u8", 1, 1, 8),
+        Field(3, "side", "u16", 1, 2, 64),
+        Field(4, "pairs", "u16", 1, 0, 2048),
+    ),
+)
+
 ALL_TYPES = Schema(
     "example/all-types",
     1,
