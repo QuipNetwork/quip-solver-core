@@ -4942,6 +4942,9 @@ fn the_polariton_retry_case_has_a_salt_that_passes_after_a_failed_try() -> Resul
 /// Recompute the encoded energy, the feasible result, and the observables of
 /// one witness through the Rust construction. Returns the expected feasible
 /// flag.
+/// The energy of an infeasible witness: one violated label, in milli.
+const POLARITON_LOW_ENERGY: i128 = 500;
+
 fn check_polariton_witness(doc: &Value, witness: &Value) -> Result<bool, String> {
     use ising_generators::descriptor::{admit, params_digest};
     use ising_generators::family::{admit_topology, feasible, generate_instance, BaseTopology};
@@ -5030,36 +5033,45 @@ fn check_polariton_witness(doc: &Value, witness: &Value) -> Result<bool, String>
         &i128::from(int("energy_milli")?),
     )?;
     // The energy is the charge loss, so a state is feasible exactly when
-    // its energy is 0, and an infeasible witness has a low energy.
-    compare(
-        witness,
-        "energy is the loss",
-        &energy,
-        &i128::from(seen.loss_milli),
-    )?;
-    compare(
-        witness,
-        "feasible is zero loss",
-        &want_feasible,
-        &(seen.loss_milli == 0),
-    )?;
+    // its energy is 0. An infeasible witness has the lowest possible
+    // violation, one violated label, which costs 500 milli.
+    let want_energy = if want_feasible {
+        0
+    } else {
+        POLARITON_LOW_ENERGY
+    };
+    compare(witness, "energy", &energy, &want_energy)?;
+    compare(witness, "loss", &i128::from(seen.loss_milli), &want_energy)?;
     Ok(want_feasible)
 }
 
 /// Recompute every witness, and count one feasible and one infeasible witness
 /// for each case.
 fn check_polariton_witnesses(doc: &Value) -> Result<(), String> {
-    let (mut feasible_count, mut infeasible_count) = (0usize, 0usize);
+    use std::collections::BTreeMap;
+    let mut seen: BTreeMap<String, (usize, usize)> = BTreeMap::new();
     for witness in section(doc, "witnesses")? {
-        if check_polariton_witness(doc, witness)? {
-            feasible_count += 1;
+        let feasible = check_polariton_witness(doc, witness)?;
+        let case = str_field(witness, "case")?;
+        let kind = if feasible { "feasible" } else { "infeasible" };
+        compare(
+            witness,
+            "name",
+            &str_field(witness, "name")?.to_owned(),
+            &format!("{case}-{kind}"),
+        )?;
+        let slot = seen.entry(case.to_owned()).or_default();
+        if feasible {
+            slot.0 += 1;
         } else {
-            infeasible_count += 1;
+            slot.1 += 1;
         }
     }
-    let cases = section(doc, "cases")?.len();
-    compare(doc, "feasible witnesses", &feasible_count, &cases)?;
-    compare(doc, "infeasible witnesses", &infeasible_count, &cases)
+    for case in section(doc, "cases")? {
+        let got = seen.remove(case_name(case));
+        compare(case, "witnesses of the case", &got, &Some((1, 1)))?;
+    }
+    compare(doc, "witnesses of unknown cases", &seen.len(), &0)
 }
 
 #[test]
@@ -5333,6 +5345,110 @@ fn a_changed_polariton_witness_fails_the_check() -> Result<(), String> {
     *first = json!(-first.as_i64().ok_or("not an integer")?);
     let broken = mutate(&doc, "/witnesses/0/spins", Value::Array(flipped));
     expect_err(&check_polariton_witnesses(&broken), "a changed spin")
+}
+
+#[test]
+fn a_polariton_witness_set_must_cover_every_case_with_both_kinds() -> Result<(), String> {
+    let doc = polariton_doc()?;
+    let witnesses = section(&doc, "witnesses")?;
+    let last = witnesses.len();
+    // The retry witnesses replaced by the L2 witnesses under the retry name.
+    let mut swapped = witnesses.to_vec();
+    for (slot, kind) in [(last - 2, "feasible"), (last - 1, "infeasible")] {
+        let source = witnesses
+            .iter()
+            .find(|w| {
+                w.get("name").and_then(Value::as_str) == Some(&format!("polariton-l2-{kind}"))
+            })
+            .ok_or("no L2 witness")?;
+        let mut copy = source.clone();
+        for (key, value) in [
+            ("name", json!(format!("polariton-retry-{kind}"))),
+            ("case", json!("polariton-retry")),
+        ] {
+            if let Some(field) = copy.get_mut(key) {
+                *field = value;
+            }
+        }
+        *swapped.get_mut(slot).ok_or("no slot")? = copy;
+    }
+    let broken = mutate(&doc, "/witnesses", Value::Array(swapped));
+    expect_err(&check_polariton_witnesses(&broken), "renamed witnesses")?;
+    // A case with two feasible witnesses and no infeasible one.
+    let mut twice = witnesses.to_vec();
+    let first = twice.first().ok_or("no witness")?.clone();
+    *twice.get_mut(1).ok_or("no slot")? = first;
+    let broken = mutate(&doc, "/witnesses", Value::Array(twice));
+    expect_err(
+        &check_polariton_witnesses(&broken),
+        "a missing infeasible witness",
+    )?;
+    // A case without witnesses.
+    let broken = mutate(
+        &doc,
+        "/witnesses",
+        Value::Array(witnesses.iter().take(last - 2).cloned().collect()),
+    );
+    expect_err(
+        &check_polariton_witnesses(&broken),
+        "a case without witnesses",
+    )
+}
+
+#[test]
+fn a_higher_energy_infeasible_witness_fails_the_check() -> Result<(), String> {
+    use ising_generators::polariton::{polariton_observables, POLARITON, POLARITON_V1};
+    let doc = polariton_doc()?;
+    let witness = find_named(&doc, "witnesses", "polariton-l3-infeasible")?;
+    let case = find_named(&doc, "cases", "polariton-l3")?;
+    let slot = u64_decimal(witness, "index")?;
+    // All spins up is a consistent witness with more violated labels.
+    let replacement = with_ice_instance(POLARITON_V1, case, slot, |params, built| {
+        let spins = vec![1i8; built.node_ids().len()];
+        let seen = polariton_observables(params, built, &spins).ok_or("no observables")?;
+        let feasible = (POLARITON.feasible.ok_or("no hook")?)(params, built, &spins);
+        let energy = encoded_energy(built, &spins)?;
+        compare(
+            witness,
+            "the replacement is consistent",
+            &energy,
+            &i128::from(seen.loss_milli),
+        )?;
+        compare(witness, "the replacement is infeasible", &feasible, &false)?;
+        compare(
+            witness,
+            "the replacement costs more",
+            &(energy > POLARITON_LOW_ENERGY),
+            &true,
+        )?;
+        let mut copy = witness.clone();
+        for (key, value) in [
+            ("spins", json!(spins)),
+            ("charges", json!(seen.charges)),
+            ("violations", json!(seen.violations)),
+            ("loss_milli", json!(seen.loss_milli)),
+            (
+                "energy_milli",
+                json!(i64::try_from(energy).map_err(|e| e.to_string())?),
+            ),
+            ("feasible", json!(false)),
+        ] {
+            if let Some(field) = copy.get_mut(key) {
+                *field = value;
+            }
+        }
+        Ok(copy)
+    })?;
+    let index = section(&doc, "witnesses")?
+        .iter()
+        .position(|w| w.get("name") == witness.get("name"))
+        .ok_or("no witness")?;
+    check_polariton_witnesses(&doc)?;
+    let broken = mutate(&doc, &format!("/witnesses/{index}"), replacement);
+    expect_err(
+        &check_polariton_witnesses(&broken),
+        "a higher-energy witness",
+    )
 }
 
 #[test]

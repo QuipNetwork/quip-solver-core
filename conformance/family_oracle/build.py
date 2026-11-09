@@ -3298,6 +3298,8 @@ def _polariton_case(
         good, bad = polariton.witnesses(inst)
         for kind, spins in (("feasible", good), ("infeasible", bad)):
             seen = polariton.observables(inst, spins)
+            if kind == "infeasible" and polariton.encoded_energy(inst, spins) != 500:
+                raise ValueError("an infeasible witness must have energy 500 milli")
             witnesses.append(
                 _case(
                     f"{name}-{kind}",

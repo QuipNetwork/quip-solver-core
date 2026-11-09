@@ -119,8 +119,13 @@ def orientation(lattice: Lattice, labels: list[int | None]) -> list[int] | None:
     links = len(lattice.links)
     vertices = len(lattice.incident)
     source, sink = 0, 1 + links + vertices
-    link_node = lambda e: 1 + e
-    vertex_node = lambda v: 1 + links + v
+
+    def link_node(e: int) -> int:
+        return 1 + e
+
+    def vertex_node(v: int) -> int:
+        return 1 + links + v
+
     flow = _Flow(sink + 1)
     for e, (tail, head, _) in enumerate(lattice.links):
         flow.add(source, link_node(e), 1)
