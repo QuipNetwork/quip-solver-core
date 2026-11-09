@@ -6,7 +6,6 @@
     clippy::cast_possible_truncation,
     clippy::expect_used,
     clippy::indexing_slicing,
-    clippy::too_many_lines,
     reason = "test code: a failed lookup is a test failure"
 )]
 
@@ -558,147 +557,264 @@ const ORACLE_GEOMETRY_DIGEST: &str =
     "45a43f9d9641ae8e2100274213b46e2738fa0ad78e5efc9dd14db9f30ae5b692";
 const ORACLE_COMMITMENT: &str = "efe917918f6d04ba87c27941caf2341ec3cb8625c3c7668fefa217bd292e365f";
 
-/// Findings of a small Rust lexer: the identifiers `f32` and `f64`, and the
-/// numeric literals with a decimal point followed by a digit or with an
-/// exponent. It skips comments, nested block comments, strings, raw strings,
-/// byte strings, and char literals.
-fn float_findings(src: &str) -> Vec<String> {
-    let c: Vec<char> = src.chars().collect();
-    let at = |i: usize| c.get(i).copied().unwrap_or('\0');
-    let is_ident = |ch: char| ch.is_alphanumeric() || ch == '_';
-    let mut found = Vec::new();
-    let mut prev = '\0';
-    let mut i = 0;
-    while i < c.len() {
-        let ch = at(i);
-        if ch == '/' && at(i + 1) == '/' {
-            while i < c.len() && at(i) != '\n' {
-                i += 1;
-            }
-        } else if ch == '/' && at(i + 1) == '*' {
-            let mut depth = 1;
-            i += 2;
-            while i < c.len() && depth > 0 {
-                if at(i) == '/' && at(i + 1) == '*' {
-                    depth += 1;
-                    i += 2;
-                } else if at(i) == '*' && at(i + 1) == '/' {
-                    depth -= 1;
-                    i += 2;
-                } else {
-                    i += 1;
-                }
-            }
-        } else if ch == '"' {
-            i = skip_string(&c, i + 1);
-            prev = '"';
-        } else if ch == '\'' {
-            // A char literal closes after one char or one escape. Anything
-            // else is a lifetime.
-            if at(i + 1) == '\\' {
-                i += 2;
-                while i < c.len() && at(i) != '\'' {
-                    i += 1;
-                }
-                i += 1;
-            } else if at(i + 2) == '\'' {
-                i += 3;
-            } else {
-                i += 1;
-            }
-            prev = '\'';
-        } else if ch.is_alphabetic() || ch == '_' {
-            let start = i;
-            while is_ident(at(i)) {
-                i += 1;
-            }
-            let ident: String = c[start..i].iter().collect();
-            let raw_prefix = matches!(ident.as_str(), "r" | "br" | "cr");
-            if raw_prefix && (at(i) == '#' || at(i) == '"') {
-                let mut hashes = 0;
-                while at(i) == '#' {
-                    hashes += 1;
-                    i += 1;
-                }
-                i += 1;
-                while i < c.len() {
-                    if at(i) == '"' && (1..=hashes).all(|n| at(i + n) == '#') {
-                        i += 1 + hashes;
-                        break;
-                    }
-                    i += 1;
-                }
-            } else if matches!(ident.as_str(), "b" | "c") && at(i) == '"' {
-                i = skip_string(&c, i + 1);
-            } else if ident == "b" && at(i) == '\'' {
-                i += 1;
-                if at(i) == '\\' {
-                    i += 1;
-                }
-                i += 2;
-            } else if ident == "f32" || ident == "f64" {
-                found.push(ident);
-            }
-            prev = 'a';
-        } else if ch.is_ascii_digit() {
-            let start = i;
-            let tuple_index = prev == '.';
-            let radix = ch == '0' && matches!(at(i + 1), 'x' | 'b' | 'o');
-            if radix {
-                while is_ident(at(i)) {
-                    i += 1;
-                }
-            } else {
-                while at(i).is_ascii_digit() || at(i) == '_' {
-                    i += 1;
-                }
-                if !tuple_index {
-                    if at(i) == '.' && at(i + 1).is_ascii_digit() {
-                        i += 1;
-                        while at(i).is_ascii_digit() || at(i) == '_' {
-                            i += 1;
-                        }
-                        found.push(c[start..i].iter().collect());
-                    }
-                    let signed = matches!(at(i + 1), '+' | '-') && at(i + 2).is_ascii_digit();
-                    if matches!(at(i), 'e' | 'E') && (at(i + 1).is_ascii_digit() || signed) {
-                        i += 2;
-                        while at(i).is_ascii_digit() || at(i) == '_' {
-                            i += 1;
-                        }
-                        found.push(c[start..i].iter().collect());
-                    }
-                }
-                let suffix = i;
-                while is_ident(at(i)) {
-                    i += 1;
-                }
-                let suffix: String = c[suffix..i].iter().collect();
-                if suffix == "f32" || suffix == "f64" {
-                    found.push(c[start..i].iter().collect());
-                }
-            }
-            prev = '0';
-        } else {
-            if !ch.is_whitespace() {
-                prev = ch;
-            }
-            i += 1;
-        }
-    }
-    found
+/// A small Rust lexer. It finds the identifiers `f32` and `f64` and the numeric
+/// literals that are floats: a decimal point after digits that is not a range or
+/// a method call, an exponent, or an `f32` or `f64` suffix. It skips comments,
+/// nested block comments, strings, raw strings, byte strings, char literals, and
+/// lifetimes. A raw identifier is an identifier.
+struct Lexer {
+    chars: Vec<char>,
+    pos: usize,
+    /// The last significant character, `r` after a range, `0` after a number.
+    prev: char,
+    found: Vec<String>,
 }
 
-/// The index after the closing quote of a string whose body starts at `i`.
-fn skip_string(c: &[char], mut i: usize) -> usize {
-    while i < c.len() {
-        match c.get(i).copied() {
-            Some('\\') => i += 2,
-            Some('"') => return i + 1,
-            _ => i += 1,
+fn is_ident(ch: char) -> bool {
+    ch.is_alphanumeric() || ch == '_'
+}
+
+fn float_findings(src: &str) -> Vec<String> {
+    let mut lexer = Lexer {
+        chars: src.chars().collect(),
+        pos: 0,
+        prev: '\0',
+        found: Vec::new(),
+    };
+    while lexer.pos < lexer.chars.len() {
+        lexer.step();
+    }
+    lexer.found
+}
+
+impl Lexer {
+    /// The character `k` places ahead, or NUL past the end.
+    fn at(&self, k: usize) -> char {
+        self.chars.get(self.pos + k).copied().unwrap_or('\0')
+    }
+
+    fn text(&self, start: usize) -> String {
+        self.chars[start..self.pos].iter().collect()
+    }
+
+    fn step(&mut self) {
+        let ch = self.at(0);
+        if ch == '/' && self.at(1) == '/' {
+            while self.pos < self.chars.len() && self.at(0) != '\n' {
+                self.pos += 1;
+            }
+        } else if ch == '/' && self.at(1) == '*' {
+            self.block_comment();
+        } else if ch == '"' {
+            self.pos += 1;
+            self.string_body();
+            self.prev = '"';
+        } else if ch == '\'' {
+            self.quote();
+            self.prev = '\'';
+        } else if ch.is_alphabetic() || ch == '_' {
+            self.ident();
+            self.prev = 'a';
+        } else if ch.is_ascii_digit() {
+            self.number();
+            self.prev = '0';
+        } else if ch == '.' && self.at(1) == '.' {
+            // `..` and `..=` are range punctuation.
+            self.pos += if self.at(2) == '=' { 3 } else { 2 };
+            self.prev = 'r';
+        } else {
+            if !ch.is_whitespace() {
+                self.prev = ch;
+            }
+            self.pos += 1;
         }
     }
-    i
+
+    fn block_comment(&mut self) {
+        let mut depth = 1;
+        self.pos += 2;
+        while self.pos < self.chars.len() && depth > 0 {
+            if self.at(0) == '/' && self.at(1) == '*' {
+                depth += 1;
+                self.pos += 2;
+            } else if self.at(0) == '*' && self.at(1) == '/' {
+                depth -= 1;
+                self.pos += 2;
+            } else {
+                self.pos += 1;
+            }
+        }
+    }
+
+    /// Skips to just past the closing quote of a string. The opening quote is
+    /// already consumed.
+    fn string_body(&mut self) {
+        while self.pos < self.chars.len() {
+            match self.at(0) {
+                '\\' => self.pos += 2,
+                '"' => {
+                    self.pos += 1;
+                    return;
+                }
+                _ => self.pos += 1,
+            }
+        }
+    }
+
+    /// Skips a raw string whose `#` run starts at the cursor and whose opening
+    /// quote follows the run.
+    fn raw_string(&mut self) {
+        let mut hashes = 0;
+        while self.at(0) == '#' {
+            hashes += 1;
+            self.pos += 1;
+        }
+        self.pos += 1;
+        while self.pos < self.chars.len() {
+            if self.at(0) == '"' && (1..=hashes).all(|n| self.at(n) == '#') {
+                self.pos += 1 + hashes;
+                return;
+            }
+            self.pos += 1;
+        }
+    }
+
+    /// Skips the body and the closing quote of a char literal. The opening quote
+    /// is already consumed.
+    fn char_body(&mut self) {
+        if self.at(0) == '\\' {
+            self.pos += 1;
+            match self.at(0) {
+                'x' => self.pos += 3,
+                'u' => {
+                    while self.pos < self.chars.len() && self.at(0) != '}' {
+                        self.pos += 1;
+                    }
+                    self.pos += 1;
+                }
+                _ => self.pos += 1,
+            }
+        } else {
+            self.pos += 1;
+        }
+        if self.at(0) == '\'' {
+            self.pos += 1;
+        }
+    }
+
+    /// A quote starts a char literal or a lifetime.
+    fn quote(&mut self) {
+        let next = self.at(1);
+        if next == '\\' || self.at(2) == '\'' {
+            self.pos += 1;
+            self.char_body();
+        } else if next.is_alphabetic() || next == '_' {
+            self.pos += 1;
+            while is_ident(self.at(0)) {
+                self.pos += 1;
+            }
+        } else {
+            self.pos += 1;
+        }
+    }
+
+    fn ident(&mut self) {
+        let start = self.pos;
+        while is_ident(self.at(0)) {
+            self.pos += 1;
+        }
+        let ident = self.text(start);
+        let after_hashes = (0..).find(|&k| self.at(k) != '#').unwrap_or(0);
+        let raw_quote = self.at(after_hashes) == '"';
+        match ident.as_str() {
+            "r" | "br" | "cr" if raw_quote => self.raw_string(),
+            "r" if self.at(0) == '#' && is_ident(self.at(1)) => {
+                // A raw identifier.
+                self.pos += 1;
+                while is_ident(self.at(0)) {
+                    self.pos += 1;
+                }
+            }
+            "b" | "c" if self.at(0) == '"' => {
+                self.pos += 1;
+                self.string_body();
+            }
+            "b" if self.at(0) == '\'' => {
+                self.pos += 1;
+                self.char_body();
+            }
+            "f32" | "f64" => self.found.push(ident),
+            _ => {}
+        }
+    }
+
+    fn digits(&mut self) {
+        while self.at(0).is_ascii_digit() || self.at(0) == '_' {
+            self.pos += 1;
+        }
+    }
+
+    /// Whether an exponent starts at the cursor: `e`, an optional sign, any
+    /// underscores, and a digit.
+    fn exponent_ahead(&self) -> bool {
+        if !matches!(self.at(0), 'e' | 'E') {
+            return false;
+        }
+        let mut k = 1;
+        if matches!(self.at(k), '+' | '-') {
+            k += 1;
+        }
+        while self.at(k) == '_' {
+            k += 1;
+        }
+        self.at(k).is_ascii_digit()
+    }
+
+    fn number(&mut self) {
+        let start = self.pos;
+        let radix = self.at(0) == '0' && matches!(self.at(1), 'x' | 'b' | 'o');
+        if radix {
+            while is_ident(self.at(0)) {
+                self.pos += 1;
+            }
+            return;
+        }
+        // After a field dot the digits are a tuple index, not a float.
+        let tuple_index = self.prev == '.';
+        self.digits();
+        if !tuple_index {
+            self.fraction_and_exponent(start);
+        }
+        let suffix_start = self.pos;
+        while is_ident(self.at(0)) {
+            self.pos += 1;
+        }
+        let suffix = self.text(suffix_start);
+        if suffix == "f32" || suffix == "f64" {
+            self.found.push(self.text(start));
+        }
+    }
+
+    fn fraction_and_exponent(&mut self, start: usize) {
+        let after = self.at(1);
+        if self.at(0) == '.' && after.is_ascii_digit() {
+            self.pos += 1;
+            self.digits();
+            self.found.push(self.text(start));
+        } else if self.at(0) == '.' && !is_ident(after) && after != '.' {
+            // `1.` followed by punctuation or the end is a float.
+            self.pos += 1;
+            self.found.push(self.text(start));
+        }
+        if self.exponent_ahead() {
+            self.pos += 1;
+            if matches!(self.at(0), '+' | '-') {
+                self.pos += 1;
+            }
+            self.digits();
+            self.found.push(self.text(start));
+        }
+    }
 }
 
 #[test]
@@ -711,6 +827,14 @@ fn the_float_lexer_flags_floats_and_skips_text() {
         "1f64",
         "2_0.5_0",
         "fn f(a: f32) {}",
+        "let r#value = (1.5 + 0.5) as i32;",
+        "['\\'', '\"']; 1.5",
+        "(b'\\x00', '\"'); 1.5",
+        "..1.5",
+        "..1e3",
+        "1e_3",
+        "1e+_3",
+        "1.;",
     ] {
         assert!(!float_findings(flagged).is_empty(), "missed {flagged}");
     }
@@ -729,6 +853,9 @@ fn the_float_lexer_flags_floats_and_skips_text() {
         "'f' + '\\'' + b'x'",
         "fn f<'a>(x: &'a str) {}",
         "let n = 10;",
+        "fn f<'f64>(x: &'f64 str) {}",
+        "let r#f64 = 1.max(2);",
+        "'\\u{1F600}' + '\\x41'",
     ] {
         assert_eq!(
             float_findings(clean),

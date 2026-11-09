@@ -101,7 +101,7 @@ The commitment covers the geometry digest. A change to a coordinate, an axis, a 
 
 ## Cost at the largest size
 
-A geometry with 8320 islands has 34,607,040 pairs. The functions `validate`, `quantize`, and the free function `truncation_bound` each visit every pair once. Their time is linear in the number of pairs plus the number of entries, and they use a fixed number of integer operations for each pair. `Table::truncation_bound` returns a value that `Table::new` already computed. `validate` visits every pair even when the entry list is empty or the radius is small. The tests do not time the largest geometry.
+A geometry with 8320 islands has 34,607,040 pairs. Let `P` be the number of pairs and `E` the number of entries. The functions `quantize` and the free function `truncation_bound` each visit every pair once. A successful `validate` makes `P + E` pair calculations. A failing `validate` stops at the first error. An empty entry list stops at the first pair inside the radius, which it reports as missing. Each function runs in `O(P + E)` time, with a fixed number of integer operations for each pair. `Table::truncation_bound` returns a value that `Table::new` already computed. The tests do not time the largest geometry.
 
 A table with every pair inside the radius has 34,607,040 entries of 12 bytes each. This is about 396 MiB. The vector that `quantize` builds grows by doubling, so it can reserve about 768 MiB of capacity. A move during growth can need more memory for a short time. The plan sets no memory budget, and an allocation failure has no `DipolarError` value. The family that consumes a table chooses its size limits.
 
