@@ -15,6 +15,19 @@ features. The conformance crate adds their contracts and vectors.
 
 ### Added
 
+- The `--family` gate of `quip-solver-drive` also sends explicit family jobs for
+  each revision that a binary lists in `accepted_families` and that has a reference
+  contract. It adds five cases after the lease cases: `explicit-supported`,
+  `explicit-digest-mismatch`, `explicit-metadata-invalid`,
+  `explicit-params-out-of-bounds`, and `explicit-topology-hash-form`. Each explicit
+  job must return exactly one credit. A binary that lists no accepted revision gets
+  the same report as before.
+- Each `ReferenceRevision` of `quip-solver-conformance` has a `topology` field, the
+  base topology the `--family` gate sends for that revision. The layered revisions
+  keep `T_SPARSE`. `quip/ice-glass@1` uses `z12-zephyr`, and the other three ice
+  revisions use `z22-zephyr`, so ice revisions pass `supported-revision` instead of
+  failing with admission code 12. The gate sends a new `Topology` message with its
+  own hash when a revision needs a topology that the session does not hold.
 - `miner.proto`: the enum value `ALGORITHM_OTSUKA` = 19, named `otsuka`, for the
   Otsuka cluster anneal. The Rust, Python, and TypeScript bindings include it.
 - The topology blob format, defined in `docs/topology-format.md`. A `.bin.gz` file

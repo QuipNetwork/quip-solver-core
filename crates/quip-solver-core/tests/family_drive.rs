@@ -94,6 +94,16 @@ const REVISION_CASES: [&str; 10] = [
     "deadline-expired",
 ];
 
+/// The explicit-job case names the gate runs for each accepted revision, in
+/// order, after every lease case.
+const EXPLICIT_CASES: [&str; 5] = [
+    "explicit-supported",
+    "explicit-digest-mismatch",
+    "explicit-metadata-invalid",
+    "explicit-params-out-of-bounds",
+    "explicit-topology-hash-form",
+];
+
 /// The pinned ordered case list of `mock_sampler_family_lease`.
 fn family_binary_cases() -> Vec<Expected> {
     let mut cases: Vec<Expected> = vec![
@@ -115,6 +125,11 @@ fn family_binary_cases() -> Vec<Expected> {
                 _ => None,
             };
             cases.push((name, Some(subject), skip));
+        }
+    }
+    for subject in [UNIFORM, RESTRICTED] {
+        for name in EXPLICIT_CASES {
+            cases.push((name, Some(subject), None));
         }
     }
     cases.push(("credit-ledger-balanced", None, None));
@@ -170,6 +185,41 @@ async fn the_local_path_passes_the_family_gate() {
     let report = drive_miner_family(&bin, &["--mode", "local"], &format!("unix://{socket}")).await;
     assert!(report.is_conformant(), "{}", report.summary());
     assert_cases(&report, &family_binary_cases());
+}
+
+#[tokio::test]
+async fn the_aware_path_passes_the_family_gate() {
+    let bin = example_bin("mock_sampler_family_lease");
+    let socket = unique_socket("fam-aware");
+    let report = drive_miner_family(&bin, &["--mode", "aware"], &format!("unix://{socket}")).await;
+    assert!(report.is_conformant(), "{}", report.summary());
+    assert_cases(&report, &family_binary_cases());
+}
+
+/// An ice binary lists `quip/ice-glass@1` (z12) and `quip/twisted-ice-dimer@1`
+/// (z22), so the gate sends a different topology to each subject.
+#[tokio::test]
+async fn an_ice_binary_passes_the_family_gate_on_the_topology_of_each_revision() {
+    let bin = example_bin("mock_sampler_family_ice");
+    let socket = unique_socket("fam-ice");
+    let report = drive_miner_family(&bin, &[], &format!("unix://{socket}")).await;
+    assert!(report.is_conformant(), "{}", report.summary());
+    for subject in ["quip/ice-glass@1", "quip/twisted-ice-dimer@1"] {
+        assert_eq!(
+            report.outcome("supported-revision", Some(subject)),
+            Some(&CaseOutcome::Passed),
+            "{}",
+            report.summary()
+        );
+        for name in EXPLICIT_CASES {
+            assert_eq!(
+                report.outcome(name, Some(subject)),
+                Some(&CaseOutcome::Passed),
+                "{name} {subject}\n{}",
+                report.summary()
+            );
+        }
+    }
 }
 
 #[tokio::test]

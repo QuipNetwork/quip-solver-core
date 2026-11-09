@@ -39,7 +39,19 @@ pub struct ReferenceRevision {
     pub params: &'static [&'static [u8]],
     /// A parameter set that decodes but is out of bounds (code 9).
     pub out_of_bounds_params: &'static [u8],
+    /// The base topology the gate sends for the revision, as a reference that
+    /// [`crate::topology`] resolves. At least one of `params` admits on it.
+    pub topology: &'static str,
 }
+
+/// `T_SPARSE`, the topology of the layered revisions.
+pub const T_SPARSE_TOPOLOGY: &str = "../topologies/t-sparse.bin.gz";
+
+/// The z(1, 2) Zephyr lattice of the ice vectors, 24 nodes.
+pub const Z12_TOPOLOGY: &str = "../topologies/z12-zephyr.bin.gz";
+
+/// The z(2, 2) Zephyr lattice of the ice vectors, 80 nodes.
+pub const Z22_TOPOLOGY: &str = "../topologies/z22-zephyr.bin.gz";
 
 /// Every revision the gate can drive: `UNIFORM_V1` and `RESTRICTED_V1`, each
 /// with params `[P_SPEC, P_L2_F0, P_L3_F0]` and `out_of_bounds_params`
@@ -52,41 +64,48 @@ pub struct ReferenceRevision {
 /// `[P_FIELDS_Z22_G125_F500_D16, P_FIELDS_ADJ_G45_F1000_D16]` and
 /// `out_of_bounds_params` `P_FIELDS_F1001`.
 ///
-/// The gate sends its fixed topology `T_SPARSE`, which carries no ice tiles.
-/// A solver that lists `quip/ice-glass`, `quip/twisted-ice-dimer`,
-/// `quip/charged-ice`, or `quip/ice-fields` therefore
-/// fails `supported-revision` with the admission code 12
-/// (`TopologyIncompatible`), because no params set admits.
+/// The gate sends each revision its own base topology (`topology`): `T_SPARSE`
+/// for the two layered revisions, `z12-zephyr` for `quip/ice-glass`, and
+/// `z22-zephyr` for the other three ice revisions. All three files are the
+/// topologies of the registered vectors. Each ice params set admits on its
+/// topology; on `T_SPARSE`, which carries no ice tiles, the admission code is 12
+/// (`TopologyIncompatible`).
 pub static REFERENCE_REVISIONS: &[ReferenceRevision] = &[
     ReferenceRevision {
         contract: &UNIFORM_V1,
         params: &[&P_SPEC, &P_L2_F0, &P_L3_F0],
         out_of_bounds_params: &P_F5000,
+        topology: T_SPARSE_TOPOLOGY,
     },
     ReferenceRevision {
         contract: &RESTRICTED_V1,
         params: &[&P_SPEC, &P_L2_F0, &P_L3_F0],
         out_of_bounds_params: &P_F5000,
+        topology: T_SPARSE_TOPOLOGY,
     },
     ReferenceRevision {
         contract: &ICE_GLASS_V1,
         params: &[&P_ICE_ADJ_125, &P_ICE_Z12_200],
         out_of_bounds_params: &P_ICE_GLASS_1000,
+        topology: Z12_TOPOLOGY,
     },
     ReferenceRevision {
         contract: &TWISTED_DIMER_V1,
         params: &[&P_TWISTED_Z22_W62_P8, &P_TWISTED_ADJ_W45_P6],
         out_of_bounds_params: &P_TWISTED_W1000,
+        topology: Z22_TOPOLOGY,
     },
     ReferenceRevision {
         contract: &CHARGED_ICE_V1,
         params: &[&P_CHARGED_Z22_A250_B31_C128, &P_CHARGED_ADJ_A100_B45_C256],
         out_of_bounds_params: &P_CHARGED_A251,
+        topology: Z22_TOPOLOGY,
     },
     ReferenceRevision {
         contract: &ICE_FIELDS_V1,
         params: &[&P_FIELDS_Z22_G125_F500_D16, &P_FIELDS_ADJ_G45_F1000_D16],
         out_of_bounds_params: &P_FIELDS_F1001,
+        topology: Z22_TOPOLOGY,
     },
 ];
 
