@@ -153,6 +153,7 @@ encodings do not change.
   request. A malformed request gives `WitnessError::Request` before any byte
   check, so `constraints` and `symmetries` return a `Result`. The modules register
   no family. The contract is `docs/square-links.md`.
+- `ising_generators::dipolar`: exact integer coefficient tables for axis-aligned square ice. A validator checks each entry with integers. The module also has the truncation bound, BLAKE3 digests, and `physical_status`. No result of `physical_status` is a physical-validation success. `docs/dipolar-numerics.md` has the formula and the `u128` bound.
 
 ### Changed
 
