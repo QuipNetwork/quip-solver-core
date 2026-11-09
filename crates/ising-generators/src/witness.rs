@@ -9,7 +9,9 @@
 use alloc::vec::Vec;
 use core::fmt;
 
-use crate::square::{charges, symmetries, Request, SquareLattice, MAX_LINKS};
+use crate::square::{
+    charges, check_request_shape, symmetries, Request, RequestError, SquareLattice, MAX_LINKS,
+};
 
 /// Witness bytes or spins are malformed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -21,6 +23,8 @@ pub enum WitnessError {
     Padding,
     /// A spin is not +1 or -1.
     Value,
+    /// The request has the wrong shape. No work sized by the request ran.
+    Request(RequestError),
 }
 
 impl fmt::Display for WitnessError {
@@ -29,6 +33,7 @@ impl fmt::Display for WitnessError {
             Self::Length => "the witness length is wrong",
             Self::Padding => "a witness padding bit is set",
             Self::Value => "a witness spin is not +1 or -1",
+            Self::Request(error) => return write!(f, "the request is malformed: {error}"),
         })
     }
 }
@@ -120,8 +125,16 @@ pub enum Constraint {
 
 /// The constraints of a request: fixed spins by link, then charge labels by
 /// vertex. The label of a constraint is its position.
+///
+/// # Errors
+///
+/// The shape error of [`check_request_shape`], before anything is allocated.
 #[must_use]
-pub fn constraints(request: &Request) -> Vec<Constraint> {
+pub fn constraints(
+    lattice: &SquareLattice,
+    request: &Request,
+) -> Result<Vec<Constraint>, RequestError> {
+    check_request_shape(lattice, request)?;
     let fixed = request
         .fixed
         .iter()
@@ -130,7 +143,7 @@ pub fn constraints(request: &Request) -> Vec<Constraint> {
         let vertex = u32::try_from(v).ok()?;
         label.map(|charge| Constraint::Charge { vertex, charge })
     });
-    fixed.chain(labeled).collect()
+    Ok(fixed.chain(labeled).collect())
 }
 
 /// The labels of the constraints that the witness fails, ascending.
@@ -140,17 +153,24 @@ pub fn constraints(request: &Request) -> Vec<Constraint> {
 ///
 /// # Errors
 ///
-/// A [`WitnessError`] when the bytes are malformed. This comes before any
-/// constraint check.
+/// [`WitnessError::Request`] when the request has the wrong shape, then a
+/// [`WitnessError`] when the bytes are malformed. Both come before any
+/// constraint check. A well shaped request that no witness can meet is not an
+/// error here. It gives failed labels.
 pub fn check_witness(
     lattice: &SquareLattice,
     request: &Request,
     bytes: &[u8],
 ) -> Result<Vec<u32>, WitnessError> {
+    check_request_shape(lattice, request).map_err(WitnessError::Request)?;
     let spins = unpack(bytes, lattice.link_count())?;
     let q = charges(lattice, &spins).ok_or(WitnessError::Value)?;
     let mut failed = Vec::new();
-    for (label, constraint) in constraints(request).into_iter().enumerate() {
+    for (label, constraint) in constraints(lattice, request)
+        .map_err(WitnessError::Request)?
+        .into_iter()
+        .enumerate()
+    {
         let holds = match constraint {
             Constraint::Fixed { link, spin } => spins.get(link as usize) == Some(&spin),
             Constraint::Charge { vertex, charge } => q.get(vertex as usize) == Some(&charge),
@@ -165,22 +185,24 @@ pub fn check_witness(
 /// The canonical bytes of a witness: the least packed image over the
 /// symmetries that preserve the request, compared as bytes.
 ///
-/// When no candidate is admissible, which happens only for a request of the
-/// wrong shape, the input is returned unchanged.
+/// The identity always passes for a well shaped request, so the result is
+/// never longer than the input.
 ///
 /// # Errors
 ///
-/// A [`WitnessError`] when the bytes are malformed.
+/// [`WitnessError::Request`] when the request has the wrong shape, then a
+/// [`WitnessError`] when the bytes are malformed.
 pub fn canonical(
     lattice: &SquareLattice,
     request: &Request,
     bytes: &[u8],
 ) -> Result<Vec<u8>, WitnessError> {
+    let group = symmetries(lattice, request).map_err(WitnessError::Request)?;
     let spins = unpack(bytes, lattice.link_count())?;
     let mut least = bytes.to_vec();
     let mut image = Vec::new();
     let mut packed = Vec::new();
-    for symmetry in symmetries(lattice, request) {
+    for symmetry in group {
         symmetry
             .apply_into(lattice, &spins, &mut image)
             .ok_or(WitnessError::Value)?;

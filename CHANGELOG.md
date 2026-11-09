@@ -130,11 +130,11 @@ encodings do not change.
   vectors are `two_commodity.json`, and the Rust contract is
   `ising_generators::routing::ROUTING_V1`. The research cohort is not regenerated.
 - `ising_generators::square` and `ising_generators::witness`: the shared primitives
-  for link-based families on a square lattice. They give a signed link graph for
-  periodic and open lattices with `2 <= L <= 64`, direct charges, charge requests
-  with a compatibility check, packed witness bytes, labeled constraints, and a
-  canonical witness identity under the symmetries that preserve the request. They
-  register no family. The contract is `docs/square-links.md`.
+  for link-based families on a square lattice. The lattice is periodic or open with
+  `2 <= L <= 64`. The charge of a vertex comes directly from the spins. A charge request has
+  a shape check and a compatibility check. A witness holds packed bytes with labeled
+  constraints and a canonical identity under the symmetries that preserve the
+  request. The modules register no family. The contract is `docs/square-links.md`.
 
 ### Changed
 

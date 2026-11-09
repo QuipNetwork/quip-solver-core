@@ -269,21 +269,21 @@ impl fmt::Display for RequestError {
 
 impl core::error::Error for RequestError {}
 
-/// Checks that some orientation of the links meets every labeled charge and
-/// every fixed spin.
+/// Checks the structure of a request: the lengths of `charges` and `fields`,
+/// then the fixed list (every link in range, ascending with no repeats, every
+/// spin +1 or -1). Each of those tests runs over the whole list before the
+/// next one starts.
 ///
-/// The local tests run first, then an exact search for an orientation. The
-/// search is a maximum flow. Every free link sends one unit to the endpoint
-/// it points into. A labeled vertex must take exactly `(degree + charge) / 2`
-/// arrows in, less the arrows the fixed links already give it. A free vertex
-/// takes any number up to its free degree. The labeled demands are saturated
-/// first and the free vertices are added afterwards. Augmenting paths never
-/// reduce the flow on a sink edge, so the first stage stays saturated.
+/// This is the first part of [`check_request`] and keeps its precedence. It
+/// does no degree, parity, total, or feasibility check, so a contradictory
+/// request that is well shaped passes. A request that passes has at most one
+/// entry per vertex and per link, so work sized by it is bounded by the
+/// lattice.
 ///
 /// # Errors
 ///
 /// The first failing check, see [`RequestError`].
-pub fn check_request(lattice: &SquareLattice, request: &Request) -> Result<(), RequestError> {
+pub fn check_request_shape(lattice: &SquareLattice, request: &Request) -> Result<(), RequestError> {
     if request.charges.len() != lattice.incident.len() {
         return Err(RequestError::ChargesLength);
     }
@@ -310,6 +310,25 @@ pub fn check_request(lattice: &SquareLattice, request: &Request) -> Result<(), R
     {
         return Err(RequestError::FixedSpin);
     }
+    Ok(())
+}
+
+/// Checks that some orientation of the links meets every labeled charge and
+/// every fixed spin.
+///
+/// The local tests run first, then an exact search for an orientation. The
+/// search is a maximum flow. Every free link sends one unit to the endpoint
+/// it points into. A labeled vertex must take exactly `(degree + charge) / 2`
+/// arrows in, less the arrows the fixed links already give it. A free vertex
+/// takes any number up to its free degree. The labeled demands are saturated
+/// first and the free vertices are added afterwards. Augmenting paths never
+/// reduce the flow on a sink edge, so the first stage stays saturated.
+///
+/// # Errors
+///
+/// The first failing check, see [`RequestError`].
+pub fn check_request(lattice: &SquareLattice, request: &Request) -> Result<(), RequestError> {
+    check_request_shape(lattice, request)?;
     let labels = labeled_degrees(lattice, request)?;
     if labels.iter().any(|&(degree, label)| {
         label.is_some_and(|q| i16::from(q).unsigned_abs() > u16::from(degree))
@@ -779,23 +798,26 @@ impl Symmetry {
 /// one. A candidate is kept when charges, fixed spins, and fields map onto
 /// themselves, with charges, fixed spins, and fields negated under reversal.
 /// Candidates that act the same way on the links are not merged. On a small
-/// torus several do. A request of the wrong shape, including a repeated or out of range fixed
-/// link, has no symmetry.
+/// torus several do. A request of the wrong shape gets the error of
+/// [`check_request_shape`].
+///
+/// # Errors
+///
+/// The shape error of [`check_request_shape`].
 ///
 /// The cost is at most `2 * 8 * L^2` candidates of `O(links)` work each.
 #[must_use]
-pub fn symmetries(lattice: &SquareLattice, request: &Request) -> Vec<Symmetry> {
-    if request.charges.len() != lattice.incident.len()
-        || (!request.fields.is_empty() && request.fields.len() != lattice.links.len())
-    {
-        return Vec::new();
-    }
+pub fn symmetries(
+    lattice: &SquareLattice,
+    request: &Request,
+) -> Result<Vec<Symmetry>, RequestError> {
+    check_request_shape(lattice, request)?;
     // The fixed spin of each link, built once so a candidate costs O(links).
     let mut fixed_spins = vec![None; lattice.links.len()];
     for &(link, spin) in &request.fixed {
         match fixed_spins.get_mut(link as usize) {
             Some(slot @ None) => *slot = Some(spin),
-            _ => return Vec::new(),
+            _ => return Err(RequestError::FixedNotAscending),
         }
     }
     let shifts = match lattice.boundary {
@@ -820,5 +842,5 @@ pub fn symmetries(lattice: &SquareLattice, request: &Request) -> Vec<Symmetry> {
             }
         }
     }
-    found
+    Ok(found)
 }

@@ -9,7 +9,7 @@
 
 use ising_generators::square::{
     charges, check_request, symmetries, Axis, Boundary, LatticeError, Request, RequestError,
-    SquareLattice,
+    SquareLattice, Symmetry,
 };
 use ising_generators::witness::{
     canonical, check_witness, constraints, pack, unpack, Constraint, WitnessError,
@@ -354,6 +354,15 @@ fn incompatible_requests_fail_directly() {
         err(&request(free(), vec![(8, 1)])),
         RequestError::FixedOutOfRange
     );
+    // Each error kind is checked across the whole list, not entry by entry.
+    assert_eq!(
+        err(&request(free(), vec![(0, 0), (8, 1)])),
+        RequestError::FixedOutOfRange
+    );
+    assert_eq!(
+        err(&request(free(), vec![(2, 0), (1, 1)])),
+        RequestError::FixedNotAscending
+    );
     assert_eq!(
         err(&request(free(), vec![(2, 1), (2, 1)])),
         RequestError::FixedNotAscending
@@ -436,6 +445,10 @@ fn incompatible_requests_fail_directly() {
     );
 }
 
+fn syms(lat: &SquareLattice, req: &Request) -> Vec<Symmetry> {
+    symmetries(lat, req).expect("well shaped request")
+}
+
 fn empty_request(lat: &SquareLattice) -> Request {
     request(vec![None; lat.vertex_count() as usize], Vec::new())
 }
@@ -496,7 +509,7 @@ fn witness_reports_labeled_violations() {
     req.charges[0] = Some(4);
     req.fixed = vec![(0, 1)];
     assert_eq!(
-        constraints(&req),
+        constraints(&lat, &req).expect("shape"),
         [
             Constraint::Fixed { link: 0, spin: 1 },
             Constraint::Charge {
@@ -527,17 +540,19 @@ fn a_valid_witness_has_no_violation() {
         check_witness(&lat, &empty_request(&lat), &witness),
         Ok(Vec::new())
     );
-    assert!(constraints(&empty_request(&lat)).is_empty());
+    assert!(constraints(&lat, &empty_request(&lat))
+        .expect("shape")
+        .is_empty());
 }
 
 #[test]
 fn symmetry_group_sizes() {
     let periodic = lattice(2, Boundary::Periodic);
     // 4 translations, 8 D4 elements, and with or without reversal.
-    assert_eq!(symmetries(&periodic, &empty_request(&periodic)).len(), 64);
+    assert_eq!(syms(&periodic, &empty_request(&periodic)).len(), 64);
     let open = lattice(2, Boundary::Open);
     // No translation: 8 D4 elements, with or without reversal.
-    assert_eq!(symmetries(&open, &empty_request(&open)).len(), 16);
+    assert_eq!(syms(&open, &empty_request(&open)).len(), 16);
 
     // Labels +2 at corner 0 and -2 at corner 8. Only four candidates keep the
     // two labels: the identity and the main diagonal reflection (charges
@@ -546,13 +561,13 @@ fn symmetry_group_sizes() {
     let mut pair = empty_request(&open);
     pair.charges[0] = Some(2);
     pair.charges[8] = Some(-2);
-    let group = symmetries(&open, &pair);
+    let group = syms(&open, &pair);
     assert_eq!(group.len(), 4);
     assert_eq!(group.iter().filter(|g| g.is_reversal()).count(), 2);
 
     let mut one_corner = empty_request(&open);
     one_corner.charges[0] = Some(2);
-    assert_eq!(symmetries(&open, &one_corner).len(), 2);
+    assert_eq!(syms(&open, &one_corner).len(), 2);
 
     let mut torus_pair = empty_request(&periodic);
     torus_pair.charges[0] = Some(2);
@@ -560,7 +575,7 @@ fn symmetry_group_sizes() {
     // Every D4 element fixes the point (1, 1) modulo 2. Translation (0, 0)
     // keeps the labels without reversal, and translation (1, 1) swaps the two
     // vertices and needs reversal. That is 8 elements times 2 translations.
-    let group = symmetries(&periodic, &torus_pair);
+    let group = syms(&periodic, &torus_pair);
     assert_eq!(group.len(), 16);
     assert_eq!(group.iter().filter(|g| g.is_reversal()).count(), 8);
 }
@@ -568,7 +583,7 @@ fn symmetry_group_sizes() {
 #[test]
 fn parallel_links_map_by_direction() {
     let lat = lattice(2, Boundary::Periodic);
-    let group = symmetries(&lat, &empty_request(&lat));
+    let group = syms(&lat, &empty_request(&lat));
     // Order: translation, then D4 element, then reversal. Translation 1 is
     // (1, 0), and element 0 is the identity.
     let shift = &group[(8) * 2];
@@ -595,7 +610,7 @@ fn parallel_links_map_by_direction() {
 fn canonical_bytes_are_invariant() {
     let lat = lattice(2, Boundary::Periodic);
     let req = empty_request(&lat);
-    let group = symmetries(&lat, &req);
+    let group = syms(&lat, &req);
     for state in 0..256u32 {
         let spins = spins_of(state, 8);
         let canon = canonical(&lat, &req, &pack(&spins).expect("valid")).expect("valid");
@@ -623,7 +638,7 @@ fn canonical_bytes_are_invariant() {
     // The open lattice too.
     let open = lattice(2, Boundary::Open);
     let req = empty_request(&open);
-    let group = symmetries(&open, &req);
+    let group = syms(&open, &req);
     for state in (0..4096u32).step_by(7) {
         let spins = spins_of(state, 12);
         let canon = canonical(&open, &req, &pack(&spins).expect("valid")).expect("valid");
@@ -650,7 +665,7 @@ fn fields_and_boundary_labels_break_symmetry() {
     let mut biased = empty_request(&lat);
     biased.fields = vec![0; 8];
     biased.fields[0] = 3;
-    let group = symmetries(&lat, &biased);
+    let group = syms(&lat, &biased);
     assert!(!group.is_empty() && group.len() < 64);
     assert!(group
         .iter()
@@ -663,7 +678,7 @@ fn fields_and_boundary_labels_break_symmetry() {
     // input unchanged.
     let mut rigid = empty_request(&lat);
     rigid.fields = vec![1, 2, 3, 4, 5, 6, 7, 8];
-    assert_eq!(symmetries(&lat, &rigid).len(), 1);
+    assert_eq!(syms(&lat, &rigid).len(), 1);
     let state = packed_state(0b1011_0110, 8);
     assert_eq!(canonical(&lat, &rigid, &state), Ok(state));
 
@@ -703,7 +718,7 @@ fn fixed_spins_restrict_the_symmetries() {
     let lat = lattice(2, Boundary::Periodic);
     let mut req = empty_request(&lat);
     req.fixed = vec![(0, 1)];
-    let group = symmetries(&lat, &req);
+    let group = syms(&lat, &req);
     assert_eq!(group.len(), 4);
     assert!(group.iter().all(|g| !(g.is_reversal() && g.element() == 0)));
     // Every image keeps link 0 at +1.
@@ -716,9 +731,52 @@ fn fixed_spins_restrict_the_symmetries() {
             assert_eq!(g.apply(&lat, &spins).expect("image")[0], 1);
         }
     }
-    // A repeated fixed link is a request of the wrong shape.
-    req.fixed = vec![(0, 1), (0, 1)];
-    assert!(symmetries(&lat, &req).is_empty());
-    req.fixed = vec![(9, 1)];
-    assert!(symmetries(&lat, &req).is_empty());
+}
+
+#[test]
+fn malformed_requests_fail_before_witness_and_symmetry_work() {
+    let lat = lattice(2, Boundary::Periodic);
+    let witness = [0xff];
+    let duplicate = request(vec![None; 4], vec![(0, 1), (0, 1)]);
+    let out_of_range = request(vec![None; 4], vec![(0, 1), (8, 1)]);
+    let spin = request(vec![None; 4], vec![(0, 0)]);
+    for (req, error) in [
+        (&duplicate, RequestError::FixedNotAscending),
+        (&out_of_range, RequestError::FixedOutOfRange),
+        (&spin, RequestError::FixedSpin),
+    ] {
+        assert_eq!(symmetries(&lat, req), Err(error));
+        assert_eq!(constraints(&lat, req), Err(error));
+        assert_eq!(
+            check_witness(&lat, req, &witness),
+            Err(WitnessError::Request(error))
+        );
+        assert_eq!(
+            canonical(&lat, req, &witness),
+            Err(WitnessError::Request(error))
+        );
+        // The request error comes before the byte checks.
+        assert_eq!(canonical(&lat, req, &[]), Err(WitnessError::Request(error)));
+    }
+    // A charges vector longer than the vertex count gets an error, and the
+    // constraint list is never built from it.
+    let long = request(vec![Some(0); 1 << 20], Vec::new());
+    assert_eq!(constraints(&lat, &long), Err(RequestError::ChargesLength));
+    assert_eq!(
+        check_witness(&lat, &long, &witness),
+        Err(WitnessError::Request(RequestError::ChargesLength))
+    );
+    let mut bad_fields = empty_request(&lat);
+    bad_fields.fields = vec![0; 7];
+    assert_eq!(
+        symmetries(&lat, &bad_fields),
+        Err(RequestError::FieldsLength)
+    );
+
+    // A well shaped request that no state meets still gives failed labels and
+    // canonical bytes.
+    let impossible = request(vec![Some(4), Some(4), None, None], Vec::new());
+    assert_eq!(check_witness(&lat, &impossible, &witness), Ok(vec![0, 1]));
+    // Reversal maps all up to all down, which packs to zero bytes.
+    assert_eq!(canonical(&lat, &impossible, &witness), Ok(vec![0]));
 }

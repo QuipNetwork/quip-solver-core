@@ -37,7 +37,7 @@ The first five checks are local. A request can pass them and still fail the last
 
 A witness holds one spin per link in link order. Link `i` is bit `i % 8` of byte `i / 8`. A set bit means spin +1. Padding bits are 0, and the length is exactly `ceil(links / 8)`. This is the FAM-53 packing rule.
 
-`check_witness` first rejects malformed bytes with an error: a wrong length or a set padding bit. Only then does it check constraints. `constraints` lists the fixed spins by link, then the charge labels by vertex. The label of a constraint is its position in that list. `check_witness` returns the labels of the failed constraints in ascending order. A fixed spin that contradicts a charge label shows up as a failed label.
+`check_request_shape` runs the length checks and the fixed-list checks of `check_request` and nothing else. `check_witness`, `canonical`, `constraints`, and `symmetries` run it first and return its error for a malformed request, before they build anything sized by the request. A well shaped request that no witness can meet is not an error there. `check_witness` then rejects malformed bytes with an error: a wrong length or a set padding bit. Only then does it check constraints. `constraints` lists the fixed spins by link, then the charge labels by vertex. The label of a constraint is its position in that list. `check_witness` returns the labels of the failed constraints in ascending order. A fixed spin that contradicts a charge label shows up as a failed label.
 
 ## Symmetries
 
@@ -51,12 +51,12 @@ A candidate passes when it maps the request onto itself. With `r = -1` under rev
 - The fixed set maps onto the fixed set, with each spin multiplied by `sign * r`.
 - `fields[g(e)] = sign * r * fields[e]` for every link.
 
-Fields and boundary labels can reduce the group. A request with all-zero fields keeps every candidate. A field-biased state is never merged with its reversal.
+Fields and boundary labels can reduce the group. All-zero fields add no restriction. Charge labels and fixed spins still restrict the group. A field-biased state is never merged with its reversal.
 
 `symmetries` returns every candidate that passes in a fixed order: translation, then D4 element, then no reversal before reversal. It does not remove candidates that act the same way on the links. On small tori some do.
 
 ## Canonical witness
 
-The canonical bytes of a witness are the least packed image over the candidates that pass, compared as bytes. When only the identity passes, the bytes stay the same.
+The canonical bytes of a witness are the least packed image over the candidates that pass, compared as bytes. A malformed request is an error and never returns the input. For a well shaped request the identity always passes, so the bytes never grow.
 
 The cost is at most `2 * 8 * L^2` images, and each image takes time linear in the number of links. For `L = 64` that is 65,536 images of 8,192 links.
