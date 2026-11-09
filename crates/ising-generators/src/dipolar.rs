@@ -414,8 +414,8 @@ impl Table {
     /// The BLAKE3 commitment: the geometry digest, the entry count and each
     /// entry as `i`, `j`, `q`, then the calibration. Integers are little
     /// endian. Text fields carry a `u32` length. An oracle is tag 0 and a
-    /// record is tag 1 followed by the material, the spacing, the
-    /// normalization, the error, and the source digest.
+    /// record is tag 1 followed by the material, the normalization, the
+    /// spacing, the error, and the source digest.
     #[must_use]
     pub fn commitment(&self) -> [u8; 32] {
         let mut h = BufferedHasher::new(TABLE_CONTEXT);
@@ -461,9 +461,11 @@ impl Table {
     }
 }
 
-/// An upper bound on the magnitude that the table omits. It sums, over every
-/// pair with `K > R2`, the integer `ceil(|x| / (K^2 * isqrt(K)))`. Since
-/// `isqrt(K) <= sqrt(K)`, each term is at least `S * |coupling|` for that pair.
+/// An upper bound on the magnitude that the table omits: the sum, over every
+/// pair with `K > R2`, of the per-pair upper bound `|x| / (K^2 * isqrt(K))`,
+/// each rounded up to an integer. Since `isqrt(K) <= sqrt(K)`, each term is at
+/// least `S * |coupling|` for that pair. The sum of the rounded terms can
+/// exceed the rounded sum of the terms.
 ///
 /// # Errors
 ///
@@ -515,11 +517,32 @@ fn cmp_scaled(b: i64, a: i64, k: u32) -> Ordering {
     }
 }
 
+/// The largest `|q|` that any pair with this `x` and `K` can have:
+/// `ceil(|x| / (K^2 * isqrt(K))) + 1`. The correct `q` has
+/// `|q| <= ceil(|x| / K^(5/2))`, which is at most the first term, so the limit
+/// admits every correct coefficient.
+fn q_limit(x: i64, k: u32) -> u128 {
+    let den = u128::from(k) * u128::from(k) * u128::from(k.isqrt());
+    u128::from(x.unsigned_abs()).div_ceil(den).saturating_add(1)
+}
+
 /// How the correct rounding of `x / K^(5/2)` relates to `q`: `Less` when the
 /// correct value is below `q`, `Greater` when above, `Equal` when `q` is
 /// correct. Ties go away from zero, so the lower bound is inclusive for
 /// `q > 0` and the upper bound is inclusive for `q < 0`.
+///
+/// A `q` beyond `q_limit` is never correct, so it is answered before any
+/// squaring: `Less` for a large positive `q` and `Greater` for a large negative
+/// one. Every `q` that reaches the comparisons has `|a| * K^(5/2) < 2^49`, see
+/// `docs/dipolar-numerics.md`.
 fn judge(x: i64, q: i64, k: u32) -> Result<Ordering, DipolarError> {
+    if u128::from(q.unsigned_abs()) > q_limit(x, k) {
+        return Ok(if q > 0 {
+            Ordering::Less
+        } else {
+            Ordering::Greater
+        });
+    }
     let b = x.checked_mul(2).ok_or(DipolarError::Arithmetic)?;
     let lo = cmp_scaled(b, 2 * q - 1, k);
     let hi = cmp_scaled(b, 2 * q + 1, k);
@@ -620,12 +643,13 @@ fn next_in_radius(
 ///
 /// # Errors
 ///
-/// The first fault in entry order. A pair inside the radius that no entry
-/// covers is reported before the entry that follows it. A pair missing after
-/// the last entry is reported at the end.
+/// The first structural fault in entry order: an index out of range, a mirrored
+/// pair, a self pair, or an entry out of order. If the shape is sound, the first
+/// fault of the second pass in entry order. A pair inside the radius that no
+/// entry covers is reported before the entry that follows it. A pair missing
+/// after the last entry is reported at the end.
 pub fn validate(geometry: &Geometry, entries: &[Entry]) -> Result<(), DipolarError> {
     let count = geometry.islands.len();
-    let mut cursor = (0_u32, 1_u32);
     let mut previous: Option<(u32, u32)> = None;
     for entry in entries {
         let (i, j) = (entry.i, entry.j);
@@ -642,6 +666,10 @@ pub fn validate(geometry: &Geometry, entries: &[Entry]) -> Result<(), DipolarErr
             return Err(DipolarError::NotAscending { i, j });
         }
         previous = Some((i, j));
+    }
+    let mut cursor = (0_u32, 1_u32);
+    for entry in entries {
+        let (i, j) = (entry.i, entry.j);
         let (numer, dist2) = geometry.pair(i, j).ok_or(DipolarError::Arithmetic)?;
         if let Some((mi, mj)) = next_in_radius(geometry, &mut cursor)? {
             if (mi, mj) < (i, j) {
@@ -674,7 +702,7 @@ pub const fn physical_status(table: &Table) -> PhysicalStatus {
 
 #[cfg(test)]
 mod tests {
-    use super::{cmp_scaled, Ordering, ROOT_BITS};
+    use super::{cmp_scaled, judge, Ordering, ROOT_BITS};
 
     /// Compares by bracketing `sqrt(K)` between two fixed-point integers, a
     /// method that shares no code with `cmp_scaled`.
@@ -716,6 +744,16 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn judge_rejects_huge_coefficients_before_squaring() {
+        let k = 1_u32 << 17;
+        let x = 1_i64 << 46;
+        assert_eq!(judge(x, i64::from(i32::MAX), k), Ok(Ordering::Less));
+        assert_eq!(judge(x, i64::from(i32::MIN), k), Ok(Ordering::Greater));
+        assert_eq!(judge(-x, i64::from(i32::MAX), k), Ok(Ordering::Less));
+        assert_eq!(judge(-x, i64::from(i32::MIN), k), Ok(Ordering::Greater));
     }
 
     #[test]

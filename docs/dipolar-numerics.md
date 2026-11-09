@@ -33,7 +33,7 @@ Let `x = S * D * m_i * m_j * N`. This is an integer. Let `T = K^(5/2)`. An entry
 
 ## The exact check
 
-The check compares an integer `b` with `a * K^2 * sqrt(K)`, where `a` is an odd integer. The check first compares the signs of `b` and `a`. When the signs differ, the sign decides. When both are zero, they are equal. When both are non-negative, it compares `b^2` with `a^2 * K^5` in `u128`. When both are negative, it compares the same values and reverses the result. A product that overflows `u128` is at least `2^128`. The value `b^2` is below `2^128`, so an overflow means that the right side is larger.
+The check compares an integer `b` with `a * K^2 * sqrt(K)`, where `a` is an odd integer. The check first compares the signs of `b` and `a`. When the signs differ, the sign decides. When both are zero, they are equal. When both are non-negative, it compares `b^2` with `a^2 * K^5` in `u128`. When both are negative, it compares the same values and reverses the result. The validator rejects an entry that is too large before it calls this check, so no product overflows, see the next section. The helper still saturates an overflowing product to the largest value, which is correct because such a product is at least `2^128` and `b^2` is below `2^128`.
 
 The unit tests compare this helper with a second method. The range of `K` is 1 to 40. The range of `a` is minus 9 to 9. The range of `b` is minus 3000 to 3000. The second method brackets `sqrt(K)` between two fixed point integers.
 
@@ -47,19 +47,28 @@ The bounds are:
 - `1 <= S` and `1 <= |D|` with `S * |D| <= 2^20`
 - `R2 <= 2 * 256^2 = 2^17`
 
-Then `K <= 2 * 256^2 = 2^17`. The value `|N|` is at most `4K`, because `|K (u_i . u_j)| <= K` and `|(u_i . r)(u_j . r)| <= K`. This gives `|N| <= 4 * 2^17 = 2^19`. Then:
+Then `K <= 2 * 256^2 = 2^17`. The value `|N|` is at most `2K`. If the axes are parallel, `N` is `K` minus `3 d^2` or `-K` plus `3 d^2`, where `d^2 <= K` is the square of the offset along the axis. Both forms lie between `-2K` and `2K`. If the axes are perpendicular, `|N| = 3 |d_x d_y| <= 3K/2`. This gives:
 
 ```
-|x| <= 2^20 * 16^2 * 2^19 = 2^47
-|2x| < 2^48
-(2x)^2 < 2^96
+|x| <= 2^20 * 16^2 * 2K = 2^29 * K <= 2^46
+|2x| <= 2^47
+(2x)^2 <= 2^94
 ```
 
-For a correct entry, `|a|` is at most `|2q| + 1`, which is about `2|x| / T`. The value `a^2 * K^5` is then about `(2x)^2`, which stays below `2^97`.
+A table entry `q` is an `i32`, so it can be far from the correct value. The check rejects an entry before it squares anything. Let `s = isqrt(K)`. The limit is `L = ceil(|x| / (K^2 * s)) + 1`. The correct coefficient has `|q| <= ceil(|x| / K^(5/2))`. Since `s <= sqrt(K)`, this is at most `ceil(|x| / (K^2 * s))`, which is less than `L`. The limit admits every correct coefficient. The check calls an entry with `|q| > L` wrong and does no further arithmetic on it.
 
-An entry `q` from outside can hold any `i32` value. Its `|a|` is at most `2^32`, so `a^2` is at most `2^64`. The factor `K^5` is at most `2^85`, so the product can reach `2^149`. The helper multiplies with checks, and an overflow saturates the right side. That result is correct, as the previous section shows. No other product comes near `2^128`, because the squares of `b` and `a` fit in `u128` for any 64 bit input.
+Every other entry has `|q| <= L`, so `|a| = |2q +- 1| <= 2L + 1 <= 2|x| / (K^2 * s) + 5`. Multiply by `K^(5/2)` and use `sqrt(K) < s + 1 <= 2s`:
 
-The estimate step shifts `x` left by 30 bits, which gives at most `2^77`. The denominator `K^2 * floor(sqrt(K) * 2^30)` is at most `2^34 * 2^38.5`, which is below `2^73`.
+```
+|a| * K^(5/2) <= 2 |x| * sqrt(K) / s + 5 * K^(5/2)
+              <  4 |x| + 5 * K^(5/2)
+              <= 2^48 + 5 * 2^43
+              <  2^49
+```
+
+The last two lines use `|x| <= 2^46` and `K^(5/2) < 2^43`, because `K <= 2^17`. Squaring gives `a^2 * K^5 < 2^98`, which is below `2^128`. The other side has `b^2 <= 2^94`. Both products fit in `u128` with no overflow. The saturating multiplication in the helper never triggers for a value that reaches it from the validator, and this proof does not depend on it. The helper keeps the saturation so that it stays correct for any input.
+
+The estimate step shifts `|x|` left by 30 bits, which gives at most `2^76`. The denominator `K^2 * floor(sqrt(K) * 2^30)` is at most `2^34 * 2^38.5`, which is below `2^73`.
 
 The geometry constructor rejects a value one step over a bound. A test covers each bound at the limit and one step over it.
 
@@ -69,9 +78,9 @@ The geometry constructor rejects a value one step over a bound. A test covers ea
 
 ## Truncation
 
-The table holds every pair with `K <= R2` and no other pair. The validator checks the order, the set of pairs, and every value. Each fault has its own error. The faults are a wrong value, a missing pair, a pair outside the radius, a mirrored pair, a pair of an island with itself, an entry out of order, and an index out of range.
+The table holds every pair with `K <= R2` and no other pair. The validator first checks the shape of every entry in this order: index, mirrored pair, self pair, and order. It then checks the set of pairs and every value. Each fault has its own error. The faults are a wrong value, a missing pair, a pair outside the radius, a mirrored pair, a pair of an island with itself, an entry out of order, and an index out of range.
 
-The omitted part of the coupling has an upper bound. For every pair with `K > R2`, the term is `ceil(|x| / (K^2 * isqrt(K)))`, where `isqrt` is the integer square root rounded down. Since `isqrt(K) <= sqrt(K)`, each term is at least `S * |J|` for that pair. The bound is the sum of the terms as a `u128`.
+The omitted part of the coupling has an upper bound. For every pair with `K > R2`, the per-pair upper bound is `|x| / (K^2 * isqrt(K))`, where `isqrt` is the integer square root rounded down. Since `isqrt(K) <= sqrt(K)`, this is at least `S * |J|` for that pair. The bound is the sum of the per-pair bounds, each rounded up, as a `u128`. The sum of the rounded terms can be larger than the rounded sum of the terms. This is the amended rule D4.
 
 The rounding error is at most one half unit of `q` for each entry. `rounding_bound` returns the number of entries, which is the count of half units.
 

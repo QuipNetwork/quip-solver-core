@@ -195,9 +195,10 @@ fn validator_rejects_each_fault() {
     );
     let mut swapped = good.clone();
     swapped.swap(0, 1);
+    // Entries (0, 2), (0, 1), (1, 2): the pair (0, 1) comes after (0, 2).
     assert_eq!(
         validate(&g, &swapped),
-        Err(DipolarError::MissingPair { i: 0, j: 1 })
+        Err(DipolarError::NotAscending { i: 0, j: 1 })
     );
     let mut far = good;
     far.push(Entry { i: 0, j: 3, q: 0 });
@@ -418,7 +419,8 @@ fn bounds_hold_at_the_limits() {
             }
         }
     }
-    // An entry at the edge of i32 fails cleanly, with no overflow.
+    // An entry at the edge of i32 at the largest admitted K = 2^17 gets the
+    // wrong-coefficient error. The limit rejects it before any squaring.
     let g = geometry(&[one(0, 0), one(256, 256)], 1, 1 << 20, MAX_R2);
     for q in [i32::MAX, i32::MIN] {
         assert_eq!(
@@ -433,9 +435,11 @@ fn truncation_bound_is_exact_on_a_tiny_case() {
     use Axis::PlusX;
     // S = 1 and D = 1, so the terms are ceil(|N| / (K^2 isqrt(K))).
     // Three islands in a row: (0,0), (1,0), (3,0), all +x, moment 1, R2 = 1.
-    // Outside the radius: (0,2) K = 9, N = 9 - 27 = -18, term ceil(18 / 81 / 3 * ...) below.
-    //   den = 81 * 3 = 243, so ceil(18 / 243) = 1.
-    // (1,2) K = 4, N = 4 - 12 = -8, den = 16 * 2 = 32, ceil(8 / 32) = 1.
+    // Outside the radius: (0,2) K = 9, N = 9 - 27 = -18, den = 81 * 3 = 243,
+    //   so the term is ceil(18 / 243) = 1.
+    // (1,2) K = 4, N = 4 - 12 = -8, den = 16 * 2 = 32, so the term is
+    //   ceil(8 / 32) = 1.
+    // The per-pair ceilings add to 2. The exact sum 35 / 108 would round up to 1.
     // (0,1) at K = 1 is inside the radius and adds nothing.
     let g = geometry(
         &[
