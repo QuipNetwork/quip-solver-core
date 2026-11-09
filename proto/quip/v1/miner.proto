@@ -36,6 +36,7 @@ enum Algorithm {
   ALGORITHM_SBQA = 16;
   ALGORITHM_TEDSB = 17;
   ALGORITHM_EXTERNAL = 18;
+  ALGORITHM_OTSUKA = 19;
 }
 
 enum CoefficientEncoding {

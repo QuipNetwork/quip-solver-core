@@ -28,6 +28,8 @@ features. The conformance crate adds their contracts and vectors.
   revisions use `z22-zephyr`, so ice revisions pass `supported-revision` instead of
   failing with admission code 12. The gate sends a new `Topology` message with its
   own hash when a revision needs a topology that the session does not hold.
+- `miner.proto`: the enum value `ALGORITHM_OTSUKA` = 19, named `otsuka`, for the
+  Otsuka cluster anneal. The Rust, Python, and TypeScript bindings include it.
 - The topology blob format, defined in `docs/topology-format.md`. A `.bin.gz` file
   holds an explicit topology or a Zephyr lattice minus removals.
 - `ising-generators` features `blob` and `cli`. The `blob` feature is `no_std` and
