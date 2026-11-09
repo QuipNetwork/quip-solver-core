@@ -969,20 +969,20 @@ fn metadata_vectors() -> Result<(), String> {
 }
 
 #[test]
-fn metadata_kind_six_is_registered_and_kind_seven_is_not() {
+fn metadata_kind_seven_is_registered_and_kind_eight_is_not() {
     let section = |kind: u16| {
         let mut bytes = 1u16.to_le_bytes().to_vec();
         bytes.extend_from_slice(&kind.to_le_bytes());
         bytes.extend_from_slice(&0u32.to_le_bytes());
         bytes
     };
-    assert_eq!(code_of(&validate_metadata(&section(6), &[1, 6])), None);
+    assert_eq!(code_of(&validate_metadata(&section(7), &[1, 7])), None);
     assert_eq!(
-        code_of(&validate_metadata(&section(7), &[1, 6, 7])),
+        code_of(&validate_metadata(&section(8), &[1, 7, 8])),
         Some(16)
     );
     assert_eq!(
-        validate_metadata(&section(7), &[1, 6, 7]),
+        validate_metadata(&section(8), &[1, 7, 8]),
         Err(Code::MetadataInvalid)
     );
 }

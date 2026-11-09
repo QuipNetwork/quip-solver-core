@@ -8,7 +8,7 @@ import re
 
 import blake3
 import pytest
-from family_oracle import build
+from family_oracle import build, topology_blob
 
 
 def _spec_ids() -> set[str]:
@@ -55,6 +55,72 @@ def _charge_doc() -> dict:
 
 def _fields_doc() -> dict:
     return json.loads(build.ICE_FIELDS_PATH.read_text())
+
+
+def _routing_doc() -> dict:
+    return json.loads(build.TWO_COMMODITY_PATH.read_text())
+
+
+def test_two_commodity_fixture_matches_oracle():
+    text = build.render(build.build_two_commodity())
+    assert text == build.TWO_COMMODITY_PATH.read_text()
+
+
+def test_two_commodity_evidence_matches_the_registry():
+    registry = json.loads((build.FAMILIES_DIR / "registry.json").read_text())[
+        "registry"
+    ]
+    entry = next(e for e in registry if e["name"] == "quip/two-commodity-routing@1")
+    doc = _routing_doc()
+    for section in ("cases", "terminals", "routing_recipes", "admission"):
+        tagged = {tag for case in doc[section] for tag in case["evidence"]}
+        assert tagged == set(entry["evidence"]), section
+
+
+def test_two_commodity_pin_matches_the_cases():
+    registry = json.loads((build.FAMILIES_DIR / "registry.json").read_text())[
+        "registry"
+    ]
+    entry = next(e for e in registry if e["name"] == "quip/two-commodity-routing@1")
+    digest = blake3.blake3(build.canonical_json(_routing_doc()["cases"]).encode())
+    assert digest.hexdigest() == entry["vectors_blake3"]
+
+
+def test_two_commodity_contract_recipe_table_matches_the_vectors():
+    text = (build.ROOT / "docs/families/quip-two-commodity-routing-1.md").read_text()
+    row = re.compile(
+        r"^\| `([^`]+)` \| `([^`]+)` \| (\d+) \| (\d+) \| (\d+) \| `([0-9a-f]{64})` \|$",
+        re.MULTILINE,
+    )
+    table = row.findall(text)
+    recipes = _routing_doc()["routing_recipes"]
+    assert len(table) == len(recipes) > 0
+    for (alias, cell, m, t, divisor, digest), recipe in zip(
+        table, recipes, strict=True
+    ):
+        values = _decoded_params(recipe["params_hex"])
+        assert alias == recipe["alias"]
+        assert cell == recipe["cell"]
+        assert (int(m), int(t), int(divisor)) == (values[1], values[2], values[3])
+        assert digest == recipe["params_digest"]
+
+
+def test_oracle_template_equals_the_research_template_on_the_live_topology():
+    from family_oracle import routing
+
+    live = topology_blob.expand(topology_blob.decode(build.LIVE_BLOB_PATH.read_bytes()))
+    template = routing.template(12, 4, live["nodes"], [tuple(e) for e in live["edges"]])
+    fixture = json.loads(
+        (
+            build.ROOT / "conformance/fixtures/two_commodity_research_template.json"
+        ).read_text()
+    )
+    assert [list(c) for c in template["cells"]] == fixture["nodes_cell"]
+    assert [[a["tail"], a["head"]] for a in template["arcs"]] == fixture["arc_nodes"]
+    assert [a["x1"] for a in template["arcs"]] == fixture["arc_spin_commodity1"]
+    assert [list(a["chain"]) for a in template["arcs"]] == fixture[
+        "arc_chain_commodity2"
+    ]
 
 
 def test_ice_fields_fixture_matches_oracle():
@@ -144,6 +210,7 @@ def test_every_json_topology_reference_names_an_indexed_file():
         _twisted_doc,
         _charge_doc,
         _fields_doc,
+        _routing_doc,
     ):
         walk(load())
     assert refs
@@ -367,6 +434,7 @@ def test_every_provided_id_has_a_case():
         _twisted_doc,
         _charge_doc,
         _fields_doc,
+        _routing_doc,
     ],
 )
 def test_sources_hash_spec_and_oracle(load):

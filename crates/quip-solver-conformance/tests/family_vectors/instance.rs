@@ -8,7 +8,7 @@ const MAX_COEFFICIENT: u64 = 1 << 30;
 /// Largest `|offset|` in milli units (FAM-37).
 const MAX_OFFSET: u64 = 1 << 56;
 /// Highest metadata section kind (FAM-34).
-const MAX_KIND: u16 = 6;
+const MAX_KIND: u16 = 7;
 
 /// Everything that goes into the canonical instance bytes.
 pub(crate) struct InstanceParts {

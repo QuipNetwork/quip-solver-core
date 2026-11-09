@@ -54,7 +54,7 @@ pub fn zephyr_coordinates(m: u16, t: u8, q: u32) -> Option<[u32; 5]> {
     clippy::many_single_char_names,
     reason = "u, w, k, j, z are the Zephyr coordinate names"
 )]
-fn zephyr_id(m: u16, t: u8, c: [i64; 5]) -> Option<u32> {
+pub(crate) fn zephyr_id(m: u16, t: u8, c: [i64; 5]) -> Option<u32> {
     let (m, t) = (i64::from(m), i64::from(t));
     let [u, w, k, j, z] = c;
     if !(0..2).contains(&u)
