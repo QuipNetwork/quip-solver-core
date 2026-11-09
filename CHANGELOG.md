@@ -129,6 +129,14 @@ encodings do not change.
   a recipe. The contract is `docs/families/quip-two-commodity-routing-1.md`, the
   vectors are `two_commodity.json`, and the Rust contract is
   `ising_generators::routing::ROUTING_V1`. The research cohort is not regenerated.
+- `ising_generators::square` and `ising_generators::witness`: the shared primitives
+  for link-based families on a square lattice. The lattice is periodic or open with
+  `2 <= L <= 64`. The charge of a vertex comes directly from the spins. A charge request has
+  a shape check and a compatibility check. A witness holds packed bytes with labeled
+  constraints and a canonical identity under the symmetries that preserve the
+  request. A malformed request gives `WitnessError::Request` before any byte
+  check, so `constraints` and `symmetries` return a `Result`. The modules register
+  no family. The contract is `docs/square-links.md`.
 
 ### Changed
 

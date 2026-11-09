@@ -13,6 +13,10 @@
 //!   generation for family leases.
 //! - [`ice`]: ice tiles, the 4-clique motifs of a base topology.
 //! - [`routing`]: the two-commodity unit routing family.
+//! - [`square`]: the square-lattice link graph, direct charges, and charge
+//!   requests shared by the link-based families.
+//! - [`witness`]: packed witness bytes, labeled constraints, and canonical
+//!   witness identity under request-preserving symmetries.
 //! - `blob` (feature `blob`): the gzip varint topology file format.
 //! - [`instance`]: canonical instance bytes, limits, and metadata validation.
 
@@ -31,6 +35,8 @@ pub mod instance;
 pub mod random;
 pub mod rng;
 pub mod routing;
+pub mod square;
+pub mod witness;
 
 use core::fmt;
 
