@@ -9,7 +9,7 @@
 use alloc::vec::Vec;
 use core::fmt;
 
-use crate::square::{charges, symmetries, Request, SquareLattice};
+use crate::square::{charges, symmetries, Request, SquareLattice, MAX_LINKS};
 
 /// Witness bytes or spins are malformed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -41,7 +41,15 @@ impl core::error::Error for WitnessError {}
 ///
 /// [`WitnessError::Value`] when a spin is not +1 or -1.
 pub fn pack(spins: &[i8]) -> Result<Vec<u8>, WitnessError> {
-    let mut bytes = alloc::vec![0u8; spins.len().div_ceil(8)];
+    let mut bytes = Vec::new();
+    pack_into(spins, &mut bytes)?;
+    Ok(bytes)
+}
+
+/// Packs spins into `bytes`, reusing its buffer.
+fn pack_into(spins: &[i8], bytes: &mut Vec<u8>) -> Result<(), WitnessError> {
+    bytes.clear();
+    bytes.resize(spins.len().div_ceil(8), 0);
     for (i, &spin) in spins.iter().enumerate() {
         match spin {
             1 => {
@@ -53,21 +61,33 @@ pub fn pack(spins: &[i8]) -> Result<Vec<u8>, WitnessError> {
             _ => return Err(WitnessError::Value),
         }
     }
-    Ok(bytes)
+    Ok(())
 }
 
 /// Unpacks witness bytes into one spin per link.
 ///
+/// The length and padding checks run first. A link count above
+/// [`MAX_LINKS`] is a length error, so the result never exceeds the largest
+/// lattice, whatever the caller passes.
+///
 /// # Errors
 ///
-/// [`WitnessError::Length`] when the length is not `ceil(links / 8)`, and
-/// [`WitnessError::Padding`] when a padding bit is set.
+/// [`WitnessError::Length`] when the length is not `ceil(links / 8)` or the
+/// link count is above [`MAX_LINKS`], and [`WitnessError::Padding`] when a
+/// padding bit is set.
 pub fn unpack(bytes: &[u8], links: u32) -> Result<Vec<i8>, WitnessError> {
     let count = links as usize;
     if bytes.len() != count.div_ceil(8) {
         return Err(WitnessError::Length);
     }
-    let spins: Vec<i8> = (0..count)
+    let used = count % 8;
+    if used != 0 && bytes.last().is_some_and(|&b| b >> used != 0) {
+        return Err(WitnessError::Padding);
+    }
+    if links > MAX_LINKS {
+        return Err(WitnessError::Length);
+    }
+    Ok((0..count)
         .map(|i| {
             let set = bytes.get(i / 8).is_some_and(|b| (b >> (i % 8)) & 1 == 1);
             if set {
@@ -76,12 +96,7 @@ pub fn unpack(bytes: &[u8], links: u32) -> Result<Vec<i8>, WitnessError> {
                 -1
             }
         })
-        .collect();
-    let used = count % 8;
-    if used != 0 && bytes.last().is_some_and(|&b| b >> used != 0) {
-        return Err(WitnessError::Padding);
-    }
-    Ok(spins)
+        .collect())
 }
 
 /// One labeled requirement of a request.
@@ -163,11 +178,15 @@ pub fn canonical(
 ) -> Result<Vec<u8>, WitnessError> {
     let spins = unpack(bytes, lattice.link_count())?;
     let mut least = bytes.to_vec();
+    let mut image = Vec::new();
+    let mut packed = Vec::new();
     for symmetry in symmetries(lattice, request) {
-        let image = symmetry.apply(lattice, &spins).ok_or(WitnessError::Value)?;
-        let packed = pack(&image)?;
+        symmetry
+            .apply_into(lattice, &spins, &mut image)
+            .ok_or(WitnessError::Value)?;
+        pack_into(&image, &mut packed)?;
         if packed < least {
-            least = packed;
+            least.clone_from(&packed);
         }
     }
     Ok(least)

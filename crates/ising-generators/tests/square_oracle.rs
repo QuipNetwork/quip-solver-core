@@ -88,6 +88,55 @@ fn open_l2_has_12_links_and_boundary_degrees() {
 }
 
 #[test]
+fn every_link_has_the_pinned_endpoints_and_axis() {
+    use Axis::{X, Y};
+    let periodic = lattice(2, Boundary::Periodic);
+    let got: Vec<_> = (0..8)
+        .map(|e| {
+            let l = periodic.link(e).expect("link");
+            (l.tail, l.head, l.axis)
+        })
+        .collect();
+    assert_eq!(
+        got,
+        [
+            (0, 1, X),
+            (0, 2, Y),
+            (1, 0, X),
+            (1, 3, Y),
+            (2, 3, X),
+            (2, 0, Y),
+            (3, 2, X),
+            (3, 1, Y)
+        ]
+    );
+    let open = lattice(2, Boundary::Open);
+    let got: Vec<_> = (0..12)
+        .map(|e| {
+            let l = open.link(e).expect("link");
+            (l.tail, l.head, l.axis)
+        })
+        .collect();
+    assert_eq!(
+        got,
+        [
+            (0, 1, X),
+            (0, 3, Y),
+            (1, 2, X),
+            (1, 4, Y),
+            (2, 5, Y),
+            (3, 4, X),
+            (3, 6, Y),
+            (4, 5, X),
+            (4, 7, Y),
+            (5, 8, Y),
+            (6, 7, X),
+            (7, 8, X)
+        ]
+    );
+}
+
+#[test]
 fn lattice_bounds() {
     for l in [0, 1, 65] {
         assert_eq!(
@@ -419,6 +468,10 @@ fn packing_round_trips_and_rejects_malformed() {
     assert_eq!(unpack(&[0, 0], 8), Err(WitnessError::Length));
     assert_eq!(unpack(&[0, 0b0000_0100], 10), Err(WitnessError::Padding));
     assert_eq!(unpack(&[0, 0b0000_0011], 10).expect("valid").len(), 10);
+    // A link count above the largest lattice never allocates, even when the
+    // bytes match it.
+    let huge = vec![0u8; 1 << 20];
+    assert_eq!(unpack(&huge, 8 << 20), Err(WitnessError::Length));
 
     // Malformed bytes fail before any constraint is read.
     let lat = lattice(2, Boundary::Periodic);
@@ -504,8 +557,12 @@ fn symmetry_group_sizes() {
     let mut torus_pair = empty_request(&periodic);
     torus_pair.charges[0] = Some(2);
     torus_pair.charges[3] = Some(-2);
+    // Every D4 element fixes the point (1, 1) modulo 2. Translation (0, 0)
+    // keeps the labels without reversal, and translation (1, 1) swaps the two
+    // vertices and needs reversal. That is 8 elements times 2 translations.
     let group = symmetries(&periodic, &torus_pair);
-    assert!(!group.is_empty() && group.len() < 64);
+    assert_eq!(group.len(), 16);
+    assert_eq!(group.iter().filter(|g| g.is_reversal()).count(), 8);
 }
 
 #[test]
@@ -628,4 +685,40 @@ fn fields_and_boundary_labels_break_symmetry() {
         canonical(&open, &corner, &states[0]),
         canonical(&open, &corner, &states[1])
     );
+}
+
+#[test]
+fn canonical_minimizes_bytewise_across_bytes() {
+    // Open L = 2 has 12 links, so two bytes. Only link 0 is up: bytes [1, 0].
+    // Some image moves the up spin to link 9, which is bit 1 of byte 1, so
+    // the least image has byte 0 at zero. A little-endian integer comparison
+    // would pick [1, 0] instead.
+    let open = lattice(2, Boundary::Open);
+    let req = empty_request(&open);
+    assert_eq!(canonical(&open, &req, &[0x01, 0x00]), Ok(vec![0x00, 0x02]));
+}
+
+#[test]
+fn fixed_spins_restrict_the_symmetries() {
+    let lat = lattice(2, Boundary::Periodic);
+    let mut req = empty_request(&lat);
+    req.fixed = vec![(0, 1)];
+    let group = symmetries(&lat, &req);
+    assert_eq!(group.len(), 4);
+    assert!(group.iter().all(|g| !(g.is_reversal() && g.element() == 0)));
+    // Every image keeps link 0 at +1.
+    for state in 0..256u32 {
+        if state & 1 == 0 {
+            continue;
+        }
+        let spins = spins_of(state, 8);
+        for g in &group {
+            assert_eq!(g.apply(&lat, &spins).expect("image")[0], 1);
+        }
+    }
+    // A repeated fixed link is a request of the wrong shape.
+    req.fixed = vec![(0, 1), (0, 1)];
+    assert!(symmetries(&lat, &req).is_empty());
+    req.fixed = vec![(9, 1)];
+    assert!(symmetries(&lat, &req).is_empty());
 }

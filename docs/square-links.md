@@ -51,7 +51,7 @@ A candidate passes when it maps the request onto itself. With `r = -1` under rev
 - The fixed set maps onto the fixed set, with each spin multiplied by `sign * r`.
 - `fields[g(e)] = sign * r * fields[e]` for every link.
 
-A request with fields or boundary labels has a smaller group. A field-biased state is never merged with its reversal.
+Fields and boundary labels can reduce the group. A request with all-zero fields keeps every candidate. A field-biased state is never merged with its reversal.
 
 `symmetries` returns every candidate that passes in a fixed order: translation, then D4 element, then no reversal before reversal. It does not remove candidates that act the same way on the links. On small tori some do.
 

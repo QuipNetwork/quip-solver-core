@@ -24,6 +24,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
 
+/// The most links of any supported lattice, an open lattice with `L = 64`.
+pub const MAX_LINKS: u32 = 2 * 64 * 65;
 /// The smallest supported side.
 const MIN_SIDE: u16 = 2;
 /// The largest supported side.
@@ -329,7 +331,9 @@ pub fn check_request(lattice: &SquareLattice, request: &Request) -> Result<(), R
     {
         return Err(RequestError::Total);
     }
-    if orientation_exists(lattice, request, &labels) {
+    // With every charge free, any assignment of the free links works.
+    if request.charges.iter().all(Option::is_none) || orientation_exists(lattice, request, &labels)
+    {
         Ok(())
     } else {
         Err(RequestError::Infeasible)
@@ -387,11 +391,15 @@ impl Network {
     /// until none is left. Returns the added flow.
     fn augment(&mut self, source: usize, sink: usize) -> Option<u32> {
         let mut total = 0u32;
+        let mut via: Vec<Option<usize>> = vec![None; self.adjacent.len()];
+        let mut seen = vec![false; self.adjacent.len()];
+        let mut queue = alloc::collections::VecDeque::new();
         loop {
-            let mut via: Vec<Option<usize>> = vec![None; self.adjacent.len()];
-            let mut seen = vec![false; self.adjacent.len()];
+            via.fill(None);
+            seen.fill(false);
+            queue.clear();
+            queue.push_back(source);
             *seen.get_mut(source)? = true;
-            let mut queue = alloc::collections::VecDeque::from([source]);
             while let Some(node) = queue.pop_front() {
                 if node == sink {
                     break;
@@ -680,20 +688,39 @@ impl Symmetry {
     /// +1 or -1.
     #[must_use]
     pub fn apply(self, lattice: &SquareLattice, spins: &[i8]) -> Option<Vec<i8>> {
+        let mut image = Vec::new();
+        self.apply_into(lattice, spins, &mut image)?;
+        Some(image)
+    }
+
+    /// Like [`Self::apply`], but writes into `image` and reuses its buffer.
+    /// The buffer holds no meaningful value when the result is `None`.
+    pub fn apply_into(
+        self,
+        lattice: &SquareLattice,
+        spins: &[i8],
+        image: &mut Vec<i8>,
+    ) -> Option<()> {
         if spins.len() != lattice.links.len() || spins.iter().any(|&s| s != 1 && s != -1) {
             return None;
         }
         let r: i8 = if self.reversed { -1 } else { 1 };
-        let mut image = vec![0i8; spins.len()];
+        image.clear();
+        image.resize(spins.len(), 0);
         for (e, &spin) in spins.iter().enumerate() {
             let (target, sign) = self.link_image(lattice, u32::try_from(e).ok()?)?;
             *image.get_mut(target as usize)? = sign * r * spin;
         }
-        Some(image)
+        Some(())
     }
 
     /// Whether the candidate maps the request onto itself.
-    fn preserves(self, lattice: &SquareLattice, request: &Request) -> bool {
+    fn preserves(
+        self,
+        lattice: &SquareLattice,
+        request: &Request,
+        fixed_spins: &[Option<i8>],
+    ) -> bool {
         let r: i16 = if self.reversed { -1 } else { 1 };
         for (v, label) in request.charges.iter().enumerate() {
             let Some(image) = u32::try_from(v)
@@ -718,12 +745,11 @@ impl Symmetry {
                 return false;
             };
             let want = i16::from(sign) * r * i16::from(spin);
-            let has = request
-                .fixed
-                .binary_search_by_key(&image, |&(l, _)| l)
-                .ok()
-                .and_then(|i| request.fixed.get(i))
-                .map(|&(_, s)| i16::from(s));
+            let has = fixed_spins
+                .get(image as usize)
+                .copied()
+                .flatten()
+                .map(i16::from);
             if has != Some(want) {
                 return false;
             }
@@ -753,7 +779,8 @@ impl Symmetry {
 /// one. A candidate is kept when charges, fixed spins, and fields map onto
 /// themselves, with charges, fixed spins, and fields negated under reversal.
 /// Candidates that act the same way on the links are not merged. On a small
-/// torus several do. A request of the wrong shape has no symmetry.
+/// torus several do. A request of the wrong shape, including a repeated or out of range fixed
+/// link, has no symmetry.
 ///
 /// The cost is at most `2 * 8 * L^2` candidates of `O(links)` work each.
 #[must_use]
@@ -762,6 +789,14 @@ pub fn symmetries(lattice: &SquareLattice, request: &Request) -> Vec<Symmetry> {
         || (!request.fields.is_empty() && request.fields.len() != lattice.links.len())
     {
         return Vec::new();
+    }
+    // The fixed spin of each link, built once so a candidate costs O(links).
+    let mut fixed_spins = vec![None; lattice.links.len()];
+    for &(link, spin) in &request.fixed {
+        match fixed_spins.get_mut(link as usize) {
+            Some(slot @ None) => *slot = Some(spin),
+            _ => return Vec::new(),
+        }
     }
     let shifts = match lattice.boundary {
         Boundary::Periodic => lattice.side,
@@ -778,7 +813,7 @@ pub fn symmetries(lattice: &SquareLattice, request: &Request) -> Vec<Symmetry> {
                         element,
                         reversed,
                     };
-                    if candidate.preserves(lattice, request) {
+                    if candidate.preserves(lattice, request, &fixed_spins) {
                         found.push(candidate);
                     }
                 }
