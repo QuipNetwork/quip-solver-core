@@ -1,0 +1,174 @@
+//! Witness bytes for square-link families: packing, labeled constraints,
+//! witness checks, and canonical bytes under request-preserving symmetries.
+//!
+//! A witness holds one spin per link in link order. Link `i` is bit `i % 8` of
+//! byte `i / 8`, a set bit is spin +1, padding bits are 0, and the length is
+//! exactly `ceil(links / 8)`. Nothing here reads Ising coefficients or
+//! penalties.
+
+use alloc::vec::Vec;
+use core::fmt;
+
+use crate::square::{charges, symmetries, Request, SquareLattice};
+
+/// Witness bytes or spins are malformed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum WitnessError {
+    /// The byte length is not `ceil(links / 8)`.
+    Length,
+    /// A padding bit is set.
+    Padding,
+    /// A spin is not +1 or -1.
+    Value,
+}
+
+impl fmt::Display for WitnessError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Length => "the witness length is wrong",
+            Self::Padding => "a witness padding bit is set",
+            Self::Value => "a witness spin is not +1 or -1",
+        })
+    }
+}
+
+impl core::error::Error for WitnessError {}
+
+/// Packs spins into witness bytes.
+///
+/// # Errors
+///
+/// [`WitnessError::Value`] when a spin is not +1 or -1.
+pub fn pack(spins: &[i8]) -> Result<Vec<u8>, WitnessError> {
+    let mut bytes = alloc::vec![0u8; spins.len().div_ceil(8)];
+    for (i, &spin) in spins.iter().enumerate() {
+        match spin {
+            1 => {
+                if let Some(byte) = bytes.get_mut(i / 8) {
+                    *byte |= 1 << (i % 8);
+                }
+            }
+            -1 => {}
+            _ => return Err(WitnessError::Value),
+        }
+    }
+    Ok(bytes)
+}
+
+/// Unpacks witness bytes into one spin per link.
+///
+/// # Errors
+///
+/// [`WitnessError::Length`] when the length is not `ceil(links / 8)`, and
+/// [`WitnessError::Padding`] when a padding bit is set.
+pub fn unpack(bytes: &[u8], links: u32) -> Result<Vec<i8>, WitnessError> {
+    let count = links as usize;
+    if bytes.len() != count.div_ceil(8) {
+        return Err(WitnessError::Length);
+    }
+    let spins: Vec<i8> = (0..count)
+        .map(|i| {
+            let set = bytes.get(i / 8).is_some_and(|b| (b >> (i % 8)) & 1 == 1);
+            if set {
+                1
+            } else {
+                -1
+            }
+        })
+        .collect();
+    let used = count % 8;
+    if used != 0 && bytes.last().is_some_and(|&b| b >> used != 0) {
+        return Err(WitnessError::Padding);
+    }
+    Ok(spins)
+}
+
+/// One labeled requirement of a request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Constraint {
+    /// The spin of `link` is `spin`.
+    Fixed {
+        /// The link.
+        link: u32,
+        /// The required spin.
+        spin: i8,
+    },
+    /// The charge of `vertex` is `charge`.
+    Charge {
+        /// The vertex.
+        vertex: u32,
+        /// The required charge.
+        charge: i8,
+    },
+}
+
+/// The constraints of a request: fixed spins by link, then charge labels by
+/// vertex. The label of a constraint is its position.
+#[must_use]
+pub fn constraints(request: &Request) -> Vec<Constraint> {
+    let fixed = request
+        .fixed
+        .iter()
+        .map(|&(link, spin)| Constraint::Fixed { link, spin });
+    let labeled = request.charges.iter().enumerate().filter_map(|(v, label)| {
+        let vertex = u32::try_from(v).ok()?;
+        label.map(|charge| Constraint::Charge { vertex, charge })
+    });
+    fixed.chain(labeled).collect()
+}
+
+/// The labels of the constraints that the witness fails, ascending.
+///
+/// The check reads the spins and the request only. It is independent of any
+/// penalty energy.
+///
+/// # Errors
+///
+/// A [`WitnessError`] when the bytes are malformed. This comes before any
+/// constraint check.
+pub fn check_witness(
+    lattice: &SquareLattice,
+    request: &Request,
+    bytes: &[u8],
+) -> Result<Vec<u32>, WitnessError> {
+    let spins = unpack(bytes, lattice.link_count())?;
+    let q = charges(lattice, &spins).ok_or(WitnessError::Value)?;
+    let mut failed = Vec::new();
+    for (label, constraint) in constraints(request).into_iter().enumerate() {
+        let holds = match constraint {
+            Constraint::Fixed { link, spin } => spins.get(link as usize) == Some(&spin),
+            Constraint::Charge { vertex, charge } => q.get(vertex as usize) == Some(&charge),
+        };
+        if !holds {
+            failed.push(u32::try_from(label).map_err(|_| WitnessError::Length)?);
+        }
+    }
+    Ok(failed)
+}
+
+/// The canonical bytes of a witness: the least packed image over the
+/// symmetries that preserve the request, compared as bytes.
+///
+/// When no candidate is admissible, which happens only for a request of the
+/// wrong shape, the input is returned unchanged.
+///
+/// # Errors
+///
+/// A [`WitnessError`] when the bytes are malformed.
+pub fn canonical(
+    lattice: &SquareLattice,
+    request: &Request,
+    bytes: &[u8],
+) -> Result<Vec<u8>, WitnessError> {
+    let spins = unpack(bytes, lattice.link_count())?;
+    let mut least = bytes.to_vec();
+    for symmetry in symmetries(lattice, request) {
+        let image = symmetry.apply(lattice, &spins).ok_or(WitnessError::Value)?;
+        let packed = pack(&image)?;
+        if packed < least {
+            least = packed;
+        }
+    }
+    Ok(least)
+}

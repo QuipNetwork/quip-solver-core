@@ -16,6 +16,9 @@
 //! cases the links are ordered by owning vertex, `+x` first.
 //!
 //! The side is `2 <= L <= 64`.
+//!
+//! The symmetries of a request are the lattice maps that carry the request
+//! onto itself, see [`symmetries`].
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -80,6 +83,8 @@ pub struct SquareLattice {
     boundary: Boundary,
     links: Vec<Link>,
     incident: Vec<Vec<(u32, i8)>>,
+    /// The link owned by each vertex, by axis (`+x` then `+y`).
+    owned: Vec<[Option<u32>; 2]>,
 }
 
 impl SquareLattice {
@@ -100,6 +105,7 @@ impl SquareLattice {
         let vertices = width * width;
         let mut links = Vec::new();
         let mut incident = vec![Vec::new(); vertices as usize];
+        let mut owned = vec![[None, None]; vertices as usize];
         for y in 0..width {
             for x in 0..width {
                 let tail = y * width + x;
@@ -115,6 +121,11 @@ impl SquareLattice {
                     let index =
                         u32::try_from(links.len()).map_err(|_| LatticeError::SizeOutOfRange)?;
                     links.push(Link { tail, head, axis });
+                    if let Some(slot) = owned.get_mut(tail as usize) {
+                        *slot
+                            .get_mut(usize::from(axis == Axis::Y))
+                            .unwrap_or(&mut None) = Some(index);
+                    }
                     for (vertex, sign) in [(tail, -1), (head, 1)] {
                         if let Some(list) = incident.get_mut(vertex as usize) {
                             list.push((index, sign));
@@ -128,6 +139,7 @@ impl SquareLattice {
             boundary,
             links,
             incident,
+            owned,
         })
     }
 
@@ -480,4 +492,298 @@ fn solve(lattice: &SquareLattice, request: &Request, labels: &[(u8, Option<i8>)]
     }
     let rest = network.augment(0, 1)?;
     Some(demand.checked_add(rest)? == free_links)
+}
+
+/// A 2 by 2 integer matrix, acting as `x' = xx * x + xy * y` and
+/// `y' = yx * x + yy * y`.
+#[derive(Clone, Copy)]
+struct Matrix {
+    xx: i32,
+    xy: i32,
+    yx: i32,
+    yy: i32,
+}
+
+/// The eight elements of the dihedral group D4. Element 0 is the identity.
+const D4: [Matrix; 8] = [
+    Matrix {
+        xx: 1,
+        xy: 0,
+        yx: 0,
+        yy: 1,
+    },
+    Matrix {
+        xx: 0,
+        xy: -1,
+        yx: 1,
+        yy: 0,
+    },
+    Matrix {
+        xx: -1,
+        xy: 0,
+        yx: 0,
+        yy: -1,
+    },
+    Matrix {
+        xx: 0,
+        xy: 1,
+        yx: -1,
+        yy: 0,
+    },
+    Matrix {
+        xx: -1,
+        xy: 0,
+        yx: 0,
+        yy: 1,
+    },
+    Matrix {
+        xx: 1,
+        xy: 0,
+        yx: 0,
+        yy: -1,
+    },
+    Matrix {
+        xx: 0,
+        xy: 1,
+        yx: 1,
+        yy: 0,
+    },
+    Matrix {
+        xx: 0,
+        xy: -1,
+        yx: -1,
+        yy: 0,
+    },
+];
+
+/// A lattice map, taken with or without global spin reversal.
+///
+/// The map sends link (tail `t`, axis `d`) to the link at tail `g(t)` in
+/// direction `R d`. When `R d` is negative, the image is the link owned by
+/// the neighbour `g(t) + R d`, and the link sign is -1. Links map by tail and
+/// axis, never by vertex pair, so parallel links on a small torus stay apart.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Symmetry {
+    tx: u16,
+    ty: u16,
+    element: u8,
+    reversed: bool,
+}
+
+impl Symmetry {
+    /// The translation `(tx, ty)`. It is `(0, 0)` on an open lattice.
+    #[must_use]
+    pub const fn translation(self) -> (u16, u16) {
+        (self.tx, self.ty)
+    }
+
+    /// The D4 element index, 0 for the identity.
+    #[must_use]
+    pub const fn element(self) -> u8 {
+        self.element
+    }
+
+    /// Whether the candidate also reverses every spin, negating charges.
+    #[must_use]
+    pub const fn is_reversal(self) -> bool {
+        self.reversed
+    }
+
+    fn matrix(self) -> Matrix {
+        D4.get(usize::from(self.element)).copied().unwrap_or(D4[0])
+    }
+
+    fn width(lattice: &SquareLattice) -> i32 {
+        match lattice.boundary {
+            Boundary::Periodic => i32::from(lattice.side),
+            Boundary::Open => i32::from(lattice.side) + 1,
+        }
+    }
+
+    /// The image of the point `(x, y)`.
+    fn map_point(self, lattice: &SquareLattice, px: i32, py: i32) -> (i32, i32) {
+        let m = self.matrix();
+        let side = i32::from(lattice.side);
+        match lattice.boundary {
+            Boundary::Periodic => (
+                (m.xx * px + m.xy * py + i32::from(self.tx)).rem_euclid(side),
+                (m.yx * px + m.yy * py + i32::from(self.ty)).rem_euclid(side),
+            ),
+            Boundary::Open => {
+                // Work in doubled coordinates about the centre of the grid.
+                let (u, w) = (2 * px - side, 2 * py - side);
+                (
+                    (m.xx * u + m.xy * w + side) / 2,
+                    (m.yx * u + m.yy * w + side) / 2,
+                )
+            }
+        }
+    }
+
+    /// The image of vertex `v`, or `None` for a vertex that does not exist.
+    #[must_use]
+    pub fn vertex_image(self, lattice: &SquareLattice, v: u32) -> Option<u32> {
+        if v as usize >= lattice.incident.len() {
+            return None;
+        }
+        let width = u32::try_from(Self::width(lattice)).ok()?;
+        let (x, y) = (
+            i32::try_from(v % width).ok()?,
+            i32::try_from(v / width).ok()?,
+        );
+        let (nx, ny) = self.map_point(lattice, x, y);
+        u32::try_from(ny * Self::width(lattice) + nx).ok()
+    }
+
+    /// The image of link `e` and its sign, +1 or -1, or `None` for a link
+    /// that does not exist. A spin `s` on link `e` becomes `sign * s` on the
+    /// image link, times -1 more under reversal.
+    #[must_use]
+    pub fn link_image(self, lattice: &SquareLattice, link_index: u32) -> Option<(u32, i8)> {
+        let link = lattice.link(link_index)?;
+        let width = u32::try_from(Self::width(lattice)).ok()?;
+        let (px, py) = (
+            i32::try_from(link.tail % width).ok()?,
+            i32::try_from(link.tail / width).ok()?,
+        );
+        let m = self.matrix();
+        let (gx, gy) = self.map_point(lattice, px, py);
+        let (dx, dy) = match link.axis {
+            Axis::X => (m.xx, m.yx),
+            Axis::Y => (m.xy, m.yy),
+        };
+        // The image axis is Y when the direction has a y component.
+        let image_axis = usize::from(dy != 0);
+        let (owner_x, owner_y, sign) = if dx + dy > 0 {
+            (gx, gy, 1)
+        } else {
+            (gx + dx, gy + dy, -1)
+        };
+        let side = i32::from(lattice.side);
+        let (owner_x, owner_y) = match lattice.boundary {
+            Boundary::Periodic => (owner_x.rem_euclid(side), owner_y.rem_euclid(side)),
+            Boundary::Open => (owner_x, owner_y),
+        };
+        let wide = Self::width(lattice);
+        if owner_x < 0 || owner_y < 0 || owner_x >= wide || owner_y >= wide {
+            return None;
+        }
+        let owner = usize::try_from(owner_y * wide + owner_x).ok()?;
+        let image = (*lattice.owned.get(owner)?.get(image_axis)?)?;
+        Some((image, sign))
+    }
+
+    /// The spins of the image witness: spin `s` on link `e` becomes
+    /// `sign * r * s` on the image link, with `r = -1` under reversal.
+    ///
+    /// Returns `None` when `spins` has the wrong length or a value other than
+    /// +1 or -1.
+    #[must_use]
+    pub fn apply(self, lattice: &SquareLattice, spins: &[i8]) -> Option<Vec<i8>> {
+        if spins.len() != lattice.links.len() || spins.iter().any(|&s| s != 1 && s != -1) {
+            return None;
+        }
+        let r: i8 = if self.reversed { -1 } else { 1 };
+        let mut image = vec![0i8; spins.len()];
+        for (e, &spin) in spins.iter().enumerate() {
+            let (target, sign) = self.link_image(lattice, u32::try_from(e).ok()?)?;
+            *image.get_mut(target as usize)? = sign * r * spin;
+        }
+        Some(image)
+    }
+
+    /// Whether the candidate maps the request onto itself.
+    fn preserves(self, lattice: &SquareLattice, request: &Request) -> bool {
+        let r: i16 = if self.reversed { -1 } else { 1 };
+        for (v, label) in request.charges.iter().enumerate() {
+            let Some(image) = u32::try_from(v)
+                .ok()
+                .and_then(|v| self.vertex_image(lattice, v))
+            else {
+                return false;
+            };
+            let expected = label.map(|q| r * i16::from(q));
+            let found = request
+                .charges
+                .get(image as usize)
+                .copied()
+                .flatten()
+                .map(i16::from);
+            if expected != found {
+                return false;
+            }
+        }
+        for &(link, spin) in &request.fixed {
+            let Some((image, sign)) = self.link_image(lattice, link) else {
+                return false;
+            };
+            let want = i16::from(sign) * r * i16::from(spin);
+            let has = request
+                .fixed
+                .binary_search_by_key(&image, |&(l, _)| l)
+                .ok()
+                .and_then(|i| request.fixed.get(i))
+                .map(|&(_, s)| i16::from(s));
+            if has != Some(want) {
+                return false;
+            }
+        }
+        for (e, &field) in request.fields.iter().enumerate() {
+            let Some((image, sign)) = u32::try_from(e)
+                .ok()
+                .and_then(|e| self.link_image(lattice, e))
+            else {
+                return false;
+            };
+            let want = i64::from(sign) * i64::from(r) * i64::from(field);
+            if request.fields.get(image as usize).map(|&f| i64::from(f)) != Some(want) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+/// Every candidate that maps the request onto itself, in a fixed order:
+/// translation (`ty * L + tx`), then D4 element, then no reversal before
+/// reversal.
+///
+/// The candidates are the lattice maps with and without global spin
+/// reversal, at most `2 * 8 * L^2` on a periodic lattice and 16 on an open
+/// one. A candidate is kept when charges, fixed spins, and fields map onto
+/// themselves, with charges, fixed spins, and fields negated under reversal.
+/// Candidates that act the same way on the links are not merged. On a small
+/// torus several do. A request of the wrong shape has no symmetry.
+///
+/// The cost is at most `2 * 8 * L^2` candidates of `O(links)` work each.
+#[must_use]
+pub fn symmetries(lattice: &SquareLattice, request: &Request) -> Vec<Symmetry> {
+    if request.charges.len() != lattice.incident.len()
+        || (!request.fields.is_empty() && request.fields.len() != lattice.links.len())
+    {
+        return Vec::new();
+    }
+    let shifts = match lattice.boundary {
+        Boundary::Periodic => lattice.side,
+        Boundary::Open => 1,
+    };
+    let mut found = Vec::new();
+    for ty in 0..shifts {
+        for tx in 0..shifts {
+            for element in 0..8u8 {
+                for reversed in [false, true] {
+                    let candidate = Symmetry {
+                        tx,
+                        ty,
+                        element,
+                        reversed,
+                    };
+                    if candidate.preserves(lattice, request) {
+                        found.push(candidate);
+                    }
+                }
+            }
+        }
+    }
+    found
 }
