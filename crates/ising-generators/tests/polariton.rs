@@ -433,8 +433,9 @@ fn admission_codes() {
         Err(code) => code,
         Ok(admitted) => bounds(&admitted, &topology).expect_err("refused"),
     };
-    // pairs above (L - 1)^2 / 2: L = 3 has 4 interior vertices.
-    assert_eq!(code(params(2, 4, 3, 3)), Code::TopologyIncompatible);
+    // pairs above (L - 1)^2 / 2 and nothing else wrong: L = 2 has 1 interior
+    // vertex and fits z(2, 4).
+    assert_eq!(code(params(2, 4, 2, 1)), Code::TopologyIncompatible);
     // L + 1 above 2m - 1.
     assert_eq!(code(params(2, 4, 3, 0)), Code::TopologyIncompatible);
     // side and pairs outside the schema.
@@ -620,8 +621,6 @@ fn check_metadata_rejects_each_rule() {
     // The side differs from the parameter.
     let mut m = meta.clone();
     m.side = 3;
-    m.labels.truncate(16);
-    m.positions.truncate(24);
     assert!(!accepts(&same_fields(&instance, encode(&m))));
     // A link position used twice.
     let mut m = meta.clone();
