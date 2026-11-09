@@ -125,10 +125,10 @@ const PARAMS_L8: &[u8] = &[
     6, 0,
 ];
 
-/// Canonical parameters of `l16`: as `l4` with `side` 16 and `pairs` 28.
-const PARAMS_L16: &[u8] = &[
-    0x01, 1, 0, 2, 0, 0, 0, 12, 0, 2, 0, 1, 0, 0, 0, 4, 3, 0, 2, 0, 0, 0, 16, 0, 4, 0, 2, 0, 0, 0,
-    28, 0,
+/// Canonical parameters of `l9`: as `l4` with `side` 9 and `pairs` 8.
+const PARAMS_L9: &[u8] = &[
+    0x01, 1, 0, 2, 0, 0, 0, 12, 0, 2, 0, 1, 0, 0, 0, 4, 3, 0, 2, 0, 0, 0, 9, 0, 4, 0, 2, 0, 0, 0,
+    8, 0,
 ];
 
 /// The registered parameter sets, on Zephyr z(12, 4), with
@@ -145,9 +145,9 @@ pub const POLARITON_RECIPES: [Recipe; 3] = [
         params: PARAMS_L8,
     },
     Recipe {
-        alias: "l16",
-        cell: "polariton-l16",
-        params: PARAMS_L16,
+        alias: "l9",
+        cell: "polariton-l9",
+        params: PARAMS_L9,
     },
 ];
 

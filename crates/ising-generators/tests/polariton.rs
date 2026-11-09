@@ -756,7 +756,7 @@ fn recipes_are_canonical() {
     let expected = [
         ("l4", "polariton-l4", 4u16, 1u16),
         ("l8", "polariton-l8", 8, 6),
-        ("l16", "polariton-l16", 16, 28),
+        ("l9", "polariton-l9", 9, 8),
     ];
     assert_eq!(POLARITON_RECIPES.len(), 3);
     for (recipe, (alias, cell, side, pairs)) in POLARITON_RECIPES.iter().zip(expected) {
@@ -773,15 +773,6 @@ fn live_recipes_build() {
     let topology = common::live_topology();
     for recipe in &POLARITON_RECIPES {
         let admitted = admitted(recipe.params).expect("admit");
-        if recipe.alias == "l16" {
-            // The pinned layout keeps at most a 10 by 10 block of cells alive
-            // on the live topology, so a 17 by 17 window does not exist.
-            assert_eq!(
-                bounds(&admitted, &topology),
-                Err(Code::TopologyIncompatible)
-            );
-            continue;
-        }
         let bounds = bounds(&admitted, &topology).expect("admit topology");
         let mut built = None;
         for i in 0..64 {
@@ -808,4 +799,17 @@ fn live_recipes_build() {
             recipe.alias, meta.c0, meta.r0
         );
     }
+}
+
+#[test]
+fn a_side_16_request_has_no_window_on_the_live_topology() {
+    // Side 16 builds only on a window without dead qubits. The live z(12, 4)
+    // topology has none: its largest alive block of cells is 10 by 10.
+    let topology = common::live_topology();
+    let bytes = params(12, 4, 16, 28);
+    let admitted = admitted(&bytes).expect("admit");
+    assert_eq!(
+        bounds(&admitted, &topology),
+        Err(Code::TopologyIncompatible)
+    );
 }
