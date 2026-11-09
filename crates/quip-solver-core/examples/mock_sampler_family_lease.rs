@@ -184,14 +184,14 @@ impl Sampler<Milli> for LocalFamily {
         Ok(())
     }
 
+    /// Lease salts never reach `sample`. An explicit family job does, because
+    /// the binary accepts the families it lists: it solves the plain model.
     fn sample(
         &self,
-        _graph: &IsingGraph<Milli>,
-        _params: &SampleParams,
+        graph: &IsingGraph<Milli>,
+        params: &SampleParams,
     ) -> Result<Vec<SamplerResult>, SampleError> {
-        Err(SampleError::DeviceFault(
-            "the local family sampler generates leases itself".into(),
-        ))
+        DefaultFamily { gate: None }.sample(graph, params)
     }
 }
 

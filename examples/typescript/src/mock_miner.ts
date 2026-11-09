@@ -76,6 +76,7 @@ const ALGORITHM_NAMES = {
   [Algorithm.ALGORITHM_SBQA]: "sbqa",
   [Algorithm.ALGORITHM_TEDSB]: "tedsb",
   [Algorithm.ALGORITHM_EXTERNAL]: "external",
+  [Algorithm.ALGORITHM_OTSUKA]: "otsuka",
   [Algorithm.UNRECOGNIZED]: "unspecified",
 };
 // Mirrors the Rust session loop's DEFAULT_NUM_SWEEPS in quip-solver-core.
