@@ -9,20 +9,21 @@ use std::slice::from_ref;
 use std::time::Duration;
 
 use ising_generators::descriptor::{
-    admit, check_family_id, params_digest, AdvertisedLimits, IdContext, SizeBounds,
+    admit, check_family_id, params_digest, AdvertisedLimits, Contract, IdContext, SizeBounds,
 };
 use ising_generators::family::{admit_topology, BaseTopology, SaltFault};
-use ising_generators::instance::Instance;
+use ising_generators::instance::{Instance, InstanceParts};
 use ising_generators::Code;
 use quip_proto::v1::{
-    coord_msg, miner_msg, Cancel, Capabilities, CoordMsg, EdgeList, FamilyDescriptor,
-    GeneratorAlgorithm, IsingProblemGenerator, Job, JobKind, MinerMsg, Ping, RejectReason,
-    SetTarget, Shutdown, Topology, Welcome,
+    coord_msg, ising_problem::Graph, miner_msg, Cancel, Capabilities, CoefficientEncoding,
+    CoordMsg, EdgeList, FamilyBinding, FamilyDescriptor, GeneratorAlgorithm, IsingProblem,
+    IsingProblemGenerator, Job, JobKind, MinerMsg, Ping, RejectReason, SetTarget, Shutdown,
+    Topology, Welcome,
 };
 use quip_protocol::family::{reject_reason, support_code, CodePhase};
 use quip_protocol::lease::{Generator, LeaseSpec};
 use quip_protocol::scoring::energy_from_milli;
-use quip_protocol::wire::decode_spins_packed;
+use quip_protocol::wire::{decode_spins_packed, encode_i32_le};
 use tokio::sync::mpsc;
 use tonic::{Status, Streaming};
 
@@ -34,7 +35,9 @@ use super::layered::{P_F5000, P_L3_F0, P_SPEC};
 use super::polariton::{P_POLARITON_SIDE1, P_POLARITON_Z24_L2_P0, P_POLARITON_Z34_L3_P2};
 use super::routing::{P_ROUTING_D3, P_ROUTING_Z24_D4, P_ROUTING_Z34_D6};
 use super::twisted::{P_TWISTED_ADJ_W45_P6, P_TWISTED_W1000, P_TWISTED_Z22_W62_P8};
-use super::{export_instances, reference_revision, ReferenceRevision, REFERENCE_REVISIONS};
+use super::{
+    export_instances, reference_revision, ReferenceRevision, REFERENCE_REVISIONS, T_SPARSE_TOPOLOGY,
+};
 use crate::driver::{
     configure, dispatch, drain_to_end, read_hello, read_until, run_miner, send, ScriptKind,
     SessionOutcome, Terminal, CONFIGURED_SWEEPS, PHASE_TIMEOUT,
@@ -130,6 +133,28 @@ pub(crate) fn plan_subjects(
             let subject = format!("{}@{revision}", entry.family_id);
             if subjects.iter().all(|(known, _)| *known != subject) {
                 let reference = reference_revision(&entry.family_id, revision);
+                subjects.push((subject, reference));
+            }
+        }
+    }
+    subjects
+}
+
+/// `family_id@revision` for each pair in `accepted_families` that the gate
+/// has a reference revision for, in `Hello` order, without repeats. The gate
+/// sends these pairs explicit family jobs (FAM-65). A pair with no reference
+/// revision has no cases, because the gate cannot build its instance.
+pub(crate) fn plan_explicit_subjects(
+    caps: &Capabilities,
+) -> Vec<(String, &'static ReferenceRevision)> {
+    let mut subjects: Vec<(String, &'static ReferenceRevision)> = Vec::new();
+    for entry in &caps.accepted_families {
+        for &revision in &entry.revisions {
+            let subject = format!("{}@{revision}", entry.family_id);
+            let Some(reference) = reference_revision(&entry.family_id, revision) else {
+                continue;
+            };
+            if subjects.iter().all(|(known, _)| *known != subject) {
                 subjects.push((subject, reference));
             }
         }
@@ -353,6 +378,15 @@ fn check_lease(
     check_refund(slice, Some(done_at))
 }
 
+/// The edges of `instance` as the scorer takes them.
+fn instance_edges(instance: &Instance) -> Result<Vec<(usize, usize)>, std::num::TryFromIntError> {
+    instance
+        .edges()
+        .iter()
+        .map(|&(a, b)| Ok((usize::try_from(a)?, usize::try_from(b)?)))
+        .collect()
+}
+
 /// Check one `Result` and return its slot. Lowers `lowest` to its energies.
 fn check_result(
     result: &quip_proto::v1::Result,
@@ -388,11 +422,7 @@ fn check_result(
     if result.solutions.is_empty() {
         return Err(format!("slot {index}: a Result without a solution"));
     }
-    let edges = instance
-        .edges()
-        .iter()
-        .map(|&(a, b)| Ok((usize::try_from(a)?, usize::try_from(b)?)))
-        .collect::<Result<Vec<_>, std::num::TryFromIntError>>()
+    let edges = instance_edges(instance)
         .map_err(|_| format!("slot {index}: an edge does not fit in usize"))?;
     for solution in &result.solutions {
         let spins = decode_spins_packed(&solution.spins, instance.node_ids().len())
@@ -450,6 +480,73 @@ fn check_stale(slice: &[miner_msg::Msg], job_id: &[u8]) -> Result<(), String> {
     check_refund(slice, None)
 }
 
+/// Grade a solved explicit job: one `Result` whose solutions score, on the plain
+/// model and without the offset, the energy they carry (FAM-64), then one refund.
+pub(crate) fn grade_explicit_solved(
+    slice: &[miner_msg::Msg],
+    job_id: &[u8],
+    instance: &Instance,
+) -> CaseOutcome {
+    outcome_of(check_explicit_solved(slice, job_id, instance))
+}
+
+fn check_explicit_solved(
+    slice: &[miner_msg::Msg],
+    job_id: &[u8],
+    instance: &Instance,
+) -> Result<(), String> {
+    let edges = instance_edges(instance)
+        .map_err(|_| "an edge of the instance does not fit in usize".to_owned())?;
+    let mut result_at = None;
+    for (at, msg) in slice.iter().enumerate() {
+        match msg {
+            miner_msg::Msg::Reject(reject) if reject.job_id == job_id => {
+                return Err(format!(
+                    "Reject with reason {} for a valid explicit job",
+                    reject.reason
+                ));
+            }
+            miner_msg::Msg::LeaseDone(done) if done.job_id == job_id => {
+                return Err("a LeaseDone followed an explicit job".to_owned());
+            }
+            miner_msg::Msg::Result(result) if result.job_id == job_id => {
+                if result_at.is_some() {
+                    return Err("a second Result for an explicit job".to_owned());
+                }
+                result_at = Some(at);
+                check_explicit_result(result, instance, &edges)?;
+            }
+            _ => {}
+        }
+    }
+    let Some(result_at) = result_at else {
+        return Err("no Result for a valid explicit job".to_owned());
+    };
+    check_refund(slice, Some(result_at))
+}
+
+fn check_explicit_result(
+    result: &quip_proto::v1::Result,
+    instance: &Instance,
+    edges: &[(usize, usize)],
+) -> Result<(), String> {
+    if result.solutions.is_empty() {
+        return Err("a Result without a solution".to_owned());
+    }
+    for solution in &result.solutions {
+        let spins = decode_spins_packed(&solution.spins, instance.node_ids().len())
+            .map_err(|fault| format!("spins do not decode: {fault:?}"))?;
+        let want = energy_from_milli(&spins, instance.h(), instance.j(), edges);
+        if solution.energy_milli != want {
+            return Err(format!(
+                "energy_milli is {}, the plain model scores {want} without the offset",
+                solution.energy_milli
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Generation the script cancels before it sends any family job.
 const FAMILY_CANCEL_GENERATION: u64 = 3;
 
@@ -464,12 +561,14 @@ const SESSION_BARRIERS: u32 = 1 + 2 + 2 * 2 + 1;
 /// How long the gate waits for the solver to exit. A walk in which every
 /// barrier times out must still finish, so the report names every case.
 ///
-/// Each reference revision runs at most `REVISION_CASES.len()` cases of two
-/// barriers each. With 10 cases and 4 reference revisions the budget is
-/// `(8 + 4 * 20 + 1) * 10 s = 890 s`, the `+ 1` being one phase of slack so
-/// the script ends before the child is killed.
+/// Each reference revision runs at most `REVISION_CASES.len()` lease cases and
+/// `EXPLICIT_CASES.len()` explicit cases of two barriers each. With 15 cases
+/// and 6 reference revisions the budget is `(8 + 6 * 30 + 1) * 10 s`, the
+/// `+ 1` being one phase of slack so the script ends before the child is
+/// killed.
 fn family_child_timeout() -> Duration {
-    let per_revision = u32::try_from(REVISION_CASES.len() * 2).unwrap_or(u32::MAX);
+    let cases = REVISION_CASES.len() + EXPLICIT_CASES.len();
+    let per_revision = u32::try_from(cases * 2).unwrap_or(u32::MAX);
     let revisions = u32::try_from(REFERENCE_REVISIONS.len()).unwrap_or(u32::MAX);
     let phases = per_revision
         .saturating_mul(revisions)
@@ -503,48 +602,68 @@ const REVISION_CASES: [&str; 10] = [
     "deadline-expired",
 ];
 
+/// The explicit-job cases of each accepted revision, in run order.
+const EXPLICIT_CASES: [&str; 5] = [
+    "explicit-supported",
+    "explicit-digest-mismatch",
+    "explicit-metadata-invalid",
+    "explicit-params-out-of-bounds",
+    "explicit-topology-hash-form",
+];
+
 fn base_salt() -> [u8; 32] {
     let mut salt = [0x33; 32];
     salt[..8].fill(0);
     salt
 }
 
-/// `T_SPARSE` in the forms the script needs: the stored ids, `T_SPARSE`
-/// itself, and `T_REORDERED` (the first two edges swapped).
-struct SparseFixture {
+/// A base topology in the forms the script needs: the stored ids, the
+/// topology itself, its reordered twin (the first two edges swapped), and the
+/// hash the session caches it under.
+struct GateTopology {
     stored: ising_generators::blob::Topology,
     plain: BaseTopology,
     reordered: BaseTopology,
+    hash: [u8; 32],
 }
 
-impl SparseFixture {
-    /// Decode the shared `T_SPARSE` file.
+impl GateTopology {
+    /// Decode the topology file that `reference` names. `T_SPARSE` keeps the
+    /// hash `FAMILY_TOPOLOGY_HASH`. Any other topology uses its own order digest,
+    /// so each distinct topology has a distinct hash.
     ///
     /// # Errors
     ///
     /// A message when the embedded file does not decode or is not valid.
-    fn load() -> Result<Self, String> {
-        let stored = crate::t_sparse().map_err(|why| format!("T_SPARSE failed to load: {why}"))?;
+    fn load(reference: &str) -> Result<Self, String> {
+        let stored = crate::topology(reference)
+            .map_err(|why| format!("{reference} failed to load: {why}"))?;
         let build = |swap: bool| {
             let mut edges = stored.edges.clone();
             if swap {
                 edges.swap(0, 1);
             }
             BaseTopology::new(stored.nodes.clone(), &edges)
-                .map_err(|why| format!("T_SPARSE is not a valid topology: {why:?}"))
+                .map_err(|why| format!("{reference} is not a valid topology: {why:?}"))
         };
         let plain = build(false)?;
         let reordered = build(true)?;
+        let hash = if reference == T_SPARSE_TOPOLOGY {
+            FAMILY_TOPOLOGY_HASH
+        } else {
+            *plain.order_digest()
+        };
         Ok(Self {
             stored,
             plain,
             reordered,
+            hash,
         })
     }
 
     fn wire(&self) -> Topology {
         Topology {
-            hash: FAMILY_TOPOLOGY_HASH.to_vec(),
+            hash: self.hash.to_vec(),
             nodes: self.stored.nodes.clone(),
             edges: Some(EdgeList {
                 u: self.stored.edges.iter().map(|&(u, _)| u).collect(),
@@ -564,6 +683,12 @@ fn admission_reason(code: Code) -> i32 {
         .map_or(RejectReason::Unspecified as i32, |reason| reason as i32)
 }
 
+/// The FAM-42 wire reason of an explicit-job code, as a raw `i32`.
+fn explicit_reason(code: Code) -> i32 {
+    reject_reason(code, CodePhase::ExplicitJob)
+        .map_or(RejectReason::Unspecified as i32, |reason| reason as i32)
+}
+
 /// The inputs of one family lease that the cases vary.
 #[derive(Clone, Debug)]
 struct FamilyLease {
@@ -572,6 +697,7 @@ struct FamilyLease {
     params: Vec<u8>,
     params_digest: Vec<u8>,
     order_digest: Vec<u8>,
+    topology_hash: [u8; 32],
     generation: u64,
     deadline_ms: u64,
 }
@@ -584,6 +710,7 @@ impl FamilyLease {
             params: params.to_vec(),
             params_digest: params_digest(params).to_vec(),
             order_digest: order_digest.to_vec(),
+            topology_hash: FAMILY_TOPOLOGY_HASH,
             generation: FAMILY_LIVE_GENERATION,
             deadline_ms: 0,
         }
@@ -605,7 +732,7 @@ impl FamilyLease {
             deadline_ms: self.deadline_ms,
             generator: Some(IsingProblemGenerator {
                 algorithm: GeneratorAlgorithm::FamilyChacha8V1 as i32,
-                topology_hash: FAMILY_TOPOLOGY_HASH.to_vec(),
+                topology_hash: self.topology_hash.to_vec(),
                 last_proof_block_hash: LAST_PROOF_BLOCK_HASH.to_vec(),
                 miner_account: MINER_ACCOUNT.to_vec(),
                 base_salt: base_salt().to_vec(),
@@ -662,12 +789,8 @@ struct JobCase {
     grade: Grade,
 }
 
-/// The expected lease of `lease` regenerated with `reference`.
-fn expected_lease(
-    reference: &ReferenceRevision,
-    lease: &FamilyLease,
-    topology: &BaseTopology,
-) -> Result<ExpectedLease, String> {
+/// The gate lease inputs and the nonce of each of its slots.
+fn lease_inputs() -> Result<(LeaseSpec, Vec<[u8; 32]>), String> {
     let spec = LeaseSpec::new(
         Generator::FamilyChacha8V1,
         LAST_PROOF_BLOCK_HASH,
@@ -684,16 +807,29 @@ fn expected_lease(
                 .ok_or_else(|| format!("slot {index} is outside the lease"))?,
         );
     }
+    Ok((spec, nonces))
+}
+
+/// The expected lease of `lease` regenerated with `reference`.
+fn expected_lease(
+    reference: &ReferenceRevision,
+    lease: &FamilyLease,
+    topology: &BaseTopology,
+) -> Result<ExpectedLease, String> {
+    let (spec, nonces) = lease_inputs()?;
     let salts = export_instances(reference.contract, &lease.params, topology, &nonces)
         .map_err(|code| format!("the reference does not regenerate: code {}", code.value()))?;
     Ok(ExpectedLease { spec, salts })
 }
 
-/// True when a `JobRequest` follows the first `Reject` or `LeaseDone` for `job_id`.
-fn refunded_after_terminal(slice: &[miner_msg::Msg], job_id: &[u8]) -> bool {
+/// True when a `JobRequest` follows the first `Reject` or `LeaseDone` for
+/// `job_id`. For an explicit job a `Result` is also terminal, because the job
+/// has no `LeaseDone`.
+fn refunded_after_terminal(slice: &[miner_msg::Msg], job_id: &[u8], explicit: bool) -> bool {
     let terminal = slice.iter().position(|msg| match msg {
         miner_msg::Msg::Reject(reject) => reject.job_id == job_id,
         miner_msg::Msg::LeaseDone(done) => done.job_id == job_id,
+        miner_msg::Msg::Result(result) => explicit && result.job_id == job_id,
         _ => false,
     });
     terminal.is_some_and(|at| {
@@ -725,6 +861,17 @@ fn push_case(
     });
 }
 
+/// What ends a job before its refund counts.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Await {
+    /// A `Reject` or the `LeaseDone` of a lease.
+    Lease,
+    /// Any refund: the job gets no other message.
+    Stale,
+    /// A `Reject` or the `Result` of an explicit job.
+    Explicit,
+}
+
 /// Dispatch `job`, wait for its refund and then a `Ping` fence, and return
 /// where its transcript starts in `outcome.messages`.
 async fn run_job(
@@ -732,7 +879,7 @@ async fn run_job(
     tx: &mpsc::Sender<Result<CoordMsg, Status>>,
     outcome: &mut SessionOutcome,
     job: Job,
-    stale: bool,
+    ends: Await,
 ) -> Result<usize, String> {
     if outcome.stream_ended() {
         return Err(format!(
@@ -747,12 +894,12 @@ async fn run_job(
     let phase = format!("{case}->refund");
     let refunded = read_until(inbound, outcome, &phase, |o| {
         let slice = o.messages.get(start..).unwrap_or_default();
-        if stale {
+        if ends == Await::Stale {
             slice
                 .iter()
                 .any(|msg| matches!(msg, miner_msg::Msg::JobRequest(_)))
         } else {
-            refunded_after_terminal(slice, &job_id)
+            refunded_after_terminal(slice, &job_id, ends == Await::Explicit)
         }
     })
     .await;
@@ -779,8 +926,12 @@ async fn run_job_case(
     grade: &Grade,
 ) {
     let job_id = subject.map_or_else(|| name.to_owned(), |subject| format!("{name}/{subject}"));
-    let stale = matches!(grade, Grade::Stale);
-    let graded = match run_job(inbound, tx, outcome, lease.job(&job_id), stale).await {
+    let ends = if matches!(grade, Grade::Stale) {
+        Await::Stale
+    } else {
+        Await::Lease
+    };
+    let graded = match run_job(inbound, tx, outcome, lease.job(&job_id), ends).await {
         Err(why) => CaseOutcome::Failed(why),
         Ok(start) => {
             let slice = outcome.messages.get(start..).unwrap_or_default();
@@ -966,6 +1117,19 @@ fn fam61_fault(caps: &Capabilities, family_id: &str) -> Option<String> {
     None
 }
 
+/// The cases to record when the gate cannot drive a listed revision:
+/// `supported-revision` fails, and the other cases of a revision with a
+/// reference are skipped with the same reason.
+fn unavailable_cases(has_reference: bool, why: &str) -> Vec<(&'static str, CaseOutcome)> {
+    let mut cases = vec![("supported-revision", CaseOutcome::Failed(why.to_owned()))];
+    if has_reference {
+        for name in REVISION_CASES.iter().skip(1) {
+            cases.push((*name, CaseOutcome::Skipped(why.to_owned())));
+        }
+    }
+    cases
+}
+
 /// The supported lease of a listed subject, or the cases to record when the
 /// gate cannot drive it. A listed revision that the gate cannot drive fails
 /// `supported-revision` (FAM-57). The other cases of a revision with a
@@ -977,15 +1141,7 @@ fn select_supported<'r>(
     topology: &BaseTopology,
 ) -> Result<(FamilyLease, &'r ReferenceRevision), Vec<(&'static str, CaseOutcome)>> {
     let family_id = subject.rsplit_once('@').map_or(subject, |(id, _)| id);
-    let cases_for = |why: String| {
-        let mut cases = vec![("supported-revision", CaseOutcome::Failed(why.clone()))];
-        if reference.is_some() {
-            for name in REVISION_CASES.iter().skip(1) {
-                cases.push((*name, CaseOutcome::Skipped(why.clone())));
-            }
-        }
-        cases
-    };
+    let cases_for = |why: String| unavailable_cases(reference.is_some(), &why);
     if let Some(fault) = fam61_fault(caps, family_id) {
         return Err(cases_for(fault));
     }
@@ -1112,19 +1268,401 @@ fn revision_cases(
     ]
 }
 
-/// Run every case of one advertised `(subject, reference)` pair.
+/// The inputs of one explicit family job that the cases vary.
+#[derive(Clone, Debug)]
+struct ExplicitJob {
+    family: FamilyDescriptor,
+    nonce: Vec<u8>,
+    instance_digest: Vec<u8>,
+    metadata: Vec<u8>,
+    order_digest: Vec<u8>,
+    node_ids: Vec<u32>,
+    offset_milli: i64,
+    graph: Graph,
+    h: Vec<i32>,
+    j: Vec<i32>,
+}
+
+impl ExplicitJob {
+    /// The valid job of `instance`, bound to `family_id@revision` and `params`.
+    fn new(contract: &Contract, params: &[u8], instance: &Instance) -> Self {
+        Self {
+            family: FamilyDescriptor {
+                family_id: contract.family_id.to_owned(),
+                revision: contract.revision,
+                params: params.to_vec(),
+                params_digest: params_digest(params).to_vec(),
+            },
+            nonce: instance
+                .nonce()
+                .map(|nonce| nonce.to_vec())
+                .unwrap_or_default(),
+            instance_digest: instance.digest().to_vec(),
+            metadata: instance.metadata().to_vec(),
+            order_digest: instance.topology_order_digest().to_vec(),
+            node_ids: instance.node_ids().to_vec(),
+            offset_milli: instance.offset_milli(),
+            graph: Graph::Edges(EdgeList {
+                u: instance.edges().iter().map(|&(u, _)| u).collect(),
+                v: instance.edges().iter().map(|&(_, v)| v).collect(),
+            }),
+            h: instance.h().to_vec(),
+            j: instance.j().to_vec(),
+        }
+    }
+
+    fn job(&self, job_id: &str) -> Job {
+        Job {
+            job_id: job_id.as_bytes().to_vec(),
+            kind: JobKind::IsingSample as i32,
+            generation: FAMILY_LIVE_GENERATION,
+            ising: Some(IsingProblem {
+                graph: Some(self.graph.clone()),
+                encoding: CoefficientEncoding::I32 as i32,
+                scale: 1000,
+                h: encode_i32_le(&self.h),
+                j: encode_i32_le(&self.j),
+                family: Some(FamilyBinding {
+                    family: Some(self.family.clone()),
+                    nonce: self.nonce.clone(),
+                    instance_digest: self.instance_digest.clone(),
+                    metadata: self.metadata.clone(),
+                    topology_order_digest: self.order_digest.clone(),
+                    node_ids: self.node_ids.clone(),
+                    offset_milli: self.offset_milli,
+                }),
+                ..IsingProblem::default()
+            }),
+            ..Job::default()
+        }
+    }
+}
+
+/// How an explicit job case is graded.
+#[derive(Clone, Debug)]
+enum ExplicitGrade {
+    /// A solution scored on the plain model of this instance.
+    Solved(Box<Instance>),
+    /// One `Reject` with this wire reason.
+    Reject(i32),
+}
+
+/// One explicit-job case. `plan` is `Err` with the outcome to record when the
+/// gate cannot build the job.
+struct ExplicitCase {
+    name: &'static str,
+    plan: Result<(ExplicitJob, ExplicitGrade), CaseOutcome>,
+}
+
+/// The first reference params set that the accepted claims admit, with the
+/// first instance of the gate lease that it generates.
+///
+/// # Errors
+///
+/// The reason, naming what each params set gives.
+fn select_explicit(
+    caps: &Capabilities,
+    reference: &'static ReferenceRevision,
+    topology: &BaseTopology,
+) -> Result<(&'static [u8], Instance), String> {
+    // Admission reads `generated_families`; the explicit job reads the accepted list.
+    let accepted = Capabilities {
+        generated_families: caps.accepted_families.clone(),
+        ..caps.clone()
+    };
+    let contract = reference.contract;
+    let (_, nonces) = lease_inputs()?;
+    let mut tried = Vec::new();
+    for &params in reference.params {
+        let admission = reference_admission(
+            &accepted,
+            reference,
+            contract.family_id,
+            contract.revision,
+            params,
+            &params_digest(params),
+            topology,
+            topology.order_digest(),
+        );
+        if let Err(code) = admission {
+            tried.push(format!(
+                "{} gives code {}",
+                params_name(params),
+                code.value()
+            ));
+            continue;
+        }
+        let salts = export_instances(contract, params, topology, &nonces)
+            .map_err(|code| format!("the reference does not regenerate: code {}", code.value()))?;
+        if let Some(instance) = salts.into_iter().find_map(Result::ok) {
+            return Ok((params, instance));
+        }
+        tried.push(format!("{} skips every salt", params_name(params)));
+    }
+    Err(format!(
+        "no reference params set gives an explicit instance under the accepted claims ({})",
+        tried.join(", ")
+    ))
+}
+
+/// The metadata of `instance` with one byte changed so the layout holds and
+/// the construction check fails, with the instance digest of the changed bytes.
+///
+/// # Errors
+///
+/// The reason when no one-byte change does both.
+fn corrupt_metadata(
+    reference: &ReferenceRevision,
+    params: &[u8],
+    instance: &Instance,
+) -> Result<(Vec<u8>, [u8; 32]), String> {
+    let contract = reference.contract;
+    let construction = contract
+        .construction
+        .ok_or_else(|| "the reference has no construction".to_owned())?;
+    let admitted = admit(
+        from_ref(contract),
+        contract.family_id.as_bytes(),
+        contract.revision,
+        params,
+        &params_digest(params),
+    )
+    .map_err(|code| format!("the reference params do not admit: code {}", code.value()))?;
+    let region = instance.metadata();
+    for at in (0..region.len()).rev() {
+        let mut changed = region.to_vec();
+        if let Some(byte) = changed.get_mut(at) {
+            *byte ^= 0x01;
+        }
+        let parts = InstanceParts {
+            descriptor_digest: *instance.descriptor_digest(),
+            topology_order_digest: *instance.topology_order_digest(),
+            nonce: instance.nonce().copied(),
+            node_ids: instance.node_ids().to_vec(),
+            edges: instance.edges().to_vec(),
+            h: instance.h().to_vec(),
+            j: instance.j().to_vec(),
+            offset_milli: instance.offset_milli(),
+            metadata: changed.clone(),
+        };
+        let Ok(rebuilt) = Instance::new(parts, &contract.limits, contract.metadata_kinds, None)
+        else {
+            continue;
+        };
+        if !(construction.check_metadata)(admitted.params(), &rebuilt) {
+            return Ok((changed, rebuilt.digest()));
+        }
+    }
+    Err("no one-byte change of the metadata keeps its layout and fails the family check".to_owned())
+}
+
+/// The explicit-job cases to record when the gate cannot build the base
+/// instance: `explicit-supported` fails and the others are skipped.
+fn unavailable_explicit(why: &str) -> Vec<ExplicitCase> {
+    EXPLICIT_CASES
+        .iter()
+        .enumerate()
+        .map(|(at, &name)| {
+            let outcome = if at == 0 {
+                CaseOutcome::Failed(why.to_owned())
+            } else {
+                CaseOutcome::Skipped(why.to_owned())
+            };
+            ExplicitCase {
+                name,
+                plan: Err(outcome),
+            }
+        })
+        .collect()
+}
+
+/// The five explicit-job cases of one accepted revision, in run order.
+fn explicit_cases(
+    caps: &Capabilities,
+    reference: &'static ReferenceRevision,
+    gate: &GateTopology,
+) -> Vec<ExplicitCase> {
+    let topology = &gate.plain;
+    let (params, instance) = match select_explicit(caps, reference, topology) {
+        Ok(selected) => selected,
+        Err(why) => return unavailable_explicit(&why),
+    };
+    let contract = reference.contract;
+    let base = ExplicitJob::new(contract, params, &instance);
+    let reject = |code: Code| ExplicitGrade::Reject(explicit_reason(code));
+
+    let mut wrong_digest = base.instance_digest.clone();
+    if let Some(byte) = wrong_digest.first_mut() {
+        *byte ^= 0x01;
+    }
+    let metadata =
+        corrupt_metadata(reference, params, &instance).map(|(metadata, digest)| ExplicitJob {
+            metadata,
+            instance_digest: digest.to_vec(),
+            ..base.clone()
+        });
+    let out_of_bounds = reference.out_of_bounds_params;
+    let oob_gives = admit(
+        from_ref(contract),
+        contract.family_id.as_bytes(),
+        contract.revision,
+        out_of_bounds,
+        &params_digest(out_of_bounds),
+    )
+    .err();
+    let out_of_bounds_job = if oob_gives == Some(Code::ParamsOutOfBounds) {
+        Ok(ExplicitJob {
+            family: ExplicitJob::new(contract, out_of_bounds, &instance).family,
+            ..base.clone()
+        })
+    } else {
+        Err(format!(
+            "the reference out-of-bounds params give {}, not code 9",
+            oob_gives.map_or_else(
+                || "admitted".to_owned(),
+                |code| format!("code {}", code.value())
+            )
+        ))
+    };
+    // The cached topology fixes the plain model of the hash form, so any
+    // coefficients that fit it work. The binding stays the valid one.
+    let hash_form = ExplicitJob {
+        graph: Graph::TopologyHash(gate.hash.to_vec()),
+        h: vec![0; topology.node_ids().len()],
+        j: vec![1000; topology.edges().len()],
+        ..base.clone()
+    };
+    let unavailable = |why: String| CaseOutcome::Failed(why);
+    vec![
+        ExplicitCase {
+            name: "explicit-supported",
+            plan: Ok((base.clone(), ExplicitGrade::Solved(Box::new(instance)))),
+        },
+        ExplicitCase {
+            name: "explicit-digest-mismatch",
+            plan: Ok((
+                ExplicitJob {
+                    instance_digest: wrong_digest,
+                    ..base
+                },
+                reject(Code::InstanceDigestMismatch),
+            )),
+        },
+        ExplicitCase {
+            name: "explicit-metadata-invalid",
+            plan: metadata
+                .map(|job| (job, reject(Code::MetadataInvalid)))
+                .map_err(unavailable),
+        },
+        ExplicitCase {
+            name: "explicit-params-out-of-bounds",
+            plan: out_of_bounds_job
+                .map(|job| (job, reject(Code::ParamsOutOfBounds)))
+                .map_err(unavailable),
+        },
+        ExplicitCase {
+            name: "explicit-topology-hash-form",
+            plan: Ok((hash_form, reject(Code::InstanceDigestMismatch))),
+        },
+    ]
+}
+
+/// Run one explicit job case and record its outcome. The job id is `"{name}/{subject}"`.
+async fn run_explicit_case(
+    inbound: &mut Streaming<MinerMsg>,
+    tx: &mpsc::Sender<Result<CoordMsg, Status>>,
+    outcome: &mut SessionOutcome,
+    (name, subject): (&'static str, &str),
+    plan: &(ExplicitJob, ExplicitGrade),
+) {
+    let (explicit, grade) = plan;
+    let job_id = format!("{name}/{subject}");
+    let graded = match run_job(inbound, tx, outcome, explicit.job(&job_id), Await::Explicit).await {
+        Err(why) => CaseOutcome::Failed(why),
+        Ok(start) => {
+            let slice = outcome.messages.get(start..).unwrap_or_default();
+            let job_id = job_id.as_bytes();
+            match grade {
+                ExplicitGrade::Solved(instance) => grade_explicit_solved(slice, job_id, instance),
+                ExplicitGrade::Reject(want) => grade_reject(slice, job_id, *want),
+            }
+        }
+    };
+    push_case(outcome, name, Some(subject), graded);
+}
+
+/// Send `gate` to the session unless the session already holds it. A session
+/// holds one topology, the last one sent, so a subject sends its own before its
+/// first job.
+async fn hold_topology(
+    tx: &mpsc::Sender<Result<CoordMsg, Status>>,
+    held: &mut [u8; 32],
+    gate: &GateTopology,
+) {
+    if *held != gate.hash {
+        let _ = send(tx, coord_msg::Msg::Topology(gate.wire())).await;
+        *held = gate.hash;
+    }
+}
+
+/// Run the explicit-job cases of one accepted `(subject, reference)` pair.
+async fn run_explicit_subject(
+    inbound: &mut Streaming<MinerMsg>,
+    tx: &mpsc::Sender<Result<CoordMsg, Status>>,
+    outcome: &mut SessionOutcome,
+    caps: &Capabilities,
+    held: &mut [u8; 32],
+    (subject, reference): (&str, &'static ReferenceRevision),
+) {
+    let gate = match GateTopology::load(reference.topology) {
+        Ok(gate) => gate,
+        Err(why) => {
+            for case in unavailable_explicit(&why) {
+                if let Err(graded) = case.plan {
+                    push_case(outcome, case.name, Some(subject), graded);
+                }
+            }
+            return;
+        }
+    };
+    for case in explicit_cases(caps, reference, &gate) {
+        match &case.plan {
+            Err(graded) => push_case(outcome, case.name, Some(subject), graded.clone()),
+            Ok(plan) => {
+                hold_topology(tx, held, &gate).await;
+                run_explicit_case(inbound, tx, outcome, (case.name, subject), plan).await;
+            }
+        }
+    }
+}
+
+/// Run every case of one advertised `(subject, reference)` pair on the base
+/// topology of its reference. `sparse` stands in when there is no reference.
 async fn run_subject(
     inbound: &mut Streaming<MinerMsg>,
     tx: &mpsc::Sender<Result<CoordMsg, Status>>,
     outcome: &mut SessionOutcome,
     caps: &Capabilities,
-    sparse: &SparseFixture,
-    subject: &str,
-    reference: Option<&ReferenceRevision>,
+    (sparse, held): (&GateTopology, &mut [u8; 32]),
+    (subject, reference): (&str, Option<&'static ReferenceRevision>),
 ) {
-    let topology = &sparse.plain;
-    let reordered = &sparse.reordered;
-    let (supported, reference) = match select_supported(caps, subject, reference, topology) {
+    let loaded;
+    let gate = match reference.map(|reference| GateTopology::load(reference.topology)) {
+        None => sparse,
+        Some(Ok(gate)) => {
+            loaded = gate;
+            &loaded
+        }
+        Some(Err(why)) => {
+            for (name, case_outcome) in unavailable_cases(true, &why) {
+                push_case(outcome, name, Some(subject), case_outcome);
+            }
+            return;
+        }
+    };
+    let topology = &gate.plain;
+    let reordered = &gate.reordered;
+    let (mut supported, reference) = match select_supported(caps, subject, reference, topology) {
         Ok(selected) => selected,
         Err(cases) => {
             for (name, case_outcome) in cases {
@@ -1133,6 +1671,7 @@ async fn run_subject(
             return;
         }
     };
+    supported.topology_hash = gate.hash;
     let cases = revision_cases(
         caps,
         reference,
@@ -1156,6 +1695,7 @@ async fn run_subject(
             (Ok(_), Some(_)) | (Err(_), None) => false,
         };
         if met {
+            hold_topology(tx, held, gate).await;
             let at = (case.name, Some(subject));
             run_job_case(inbound, tx, outcome, at, lease, &case.grade).await;
         } else {
@@ -1172,13 +1712,26 @@ async fn run_subject(
     }
 }
 
+/// Run the explicit-job cases of every accepted revision.
+async fn run_explicit_subjects(
+    inbound: &mut Streaming<MinerMsg>,
+    tx: &mpsc::Sender<Result<CoordMsg, Status>>,
+    outcome: &mut SessionOutcome,
+    caps: &Capabilities,
+    held: &mut [u8; 32],
+) {
+    for (subject, reference) in plan_explicit_subjects(caps) {
+        run_explicit_subject(inbound, tx, outcome, caps, held, (&subject, reference)).await;
+    }
+}
+
 /// The session cases that send a family lease the binary must refuse.
 async fn run_session_cases(
     inbound: &mut Streaming<MinerMsg>,
     tx: &mpsc::Sender<Result<CoordMsg, Status>>,
     outcome: &mut SessionOutcome,
     caps: &Capabilities,
-    sparse: &SparseFixture,
+    sparse: &GateTopology,
 ) {
     let order_digest = *sparse.plain.order_digest();
     let grade = Grade::Reject(admission_reason(Code::FamilyUnsupported));
@@ -1218,8 +1771,8 @@ fn grade_setup(missed: &[String]) -> CaseOutcome {
 }
 
 /// Load `T_SPARSE`, or grade `session-setup` as failed and give `None`.
-fn load_sparse(outcome: &mut SessionOutcome) -> Option<SparseFixture> {
-    match SparseFixture::load() {
+fn load_sparse(outcome: &mut SessionOutcome) -> Option<GateTopology> {
+    match GateTopology::load(T_SPARSE_TOPOLOGY) {
         Ok(sparse) => Some(sparse),
         Err(why) => {
             push_case(outcome, "session-setup", None, CaseOutcome::Failed(why));
@@ -1229,8 +1782,8 @@ fn load_sparse(outcome: &mut SessionOutcome) -> Option<SparseFixture> {
 }
 
 /// The family session script: handshake, setup, the cancel watermark, the
-/// session cases, the cases of each advertised revision, the credit ledger,
-/// and `Shutdown`.
+/// session cases, the cases of each advertised revision, the explicit-job
+/// cases of each accepted revision, the credit ledger, and `Shutdown`.
 pub(crate) async fn run_family_script(
     inbound: &mut Streaming<MinerMsg>,
     tx: &mpsc::Sender<Result<CoordMsg, Status>>,
@@ -1315,20 +1868,23 @@ pub(crate) async fn run_family_script(
     //    (`run_job`). 5. The session cases, then 6. the cases of each
     //    advertised revision.
     run_session_cases(inbound, tx, &mut outcome, &caps, &sparse).await;
+    let mut held = sparse.hash;
     for (subject, reference) in plan_subjects(&caps) {
         run_subject(
             inbound,
             tx,
             &mut outcome,
             &caps,
-            &sparse,
-            &subject,
-            reference,
+            (&sparse, &mut held),
+            (&subject, reference),
         )
         .await;
     }
 
-    // 7. Every dispatched job returned exactly one credit.
+    // 7. The explicit jobs of each accepted revision, after every lease case.
+    run_explicit_subjects(inbound, tx, &mut outcome, &caps, &mut held).await;
+
+    // 8. Every dispatched job, explicit jobs included, returned exactly one credit.
     let refunded = outcome.credits_refunded();
     let dispatched = outcome.jobs_dispatched as u64;
     let ledger = if dispatched > 0 && refunded == dispatched {
@@ -1340,7 +1896,7 @@ pub(crate) async fn run_family_script(
     };
     push_case(&mut outcome, "credit-ledger-balanced", None, ledger);
 
-    // 8. Shutdown ends the session.
+    // 9. Shutdown ends the session.
     let _ = send(tx, coord_msg::Msg::Shutdown(Shutdown { grace_ms: 1000 })).await;
     drain_to_end(inbound, &mut outcome).await;
     outcome
@@ -1783,7 +2339,7 @@ mod tests {
     }
 
     #[test]
-    fn ice_glass_on_t_sparse_fails_supported_revision_with_code_12() {
+    fn a_reference_run_on_t_sparse_without_its_tiles_fails_with_code_12() {
         let mut caps = mock_caps();
         caps.generated_families.push(FamilySupport {
             family_id: "quip/ice-glass".to_owned(),
@@ -1795,136 +2351,6 @@ mod tests {
             .expect_err("T_SPARSE carries no ice tiles");
         let why = "no reference params set admits under the advertised limits \
                    (P_ICE_ADJ_125 gives code 12, P_ICE_Z12_200 gives code 12)";
-        assert_eq!(cases.len(), 10);
-        assert_eq!(
-            cases.first(),
-            Some(&("supported-revision", CaseOutcome::Failed(why.to_owned())))
-        );
-    }
-
-    #[test]
-    fn twisted_ice_dimer_on_t_sparse_fails_supported_revision_with_code_12() {
-        let mut caps = mock_caps();
-        caps.generated_families.push(FamilySupport {
-            family_id: "quip/twisted-ice-dimer".to_owned(),
-            revisions: vec![1],
-            params_digests: vec![],
-        });
-        let reference =
-            reference_revision("quip/twisted-ice-dimer", 1).expect("a reference revision");
-        let cases = select_supported(
-            &caps,
-            "quip/twisted-ice-dimer@1",
-            Some(reference),
-            &t_sparse(false),
-        )
-        .expect_err("T_SPARSE carries no ice tiles");
-        let why = "no reference params set admits under the advertised limits \
-                   (P_TWISTED_Z22_W62_P8 gives code 12, P_TWISTED_ADJ_W45_P6 gives code 12)";
-        assert_eq!(cases.len(), 10);
-        assert_eq!(
-            cases.first(),
-            Some(&("supported-revision", CaseOutcome::Failed(why.to_owned())))
-        );
-    }
-
-    #[test]
-    fn charged_ice_on_t_sparse_fails_supported_revision_with_code_12() {
-        let mut caps = mock_caps();
-        caps.generated_families.push(FamilySupport {
-            family_id: "quip/charged-ice".to_owned(),
-            revisions: vec![1],
-            params_digests: vec![],
-        });
-        let reference = reference_revision("quip/charged-ice", 1).expect("a reference revision");
-        let cases = select_supported(
-            &caps,
-            "quip/charged-ice@1",
-            Some(reference),
-            &t_sparse(false),
-        )
-        .expect_err("T_SPARSE carries no ice tiles");
-        let why = "no reference params set admits under the advertised limits \
-                   (P_CHARGED_Z22_A250_B31_C128 gives code 12, \
-                   P_CHARGED_ADJ_A100_B45_C256 gives code 12)";
-        assert_eq!(cases.len(), 10);
-        assert_eq!(
-            cases.first(),
-            Some(&("supported-revision", CaseOutcome::Failed(why.to_owned())))
-        );
-    }
-
-    #[test]
-    fn ice_fields_on_t_sparse_fails_supported_revision_with_code_12() {
-        let mut caps = mock_caps();
-        caps.generated_families.push(FamilySupport {
-            family_id: "quip/ice-fields".to_owned(),
-            revisions: vec![1],
-            params_digests: vec![],
-        });
-        let reference = reference_revision("quip/ice-fields", 1).expect("a reference revision");
-        let cases = select_supported(
-            &caps,
-            "quip/ice-fields@1",
-            Some(reference),
-            &t_sparse(false),
-        )
-        .expect_err("T_SPARSE carries no ice tiles");
-        let why = "no reference params set admits under the advertised limits \
-                   (P_FIELDS_Z22_G125_F500_D16 gives code 12, \
-                   P_FIELDS_ADJ_G45_F1000_D16 gives code 12)";
-        assert_eq!(cases.len(), 10);
-        assert_eq!(
-            cases.first(),
-            Some(&("supported-revision", CaseOutcome::Failed(why.to_owned())))
-        );
-    }
-
-    #[test]
-    fn two_commodity_routing_on_t_sparse_fails_supported_revision_with_code_12() {
-        let mut caps = mock_caps();
-        caps.generated_families.push(FamilySupport {
-            family_id: "quip/two-commodity-routing".to_owned(),
-            revisions: vec![1],
-            params_digests: vec![],
-        });
-        let reference =
-            reference_revision("quip/two-commodity-routing", 1).expect("a reference revision");
-        let cases = select_supported(
-            &caps,
-            "quip/two-commodity-routing@1",
-            Some(reference),
-            &t_sparse(false),
-        )
-        .expect_err("T_SPARSE has no street cell");
-        let why = "no reference params set admits under the advertised limits \
-                   (P_ROUTING_Z24_D4 gives code 12, P_ROUTING_Z34_D6 gives code 12)";
-        assert_eq!(cases.len(), 10);
-        assert_eq!(
-            cases.first(),
-            Some(&("supported-revision", CaseOutcome::Failed(why.to_owned())))
-        );
-    }
-
-    #[test]
-    fn polariton_static_on_t_sparse_fails_supported_revision_with_code_12() {
-        let mut caps = mock_caps();
-        caps.generated_families.push(FamilySupport {
-            family_id: "quip/polariton-static".to_owned(),
-            revisions: vec![1],
-            params_digests: vec![],
-        });
-        let reference =
-            reference_revision("quip/polariton-static", 1).expect("a reference revision");
-        let cases = select_supported(
-            &caps,
-            "quip/polariton-static@1",
-            Some(reference),
-            &t_sparse(false),
-        )
-        .expect_err("T_SPARSE has no alive window");
-        let why = "no reference params set admits under the advertised limits \
-                   (P_POLARITON_Z24_L2_P0 gives code 12, P_POLARITON_Z34_L3_P2 gives code 12)";
         assert_eq!(cases.len(), 10);
         assert_eq!(
             cases.first(),
@@ -2194,16 +2620,404 @@ mod tests {
 
     #[test]
     fn the_child_budget_covers_every_reference_revision() {
-        // 8 session barriers, 20 per reference revision, 1 phase of slack.
-        let phases = 8 + 20 * REFERENCE_REVISIONS.len() + 1;
+        // 8 session barriers, 30 per reference revision (ten lease cases and
+        // five explicit cases, two barriers each), 1 phase of slack.
+        let phases = 8 + 30 * REFERENCE_REVISIONS.len() + 1;
         let phases = u32::try_from(phases).expect("small");
         assert_eq!(family_child_timeout(), PHASE_TIMEOUT * phases);
     }
 
     #[test]
-    fn an_accepted_only_pair_has_no_subject() {
+    fn an_accepted_only_pair_has_no_lease_subject_but_an_explicit_one() {
         let mut caps = mock_caps();
         caps.generated_families = vec![];
         assert!(plan_subjects(&caps).is_empty());
+        let subjects = plan_explicit_subjects(&caps);
+        let names: Vec<&str> = subjects.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["vectors/uniform-field@1", "vectors/restricted-field@1"]
+        );
+    }
+
+    #[test]
+    fn a_generated_only_pair_has_no_explicit_subject() {
+        let mut caps = mock_caps();
+        caps.accepted_families = vec![];
+        assert!(plan_explicit_subjects(&caps).is_empty());
+        assert_eq!(plan_subjects(&caps).len(), 2);
+    }
+
+    #[test]
+    fn an_accepted_pair_without_a_reference_has_no_explicit_subject() {
+        let mut caps = mock_caps();
+        caps.accepted_families = vec![FamilySupport {
+            family_id: "vectors/other".to_owned(),
+            revisions: vec![1, 1],
+            params_digests: vec![],
+        }];
+        assert!(plan_explicit_subjects(&caps).is_empty());
+        let mut caps = mock_caps();
+        let repeat = caps.accepted_families.clone();
+        caps.accepted_families.extend(repeat);
+        assert_eq!(plan_explicit_subjects(&caps).len(), 2);
+    }
+
+    fn explicit_base() -> Instance {
+        select_explicit(&mock_caps(), uniform_reference(), &t_sparse(false))
+            .expect("the uniform reference gives an explicit instance")
+            .1
+    }
+
+    fn explicit_result(instance: &Instance, with_offset: bool) -> miner_msg::Msg {
+        let spins = vec![-1_i8; instance.node_ids().len()];
+        let edges = instance_edges(instance).expect("small");
+        let mut energy = energy_from_milli(&spins, instance.h(), instance.j(), &edges);
+        if with_offset {
+            energy += instance.offset_milli();
+        }
+        miner_msg::Msg::Result(quip_proto::v1::Result {
+            job_id: JOB.to_vec(),
+            solutions: vec![Solution {
+                energy_milli: energy,
+                spins: encode_spins_packed(&spins),
+            }],
+            ..quip_proto::v1::Result::default()
+        })
+    }
+
+    fn solved(slice: &[miner_msg::Msg], instance: &Instance) -> CaseOutcome {
+        grade_explicit_solved(slice, JOB, instance)
+    }
+
+    #[test]
+    fn a_solved_explicit_job_with_its_refund_passes() {
+        let instance = explicit_base();
+        assert_ne!(
+            instance.offset_milli(),
+            0,
+            "the offset check needs an offset"
+        );
+        let slice = [explicit_result(&instance, false), msg_request(1)];
+        assert_eq!(solved(&slice, &instance), CaseOutcome::Passed);
+    }
+
+    #[test]
+    fn an_explicit_result_scored_with_the_offset_fails() {
+        let instance = explicit_base();
+        let slice = [explicit_result(&instance, true), msg_request(1)];
+        assert!(failed(&solved(&slice, &instance)));
+    }
+
+    #[test]
+    fn an_explicit_job_without_a_result_fails() {
+        let instance = explicit_base();
+        assert!(failed(&solved(&[msg_request(1)], &instance)));
+    }
+
+    #[test]
+    fn a_rejected_valid_explicit_job_fails() {
+        let instance = explicit_base();
+        let slice = [msg_reject(RejectReason::Malformed), msg_request(1)];
+        assert!(failed(&solved(&slice, &instance)));
+    }
+
+    #[test]
+    fn an_explicit_result_without_a_refund_fails() {
+        let instance = explicit_base();
+        let slice = [explicit_result(&instance, false)];
+        assert!(failed(&solved(&slice, &instance)));
+        let early = [msg_request(1), explicit_result(&instance, false)];
+        assert!(failed(&solved(&early, &instance)));
+        let twice = [
+            explicit_result(&instance, false),
+            msg_request(1),
+            msg_request(1),
+        ];
+        assert!(failed(&solved(&twice, &instance)));
+    }
+
+    #[test]
+    fn a_second_explicit_result_fails() {
+        let instance = explicit_base();
+        let slice = [
+            explicit_result(&instance, false),
+            explicit_result(&instance, false),
+            msg_request(1),
+        ];
+        assert!(failed(&solved(&slice, &instance)));
+    }
+
+    #[test]
+    fn an_explicit_result_without_solutions_or_with_bad_spins_fails() {
+        let instance = explicit_base();
+        let mut empty = explicit_result(&instance, false);
+        if let miner_msg::Msg::Result(result) = &mut empty {
+            result.solutions.clear();
+        }
+        assert!(failed(&solved(&[empty, msg_request(1)], &instance)));
+        let mut bad = explicit_result(&instance, false);
+        if let miner_msg::Msg::Result(result) = &mut bad {
+            if let Some(solution) = result.solutions.first_mut() {
+                solution.spins = vec![];
+            }
+        }
+        assert!(failed(&solved(&[bad, msg_request(1)], &instance)));
+    }
+
+    #[test]
+    fn a_lease_done_for_an_explicit_job_fails() {
+        let instance = explicit_base();
+        let done = miner_msg::Msg::LeaseDone(LeaseDone {
+            job_id: JOB.to_vec(),
+            salts_done: 0,
+            best_energy_milli: 0,
+        });
+        let slice = [explicit_result(&instance, false), done, msg_request(1)];
+        assert!(failed(&solved(&slice, &instance)));
+    }
+
+    fn explicit_plans(caps: &Capabilities) -> Vec<ExplicitCase> {
+        let gate = gate_of(uniform_reference());
+        explicit_cases(caps, uniform_reference(), &gate)
+    }
+
+    fn plan_of(cases: &[ExplicitCase], name: &str) -> (ExplicitJob, ExplicitGrade) {
+        cases
+            .iter()
+            .find(|case| case.name == name)
+            .and_then(|case| case.plan.clone().ok())
+            .expect("the case builds")
+    }
+
+    #[test]
+    fn the_explicit_cases_run_in_the_documented_order() {
+        let cases = explicit_plans(&mock_caps());
+        let names: Vec<&str> = cases.iter().map(|case| case.name).collect();
+        assert_eq!(names, EXPLICIT_CASES);
+        assert!(cases.iter().all(|case| case.plan.is_ok()));
+    }
+
+    #[test]
+    fn the_supported_explicit_job_carries_the_reference_instance() {
+        let cases = explicit_plans(&mock_caps());
+        let instance = explicit_base();
+        let (job, grade) = plan_of(&cases, "explicit-supported");
+        assert_eq!(job.instance_digest, instance.digest().to_vec());
+        assert_eq!(job.offset_milli, instance.offset_milli());
+        assert_eq!(job.node_ids, instance.node_ids());
+        assert_eq!(job.nonce.len(), 32);
+        assert!(matches!(grade, ExplicitGrade::Solved(_)));
+        let wire = job.job("explicit-supported/x");
+        assert_eq!(wire.kind, JobKind::IsingSample as i32);
+        assert_eq!(wire.generation, FAMILY_LIVE_GENERATION);
+        let ising = wire.ising.expect("an IsingProblem");
+        assert!(matches!(ising.graph, Some(Graph::Edges(_))));
+        assert_eq!(ising.scale, 1000);
+        let binding = ising.family.expect("a binding");
+        assert_eq!(binding.instance_digest, instance.digest().to_vec());
+    }
+
+    #[test]
+    fn the_digest_case_changes_one_byte_and_expects_code_15() {
+        let cases = explicit_plans(&mock_caps());
+        let (base, _) = plan_of(&cases, "explicit-supported");
+        let (job, grade) = plan_of(&cases, "explicit-digest-mismatch");
+        let differing = job
+            .instance_digest
+            .iter()
+            .zip(&base.instance_digest)
+            .filter(|(a, b)| a != b)
+            .count();
+        assert_eq!(differing, 1);
+        assert_eq!(job.instance_digest.len(), 32);
+        let malformed = RejectReason::Malformed as i32;
+        assert!(matches!(grade, ExplicitGrade::Reject(want) if want == malformed));
+    }
+
+    #[test]
+    fn the_metadata_case_passes_steps_one_to_three_and_fails_the_family_check() {
+        let cases = explicit_plans(&mock_caps());
+        let instance = explicit_base();
+        let (job, grade) = plan_of(&cases, "explicit-metadata-invalid");
+        assert_ne!(job.metadata, instance.metadata());
+        let contract = &UNIFORM_V1;
+        let parts = InstanceParts {
+            descriptor_digest: *instance.descriptor_digest(),
+            topology_order_digest: *instance.topology_order_digest(),
+            nonce: instance.nonce().copied(),
+            node_ids: instance.node_ids().to_vec(),
+            edges: instance.edges().to_vec(),
+            h: instance.h().to_vec(),
+            j: instance.j().to_vec(),
+            offset_milli: instance.offset_milli(),
+            metadata: job.metadata.clone(),
+        };
+        let sent: [u8; 32] = job.instance_digest.as_slice().try_into().expect("32 bytes");
+        let rebuilt = Instance::new(
+            parts,
+            &contract.limits,
+            contract.metadata_kinds,
+            Some(&sent),
+        )
+        .expect("the layout and the digest are valid");
+        let admitted = admit(
+            from_ref(contract),
+            contract.family_id.as_bytes(),
+            1,
+            &P_SPEC,
+            &params_digest(&P_SPEC),
+        )
+        .expect("P_SPEC admits");
+        let check = contract
+            .construction
+            .expect("a construction")
+            .check_metadata;
+        assert!(!check(admitted.params(), &rebuilt));
+        let invalid = explicit_reason(Code::MetadataInvalid);
+        assert!(matches!(grade, ExplicitGrade::Reject(want) if want == invalid));
+    }
+
+    #[test]
+    fn the_params_case_sends_out_of_bounds_params_with_their_digest() {
+        let cases = explicit_plans(&mock_caps());
+        let (base, _) = plan_of(&cases, "explicit-supported");
+        let (job, grade) = plan_of(&cases, "explicit-params-out-of-bounds");
+        assert_eq!(job.family.params, P_F5000);
+        assert_eq!(job.family.params_digest, params_digest(&P_F5000).to_vec());
+        assert_eq!(job.instance_digest, base.instance_digest);
+        let want = explicit_reason(Code::ParamsOutOfBounds);
+        assert!(matches!(grade, ExplicitGrade::Reject(got) if got == want));
+    }
+
+    #[test]
+    fn the_hash_form_case_swaps_the_graph_and_expects_code_15() {
+        let cases = explicit_plans(&mock_caps());
+        let (job, grade) = plan_of(&cases, "explicit-topology-hash-form");
+        let topology = t_sparse(false);
+        assert_eq!(
+            job.graph,
+            Graph::TopologyHash(FAMILY_TOPOLOGY_HASH.to_vec())
+        );
+        assert_eq!(job.h.len(), topology.node_ids().len());
+        assert_eq!(job.j.len(), topology.edges().len());
+        let wire = job.job("explicit-topology-hash-form/x");
+        assert!(wire.ising.and_then(|ising| ising.family).is_some());
+        let want = explicit_reason(Code::InstanceDigestMismatch);
+        assert!(matches!(grade, ExplicitGrade::Reject(got) if got == want));
+    }
+
+    #[test]
+    fn an_unbuildable_explicit_instance_fails_the_first_case_and_skips_the_rest() {
+        let caps = Capabilities {
+            max_nodes: 1,
+            ..mock_caps()
+        };
+        let cases = explicit_plans(&caps);
+        assert_eq!(cases.len(), EXPLICIT_CASES.len());
+        let outcomes: Vec<&CaseOutcome> = cases
+            .iter()
+            .map(|case| case.plan.as_ref().expect_err("nothing builds"))
+            .collect();
+        let (first, rest) = outcomes.split_first().expect("five cases");
+        assert!(failed(first));
+        for skipped in rest {
+            assert!(matches!(skipped, CaseOutcome::Skipped(_)));
+        }
+    }
+
+    #[test]
+    fn a_restricted_accepted_entry_picks_a_params_set_it_allows() {
+        let reference = reference_revision("vectors/restricted-field", 1).expect("a reference");
+        let (params, _) =
+            select_explicit(&mock_caps(), reference, &t_sparse(false)).expect("P_SPEC is allowed");
+        assert_eq!(params, P_SPEC);
+    }
+
+    /// Every reference revision listed, with limits wide enough for Zephyr.
+    fn wide_caps() -> Capabilities {
+        let list: Vec<FamilySupport> = REFERENCE_REVISIONS
+            .iter()
+            .map(|reference| FamilySupport {
+                family_id: reference.contract.family_id.to_owned(),
+                revisions: vec![reference.contract.revision],
+                params_digests: vec![],
+            })
+            .collect();
+        Capabilities {
+            max_degree: None,
+            generated_families: list.clone(),
+            accepted_families: list,
+            ..mock_caps()
+        }
+    }
+
+    fn gate_of(reference: &ReferenceRevision) -> GateTopology {
+        GateTopology::load(reference.topology).expect("the reference topology loads")
+    }
+
+    #[test]
+    fn every_reference_admits_on_its_own_topology() {
+        let caps = wide_caps();
+        for reference in REFERENCE_REVISIONS {
+            let contract = reference.contract;
+            let subject = format!("{}@{}", contract.family_id, contract.revision);
+            let gate = gate_of(reference);
+            let supported = select_supported(&caps, &subject, Some(reference), &gate.plain);
+            assert!(supported.is_ok(), "{subject}: {:?}", supported.err());
+            let explicit = select_explicit(&caps, reference, &gate.plain);
+            assert!(explicit.is_ok(), "{subject}: {:?}", explicit.err());
+        }
+    }
+
+    #[test]
+    fn the_layered_revisions_keep_t_sparse_and_its_hash() {
+        for family in ["vectors/uniform-field", "vectors/restricted-field"] {
+            let reference = reference_revision(family, 1).expect("a reference revision");
+            assert_eq!(reference.topology, T_SPARSE_TOPOLOGY);
+            assert_eq!(gate_of(reference).hash, FAMILY_TOPOLOGY_HASH);
+        }
+    }
+
+    #[test]
+    fn each_distinct_topology_has_its_own_hash() {
+        let mut seen: Vec<(&str, [u8; 32])> = Vec::new();
+        for reference in REFERENCE_REVISIONS {
+            let hash = gate_of(reference).hash;
+            if let Some((_, known)) = seen.iter().find(|(file, _)| *file == reference.topology) {
+                assert_eq!(*known, hash);
+            } else {
+                assert!(seen.iter().all(|(_, known)| *known != hash));
+                seen.push((reference.topology, hash));
+            }
+        }
+        assert_eq!(seen.len(), 4);
+    }
+
+    #[test]
+    fn a_lease_names_the_topology_hash_it_carries() {
+        let order = *t_sparse(false).order_digest();
+        let mut lease = FamilyLease::new("vectors/uniform-field", 1, &P_SPEC, &order);
+        let generator = |lease: &FamilyLease| {
+            lease
+                .job("job")
+                .generator
+                .expect("a generator")
+                .topology_hash
+        };
+        assert_eq!(generator(&lease), FAMILY_TOPOLOGY_HASH.to_vec());
+        lease.topology_hash = [0x42; 32];
+        assert_eq!(generator(&lease), vec![0x42; 32]);
+    }
+
+    #[test]
+    fn the_hash_form_case_names_the_topology_of_its_gate() {
+        let reference = reference_revision("quip/ice-glass", 1).expect("a reference revision");
+        let gate = gate_of(reference);
+        let cases = explicit_cases(&wide_caps(), reference, &gate);
+        let (job, _) = plan_of(&cases, "explicit-topology-hash-form");
+        assert_eq!(job.graph, Graph::TopologyHash(gate.hash.to_vec()));
+        assert_eq!(job.h.len(), gate.plain.node_ids().len());
+        assert_eq!(job.j.len(), gate.plain.edges().len());
     }
 }
