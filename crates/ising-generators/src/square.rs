@@ -806,7 +806,6 @@ impl Symmetry {
 /// The shape error of [`check_request_shape`].
 ///
 /// The cost is at most `2 * 8 * L^2` candidates of `O(links)` work each.
-#[must_use]
 pub fn symmetries(
     lattice: &SquareLattice,
     request: &Request,

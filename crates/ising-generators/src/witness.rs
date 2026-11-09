@@ -129,7 +129,6 @@ pub enum Constraint {
 /// # Errors
 ///
 /// The shape error of [`check_request_shape`], before anything is allocated.
-#[must_use]
 pub fn constraints(
     lattice: &SquareLattice,
     request: &Request,
