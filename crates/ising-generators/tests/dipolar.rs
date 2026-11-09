@@ -724,7 +724,10 @@ impl Lexer {
             self.pos += 1;
         }
         let ident = self.text(start);
-        let after_hashes = (0..).find(|&k| self.at(k) != '#').unwrap_or(0);
+        let mut after_hashes = 0;
+        while self.at(after_hashes) == '#' {
+            after_hashes += 1;
+        }
         let raw_quote = self.at(after_hashes) == '"';
         match ident.as_str() {
             "r" | "br" | "cr" if raw_quote => self.raw_string(),
