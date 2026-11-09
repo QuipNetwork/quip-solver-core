@@ -73,10 +73,11 @@ Per-revision and explicit-job cases carry the subject `family_id@revision`.
 ### Cases of each revision
 
 The gate runs these ten cases for each `(family_id, revision)` that the binary lists in `generated_families`.
-At present the reference revisions are `vectors/uniform-field@1`, `vectors/restricted-field@1`, `quip/ice-glass@1`, `quip/twisted-ice-dimer@1`, `quip/charged-ice@1`, and `quip/ice-fields@1`.
+At present the reference revisions are `vectors/uniform-field@1`, `vectors/restricted-field@1`, `quip/ice-glass@1`, `quip/twisted-ice-dimer@1`, `quip/charged-ice@1`, `quip/ice-fields@1`, and `quip/two-commodity-routing@1`.
 The gate sends each reference revision its own base topology.
 The two layered revisions use `T_SPARSE`.
 `quip/ice-glass@1` uses the topology `z12-zephyr`, and the other three ice revisions use `z22-zephyr`.
+`quip/two-commodity-routing@1` uses `routing-small`, a z(2, 4) Zephyr topology.
 These are the topologies of the registered vectors, and at least one reference params set of each revision admits on its topology.
 A session holds one topology, the last one sent.
 The gate sends `T_SPARSE` in the setup.

@@ -24,9 +24,10 @@ features. The conformance crate adds their contracts and vectors.
   the same report as before.
 - Each `ReferenceRevision` of `quip-solver-conformance` has a `topology` field, the
   base topology the `--family` gate sends for that revision. The layered revisions
-  keep `T_SPARSE`. `quip/ice-glass@1` uses `z12-zephyr`, and the other three ice
-  revisions use `z22-zephyr`, so ice revisions pass `supported-revision` instead of
-  failing with admission code 12. The gate sends a new `Topology` message with its
+  keep `T_SPARSE`. `quip/ice-glass@1` uses `z12-zephyr`, the other three ice
+  revisions use `z22-zephyr`, and `quip/two-commodity-routing@1` uses
+  `routing-small`, so these revisions pass `supported-revision` instead of failing
+  with admission code 12. The gate sends a new `Topology` message with its
   own hash when a revision needs a topology that the session does not hold.
 - `miner.proto`: the enum value `ALGORITHM_OTSUKA` = 19, named `otsuka`, for the
   Otsuka cluster anneal. The Rust, Python, and TypeScript bindings include it.
@@ -81,6 +82,25 @@ features. The conformance crate adds their contracts and vectors.
   contract is `docs/families/quip-ice-fields-1.md`, the vectors are
   `ice_fields.json`, and the Rust contract is
   `ising_generators::ice::ICE_FIELDS_V1`. The research cohort is not regenerated.
+- `quip/two-commodity-routing@1`, a registered family with status `research`. It
+  is a two-commodity unit routing problem on a Manhattan-street template of
+  Zephyr cells. The parameters are the Zephyr shape and `pairs_divisor`. The
+  terminals draw from a ChaCha8 stream with at most four tries, and a salt with
+  no routable terminals gives code 14 and the miner skips it. The metadata is the
+  new kind 7, `routing`. The diagnostic `routing_defects` never decides
+  acceptance. On the live z(12, 4) topology the template equals the template of
+  the research generator. The contract registers one parameter set on z(12, 4) as
+  a recipe. The contract is `docs/families/quip-two-commodity-routing-1.md`, the
+  vectors are `two_commodity.json`, and the Rust contract is
+  `ising_generators::routing::ROUTING_V1`. The research cohort is not regenerated.
+- `ising_generators::square` and `ising_generators::witness`: the shared primitives
+  for link-based families on a square lattice. The lattice is periodic or open with
+  `2 <= L <= 64`. The charge of a vertex comes directly from the spins. A charge request has
+  a shape check and a compatibility check. A witness holds packed bytes with labeled
+  constraints and a canonical identity under the symmetries that preserve the
+  request. A malformed request gives `WitnessError::Request` before any byte
+  check, so `constraints` and `symmetries` return a `Result`. The modules register
+  no family. The contract is `docs/square-links.md`.
 
 ### Changed
 
