@@ -2478,6 +2478,7 @@ fn check_layered_against_rust(case: &Value) -> Result<(), String> {
     use ising_generators::descriptor::{admit, params_digest};
     use ising_generators::family::{admit_topology, generate_instance, BaseTopology, SaltFault};
     use ising_generators::ice::{CHARGED_ICE_V1, ICE_FIELDS_V1, ICE_GLASS_V1, TWISTED_DIMER_V1};
+    use ising_generators::polariton::POLARITON_V1;
     use ising_generators::routing::ROUTING_V1;
     use quip_solver_conformance::families::layered::{RESTRICTED_V1, UNIFORM_V1};
     let family = str_field(case, "family_id")?;
@@ -2489,6 +2490,7 @@ fn check_layered_against_rust(case: &Value) -> Result<(), String> {
         "quip/charged-ice" => CHARGED_ICE_V1,
         "quip/ice-fields" => ICE_FIELDS_V1,
         "quip/two-commodity-routing" => ROUTING_V1,
+        "quip/polariton-static" => POLARITON_V1,
         other => return Err(format!("{}: unknown family {other}", case_name(case))),
     };
     let params = codec::hex_decode(str_field(case, "params_hex")?)?;
@@ -4649,6 +4651,844 @@ fn a_changed_routing_recipe_hash_fails_the_recompute() -> Result<(), String> {
         .first()
         .ok_or("no recipe")?;
     expect_err(&check_routing_recipe(recipe), "a changed recipe hash")
+}
+
+// ---- polariton static vectors (polariton.json) ----
+
+fn polariton_doc() -> Result<Value, String> {
+    serde_json::from_str(include_str!("../vectors/families/polariton.json"))
+        .map_err(|e| e.to_string())
+}
+
+/// `side` and `pairs` of canonical polariton params: the two last fields,
+/// which have fixed offsets.
+fn polariton_shape(params: &[u8]) -> Result<(u64, u64), String> {
+    if params.len() != 32 {
+        return Err(format!("polariton params have {} bytes", params.len()));
+    }
+    Ok((
+        u64::from(le_u16(params, 22)?),
+        u64::from(le_u16(params, 30)?),
+    ))
+}
+
+/// The bounds of `quip/polariton-static`: the links, six couplers for each
+/// interior vertex, and degree six.
+fn polariton_size_bounds(
+    _: &Value,
+    params: &[u8],
+    nodes: &[u32],
+    edges: &[(u32, u32)],
+) -> Result<Option<(u64, u64, u64)>, String> {
+    let (side, _) = polariton_shape(params)?;
+    let n = u64::try_from(nodes.len())
+        .map_err(|e| e.to_string())?
+        .min(2 * side * (side + 1));
+    let e = u64::try_from(edges.len())
+        .map_err(|e| e.to_string())?
+        .min(6 * (side - 1) * (side - 1));
+    let d = topology_max_degree(nodes, edges)
+        .min(6)
+        .min(n.saturating_sub(1));
+    Ok(Some((n, e, d)))
+}
+
+/// Recompute the digests, nonces, and instance bytes of every registered
+/// `quip/polariton-static` case with Rust code that does not call the
+/// construction.
+fn check_polariton(doc: &Value) -> Result<(), String> {
+    validate(&schema()?, doc)?;
+    check_names_unique(doc)?;
+    for case in section(doc, "cases")? {
+        check_layered_case(case, polariton_size_bounds)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn polariton_fixture_matches_schema() -> Result<(), String> {
+    let doc = polariton_doc()?;
+    validate(&schema()?, &doc)?;
+    match doc.get("provenance").and_then(Value::as_str) {
+        Some("specified") => {}
+        other => return Err(format!("provenance is {other:?}, expected specified")),
+    }
+    check_names_unique(&doc)?;
+    for name in ["cases", "witnesses", "polariton_recipes", "admission"] {
+        section(&doc, name).map(|_| ())?;
+    }
+    Ok(())
+}
+
+#[test]
+fn polariton_cases_recompute() -> Result<(), String> {
+    check_polariton(&polariton_doc()?)
+}
+
+#[test]
+fn polariton_cases_match_the_rust_construction() -> Result<(), String> {
+    for case in section(&polariton_doc()?, "cases")? {
+        check_layered_against_rust(case)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn polariton_params_constants_match_the_vectors() -> Result<(), String> {
+    use quip_solver_conformance::families::polariton::{
+        P_POLARITON_SIDE1, P_POLARITON_Z24_L2_P0, P_POLARITON_Z34_L3_P2,
+    };
+    let doc = polariton_doc()?;
+    for (section_name, name, want) in [
+        ("cases", "polariton-l2", P_POLARITON_Z24_L2_P0),
+        ("cases", "polariton-l3", P_POLARITON_Z34_L3_P2),
+        ("admission", "side-1-is-out-of-bounds", P_POLARITON_SIDE1),
+    ] {
+        let case = find_named(&doc, section_name, name)?;
+        compare(
+            case,
+            "params_hex",
+            &str_field(case, "params_hex")?.to_owned(),
+            &codec::hex_encode(&want),
+        )?;
+    }
+    compare(&doc, "case count", &section(&doc, "cases")?.len(), &5)
+}
+
+/// The labels and the window of a built instance, decoded by hand from the
+/// kind 4 and kind 5 layouts.
+struct PolaritonMeta {
+    side: u16,
+    labels: Vec<i8>,
+    window: (u16, u16),
+    positions: Vec<u32>,
+}
+
+fn polariton_meta(built: &ising_generators::instance::Instance) -> Result<PolaritonMeta, String> {
+    let region = built.metadata();
+    if le_u16(region, 0)? != 2 || le_u16(region, 2)? != 4 {
+        return Err("the region does not start with kinds 4 and 5".to_owned());
+    }
+    let first = usize::try_from(le_u32(region, 4)?).map_err(|e| e.to_string())?;
+    let charges = region.get(8..8 + first).ok_or("section past the region")?;
+    let at = 8 + first;
+    if le_u16(region, at)? != 5 {
+        return Err("the second section is not kind 5".to_owned());
+    }
+    let second = usize::try_from(le_u32(region, at + 2)?).map_err(|e| e.to_string())?;
+    let incidence = region
+        .get(at + 6..at + 6 + second)
+        .ok_or("section past the region")?;
+    if region.len() != at + 6 + second {
+        return Err("trailing bytes in the region".to_owned());
+    }
+    let side = le_u16(charges, 0)?;
+    let labels = charges
+        .get(2..)
+        .ok_or("short charges")?
+        .iter()
+        .map(|&b| i8::from_le_bytes([b]))
+        .collect();
+    let positions = incidence
+        .get(4..)
+        .ok_or("short incidence")?
+        .chunks_exact(4)
+        .map(|c| <[u8; 4]>::try_from(c).map(u32::from_le_bytes))
+        .collect::<Result<_, _>>()
+        .map_err(|_| "short position".to_owned())?;
+    Ok(PolaritonMeta {
+        side,
+        labels,
+        window: (le_u16(incidence, 0)?, le_u16(incidence, 2)?),
+        positions,
+    })
+}
+
+/// The `charges` stream of one salt, replayed with the FAM-24 shuffle and the
+/// request check of `square`. Returns the try that passed and its labels, or
+/// `None` when all four tries fail.
+type ChargeReplay = (u64, Vec<Option<i8>>);
+
+fn replay_charges(case: &Value, slot: u64) -> Result<Option<ChargeReplay>, String> {
+    use ising_generators::family::Streams;
+    use ising_generators::rng::shuffle;
+    use ising_generators::square::{check_request, Boundary, Request, SquareLattice};
+    let params = codec::hex_decode(str_field(case, "params_hex")?)?;
+    let (side, pairs) = polariton_shape(&params)?;
+    let (side, pairs) = (
+        u16::try_from(side).map_err(|e| e.to_string())?,
+        usize::try_from(pairs).map_err(|e| e.to_string())?,
+    );
+    let (nodes, edges) = topology_inputs(object_field(case, "topology")?)?;
+    let order = digests::topology_order_digest(&nodes, &edges);
+    let mut streams = Streams::new(
+        codec::hex32(&lease_nonce(case, slot)?)?,
+        digests::descriptor_digest(
+            str_field(case, "family_id")?.as_bytes(),
+            u32_field(case, "revision")?,
+            &digests::params_digest(&params),
+        ),
+        order,
+        ising_generators::polariton::POLARITON.labels,
+    );
+    let mut stream = streams.open("charges").ok_or("no charges stream")?;
+    let lattice = SquareLattice::new(side, Boundary::Open).map_err(|e| e.to_string())?;
+    let width = u32::from(side) + 1;
+    let interior: Vec<u32> = (1..u32::from(side))
+        .flat_map(|y| (1..u32::from(side)).map(move |x| y * width + x))
+        .collect();
+    let vertices = usize::try_from(lattice.vertex_count()).map_err(|e| e.to_string())?;
+    for attempt in 1..=4u64 {
+        let mut list = interior.clone();
+        shuffle(&mut stream, &mut list).map_err(|e| format!("{e:?}"))?;
+        let mut labels = vec![None; vertices];
+        for (rank, &v) in list.iter().enumerate() {
+            let label = if rank < pairs {
+                2
+            } else if rank < 2 * pairs {
+                -2
+            } else {
+                0
+            };
+            let slot = labels
+                .get_mut(usize::try_from(v).map_err(|e| e.to_string())?)
+                .ok_or("a vertex outside the lattice")?;
+            *slot = Some(label);
+        }
+        let request = Request {
+            charges: labels.clone(),
+            fixed: Vec::new(),
+            fields: Vec::new(),
+        };
+        if check_request(&lattice, &request).is_ok() {
+            return Ok(Some((attempt, labels)));
+        }
+    }
+    Ok(None)
+}
+
+/// The Rust metadata check must accept every built instance.
+fn check_polariton_metadata(
+    params: &ising_generators::descriptor::Params<'_>,
+    built: &ising_generators::instance::Instance,
+) -> Result<PolaritonMeta, String> {
+    use ising_generators::polariton::POLARITON;
+    if !(POLARITON.check_metadata)(params, built) {
+        return Err("check_metadata rejected a built instance".to_owned());
+    }
+    polariton_meta(built)
+}
+
+/// Rebuild every salt of a case with the Rust construction, replay the charge
+/// draw, and compare the labels. A salt that is skipped must fail all four
+/// tries. Returns the tries of the salts that build.
+fn check_polariton_draws(doc: &Value) -> Result<Vec<u64>, String> {
+    use ising_generators::polariton::POLARITON_V1;
+    let mut tries = Vec::new();
+    for case in section(doc, "cases")? {
+        for entry in entries_of(case, "skipped")? {
+            let replay = replay_charges(case, u64_decimal(entry, "index")?)?;
+            compare(case, "a skipped salt fails every try", &replay, &None)?;
+        }
+        for instance in entries_of(case, "instances")? {
+            let slot = u64_decimal(instance, "index")?;
+            let meta = with_ice_instance(POLARITON_V1, case, slot, |params, built| {
+                check_polariton_metadata(params, built)
+            })?;
+            let (attempt, labels) =
+                replay_charges(case, slot)?.ok_or("a salt that builds has a passing try")?;
+            let want: Vec<i8> = labels.iter().map(|l| l.unwrap_or(127)).collect();
+            compare(case, "labels", &meta.labels, &want)?;
+            tries.push(attempt);
+        }
+    }
+    Ok(tries)
+}
+
+#[test]
+fn polariton_charges_match_a_replay_of_the_charges_stream() -> Result<(), String> {
+    check_polariton_draws(&polariton_doc()?).map(|_| ())
+}
+
+#[test]
+fn the_polariton_retry_case_has_a_salt_that_passes_after_a_failed_try() -> Result<(), String> {
+    let doc = polariton_doc()?;
+    let case = find_named(&doc, "cases", "polariton-retry")?;
+    let mut tries = Vec::new();
+    for instance in entries_of(case, "instances")? {
+        let (attempt, _) = replay_charges(case, u64_decimal(instance, "index")?)?
+            .ok_or("a salt that builds has a passing try")?;
+        tries.push(attempt);
+    }
+    compare(
+        case,
+        "a later try exists",
+        &tries.iter().any(|&t| t > 1),
+        &true,
+    )?;
+    let skipped = entries_of(case, "skipped")?;
+    compare(case, "a skipped salt exists", &skipped.is_empty(), &false)?;
+    for entry in skipped {
+        compare(
+            case,
+            "skip_code",
+            &entry.get("skip_code"),
+            &Some(&json!(14)),
+        )?;
+    }
+    Ok(())
+}
+
+/// Recompute the encoded energy, the feasible result, and the observables of
+/// one witness through the Rust construction. Returns the expected feasible
+/// flag.
+/// The energy of an infeasible witness: one violated label, in milli.
+const POLARITON_LOW_ENERGY: i128 = 500;
+
+fn check_polariton_witness(doc: &Value, witness: &Value) -> Result<bool, String> {
+    use ising_generators::descriptor::{admit, params_digest};
+    use ising_generators::family::{admit_topology, feasible, generate_instance, BaseTopology};
+    use ising_generators::polariton::{polariton_observables, POLARITON_V1};
+    let contracts = [POLARITON_V1];
+    let case = find_named(doc, "cases", str_field(witness, "case")?)?;
+    let slot = u64_decimal(witness, "index")?;
+    let params = codec::hex_decode(str_field(case, "params_hex")?)?;
+    let admitted = admit(
+        &contracts,
+        str_field(case, "family_id")?.as_bytes(),
+        u32_field(case, "revision")?,
+        &params,
+        &params_digest(&params),
+    )
+    .map_err(|c| format!("{}: admit failed with {c}", case_name(case)))?;
+    let (nodes, edges) = topology_inputs(object_field(case, "topology")?)?;
+    let topology = BaseTopology::new(nodes, &edges).map_err(|e| format!("{e:?}"))?;
+    let bounds = admit_topology(
+        &admitted,
+        &topology,
+        topology.order_digest(),
+        &ising_generators::descriptor::AdvertisedLimits {
+            max_nodes: 0,
+            max_edges: 0,
+            max_degree: 0,
+        },
+    )
+    .map_err(|c| format!("{}: admit_topology failed with {c}", case_name(case)))?;
+    let nonce = codec::hex32(&lease_nonce(case, slot)?)?;
+    let built = generate_instance(&admitted, &topology, &bounds, nonce)
+        .map_err(|fault| format!("{}: generation gave {fault:?}", case_name(case)))?;
+    let spins: Vec<i8> = entries_of(witness, "spins")?
+        .iter()
+        .map(|v| {
+            v.as_i64()
+                .and_then(|n| i8::try_from(n).ok())
+                .ok_or_else(|| "a spin is not an i8".to_owned())
+        })
+        .collect::<Result<_, _>>()?;
+    let want_feasible = witness
+        .get("feasible")
+        .and_then(Value::as_bool)
+        .ok_or("no feasible flag")?;
+    compare(
+        witness,
+        "feasible",
+        &feasible(&admitted, &built, &spins),
+        &want_feasible,
+    )?;
+    let seen = polariton_observables(admitted.params(), &built, &spins)
+        .ok_or("no observables for a witness")?;
+    let int = |key: &str| {
+        witness
+            .get(key)
+            .and_then(Value::as_i64)
+            .ok_or_else(|| format!("no {key}"))
+    };
+    compare(
+        witness,
+        "violations",
+        &i64::from(seen.violations),
+        &int("violations")?,
+    )?;
+    compare(
+        witness,
+        "loss_milli",
+        &i64::try_from(seen.loss_milli).map_err(|e| e.to_string())?,
+        &int("loss_milli")?,
+    )?;
+    compare(
+        witness,
+        "charges",
+        &seen
+            .charges
+            .iter()
+            .map(|&q| json!(q))
+            .collect::<Vec<Value>>(),
+        &entries_of(witness, "charges")?.to_vec(),
+    )?;
+    let energy = encoded_energy(&built, &spins)?;
+    compare(
+        witness,
+        "energy_milli",
+        &energy,
+        &i128::from(int("energy_milli")?),
+    )?;
+    // The energy is the charge loss, so a state is feasible exactly when
+    // its energy is 0. An infeasible witness has the lowest possible
+    // violation, one violated label, which costs 500 milli.
+    let want_energy = if want_feasible {
+        0
+    } else {
+        POLARITON_LOW_ENERGY
+    };
+    compare(witness, "energy", &energy, &want_energy)?;
+    compare(witness, "loss", &i128::from(seen.loss_milli), &want_energy)?;
+    Ok(want_feasible)
+}
+
+/// Recompute every witness, and count one feasible and one infeasible witness
+/// for each case.
+fn check_polariton_witnesses(doc: &Value) -> Result<(), String> {
+    use std::collections::BTreeMap;
+    let mut seen: BTreeMap<String, (usize, usize)> = BTreeMap::new();
+    for witness in section(doc, "witnesses")? {
+        let feasible = check_polariton_witness(doc, witness)?;
+        let case = str_field(witness, "case")?;
+        let kind = if feasible { "feasible" } else { "infeasible" };
+        compare(
+            witness,
+            "name",
+            &str_field(witness, "name")?.to_owned(),
+            &format!("{case}-{kind}"),
+        )?;
+        let slot = seen.entry(case.to_owned()).or_default();
+        if feasible {
+            slot.0 += 1;
+        } else {
+            slot.1 += 1;
+        }
+    }
+    for case in section(doc, "cases")? {
+        let got = seen.remove(case_name(case));
+        compare(case, "witnesses of the case", &got, &Some((1, 1)))?;
+    }
+    compare(doc, "witnesses of unknown cases", &seen.len(), &0)
+}
+
+#[test]
+fn polariton_witnesses_match_the_rust_feasibility_and_observables() -> Result<(), String> {
+    check_polariton_witnesses(&polariton_doc()?)
+}
+
+/// Rebuild every salt of a recipe with the Rust construction and compare the
+/// hash, the window, and the try that passed.
+fn check_polariton_recipe(recipe: &Value) -> Result<(), String> {
+    use ising_generators::descriptor::params_digest;
+    use ising_generators::polariton::POLARITON_V1;
+    let params = codec::hex_decode(str_field(recipe, "params_hex")?)?;
+    compare(
+        recipe,
+        "params_digest",
+        &codec::hex_encode(&params_digest(&params)),
+        &str_field(recipe, "params_digest")?.to_owned(),
+    )?;
+    let salts = entries_of(recipe, "salts")?;
+    compare(
+        recipe,
+        "salts",
+        &u64::try_from(salts.len()).map_err(|e| e.to_string())?,
+        &u64_decimal(object_field(recipe, "lease")?, "salt_count")?,
+    )?;
+    for salt in salts {
+        let slot = u64_decimal(salt, "index")?;
+        compare(
+            recipe,
+            "nonce",
+            &lease_nonce(recipe, slot)?,
+            &str_field(salt, "nonce")?.to_owned(),
+        )?;
+        let (hash, meta) = with_ice_instance(POLARITON_V1, recipe, slot, |params, built| {
+            let meta = check_polariton_metadata(params, built)?;
+            let canonical = built.canonical_bytes().map_err(|e| e.to_string())?;
+            Ok((blake3::hash(&canonical).to_hex().to_string(), meta))
+        })?;
+        compare(
+            recipe,
+            "canonical_blake3",
+            &hash,
+            &str_field(salt, "canonical_blake3")?.to_owned(),
+        )?;
+        let window: Vec<u64> = u64_array(salt, "window")?;
+        compare(
+            recipe,
+            "window",
+            &window,
+            &vec![u64::from(meta.window.0), u64::from(meta.window.1)],
+        )?;
+        let (attempt, _) =
+            replay_charges(recipe, slot)?.ok_or("a salt that builds has a passing try")?;
+        compare(
+            recipe,
+            "try",
+            &attempt,
+            &salt.get("try").and_then(Value::as_u64).ok_or("no try")?,
+        )?;
+    }
+    Ok(())
+}
+
+#[test]
+fn polariton_recipes_match_the_rust_construction() -> Result<(), String> {
+    let doc = polariton_doc()?;
+    for recipe in section(&doc, "polariton_recipes")? {
+        check_polariton_recipe(recipe)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn polariton_recipes_match_the_rust_constants() -> Result<(), String> {
+    use ising_generators::descriptor::params_digest;
+    use ising_generators::polariton::POLARITON_RECIPES;
+    let doc = polariton_doc()?;
+    let recipes = section(&doc, "polariton_recipes")?;
+    compare(
+        &doc,
+        "recipe count",
+        &recipes.len(),
+        &POLARITON_RECIPES.len(),
+    )?;
+    for (recipe, want) in recipes.iter().zip(POLARITON_RECIPES) {
+        compare(recipe, "alias", &str_field(recipe, "alias")?, &want.alias)?;
+        compare(recipe, "cell", &str_field(recipe, "cell")?, &want.cell)?;
+        compare(
+            recipe,
+            "params_hex",
+            &str_field(recipe, "params_hex")?.to_owned(),
+            &codec::hex_encode(want.params),
+        )?;
+        compare(
+            recipe,
+            "params_digest",
+            &str_field(recipe, "params_digest")?.to_owned(),
+            &codec::hex_encode(&params_digest(want.params)),
+        )?;
+    }
+    Ok(())
+}
+
+#[test]
+fn the_polariton_windows_are_inside_the_cell_grid_and_the_dead_cell_moves_it() -> Result<(), String>
+{
+    use ising_generators::polariton::POLARITON_V1;
+    let doc = polariton_doc()?;
+    for case in section(&doc, "cases")? {
+        let params = codec::hex_decode(str_field(case, "params_hex")?)?;
+        let (side, _) = polariton_shape(&params)?;
+        let m = u64::from(le_u16(&params, 7)?);
+        let first = entries_of(case, "instances")?
+            .first()
+            .ok_or("a case builds no instance")?;
+        let meta = with_ice_instance(
+            POLARITON_V1,
+            case,
+            u64_decimal(first, "index")?,
+            check_polariton_metadata,
+        )?;
+        let (c0, r0) = (u64::from(meta.window.0), u64::from(meta.window.1));
+        compare(case, "side", &u64::from(meta.side), &side)?;
+        compare(
+            case,
+            "the window fits the cell grid",
+            &(c0 >= 1 && r0 >= 1 && c0 + side < 2 * m && r0 + side < 2 * m),
+            &true,
+        )?;
+        let expected = match case_name(case) {
+            "polariton-dead-cell" => Some((1, 2)),
+            "polariton-l2" | "polariton-l3" | "polariton-l3-permuted" => Some((1, 1)),
+            _ => None,
+        };
+        if let Some(window) = expected {
+            compare(case, "window", &(c0, r0), &window)?;
+        }
+        compare(
+            case,
+            "the link positions are every instance node",
+            &{
+                let mut sorted = meta.positions.clone();
+                sorted.sort_unstable();
+                sorted
+            },
+            &(0..u32::try_from(meta.positions.len()).map_err(|e| e.to_string())?).collect(),
+        )?;
+    }
+    Ok(())
+}
+
+#[test]
+fn polariton_admission_codes_match_the_rust_admission() -> Result<(), String> {
+    use ising_generators::descriptor::{admit, params_digest, AdvertisedLimits};
+    use ising_generators::family::{admit_topology, BaseTopology};
+    use ising_generators::polariton::POLARITON_V1;
+    let doc = polariton_doc()?;
+    let contracts = [POLARITON_V1];
+    let mut codes = Vec::new();
+    for case in section(&doc, "admission")? {
+        let params = codec::hex_decode(str_field(case, "params_hex")?)?;
+        let (nodes, edges) = topology_inputs(object_field(case, "topology")?)?;
+        let topology = BaseTopology::new(nodes, &edges).map_err(|e| format!("{e:?}"))?;
+        let got = admit(
+            &contracts,
+            str_field(case, "family_id")?.as_bytes(),
+            u32_field(case, "revision")?,
+            &params,
+            &params_digest(&params),
+        )
+        .and_then(|admitted| {
+            admit_topology(
+                &admitted,
+                &topology,
+                topology.order_digest(),
+                &AdvertisedLimits {
+                    max_nodes: 0,
+                    max_edges: 0,
+                    max_degree: 0,
+                },
+            )
+        });
+        let got = got.err().map(ising_generators::Code::value);
+        compare(case, "admission code", &got, &expected_code(case)?)?;
+        codes.push(got);
+    }
+    compare(&doc, "codes 9 present", &codes.contains(&Some(9)), &true)?;
+    compare(&doc, "code 12 present", &codes.contains(&Some(12)), &true)?;
+    compare(&doc, "an admitted request", &codes.contains(&None), &true)
+}
+
+#[test]
+fn a_side_16_request_has_no_window_on_the_live_topology() -> Result<(), String> {
+    use ising_generators::descriptor::{admit, params_digest, AdvertisedLimits};
+    use ising_generators::family::{admit_topology, BaseTopology};
+    use ising_generators::polariton::POLARITON_V1;
+    // The live z(12, 4) topology has dead qubits. Side 16 builds only on a
+    // window without them, so the request gives code 12.
+    let doc = polariton_doc()?;
+    let recipe = section(&doc, "polariton_recipes")?
+        .first()
+        .ok_or("no recipe")?;
+    let mut params = codec::hex_decode(str_field(recipe, "params_hex")?)?;
+    for (at, byte) in [(22, 16u8), (30, 28)] {
+        *params.get_mut(at).ok_or("short params")? = byte;
+    }
+    let (nodes, edges) = topology_inputs(object_field(recipe, "topology")?)?;
+    let topology = BaseTopology::new(nodes, &edges).map_err(|e| format!("{e:?}"))?;
+    let contracts = [POLARITON_V1];
+    let admitted = admit(
+        &contracts,
+        b"quip/polariton-static",
+        1,
+        &params,
+        &params_digest(&params),
+    )
+    .map_err(|c| format!("admit failed with {c}"))?;
+    let got = admit_topology(
+        &admitted,
+        &topology,
+        topology.order_digest(),
+        &AdvertisedLimits {
+            max_nodes: 0,
+            max_edges: 0,
+            max_degree: 0,
+        },
+    )
+    .err()
+    .map(ising_generators::Code::value);
+    compare(&doc, "admission code", &got, &Some(12))
+}
+
+#[test]
+fn a_changed_polariton_coupling_fails_the_recompute() -> Result<(), String> {
+    let doc = polariton_doc()?;
+    let pointer = "/cases/0/instances/0/h/0";
+    let was = doc
+        .pointer(pointer)
+        .and_then(Value::as_i64)
+        .ok_or("no field")?;
+    let broken = mutate(&doc, pointer, json!(was + 4));
+    expect_err(&check_polariton(&broken), "a changed field")
+}
+
+#[test]
+fn a_changed_polariton_witness_fails_the_check() -> Result<(), String> {
+    let doc = polariton_doc()?;
+    for pointer in [
+        "/witnesses/0/feasible",
+        "/witnesses/1/feasible",
+        "/witnesses/1/loss_milli",
+        "/witnesses/1/violations",
+        "/witnesses/1/energy_milli",
+    ] {
+        let was = doc.pointer(pointer).ok_or("no value")?.clone();
+        let changed = match was {
+            Value::Bool(flag) => json!(!flag),
+            Value::Number(n) => json!(n.as_i64().ok_or("not an integer")? + 500),
+            _ => return Err("unexpected witness value".to_owned()),
+        };
+        let broken = mutate(&doc, pointer, changed);
+        expect_err(&check_polariton_witnesses(&broken), pointer)?;
+    }
+    let spins = doc
+        .pointer("/witnesses/0/spins")
+        .and_then(Value::as_array)
+        .ok_or("no spins")?;
+    let mut flipped = spins.clone();
+    let first = flipped.first_mut().ok_or("no spin")?;
+    *first = json!(-first.as_i64().ok_or("not an integer")?);
+    let broken = mutate(&doc, "/witnesses/0/spins", Value::Array(flipped));
+    expect_err(&check_polariton_witnesses(&broken), "a changed spin")
+}
+
+#[test]
+fn a_polariton_witness_set_must_cover_every_case_with_both_kinds() -> Result<(), String> {
+    let doc = polariton_doc()?;
+    let witnesses = section(&doc, "witnesses")?;
+    let last = witnesses.len();
+    // The retry witnesses replaced by the L2 witnesses under the retry name.
+    let mut swapped = witnesses.to_vec();
+    for (slot, kind) in [(last - 2, "feasible"), (last - 1, "infeasible")] {
+        let source = witnesses
+            .iter()
+            .find(|w| {
+                w.get("name").and_then(Value::as_str) == Some(&format!("polariton-l2-{kind}"))
+            })
+            .ok_or("no L2 witness")?;
+        let mut copy = source.clone();
+        for (key, value) in [
+            ("name", json!(format!("polariton-retry-{kind}"))),
+            ("case", json!("polariton-retry")),
+        ] {
+            if let Some(field) = copy.get_mut(key) {
+                *field = value;
+            }
+        }
+        *swapped.get_mut(slot).ok_or("no slot")? = copy;
+    }
+    let broken = mutate(&doc, "/witnesses", Value::Array(swapped));
+    expect_err(&check_polariton_witnesses(&broken), "renamed witnesses")?;
+    // A case with two feasible witnesses and no infeasible one.
+    let mut twice = witnesses.to_vec();
+    let first = twice.first().ok_or("no witness")?.clone();
+    *twice.get_mut(1).ok_or("no slot")? = first;
+    let broken = mutate(&doc, "/witnesses", Value::Array(twice));
+    expect_err(
+        &check_polariton_witnesses(&broken),
+        "a missing infeasible witness",
+    )?;
+    // A case without witnesses.
+    let broken = mutate(
+        &doc,
+        "/witnesses",
+        Value::Array(witnesses.iter().take(last - 2).cloned().collect()),
+    );
+    expect_err(
+        &check_polariton_witnesses(&broken),
+        "a case without witnesses",
+    )
+}
+
+#[test]
+fn a_higher_energy_infeasible_witness_fails_the_check() -> Result<(), String> {
+    use ising_generators::polariton::{polariton_observables, POLARITON, POLARITON_V1};
+    let doc = polariton_doc()?;
+    let witness = find_named(&doc, "witnesses", "polariton-l3-infeasible")?;
+    let case = find_named(&doc, "cases", "polariton-l3")?;
+    let slot = u64_decimal(witness, "index")?;
+    // All spins up is a consistent witness with more violated labels.
+    let replacement = with_ice_instance(POLARITON_V1, case, slot, |params, built| {
+        let spins = vec![1i8; built.node_ids().len()];
+        let seen = polariton_observables(params, built, &spins).ok_or("no observables")?;
+        let feasible = (POLARITON.feasible.ok_or("no hook")?)(params, built, &spins);
+        let energy = encoded_energy(built, &spins)?;
+        compare(
+            witness,
+            "the replacement is consistent",
+            &energy,
+            &i128::from(seen.loss_milli),
+        )?;
+        compare(witness, "the replacement is infeasible", &feasible, &false)?;
+        compare(
+            witness,
+            "the replacement costs more",
+            &(energy > POLARITON_LOW_ENERGY),
+            &true,
+        )?;
+        let mut copy = witness.clone();
+        for (key, value) in [
+            ("spins", json!(spins)),
+            ("charges", json!(seen.charges)),
+            ("violations", json!(seen.violations)),
+            ("loss_milli", json!(seen.loss_milli)),
+            (
+                "energy_milli",
+                json!(i64::try_from(energy).map_err(|e| e.to_string())?),
+            ),
+            ("feasible", json!(false)),
+        ] {
+            if let Some(field) = copy.get_mut(key) {
+                *field = value;
+            }
+        }
+        Ok(copy)
+    })?;
+    let index = section(&doc, "witnesses")?
+        .iter()
+        .position(|w| w.get("name") == witness.get("name"))
+        .ok_or("no witness")?;
+    check_polariton_witnesses(&doc)?;
+    let broken = mutate(&doc, &format!("/witnesses/{index}"), replacement);
+    expect_err(
+        &check_polariton_witnesses(&broken),
+        "a higher-energy witness",
+    )
+}
+
+#[test]
+fn a_changed_polariton_try_fails_the_replay() -> Result<(), String> {
+    let doc = polariton_doc()?;
+    let recipe = section(&doc, "polariton_recipes")?
+        .first()
+        .ok_or("no recipe")?;
+    let broken = mutate(&doc, "/polariton_recipes/0/salts/0/try", json!(4));
+    let changed = section(&broken, "polariton_recipes")?
+        .first()
+        .ok_or("no recipe")?;
+    expect_err(&check_polariton_recipe(changed), "a changed try")?;
+    let broken = mutate(&doc, "/polariton_recipes/0/salts/0/window/0", json!(1));
+    let changed = section(&broken, "polariton_recipes")?
+        .first()
+        .ok_or("no recipe")?;
+    expect_err(&check_polariton_recipe(changed), "a changed window")?;
+    check_polariton_recipe(recipe)
+}
+
+#[test]
+fn a_changed_polariton_recipe_hash_fails_the_recompute() -> Result<(), String> {
+    let doc = polariton_doc()?;
+    let recipe = section(&doc, "polariton_recipes")?
+        .first()
+        .ok_or("no recipe")?;
+    let was = str_field(
+        recipe.pointer("/salts/0").ok_or("no salt")?,
+        "canonical_blake3",
+    )?;
+    let broken = mutate(
+        &doc,
+        "/polariton_recipes/0/salts/0/canonical_blake3",
+        json!(flip_last_hex_digit(was)),
+    );
+    let recipe = section(&broken, "polariton_recipes")?
+        .first()
+        .ok_or("no recipe")?;
+    expect_err(&check_polariton_recipe(recipe), "a changed recipe hash")
 }
 
 // ---- topology files (vectors/topologies/) ----

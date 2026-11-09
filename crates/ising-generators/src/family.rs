@@ -191,6 +191,10 @@ pub type GenerateFn =
 /// FAM-36: `true` when the metadata of `instance` is valid against it.
 pub type CheckMetadataFn = fn(&Params<'_>, &Instance) -> bool;
 
+/// `true` when `spins`, one entry per instance node, meets every hard
+/// constraint of the instance. The hook of a `hard` family.
+pub type FeasibleFn = fn(&Params<'_>, &Instance, &[i8]) -> bool;
+
 /// The construction items of a family contract (FAM-38).
 #[derive(Clone, Copy, Debug)]
 pub struct Construction {
@@ -202,6 +206,9 @@ pub struct Construction {
     pub generate: GenerateFn,
     /// The metadata check of FAM-36.
     pub check_metadata: CheckMetadataFn,
+    /// The feasibility hook. `Some` marks a `hard` family. `None` marks a
+    /// soft family, where every witness of the right length is feasible.
+    pub feasible: Option<FeasibleFn>,
 }
 
 /// An instance before the digests and nonce are added.
@@ -351,4 +358,22 @@ pub fn generate_instance(
         return Err(SaltFault::Defect(Defect::MetadataRejected));
     }
     Ok(instance)
+}
+
+/// Whether `spins` is a feasible witness of `instance`.
+///
+/// `false` when the contract has no construction. For a soft family
+/// (`feasible` is `None`), `true` when `spins` holds one `+1` or `-1` entry per
+/// instance node. For a hard family, the result of the hook.
+#[must_use]
+pub fn feasible(admitted: &Admitted<'_>, instance: &Instance, spins: &[i8]) -> bool {
+    let Some(construction) = admitted.contract().construction else {
+        return false;
+    };
+    match construction.feasible {
+        Some(hook) => hook(admitted.params(), instance, spins),
+        None => {
+            spins.len() == instance.node_ids().len() && spins.iter().all(|&s| s == 1 || s == -1)
+        }
+    }
 }

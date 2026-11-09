@@ -5,6 +5,27 @@ This file documents changes to the Quip solver contract.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+
+- `quip/polariton-static@1`, a registered family with status `research` and the
+  first `hard` family. An open square-link lattice of side `L` sits natively on
+  Zephyr cells, where each vertex is a cell K4 and each link is one shared segment
+  qubit. The interior vertices carry balanced charges of `+2`, `-2`, and `0`, and
+  the instance holds the charge penalty `(U / 2) * (Q - q)^2` with `U` of 250
+  milli. A witness is valid only when every labeled charge holds. The charges draw
+  from a ChaCha8 stream with at most four tries, and a salt whose four draws
+  all fail the request check gives code 14. The metadata uses the registered kinds 4 and 5. The
+  contract registers three parameter sets on z(12, 4) as recipes, `l4`, `l8`, and
+  `l9`. A static pattern does not show optical preparation, retention, or
+  transport. The family has no research cohort. The contract is
+  `docs/families/quip-polariton-static-1.md`, the vectors are `polariton.json`,
+  and the Rust contract is `ising_generators::polariton::POLARITON_V1`. The new
+  hook `family::feasible` and the `feasible` field of `Construction` let a `hard`
+  family state its feasibility constraint. The coordinator does not call the hook
+  yet. The `--family` gate sends the revision the `routing-small` topology.
+
 ## 0.0.6
 
 Topology blob files and four ice families. `ising-generators` adds the ice tile

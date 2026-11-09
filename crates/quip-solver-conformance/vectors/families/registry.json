@@ -47,6 +47,19 @@
     },
     {
       "adapted_from": null,
+      "contract": "docs/families/quip-polariton-static-1.md",
+      "evidence": [
+        "SC-14:polariton-vectors-frozen"
+      ],
+      "family_id": "quip/polariton-static",
+      "name": "quip/polariton-static@1",
+      "revision": 1,
+      "status": "research",
+      "vectors": "crates/quip-solver-conformance/vectors/families/polariton.json",
+      "vectors_blake3": "6a7aff05df982ba8e9691c08d46900f92ae523cdb0b73d7f43832f60e7d6dc87"
+    },
+    {
+      "adapted_from": null,
       "contract": "docs/families/quip-twisted-ice-dimer-1.md",
       "evidence": [
         "SC-9:twisted-ice-dimer-vectors-frozen"

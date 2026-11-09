@@ -14161,7 +14161,7 @@
       "path": "conformance/family_oracle/__main__.py"
     },
     {
-      "blake3": "7a4ab15a312577b5178ab22fea1afc3bfdd5b067e3b22f5a62eb858a701f8ce5",
+      "blake3": "089898d9ead8e99e35899dd4bed5af03cbf29d0e9f8f32debc57240817783218",
       "path": "conformance/family_oracle/build.py"
     },
     {
@@ -14201,8 +14201,12 @@
       "path": "conformance/family_oracle/layered.py"
     },
     {
-      "blake3": "5400c08b99bdbc82fec1cf53d39b3788896226340f800c3c4fc479856e942155",
+      "blake3": "8dcf1440b7d36ac91ddc00df5d79d5fe67c7e0b511074e33b22b2c827e35d8d0",
       "path": "conformance/family_oracle/params.py"
+    },
+    {
+      "blake3": "7d828bbb8fe6fc4668b49bbf96402ed4b316a6230efed6ba9e0e8c920e892713",
+      "path": "conformance/family_oracle/polariton.py"
     },
     {
       "blake3": "d88da2f573b08cb3f021b8255a1b0c77069b1bc333ada89330280fcb1b1b87bd",

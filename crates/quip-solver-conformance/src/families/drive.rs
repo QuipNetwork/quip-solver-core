@@ -32,6 +32,7 @@ use super::fields::{P_FIELDS_ADJ_G45_F1000_D16, P_FIELDS_F1001, P_FIELDS_Z22_G12
 use super::ice::{P_ICE_ADJ_125, P_ICE_GLASS_1000, P_ICE_Z12_200};
 use super::layered::P_L2_F0;
 use super::layered::{P_F5000, P_L3_F0, P_SPEC};
+use super::polariton::{P_POLARITON_SIDE1, P_POLARITON_Z24_L2_P0, P_POLARITON_Z34_L3_P2};
 use super::routing::{P_ROUTING_D3, P_ROUTING_Z24_D4, P_ROUTING_Z34_D6};
 use super::twisted::{P_TWISTED_ADJ_W45_P6, P_TWISTED_W1000, P_TWISTED_Z22_W62_P8};
 use super::{
@@ -980,6 +981,9 @@ fn params_name(params: &[u8]) -> String {
         ("P_ROUTING_Z24_D4", &P_ROUTING_Z24_D4[..]),
         ("P_ROUTING_Z34_D6", &P_ROUTING_Z34_D6[..]),
         ("P_ROUTING_D3", &P_ROUTING_D3[..]),
+        ("P_POLARITON_Z24_L2_P0", &P_POLARITON_Z24_L2_P0[..]),
+        ("P_POLARITON_Z34_L3_P2", &P_POLARITON_Z34_L3_P2[..]),
+        ("P_POLARITON_SIDE1", &P_POLARITON_SIDE1[..]),
     ] {
         if params == known {
             return name.to_owned();

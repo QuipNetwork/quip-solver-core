@@ -98,6 +98,7 @@ pub static ROUTING: Construction = Construction {
     check_topology,
     generate,
     check_metadata,
+    feasible: None,
 };
 
 /// The contract of `quip/two-commodity-routing@1`.
@@ -141,7 +142,7 @@ fn routing_size_bounds(_: &Params<'_>, stats: &TopologyStats) -> Result<SizeBoun
 }
 
 /// An unsigned parameter, `None` when it is missing or out of range.
-fn unsigned(params: &Params<'_>, tag: u16) -> Option<u32> {
+pub(crate) fn unsigned(params: &Params<'_>, tag: u16) -> Option<u32> {
     match params.get(tag) {
         Some(Value::Unsigned(value)) => u32::try_from(value).ok(),
         _ => None,
@@ -150,12 +151,12 @@ fn unsigned(params: &Params<'_>, tag: u16) -> Option<u32> {
 
 /// The parameters of a revision.
 #[derive(Clone, Copy)]
-struct Shape {
-    m: u16,
-    t: u8,
-    divisor: usize,
+pub(crate) struct Shape {
+    pub(crate) m: u16,
+    pub(crate) t: u8,
+    pub(crate) divisor: usize,
     /// The grid side `L = 2m - 1`.
-    side: u16,
+    pub(crate) side: u16,
 }
 
 impl Shape {
@@ -174,21 +175,21 @@ impl Shape {
 }
 
 /// A grid cell `(c, r)`, ordered by `(c, r)`.
-type Cell = (u16, u16);
+pub(crate) type Cell = (u16, u16);
 
 /// The three lines of one row or column: the commodity 1 line, then the two
 /// commodity 2 lines that alternate.
 type Triple = [u8; 3];
 
 /// The topology seen through Zephyr coordinates, in dense positions.
-struct Grid {
-    shape: Shape,
+pub(crate) struct Grid {
+    pub(crate) shape: Shape,
     position: BTreeMap<u32, u32>,
     edges: BTreeSet<(u32, u32)>,
 }
 
 impl Grid {
-    fn new(shape: Shape, topology: &BaseTopology) -> Self {
+    pub(crate) fn new(shape: Shape, topology: &BaseTopology) -> Self {
         let position = (0u32..)
             .zip(topology.node_ids())
             .map(|(pos, &id)| (id, pos))
@@ -207,7 +208,7 @@ impl Grid {
 
     /// The dense position of the segment that starts at position `p` on the
     /// line `(u, w, k)`, `None` when it is not a node of the topology.
-    fn seg(&self, u: i64, w: i64, k: u8, p: i64) -> Option<u32> {
+    pub(crate) fn seg(&self, u: i64, w: i64, k: u8, p: i64) -> Option<u32> {
         if !(0..2 * i64::from(self.shape.m)).contains(&p) {
             return None;
         }
@@ -237,7 +238,7 @@ impl Grid {
     }
 
     /// Whether the cell K4 exists: four nodes and all six couplers.
-    fn has_k4(&self, cell: Cell, k: u8, k2: u8) -> bool {
+    pub(crate) fn has_k4(&self, cell: Cell, k: u8, k2: u8) -> bool {
         let [Some(low), Some(high), Some(left), Some(right)] = self.corners(cell, k, k2) else {
             return false;
         };
@@ -307,7 +308,7 @@ fn layout(grid: &Grid) -> Option<(Vec<Triple>, Vec<Triple>)> {
                     .count()
             };
             let current = *rows.get(usize::from(r))?;
-            if let Some(best) = best_triple(&all, score(current), score) {
+            if let Some(best) = best_choice(&all, score(current), score) {
                 *rows.get_mut(usize::from(r))? = best;
                 changed = true;
             }
@@ -322,7 +323,7 @@ fn layout(grid: &Grid) -> Option<(Vec<Triple>, Vec<Triple>)> {
                     .count()
             };
             let current = *cols.get(usize::from(c))?;
-            if let Some(best) = best_triple(&all, score(current), score) {
+            if let Some(best) = best_choice(&all, score(current), score) {
                 *cols.get_mut(usize::from(c))? = best;
                 changed = true;
             }
@@ -333,9 +334,13 @@ fn layout(grid: &Grid) -> Option<(Vec<Triple>, Vec<Triple>)> {
     }
 }
 
-/// The first triple, in order, whose score is the largest and is above
-/// `current`. `None` when no triple beats `current`.
-fn best_triple(all: &[Triple], current: usize, score: impl Fn(Triple) -> usize) -> Option<Triple> {
+/// The first choice, in order, whose score is the largest and is above
+/// `current`. `None` when no choice beats `current`.
+pub(crate) fn best_choice<T: Copy>(
+    all: &[T],
+    current: usize,
+    score: impl Fn(T) -> usize,
+) -> Option<T> {
     let mut best = current;
     let mut chosen = None;
     for &triple in all {

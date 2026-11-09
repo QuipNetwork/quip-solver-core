@@ -3595,6 +3595,7 @@ mod tests {
             check_topology: accept_topology,
             generate: no_instance,
             check_metadata: accept_metadata,
+            feasible: None,
         };
 
         const UNIFORM_V1: Contract = contract(1);

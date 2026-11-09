@@ -162,6 +162,7 @@ const fn layered_construction() -> Construction {
         check_topology: layered_check_topology,
         generate: layered_generate,
         check_metadata: layered_check_metadata,
+        feasible: None,
     }
 }
 
@@ -315,6 +316,7 @@ const fn small(
         check_topology: accept_topology,
         generate,
         check_metadata: accept_metadata,
+        feasible: None,
     }
 }
 

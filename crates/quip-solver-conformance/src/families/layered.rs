@@ -63,6 +63,7 @@ pub static LAYERED: Construction = Construction {
     check_topology: layered_check_topology,
     generate: layered_generate,
     check_metadata: layered_check_metadata,
+    feasible: None,
 };
 
 fn nz(n: u32) -> Result<NonZeroU32, Code> {

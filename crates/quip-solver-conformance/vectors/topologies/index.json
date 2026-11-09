@@ -143,6 +143,50 @@
     "provenance": "specified"
   },
   {
+    "about": "Explicit topology first used by the case polariton-dead-cell in polariton.json cases.",
+    "edges": 264,
+    "file": "polariton-dead-cell.bin.gz",
+    "kind": "explicit",
+    "name": "polariton-dead-cell",
+    "nodes": 83,
+    "order_digest": "ec574fd5bedc6699eadf8bc6ded9cc7a31ecb046654d206c0d60c97f7bb69f53",
+    "payload_blake3": "c75abce38524830f51c5186f340cf843defbd2d9c4376c5235c633c0bf0926db",
+    "provenance": "specified"
+  },
+  {
+    "about": "Explicit topology first used by the case polariton-l3-permuted in polariton.json cases.",
+    "edges": 2808,
+    "file": "polariton-l3-permuted.bin.gz",
+    "kind": "explicit",
+    "name": "polariton-l3-permuted",
+    "nodes": 336,
+    "order_digest": "2aae948cb893aa79affa6d402cf6d61a857ef82322512a41cdbdbbeb17b3a109",
+    "payload_blake3": "efee80b6a27659264f40d64ee2b1a3f67e9da309251676791b2fc0444e633b14",
+    "provenance": "specified"
+  },
+  {
+    "about": "Explicit topology first used by the case polariton-no-window in polariton.json cases.",
+    "edges": 262,
+    "file": "polariton-no-window.bin.gz",
+    "kind": "explicit",
+    "name": "polariton-no-window",
+    "nodes": 83,
+    "order_digest": "0a2fbd52e38b233e75b8a81f50ebfe4b88ee937d635691f4cd145dfc7aa7ad56",
+    "payload_blake3": "87c642dbba83aac2ac00f881bf2f1b1e834ded8d2ef19dfe01f5b895c8313a45",
+    "provenance": "specified"
+  },
+  {
+    "about": "Explicit topology first used by the case polariton-retry in polariton.json cases.",
+    "edges": 11400,
+    "file": "polariton-retry.bin.gz",
+    "kind": "explicit",
+    "name": "polariton-retry",
+    "nodes": 1248,
+    "order_digest": "3897473aaa37511c1e4ec908fb870e74c8b9a065d61bb88059a948c5b6b2551e",
+    "payload_blake3": "fb215196de2219654048c3ed609e34948fc7c14dee25982ef363d767aaceee92",
+    "provenance": "specified"
+  },
+  {
     "about": "Explicit topology first used by the case reverse-ten in core.json topologies.",
     "edges": 9,
     "file": "reverse-ten.bin.gz",

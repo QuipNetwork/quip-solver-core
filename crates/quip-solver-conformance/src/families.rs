@@ -9,6 +9,7 @@ use ising_generators::descriptor::{admit, params_digest, AdvertisedLimits, Contr
 use ising_generators::family::{admit_topology, generate_instance, BaseTopology, SaltFault};
 use ising_generators::ice::{CHARGED_ICE_V1, ICE_FIELDS_V1, ICE_GLASS_V1, TWISTED_DIMER_V1};
 use ising_generators::instance::Instance;
+use ising_generators::polariton::POLARITON_V1;
 use ising_generators::routing::ROUTING_V1;
 use ising_generators::Code;
 use serde_json::Value;
@@ -18,6 +19,7 @@ mod drive;
 pub mod fields;
 pub mod ice;
 pub mod layered;
+pub mod polariton;
 pub mod registry;
 pub mod routing;
 pub mod twisted;
@@ -29,6 +31,7 @@ use charge::{P_CHARGED_A251, P_CHARGED_ADJ_A100_B45_C256, P_CHARGED_Z22_A250_B31
 use fields::{P_FIELDS_ADJ_G45_F1000_D16, P_FIELDS_F1001, P_FIELDS_Z22_G125_F500_D16};
 use ice::{P_ICE_ADJ_125, P_ICE_GLASS_1000, P_ICE_Z12_200};
 use layered::{P_F5000, P_L2_F0, P_L3_F0, P_SPEC, RESTRICTED_V1, UNIFORM_V1};
+use polariton::{P_POLARITON_SIDE1, P_POLARITON_Z24_L2_P0, P_POLARITON_Z34_L3_P2};
 use routing::{P_ROUTING_D3, P_ROUTING_Z24_D4, P_ROUTING_Z34_D6};
 use twisted::{P_TWISTED_ADJ_W45_P6, P_TWISTED_W1000, P_TWISTED_Z22_W62_P8};
 
@@ -70,13 +73,16 @@ pub const ROUTING_TOPOLOGY: &str = "../topologies/routing-small.bin.gz";
 /// `[P_FIELDS_Z22_G125_F500_D16, P_FIELDS_ADJ_G45_F1000_D16]` and
 /// `out_of_bounds_params` `P_FIELDS_F1001`, and `ROUTING_V1` with params
 /// `[P_ROUTING_Z24_D4, P_ROUTING_Z34_D6]` and `out_of_bounds_params`
-/// `P_ROUTING_D3`.
+/// `P_ROUTING_D3`, and `POLARITON_V1` with params
+/// `[P_POLARITON_Z24_L2_P0, P_POLARITON_Z34_L3_P2]` and `out_of_bounds_params`
+/// `P_POLARITON_SIDE1`.
 ///
 /// The gate sends each revision its own base topology (`topology`): `T_SPARSE`
 /// for the two layered revisions, `z12-zephyr` for `quip/ice-glass`,
 /// `z22-zephyr` for the other three ice revisions, and `routing-small` for
-/// `quip/two-commodity-routing`. Each file is the topology of a registered
-/// vector, and at least one params set of the revision admits on it. On
+/// `quip/two-commodity-routing` and `quip/polariton-static`. Each file is the
+/// topology of a registered vector, and at least one params set of the
+/// revision admits on it. On
 /// `T_SPARSE`, which carries no ice tiles, every ice params set gets the
 /// admission code 12 (`TopologyIncompatible`).
 pub static REFERENCE_REVISIONS: &[ReferenceRevision] = &[
@@ -120,6 +126,12 @@ pub static REFERENCE_REVISIONS: &[ReferenceRevision] = &[
         contract: &ROUTING_V1,
         params: &[&P_ROUTING_Z24_D4, &P_ROUTING_Z34_D6],
         out_of_bounds_params: &P_ROUTING_D3,
+        topology: ROUTING_TOPOLOGY,
+    },
+    ReferenceRevision {
+        contract: &POLARITON_V1,
+        params: &[&P_POLARITON_Z24_L2_P0, &P_POLARITON_Z34_L3_P2],
+        out_of_bounds_params: &P_POLARITON_SIDE1,
         topology: ROUTING_TOPOLOGY,
     },
 ];

@@ -61,6 +61,107 @@ def _routing_doc() -> dict:
     return json.loads(build.TWO_COMMODITY_PATH.read_text())
 
 
+def _polariton_doc() -> dict:
+    return json.loads(build.POLARITON_PATH.read_text())
+
+
+def test_polariton_fixture_matches_oracle():
+    text = build.render(build.build_polariton())
+    assert text == build.POLARITON_PATH.read_text()
+
+
+def test_polariton_evidence_matches_the_registry():
+    registry = json.loads((build.FAMILIES_DIR / "registry.json").read_text())[
+        "registry"
+    ]
+    entry = next(e for e in registry if e["name"] == "quip/polariton-static@1")
+    doc = _polariton_doc()
+    for section in ("cases", "witnesses", "polariton_recipes", "admission"):
+        tagged = {tag for case in doc[section] for tag in case["evidence"]}
+        assert tagged == set(entry["evidence"]), section
+
+
+def test_polariton_pin_matches_the_cases():
+    registry = json.loads((build.FAMILIES_DIR / "registry.json").read_text())[
+        "registry"
+    ]
+    entry = next(e for e in registry if e["name"] == "quip/polariton-static@1")
+    digest = blake3.blake3(build.canonical_json(_polariton_doc()["cases"]).encode())
+    assert digest.hexdigest() == entry["vectors_blake3"]
+
+
+def test_polariton_contract_recipe_table_matches_the_vectors():
+    text = (build.ROOT / "docs/families/quip-polariton-static-1.md").read_text()
+    row = re.compile(
+        r"^\| `([^`]+)` \| `([^`]+)` \| (\d+) \| (\d+) \| (\d+) \| (\d+) \| `([0-9a-f]{64})` \|$",
+        re.MULTILINE,
+    )
+    table = row.findall(text)
+    recipes = _polariton_doc()["polariton_recipes"]
+    assert len(table) == len(recipes) > 0
+    for (alias, cell, m, t, side, pairs, digest), recipe in zip(
+        table, recipes, strict=True
+    ):
+        values = _decoded_params(recipe["params_hex"])
+        assert alias == recipe["alias"]
+        assert cell == recipe["cell"]
+        assert (int(m), int(t), int(side), int(pairs)) == (
+            values[1],
+            values[2],
+            values[3],
+            values[4],
+        )
+        assert int(pairs) == (int(side) - 1) ** 2 // 8
+        assert digest == recipe["params_digest"]
+
+
+def _check_polariton_witnesses(doc: dict) -> None:
+    by_case: dict[str, list[dict]] = {}
+    for witness in doc["witnesses"]:
+        by_case.setdefault(witness["case"], []).append(witness)
+    assert set(by_case) == {case["name"] for case in doc["cases"]}
+    cases = {case["name"]: case for case in doc["cases"]}
+    for name, found in by_case.items():
+        nodes = {
+            inst["index"]: len(inst["node_ids"]) for inst in cases[name]["instances"]
+        }
+        for witness in found:
+            assert len(witness["spins"]) == nodes.get(witness["index"]), name
+        kinds = sorted(w["feasible"] for w in found)
+        assert kinds == [False, True], name
+        for witness in found:
+            kind = "feasible" if witness["feasible"] else "infeasible"
+            assert witness["name"] == f"{name}-{kind}"
+            # One violated label costs 500 milli. A feasible witness costs 0.
+            expected = 0 if witness["feasible"] else 500
+            assert witness["energy_milli"] == witness["loss_milli"] == expected
+
+
+def test_polariton_witnesses_cover_every_case_with_both_kinds():
+    _check_polariton_witnesses(_polariton_doc())
+
+
+def test_polariton_witness_coverage_rejects_a_swap_and_a_higher_energy():
+    doc = _polariton_doc()
+    swapped = json.loads(json.dumps(doc))
+    l2 = [w for w in doc["witnesses"] if w["case"] == "polariton-l2"]
+    retry = [
+        i for i, w in enumerate(doc["witnesses"]) if w["case"] == "polariton-retry"
+    ]
+    for slot, witness in zip(retry, l2, strict=True):
+        copy = dict(witness)
+        copy["case"] = "polariton-retry"
+        copy["name"] = witness["name"].replace("polariton-l2", "polariton-retry")
+        swapped["witnesses"][slot] = copy
+    with pytest.raises(AssertionError):
+        _check_polariton_witnesses(swapped)
+    loud = json.loads(json.dumps(doc))
+    bad = next(w for w in loud["witnesses"] if not w["feasible"])
+    bad["energy_milli"] = bad["loss_milli"] = 32000
+    with pytest.raises(AssertionError):
+        _check_polariton_witnesses(loud)
+
+
 def test_two_commodity_fixture_matches_oracle():
     text = build.render(build.build_two_commodity())
     assert text == build.TWO_COMMODITY_PATH.read_text()
@@ -211,6 +312,7 @@ def test_every_json_topology_reference_names_an_indexed_file():
         _charge_doc,
         _fields_doc,
         _routing_doc,
+        _polariton_doc,
     ):
         walk(load())
     assert refs
@@ -435,6 +537,7 @@ def test_every_provided_id_has_a_case():
         _charge_doc,
         _fields_doc,
         _routing_doc,
+        _polariton_doc,
     ],
 )
 def test_sources_hash_spec_and_oracle(load):
