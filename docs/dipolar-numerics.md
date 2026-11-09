@@ -89,9 +89,21 @@ The rounding error is at most one half unit of `q` for each entry. `rounding_bou
 Both digests use BLAKE3 in key derivation mode. Integers are little endian.
 
 - The geometry digest uses the context `quip dipolar geometry v1`. The bytes are the island count as a `u32`. Each island follows with `x` as a `u16`, `y` as a `u16`, the axis code as a `u8`, and the moment as an `i8`. The axis codes are 0 for `+x`, 1 for `-x`, 2 for `+y`, and 3 for `-y`. The constants end the bytes: `D` as an `i32`, `S` as a `u32`, and `R2` as a `u32`.
-- The table commitment uses the context `quip dipolar table v1`. The bytes start with the geometry digest and the entry count as a `u64`. Each entry follows with `i` as a `u32`, `j` as a `u32`, and `q` as an `i32`. The calibration ends the bytes. The byte 0 marks an oracle. The byte 1 marks a record, and the material and the normalization follow it, each with a `u32` length. The lattice spacing, the approximation error, and the 32 byte source digest finish the record.
+- The table commitment uses the context `quip dipolar table v1`. The bytes start with the geometry digest and the entry count as a `u64`. Each entry follows with `i` as a `u32`, `j` as a `u32`, and `q` as an `i32`. The calibration ends the bytes. The byte 0 marks an oracle and has no more bytes. The byte 1 marks a record, and these fields follow it in order:
+
+  1. The material as a `u32` byte length and then the UTF-8 bytes of the text. The length counts bytes, not characters.
+  2. The normalization in the same form.
+  3. The lattice spacing in picometers as a `u32`.
+  4. The approximation error in parts per million as a `u32`.
+  5. The source digest as 32 raw bytes.
 
 The commitment covers the geometry digest. A change to a coordinate, an axis, a moment, `D`, `S`, or `R2` changes the commitment.
+
+## Cost at the largest size
+
+A geometry with 8320 islands has 34,607,040 pairs. The functions `validate`, `quantize`, and the free function `truncation_bound` each visit every pair once. Their time is linear in the number of pairs plus the number of entries, and they use a fixed number of integer operations for each pair. `Table::truncation_bound` returns a value that `Table::new` already computed. `validate` visits every pair even when the entry list is empty or the radius is small. The tests do not time the largest geometry.
+
+A table with every pair inside the radius has 34,607,040 entries of 12 bytes each. This is about 396 MiB. The vector that `quantize` builds grows by doubling, so it can reserve about 768 MiB of capacity. A move during growth can need more memory for a short time. The plan sets no memory budget, and an allocation failure has no `DipolarError` value. The family that consumes a table chooses its size limits.
 
 ## Calibration status
 

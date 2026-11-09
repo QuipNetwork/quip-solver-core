@@ -413,9 +413,10 @@ impl Table {
 
     /// The BLAKE3 commitment: the geometry digest, the entry count and each
     /// entry as `i`, `j`, `q`, then the calibration. Integers are little
-    /// endian. Text fields carry a `u32` length. An oracle is tag 0 and a
-    /// record is tag 1 followed by the material, the normalization, the
-    /// spacing, the error, and the source digest.
+    /// endian. An oracle is the byte 0. A record is the byte 1 followed by
+    /// the material and the normalization, each as its UTF-8 byte length in a
+    /// `u32` and then the bytes, then the spacing as a `u32`, the error as a
+    /// `u32`, and the 32 source digest bytes.
     #[must_use]
     pub fn commitment(&self) -> [u8; 32] {
         let mut h = BufferedHasher::new(TABLE_CONTEXT);

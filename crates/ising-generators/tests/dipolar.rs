@@ -6,6 +6,7 @@
     clippy::cast_possible_truncation,
     clippy::expect_used,
     clippy::indexing_slicing,
+    clippy::too_many_lines,
     reason = "test code: a failed lookup is a test failure"
 )]
 
@@ -557,15 +558,258 @@ const ORACLE_GEOMETRY_DIGEST: &str =
     "45a43f9d9641ae8e2100274213b46e2738fa0ad78e5efc9dd14db9f30ae5b692";
 const ORACLE_COMMITMENT: &str = "efe917918f6d04ba87c27941caf2341ec3cb8625c3c7668fefa217bd292e365f";
 
-#[test]
-fn the_module_uses_no_float() {
-    let needles = [["f", "32"].concat(), ["f", "64"].concat()];
-    for source in [
-        include_str!("../src/dipolar.rs"),
-        include_str!("dipolar.rs"),
-    ] {
-        for needle in &needles {
-            assert!(!source.contains(needle.as_str()), "found {needle}");
+/// Findings of a small Rust lexer: the identifiers `f32` and `f64`, and the
+/// numeric literals with a decimal point followed by a digit or with an
+/// exponent. It skips comments, nested block comments, strings, raw strings,
+/// byte strings, and char literals.
+fn float_findings(src: &str) -> Vec<String> {
+    let c: Vec<char> = src.chars().collect();
+    let at = |i: usize| c.get(i).copied().unwrap_or('\0');
+    let is_ident = |ch: char| ch.is_alphanumeric() || ch == '_';
+    let mut found = Vec::new();
+    let mut prev = '\0';
+    let mut i = 0;
+    while i < c.len() {
+        let ch = at(i);
+        if ch == '/' && at(i + 1) == '/' {
+            while i < c.len() && at(i) != '\n' {
+                i += 1;
+            }
+        } else if ch == '/' && at(i + 1) == '*' {
+            let mut depth = 1;
+            i += 2;
+            while i < c.len() && depth > 0 {
+                if at(i) == '/' && at(i + 1) == '*' {
+                    depth += 1;
+                    i += 2;
+                } else if at(i) == '*' && at(i + 1) == '/' {
+                    depth -= 1;
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+        } else if ch == '"' {
+            i = skip_string(&c, i + 1);
+            prev = '"';
+        } else if ch == '\'' {
+            // A char literal closes after one char or one escape. Anything
+            // else is a lifetime.
+            if at(i + 1) == '\\' {
+                i += 2;
+                while i < c.len() && at(i) != '\'' {
+                    i += 1;
+                }
+                i += 1;
+            } else if at(i + 2) == '\'' {
+                i += 3;
+            } else {
+                i += 1;
+            }
+            prev = '\'';
+        } else if ch.is_alphabetic() || ch == '_' {
+            let start = i;
+            while is_ident(at(i)) {
+                i += 1;
+            }
+            let ident: String = c[start..i].iter().collect();
+            let raw_prefix = matches!(ident.as_str(), "r" | "br" | "cr");
+            if raw_prefix && (at(i) == '#' || at(i) == '"') {
+                let mut hashes = 0;
+                while at(i) == '#' {
+                    hashes += 1;
+                    i += 1;
+                }
+                i += 1;
+                while i < c.len() {
+                    if at(i) == '"' && (1..=hashes).all(|n| at(i + n) == '#') {
+                        i += 1 + hashes;
+                        break;
+                    }
+                    i += 1;
+                }
+            } else if matches!(ident.as_str(), "b" | "c") && at(i) == '"' {
+                i = skip_string(&c, i + 1);
+            } else if ident == "b" && at(i) == '\'' {
+                i += 1;
+                if at(i) == '\\' {
+                    i += 1;
+                }
+                i += 2;
+            } else if ident == "f32" || ident == "f64" {
+                found.push(ident);
+            }
+            prev = 'a';
+        } else if ch.is_ascii_digit() {
+            let start = i;
+            let tuple_index = prev == '.';
+            let radix = ch == '0' && matches!(at(i + 1), 'x' | 'b' | 'o');
+            if radix {
+                while is_ident(at(i)) {
+                    i += 1;
+                }
+            } else {
+                while at(i).is_ascii_digit() || at(i) == '_' {
+                    i += 1;
+                }
+                if !tuple_index {
+                    if at(i) == '.' && at(i + 1).is_ascii_digit() {
+                        i += 1;
+                        while at(i).is_ascii_digit() || at(i) == '_' {
+                            i += 1;
+                        }
+                        found.push(c[start..i].iter().collect());
+                    }
+                    let signed = matches!(at(i + 1), '+' | '-') && at(i + 2).is_ascii_digit();
+                    if matches!(at(i), 'e' | 'E') && (at(i + 1).is_ascii_digit() || signed) {
+                        i += 2;
+                        while at(i).is_ascii_digit() || at(i) == '_' {
+                            i += 1;
+                        }
+                        found.push(c[start..i].iter().collect());
+                    }
+                }
+                let suffix = i;
+                while is_ident(at(i)) {
+                    i += 1;
+                }
+                let suffix: String = c[suffix..i].iter().collect();
+                if suffix == "f32" || suffix == "f64" {
+                    found.push(c[start..i].iter().collect());
+                }
+            }
+            prev = '0';
+        } else {
+            if !ch.is_whitespace() {
+                prev = ch;
+            }
+            i += 1;
         }
     }
+    found
 }
+
+/// The index after the closing quote of a string whose body starts at `i`.
+fn skip_string(c: &[char], mut i: usize) -> usize {
+    while i < c.len() {
+        match c.get(i).copied() {
+            Some('\\') => i += 2,
+            Some('"') => return i + 1,
+            _ => i += 1,
+        }
+    }
+    i
+}
+
+#[test]
+fn the_float_lexer_flags_floats_and_skips_text() {
+    for flagged in [
+        "1.5 + 0.5",
+        "1e3",
+        "2.5E-1",
+        "let x: f64 = y;",
+        "1f64",
+        "2_0.5_0",
+        "fn f(a: f32) {}",
+    ] {
+        assert!(!float_findings(flagged).is_empty(), "missed {flagged}");
+    }
+    for clean in [
+        "x.0",
+        "x.0.1",
+        "0..n",
+        "0..=9",
+        "0x1e3 + 0b10",
+        "1usize",
+        "// f64",
+        "\"f64 1.5\"",
+        "/* f64 /* 1.5 */ 2.5 */ 7",
+        "r#\"raw \"f64\" 1.5\"#",
+        "b\"f64\"",
+        "'f' + '\\'' + b'x'",
+        "fn f<'a>(x: &'a str) {}",
+        "let n = 10;",
+    ] {
+        assert_eq!(
+            float_findings(clean),
+            Vec::<String>::new(),
+            "flagged {clean}"
+        );
+    }
+}
+
+#[test]
+fn the_module_uses_no_float() {
+    for (name, source) in [
+        ("src/dipolar.rs", include_str!("../src/dipolar.rs")),
+        ("tests/dipolar.rs", include_str!("dipolar.rs")),
+    ] {
+        assert_eq!(float_findings(source), Vec::<String>::new(), "{name}");
+    }
+}
+
+#[test]
+fn a_recorded_commitment_follows_the_documented_bytes() {
+    // The table: three +x islands, D = 1, S = 1024, R2 = 2, moment 1 each.
+    // (0,1): K = 1, N = -2, q = -2048. (0,2): K = 1, N = 1, q = 1024.
+    // (1,2): K = 2, N = -1, q = -1024 / 5.657 = -181.02, so -181.
+    let material = "Permalloy Ni\u{2088}\u{2080}Fe\u{2082}\u{2080}";
+    let normalization = "D in units of m_i m_j";
+    assert_ne!(material.len(), material.chars().count());
+    let record = CalibrationRecord {
+        material: material.into(),
+        lattice_spacing_pm: 500_000,
+        normalization: normalization.into(),
+        approximation_error_ppm: 1000,
+        source_digest: [7; 32],
+    };
+    let g = geometry(&three(), 1, 1024, 2);
+    let entries =
+        [(0_u32, 1_u32, -2048_i32), (0, 2, 1024), (1, 2, -181)].map(|(i, j, q)| Entry { i, j, q });
+    let table = Table::new(g, entries.to_vec(), Calibration::Recorded(record)).expect("table");
+
+    let derive = |context: &str, bytes: &[u8]| -> [u8; 32] {
+        let mut h = blake3::Hasher::new_derive_key(context);
+        let _updated = h.update(bytes);
+        *h.finalize().as_bytes()
+    };
+    // The geometry bytes: count, then x, y, axis code, moment, then D, S, R2.
+    let mut geo = 3_u32.to_le_bytes().to_vec();
+    for (x, y) in [(0_u16, 0_u16), (1, 0), (0, 1)] {
+        geo.extend(x.to_le_bytes());
+        geo.extend(y.to_le_bytes());
+        geo.extend([0_u8, 1]);
+    }
+    geo.extend(1_i32.to_le_bytes());
+    geo.extend(1024_u32.to_le_bytes());
+    geo.extend(2_u32.to_le_bytes());
+    let geo_digest = derive("quip dipolar geometry v1", &geo);
+    // The table bytes: the geometry digest, the entry count, each entry, then
+    // the record: tag 1, two length-prefixed UTF-8 strings, two u32 values,
+    // and the source digest.
+    let mut bytes = geo_digest.to_vec();
+    bytes.extend(3_u64.to_le_bytes());
+    for e in entries {
+        bytes.extend(e.i.to_le_bytes());
+        bytes.extend(e.j.to_le_bytes());
+        bytes.extend(e.q.to_le_bytes());
+    }
+    bytes.push(1);
+    bytes.extend(u32::try_from(material.len()).expect("short").to_le_bytes());
+    bytes.extend(material.as_bytes());
+    bytes.extend(
+        u32::try_from(normalization.len())
+            .expect("short")
+            .to_le_bytes(),
+    );
+    bytes.extend(normalization.as_bytes());
+    bytes.extend(500_000_u32.to_le_bytes());
+    bytes.extend(1000_u32.to_le_bytes());
+    bytes.extend([7_u8; 32]);
+    let expected = derive("quip dipolar table v1", &bytes);
+    assert_eq!(table.commitment(), expected);
+    assert_eq!(hex(&table.commitment()), RECORDED_COMMITMENT);
+}
+
+const RECORDED_COMMITMENT: &str =
+    "9c03ec9b2e45866a48dc3752ced737e533d0a3e29c56f83b07d0b9c246c9dab3";
