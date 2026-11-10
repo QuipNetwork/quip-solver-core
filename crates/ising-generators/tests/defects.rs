@@ -539,6 +539,7 @@ fn every_l2_state_matches_the_direct_energy() {
     let admitted = admitted(&DEFECTS_V1, &bytes).expect("admit");
     assert_eq!(instance.node_ids().len(), 12);
     assert_eq!(meta.weight, expected_weight(2, &kept, L2));
+    assert_eq!(meta.weight, 12982);
     assert_eq!(meta.pins.len(), 2);
     let mut feasible_count = 0;
     for bits in 0..4096u64 {
@@ -724,7 +725,7 @@ fn dropped_entries_are_the_parallel_pairs() {
         let lattice = SquareLattice::new(case.side, Boundary::Open).expect("lattice");
         let table = reference_table(&lattice);
         let (_, dropped) = split(&lattice, &table);
-        assert!(dropped > 0);
+        assert_eq!(dropped, if case.side == 2 { 1000 } else { 2250 });
         assert_eq!(meta.dropped, dropped, "{case:?}: the stored sum");
         assert_eq!(
             meta.commitment,
