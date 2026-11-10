@@ -2854,7 +2854,7 @@ mod tests {
             .iter()
             .find(|case| case.name == name)
             .and_then(|case| case.plan.clone().ok())
-            .expect("the case builds")
+            .unwrap_or_else(|| panic!("{name}: the case is missing or does not build"))
     }
 
     fn check_supported_explicit_plan(cases: &[ExplicitCase], instance: &Instance) {
@@ -2882,13 +2882,13 @@ mod tests {
             wire.generation, FAMILY_LIVE_GENERATION,
             "explicit-supported"
         );
-        let ising = wire.ising.expect("an IsingProblem");
+        let ising = wire.ising.expect("explicit-supported: an IsingProblem");
         assert!(
             matches!(ising.graph, Some(Graph::Edges(_))),
             "explicit-supported sends the edges"
         );
         assert_eq!(ising.scale, 1000, "explicit-supported");
-        let binding = ising.family.expect("a binding");
+        let binding = ising.family.expect("explicit-supported: a binding");
         assert_eq!(
             binding.instance_digest,
             instance.digest().to_vec(),
@@ -2935,7 +2935,11 @@ mod tests {
             offset_milli: instance.offset_milli(),
             metadata: job.metadata.clone(),
         };
-        let sent: [u8; 32] = job.instance_digest.as_slice().try_into().expect("32 bytes");
+        let sent: [u8; 32] = job
+            .instance_digest
+            .as_slice()
+            .try_into()
+            .expect("explicit-metadata-invalid: 32 bytes");
         let rebuilt = Instance::new(
             parts,
             &contract.limits,
@@ -2950,10 +2954,10 @@ mod tests {
             &P_SPEC,
             &params_digest(&P_SPEC),
         )
-        .expect("P_SPEC admits");
+        .expect("explicit-metadata-invalid: P_SPEC admits");
         let check = contract
             .construction
-            .expect("a construction")
+            .expect("explicit-metadata-invalid: a construction")
             .check_metadata;
         assert!(
             !check(admitted.params(), &rebuilt),
@@ -3025,10 +3029,14 @@ mod tests {
         // The order of the cases.
         let names: Vec<&str> = cases.iter().map(|case| case.name).collect();
         assert_eq!(names, EXPLICIT_CASES, "the order of the cases");
-        assert!(
-            cases.iter().all(|case| case.plan.is_ok()),
-            "every case builds"
-        );
+        for case in &cases {
+            assert!(
+                case.plan.is_ok(),
+                "{}: the case does not build: {:?}",
+                case.name,
+                case.plan.as_ref().err()
+            );
+        }
         check_supported_explicit_plan(&cases, &instance);
         check_digest_explicit_plan(&cases);
         check_metadata_explicit_plan(&cases, &instance);

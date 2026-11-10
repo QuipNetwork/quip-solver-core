@@ -735,6 +735,14 @@ fn a_hard_contract_without_constraints_fails() -> Result<(), String> {
     )
 }
 
+/// `synthetic` with the row label on its error.
+fn synthetic_labelled(
+    label: &str,
+    entries: &[(&str, &str, Option<&str>)],
+) -> Result<Vec<RegistryEntry>, String> {
+    synthetic(entries).map_err(|e| format!("{label}: {e}"))
+}
+
 #[test]
 fn adapted_family_rule_violations_fail() -> Result<(), String> {
     // (label, entries, class of every family, whether the same entries pass with
@@ -742,28 +750,40 @@ fn adapted_family_rule_violations_fail() -> Result<(), String> {
     let rows = [
         (
             "an adapted soft family",
-            synthetic(&[("vectors/a", "research", Some("vectors/b"))])?,
+            synthetic_labelled(
+                "an adapted soft family",
+                &[("vectors/a", "research", Some("vectors/b"))],
+            )?,
             "soft",
             true,
         ),
         (
             "a shared id",
-            synthetic(&[
-                ("vectors/a", "research", Some("vectors/b")),
-                ("vectors/a", "research", None),
-            ])?,
+            synthetic_labelled(
+                "a shared id",
+                &[
+                    ("vectors/a", "research", Some("vectors/b")),
+                    ("vectors/a", "research", None),
+                ],
+            )?,
             "hard",
             false,
         ),
         (
             "an adapted-from-itself family",
-            synthetic(&[("vectors/a", "research", Some("vectors/a"))])?,
+            synthetic_labelled(
+                "an adapted-from-itself family",
+                &[("vectors/a", "research", Some("vectors/a"))],
+            )?,
             "hard",
             false,
         ),
         (
             "an adapted family outside research",
-            synthetic(&[("vectors/a", "chain-authorized", Some("vectors/b"))])?,
+            synthetic_labelled(
+                "an adapted family outside research",
+                &[("vectors/a", "chain-authorized", Some("vectors/b"))],
+            )?,
             "hard",
             false,
         ),

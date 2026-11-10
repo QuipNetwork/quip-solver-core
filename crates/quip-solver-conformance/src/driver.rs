@@ -2240,13 +2240,23 @@ mod tests {
             for message in messages {
                 fold(&mut o, message);
             }
-            let outcome = o.lease.clone().unwrap_or_default();
+            let lease_checked = results.is_some() || verified.is_some() || refunded.is_some();
+            assert!(
+                !lease_checked || o.lease.is_some(),
+                "{label}: lease missing"
+            );
+            let outcome = o.lease.as_ref();
             if let Some(results) = results {
-                assert_eq!(outcome.results, results, "{label}: lease results");
+                assert_eq!(
+                    outcome.map(|l| l.results),
+                    Some(results),
+                    "{label}: lease results"
+                );
             }
             if let Some(verified) = verified {
                 assert_eq!(
-                    outcome.results_verified, verified,
+                    outcome.map(|l| l.results_verified),
+                    Some(verified),
                     "{label}: verified results"
                 );
             }
@@ -2255,7 +2265,8 @@ mod tests {
             }
             if let Some(refunded) = refunded {
                 assert_eq!(
-                    outcome.credit_refunded, refunded,
+                    outcome.map(|l| l.credit_refunded),
+                    Some(refunded),
                     "{label}: credit refunded"
                 );
             }

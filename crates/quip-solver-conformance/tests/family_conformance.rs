@@ -98,7 +98,7 @@ fn faulty_generators_keep_the_all_up_energy() -> Result<(), String> {
         ("faulty metadata", FAULTY_METADATA_V1, false),
     ];
     for (label, faulty, changes_couplings) in rows {
-        let (honest, broken) = honest_and_faulty(faulty)?;
+        let (honest, broken) = honest_and_faulty(faulty).map_err(|e| format!("{label}: {e}"))?;
         let (a, b) = (all_up_energy(&honest), all_up_energy(&broken));
         if a != b {
             return Err(format!("{label}: energies differ: {a} and {b}"));
@@ -114,7 +114,9 @@ fn faulty_generators_keep_the_all_up_energy() -> Result<(), String> {
         } else if honest.metadata() == broken.metadata() {
             return Err(format!("{label}: the metadata regions are equal"));
         }
-        if canonical(&honest)? == canonical(&broken)? {
+        let honest_bytes = canonical(&honest).map_err(|e| format!("{label}: {e}"))?;
+        let broken_bytes = canonical(&broken).map_err(|e| format!("{label}: {e}"))?;
+        if honest_bytes == broken_bytes {
             return Err(format!("{label}: canonical bytes are equal"));
         }
     }
@@ -495,8 +497,8 @@ fn faulty_generators_fail_at_their_component() -> Result<(), String> {
         }
     }
     // The faulty J generator keeps the energy of the vector.
-    let cases = cases()?;
-    let (salt, _) = slot_one(&cases)?;
+    let cases = cases().map_err(|e| format!("faulty J: {e}"))?;
+    let (salt, _) = slot_one(&cases).map_err(|e| format!("faulty J: {e}"))?;
     let Expected::Instance {
         energy_all_up_milli,
         ..
@@ -504,7 +506,7 @@ fn faulty_generators_fail_at_their_component() -> Result<(), String> {
     else {
         return Err("faulty J: slot 1 is a skip".to_owned());
     };
-    let (_, broken) = honest_and_faulty(FAULTY_J_V1)?;
+    let (_, broken) = honest_and_faulty(FAULTY_J_V1).map_err(|e| format!("faulty J: {e}"))?;
     if all_up_energy(&broken) == energy_all_up_milli {
         Ok(())
     } else {

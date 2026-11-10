@@ -1599,11 +1599,17 @@ fn changed_topology_reference_fails() -> Result<(), String> {
     let rows = [
         (
             "reordered topology nodes",
-            repoint_sparse("sparse-nodes-reordered")?,
+            labelled(
+                "reordered topology nodes",
+                repoint_sparse("sparse-nodes-reordered"),
+            )?,
         ),
         (
             "swapped topology edges",
-            repoint_sparse("sparse-edges-reordered")?,
+            labelled(
+                "swapped topology edges",
+                repoint_sparse("sparse-edges-reordered"),
+            )?,
         ),
         (
             "a missing topology file",
@@ -2554,12 +2560,73 @@ fn obstruction_json(found: ising_generators::ice::Obstructions) -> Value {
     })
 }
 
-/// Rebuild every salt of one recipe with the Rust construction and compare
-/// the hash, the counts, and the obstruction values.
-fn check_twisted_recipe(recipe: &Value) -> Result<(), String> {
+/// The hash, the tile count, the pair count, and the obstruction values of one
+/// built salt of a twisted recipe.
+type TwistedSalt = (String, u64, Option<u64>, Value);
+
+/// Every salt of recipe `index`, built with the Rust construction on the live
+/// topology. The admission, the topology order digest, and the generation are
+/// checked here.
+fn built_twisted_salts(index: usize) -> Result<&'static [TwistedSalt], String> {
     use ising_generators::descriptor::{admit, params_digest, AdvertisedLimits};
     use ising_generators::family::{admit_topology, generate_instance, BaseTopology};
     use ising_generators::ice::{gauge_obstructions, local_gauges, TWISTED_DIMER_V1};
+    static BUILT: [OnceLock<Result<Vec<TwistedSalt>, String>>; 3] = [const { OnceLock::new() }; 3];
+    built_once(&BUILT, index, twisted_doc, "recipes", |recipe| {
+        let params = codec::hex_decode(str_field(recipe, "params_hex")?)?;
+        let contracts = [TWISTED_DIMER_V1];
+        let admitted = admit(
+            &contracts,
+            str_field(recipe, "family_id")?.as_bytes(),
+            u32_field(recipe, "revision")?,
+            &params,
+            &params_digest(&params),
+        )
+        .map_err(|c| format!("{}: admit failed with {c}", case_name(recipe)))?;
+        let (nodes, edges) = topology_inputs(object_field(recipe, "topology")?)?;
+        let topology = BaseTopology::new(nodes, &edges).map_err(|e| format!("{e:?}"))?;
+        compare(
+            recipe,
+            "order_digest",
+            &codec::hex_encode(topology.order_digest()),
+            &str_field(object_field(recipe, "topology")?, "order_digest")?.to_owned(),
+        )?;
+        let bounds = admit_topology(
+            &admitted,
+            &topology,
+            topology.order_digest(),
+            &AdvertisedLimits {
+                max_nodes: 0,
+                max_edges: 0,
+                max_degree: 0,
+            },
+        )
+        .map_err(|c| format!("{}: admit_topology failed with {c}", case_name(recipe)))?;
+        entries_of(recipe, "salts")?
+            .iter()
+            .map(|salt| {
+                let nonce = codec::hex32(str_field(salt, "nonce")?)?;
+                let built = generate_instance(&admitted, &topology, &bounds, nonce)
+                    .map_err(|fault| format!("{}: generation gave {fault:?}", case_name(recipe)))?;
+                let canonical = built.canonical_bytes().map_err(|e| e.to_string())?;
+                let (tiles, gauges) = local_gauges(&built).ok_or("no local gauges")?;
+                let found = gauge_obstructions(&tiles, &gauges, built.node_ids().len())
+                    .map_err(|e| format!("{}: obstructions: {e:?}", case_name(recipe)))?;
+                Ok((
+                    blake3::hash(&canonical).to_hex().to_string(),
+                    u64::try_from(tiles.len()).map_err(|e| e.to_string())?,
+                    pair_count_of(built.metadata()).map(u64::from),
+                    obstruction_json(found),
+                ))
+            })
+            .collect()
+    })
+}
+
+/// Compare every salt of recipe `index` with the Rust construction: the hash, the
+/// counts, and the obstruction values.
+fn check_twisted_recipe(recipe: &Value, index: usize) -> Result<(), String> {
+    use ising_generators::descriptor::params_digest;
     let params = codec::hex_decode(str_field(recipe, "params_hex")?)?;
     compare(
         recipe,
@@ -2567,34 +2634,6 @@ fn check_twisted_recipe(recipe: &Value) -> Result<(), String> {
         &codec::hex_encode(&params_digest(&params)),
         &str_field(recipe, "params_digest")?.to_owned(),
     )?;
-    let contracts = [TWISTED_DIMER_V1];
-    let admitted = admit(
-        &contracts,
-        str_field(recipe, "family_id")?.as_bytes(),
-        u32_field(recipe, "revision")?,
-        &params,
-        &params_digest(&params),
-    )
-    .map_err(|c| format!("{}: admit failed with {c}", case_name(recipe)))?;
-    let (nodes, edges) = topology_inputs(object_field(recipe, "topology")?)?;
-    let topology = BaseTopology::new(nodes, &edges).map_err(|e| format!("{e:?}"))?;
-    compare(
-        recipe,
-        "order_digest",
-        &codec::hex_encode(topology.order_digest()),
-        &str_field(object_field(recipe, "topology")?, "order_digest")?.to_owned(),
-    )?;
-    let bounds = admit_topology(
-        &admitted,
-        &topology,
-        topology.order_digest(),
-        &AdvertisedLimits {
-            max_nodes: 0,
-            max_edges: 0,
-            max_degree: 0,
-        },
-    )
-    .map_err(|c| format!("{}: admit_topology failed with {c}", case_name(recipe)))?;
     let salts = entries_of(recipe, "salts")?;
     compare(
         recipe,
@@ -2602,28 +2641,24 @@ fn check_twisted_recipe(recipe: &Value) -> Result<(), String> {
         &u64::try_from(salts.len()).map_err(|e| e.to_string())?,
         &u64_decimal(object_field(recipe, "lease")?, "salt_count")?,
     )?;
-    for salt in salts {
+    let built = built_twisted_salts(index)?;
+    for (salt, (hash, tiles, pairs, obstructions)) in salts.iter().zip(built) {
         compare(
             recipe,
             "nonce",
             &lease_nonce(recipe, u64_decimal(salt, "index")?)?,
             &str_field(salt, "nonce")?.to_owned(),
         )?;
-        let nonce = codec::hex32(str_field(salt, "nonce")?)?;
-        let built = generate_instance(&admitted, &topology, &bounds, nonce)
-            .map_err(|fault| format!("{}: generation gave {fault:?}", case_name(recipe)))?;
-        let canonical = built.canonical_bytes().map_err(|e| e.to_string())?;
         compare(
             recipe,
             "canonical_blake3",
-            &blake3::hash(&canonical).to_hex().to_string(),
+            hash,
             &str_field(salt, "canonical_blake3")?.to_owned(),
         )?;
-        let (tiles, gauges) = local_gauges(&built).ok_or("no local gauges")?;
         compare(
             recipe,
             "tiles",
-            &u64::try_from(tiles.len()).map_err(|e| e.to_string())?,
+            tiles,
             &salt
                 .get("tiles")
                 .and_then(Value::as_u64)
@@ -2632,15 +2667,13 @@ fn check_twisted_recipe(recipe: &Value) -> Result<(), String> {
         compare(
             recipe,
             "pairs",
-            &pair_count_of(built.metadata()).map(u64::from),
+            pairs,
             &salt.get("pairs").and_then(Value::as_u64),
         )?;
-        let found = gauge_obstructions(&tiles, &gauges, built.node_ids().len())
-            .map_err(|e| format!("{}: obstructions: {e:?}", case_name(recipe)))?;
         compare(
             recipe,
             "obstructions",
-            &obstruction_json(found),
+            obstructions,
             salt.get("obstructions").ok_or("no obstructions")?,
         )?;
     }
@@ -2650,8 +2683,8 @@ fn check_twisted_recipe(recipe: &Value) -> Result<(), String> {
 #[test]
 fn twisted_recipes_match_the_rust_construction() -> Result<(), String> {
     let doc = twisted_doc()?;
-    for recipe in section(&doc, "recipes")? {
-        check_twisted_recipe(recipe)?;
+    for (index, recipe) in section(&doc, "recipes")?.iter().enumerate() {
+        check_twisted_recipe(recipe, index)?;
     }
     Ok(())
 }
@@ -3758,9 +3791,12 @@ fn polariton_size_bounds(
     let n = u64::try_from(nodes.len())
         .map_err(|e| e.to_string())?
         .min(2 * side * (side + 1));
+    let inner = side
+        .checked_sub(1)
+        .ok_or_else(|| "polariton side is 0".to_owned())?;
     let e = u64::try_from(edges.len())
         .map_err(|e| e.to_string())?
-        .min(6 * (side - 1) * (side - 1));
+        .min(6 * inner * inner);
     let d = topology_max_degree(nodes, edges)
         .min(6)
         .min(n.saturating_sub(1));
@@ -4735,7 +4771,7 @@ const FAMILY_CASE_DOCS: [(&str, DocFn, SizeBoundsOf, &str, i64); 7] = [
         routing_doc,
         ice_glass_size_bounds,
         "/cases/0/instances/0/j/0",
-        1000,
+        4,
     ),
     (
         "polariton",
@@ -5165,9 +5201,7 @@ fn admission_codes_match_the_rust_admission() -> Result<(), String> {
 fn a_changed_recipe_hash_fails_every_recipe_check() -> Result<(), String> {
     // (family name, document, recipe section, recipe check)
     let rows: [(&str, DocFn, &str, RecipeCheck); 5] = [
-        ("twisted", twisted_doc, "recipes", |recipe, _| {
-            check_twisted_recipe(recipe)
-        }),
+        ("twisted", twisted_doc, "recipes", check_twisted_recipe),
         ("charge", charge_doc, "recipe", check_charge_recipe),
         ("fields", fields_doc, "field_recipes", check_fields_recipe),
         (
