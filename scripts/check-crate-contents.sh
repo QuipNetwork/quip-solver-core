@@ -18,6 +18,11 @@ LIMIT=$((10 * 1024 * 1024))
 REGISTRY_PATH=crates/quip-solver-conformance/vectors/families/registry.json
 VECTOR_DIR=crates/quip-solver-conformance/vectors/families
 
+if [ ! -d "$VECTOR_DIR" ]; then
+    echo "No such directory: $VECTOR_DIR (run from the repository root)" >&2
+    exit 1
+fi
+
 find_crate() {
     local crates
     mapfile -t crates < <(find "$PKG_DIR" -maxdepth 1 -name "$1-[0-9]*.crate")
@@ -79,7 +84,9 @@ REGISTRY_PATH_IN_CRATE=${REGISTRY_PATH#crates/quip-solver-conformance/}
 REGISTRY_JSON=$(tar xzOf "$CONF" "$CONF_ROOT/$REGISTRY_PATH_IN_CRATE")
 
 # Each vectors path in the registry is relative to the repository root.
-mapfile -t REGISTERED < <(
+# Command substitution, not process substitution, so a failed read stops the
+# script under `set -e`.
+REGISTERED_TEXT=$(
     printf '%s\n' "$REGISTRY_JSON" \
         | python3 -I -c '
 import json, sys
@@ -87,7 +94,8 @@ for entry in json.load(sys.stdin)["registry"]:
     print(entry["vectors"].removeprefix("crates/quip-solver-conformance/"))
 ' | sort -u
 )
-if [ "${#REGISTERED[@]}" -eq 0 ]; then
+mapfile -t REGISTERED <<<"$REGISTERED_TEXT"
+if [ -z "$REGISTERED_TEXT" ]; then
     echo "The packaged registry lists no vector files" >&2
     exit 1
 fi

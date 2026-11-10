@@ -20,7 +20,7 @@ Pin the same version in every package that you use.
 
 The release is a set of packages that match.
 Use `=0.0.9` for the crates and `==0.0.9` for the wheel.
-A vector file and a generator from different versions can disagree, and the pin check fails when they do.
+A vector file and a generator from different versions can disagree, and `every_released_family_passes_its_vector_cases` fails when they do. The pin check catches a changed vector file only.
 
 The check scripts `scripts/check-crate-contents.sh` and `scripts/check-wheel-families.sh` run in `make check-release`.
 They fail when a crate lacks a generator source file or a registered vector file, or when the wheel lacks the `families` module or lists a different set of families than the registry.
@@ -119,9 +119,8 @@ The `Capabilities` message gains `generated_families` and `accepted_families`.
 The `IsingProblem` message gains an optional `family` binding.
 The generator algorithm enum gains the family value.
 
-A solver that lists no family keeps working, because a coordinator sends it only the leases and jobs that it handled before.
-If an old solver receives a job with a `family` binding, it ignores the unknown field and solves the plain model.
-A solver of this release that lists no family rejects a family lease with code 5, `FamilyUnsupported`.
+A solver that lists no family keeps working, because a coordinator sends it no family lease (FAM-72).
+If a solver receives a job with a `family` binding and does not accept that family, it solves the plain model, and the coordinator decides acceptance (FAM-55, FAM-56).
 
 Old production fixtures still pass.
 These tests prove it.
