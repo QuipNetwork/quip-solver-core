@@ -150,7 +150,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn i32_le_roundtrip_and_bytes() {
+    fn i32_le_codec_bytes_roundtrip_and_empty() {
         // -1000 milli little-endian = 0x18 0xFC 0xFF 0xFF
         assert_eq!(
             encode_i32_le(&[-1000, 0, 1000]),
@@ -164,29 +164,6 @@ mod tests {
             decode_i32_le(&[1, 2, 3]),
             Err(WireError::BadLength)
         ));
-    }
-
-    #[test]
-    fn spins_bytes() {
-        assert_eq!(encode_spins(&[1, -1, 1]), vec![0x01, 0xFF, 0x01]);
-        assert_eq!(decode_spins(&[0x01, 0xFF, 0x01]).unwrap(), vec![1, -1, 1]);
-        assert!(matches!(
-            decode_spins(&[0x00]),
-            Err(WireError::BadSpinByte(0))
-        ));
-    }
-
-    #[test]
-    fn encode_spins_zero_matches_scorer_sign() {
-        // Spins are {-1,+1} by contract, but a stray 0 must encode consistently
-        // with `scoring::sign` (which maps 0 -> -1, since it uses `s > 0`).
-        // Both now map 0 to the -1 byte, so the wire byte and the energy scorer
-        // agree on a consensus-scored value.
-        assert_eq!(encode_spins(&[0]), vec![0xFF]);
-    }
-
-    #[test]
-    fn wire_i32_roundtrip_at_i32_bounds() {
         // i32::MIN/MAX are named load-bearing edge values for the LE codec.
         let vals = [i32::MIN, -1, 0, 1, i32::MAX];
         let bytes = encode_i32_le(&vals);
@@ -194,20 +171,29 @@ mod tests {
         // Byte-level check of the sign boundary (little-endian).
         assert_eq!(&encode_i32_le(&[i32::MIN]), &[0x00, 0x00, 0x00, 0x80]);
         assert_eq!(&encode_i32_le(&[i32::MAX]), &[0xFF, 0xFF, 0xFF, 0x7F]);
-    }
-
-    #[test]
-    fn wire_empty_payload_roundtrips() {
         assert_eq!(encode_i32_le(&[]), Vec::<u8>::new());
         assert_eq!(decode_i32_le(&[]).unwrap(), Vec::<i32>::new());
-        assert_eq!(encode_spins(&[]), Vec::<u8>::new());
-        assert_eq!(decode_spins(&[]).unwrap(), Vec::<i8>::new());
-        assert_eq!(encode_spins_packed(&[]), Vec::<u8>::new());
-        assert_eq!(decode_spins_packed(&[], 0).unwrap(), Vec::<i8>::new());
     }
 
     #[test]
-    fn packed_spins_are_lsb_first_with_zero_padding() {
+    fn spins_codec_bytes_and_zero_sign() {
+        assert_eq!(encode_spins(&[1, -1, 1]), vec![0x01, 0xFF, 0x01]);
+        assert_eq!(decode_spins(&[0x01, 0xFF, 0x01]).unwrap(), vec![1, -1, 1]);
+        assert!(matches!(
+            decode_spins(&[0x00]),
+            Err(WireError::BadSpinByte(0))
+        ));
+        // Spins are {-1,+1} by contract, but a stray 0 must encode consistently
+        // with `scoring::sign` (which maps 0 -> -1, since it uses `s > 0`).
+        // Both now map 0 to the -1 byte, so the wire byte and the energy scorer
+        // agree on a consensus-scored value.
+        assert_eq!(encode_spins(&[0]), vec![0xFF]);
+        assert_eq!(encode_spins(&[]), Vec::<u8>::new());
+        assert_eq!(decode_spins(&[]).unwrap(), Vec::<i8>::new());
+    }
+
+    #[test]
+    fn packed_spins_roundtrip() {
         // Spin 0 is bit 0; spins 8 and 9 land in the second byte.
         let spins = [1, -1, -1, -1, -1, -1, -1, 1, -1, 1];
         assert_eq!(encode_spins_packed(&spins), vec![0b1000_0001, 0b0000_0010]);
@@ -215,15 +201,13 @@ mod tests {
             decode_spins_packed(&[0b1000_0001, 0b10], 10).unwrap(),
             spins
         );
-    }
-
-    #[test]
-    fn packed_spins_roundtrip_every_tail_width() {
+        assert_eq!(encode_spins_packed(&[]), Vec::<u8>::new());
         for n in 0..=17usize {
             let spins: Vec<i8> = (0..n).map(|i| if i % 3 == 0 { 1 } else { -1 }).collect();
             assert_eq!(
-                decode_spins_packed(&encode_spins_packed(&spins), n).unwrap(),
-                spins
+                decode_spins_packed(&encode_spins_packed(&spins), n),
+                Ok(spins.clone()),
+                "n={n}"
             );
         }
     }

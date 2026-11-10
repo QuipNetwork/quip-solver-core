@@ -104,37 +104,28 @@ mod cancel_tests {
     use super::CancelToken;
 
     #[test]
-    fn marks_watermarks_at_or_below_the_cancel_point() {
-        let t = CancelToken::default();
-        assert!(!t.is_cancelled(Some(5))); // nothing cancelled yet
-        t.cancel_through(5);
-        assert!(t.is_cancelled(Some(5)));
-        assert!(t.is_cancelled(Some(4)));
-        assert!(!t.is_cancelled(Some(6)));
-    }
-
-    #[test]
-    fn a_job_with_no_watermark_is_never_cancelled() {
-        let t = CancelToken::default();
-        t.cancel_through(u64::MAX);
-        assert!(!t.is_cancelled(None));
-    }
-
-    #[test]
-    fn the_cancel_point_is_monotonic() {
-        let t = CancelToken::default();
-        t.cancel_through(7);
-        t.cancel_through(3); // a lower value must not lower the cancel point
-        assert!(t.is_cancelled(Some(7)));
-        assert!(t.is_cancelled(Some(4)));
-    }
-
-    #[test]
-    fn a_fresh_token_cancels_nothing_at_all() {
-        // The zero sentinel must not read as "watermark 0 is cancelled".
-        let t = CancelToken::default();
-        assert!(!t.is_cancelled(Some(0)));
-        assert!(!t.is_cancelled(Some(1)));
+    fn cancel_token_marks_watermarks_monotonically() {
+        // (label, cancel_through calls in order, watermark, expected)
+        let rows: [(&str, &[u64], Option<u64>, bool); 9] = [
+            ("nothing cancelled yet", &[], Some(5), false),
+            ("at the cancel point", &[5], Some(5), true),
+            ("below the cancel point", &[5], Some(4), true),
+            ("above the cancel point", &[5], Some(6), false),
+            ("no watermark is never cancelled", &[u64::MAX], None, false),
+            // A lower value must not lower the cancel point.
+            ("monotonic at the high point", &[7, 3], Some(7), true),
+            ("monotonic below the high point", &[7, 3], Some(4), true),
+            // The zero sentinel must not read as "watermark 0 is cancelled".
+            ("fresh token, watermark 0", &[], Some(0), false),
+            ("fresh token, watermark 1", &[], Some(1), false),
+        ];
+        for (label, calls, watermark, expected) in rows {
+            let t = CancelToken::default();
+            for &point in calls {
+                t.cancel_through(point);
+            }
+            assert_eq!(t.is_cancelled(watermark), expected, "{label}");
+        }
     }
 }
 
@@ -664,11 +655,12 @@ mod stream_tests {
     /// Drive one job with watermark `Some(5)` through a sampler that cancels
     /// generation 9 while sampling, and report the outcome.
     fn outcome_after_cancel_during_sample(
+        label: &str,
         result: Result<Vec<SamplerResult>, SampleError>,
     ) -> StreamOutcome {
         let rt = tokio::runtime::Builder::new_current_thread()
             .build()
-            .expect("rt");
+            .unwrap_or_else(|e| panic!("{label}: runtime: {e}"));
         let (job_tx, job_rx) = tokio::sync::mpsc::channel::<StreamJob>(4);
         let (res_tx, mut res_rx) = tokio::sync::mpsc::channel::<StreamResult>(4);
         let cancel = CancelToken::default();
@@ -687,53 +679,66 @@ mod stream_tests {
                     watermark: Some(5),
                 })
                 .await
-                .expect("send");
+                .unwrap_or_else(|e| panic!("{label}: send: {e}"));
             drop(job_tx);
-            let r = res_rx.recv().await.expect("one result");
-            assert!(res_rx.recv().await.is_none(), "exactly one result per job");
+            let r = res_rx
+                .recv()
+                .await
+                .unwrap_or_else(|| panic!("{label}: no result"));
+            assert!(
+                res_rx.recv().await.is_none(),
+                "{label}: exactly one result per job"
+            );
             r.outcome
         });
-        worker.join().expect("worker join");
+        worker
+            .join()
+            .unwrap_or_else(|_| panic!("{label}: worker panicked"));
         outcome
     }
 
     /// SPEC section 5: a generation abandoned while its job was sampling gets
     /// no `Result`. Checking the watermark only at dequeue lets the finished
-    /// samples out anyway, which is the bug this pins.
+    /// samples out anyway, which is the bug the first row pins.
     #[test]
-    fn a_cancel_arriving_during_sample_suppresses_the_result() {
-        let outcome = outcome_after_cancel_during_sample(Ok(vec![SamplerResult {
-            spins: vec![1i8, -1],
-            energy_milli: -1000,
-        }]));
-        assert!(
-            matches!(outcome, StreamOutcome::Cancelled),
-            "a job cancelled while sampling must not report Completed"
-        );
-    }
-
-    /// The carve-out: a device fault describes the device, not the job. A
-    /// cancellation must not swallow it, or a wedged device keeps taking work.
-    #[test]
-    fn a_cancel_during_sample_still_reports_a_device_fault() {
-        let outcome = outcome_after_cancel_during_sample(Err(SampleError::DeviceFault(
-            "nvml: GPU 0 lost".to_owned(),
-        )));
-        assert!(
-            matches!(
-                outcome,
-                StreamOutcome::Completed(Err(SampleError::DeviceFault(_)))
+    fn a_cancel_during_sample_suppresses_all_but_a_device_fault() {
+        type Check = fn(&StreamOutcome) -> bool;
+        type Row = (&'static str, Result<Vec<SamplerResult>, SampleError>, Check);
+        let rows: [Row; 3] = [
+            (
+                "a job cancelled while sampling must not report Completed",
+                Ok(vec![SamplerResult {
+                    spins: vec![1i8, -1],
+                    energy_milli: -1000,
+                }]),
+                |o| matches!(o, StreamOutcome::Cancelled),
             ),
-            "a device fault must survive a concurrent cancel"
-        );
-    }
-
-    /// A non-fatal device error for an abandoned generation is still abandoned:
-    /// the coordinator has moved on, so a stale `Reject` helps nobody.
-    #[test]
-    fn a_cancel_during_sample_suppresses_a_non_fatal_error() {
-        let outcome = outcome_after_cancel_during_sample(Err(SampleError::DeviceBusy));
-        assert!(matches!(outcome, StreamOutcome::Cancelled));
+            // The carve-out: a device fault describes the device, not the job.
+            // A cancellation must not swallow it, or a wedged device keeps
+            // taking work.
+            (
+                "a device fault must survive a concurrent cancel",
+                Err(SampleError::DeviceFault("nvml: GPU 0 lost".to_owned())),
+                |o| {
+                    matches!(
+                        o,
+                        StreamOutcome::Completed(Err(SampleError::DeviceFault(_)))
+                    )
+                },
+            ),
+            // A non-fatal device error for an abandoned generation is still
+            // abandoned: the coordinator has moved on, so a stale `Reject`
+            // helps nobody.
+            (
+                "a non-fatal error is suppressed",
+                Err(SampleError::DeviceBusy),
+                |o| matches!(o, StreamOutcome::Cancelled),
+            ),
+        ];
+        for (label, result, check) in rows {
+            let outcome = outcome_after_cancel_during_sample(label, result);
+            assert!(check(&outcome), "{label}");
+        }
     }
 
     /// Reports which entry point handled each job through the read's energy:
@@ -767,61 +772,6 @@ mod stream_tests {
                 spins: first,
             }])
         }
-    }
-
-    /// The default warm stream sends a seeded job to `sample_warm` and a cold
-    /// one to `sample`.
-    #[test]
-    fn default_sample_stream_warm_routes_by_warm_start() {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .build()
-            .expect("rt");
-        let (job_tx, job_rx) = tokio::sync::mpsc::channel::<WarmStreamJob>(4);
-        let (res_tx, mut res_rx) = tokio::sync::mpsc::channel::<StreamResult>(4);
-        let worker = std::thread::spawn(move || {
-            WarmEcho.sample_stream_warm(job_rx, res_tx, CancelToken::default());
-        });
-
-        let energies = rt.block_on(async {
-            for (id, warm_start) in [
-                (
-                    1u8,
-                    Some(WarmStart {
-                        spins: vec![vec![-1, 1]],
-                        start_beta: None,
-                        reversal_s: None,
-                        reversal_pause_us: None,
-                    }),
-                ),
-                (2u8, None),
-            ] {
-                job_tx
-                    .send(WarmStreamJob {
-                        job: StreamJob {
-                            job_id: vec![id],
-                            graph: tiny_graph(),
-                            params: SampleParams::default(),
-                            watermark: None,
-                        },
-                        warm_start,
-                        family: None,
-                    })
-                    .await
-                    .expect("send");
-            }
-            drop(job_tx);
-            let mut energies = std::collections::HashMap::new();
-            while let Some(r) = res_rx.recv().await {
-                let StreamOutcome::Completed(Ok(reads)) = r.outcome else {
-                    panic!("both jobs complete");
-                };
-                let _ = energies.insert(r.job_id, reads.first().map(|x| x.energy_milli));
-            }
-            energies
-        });
-        worker.join().expect("worker join");
-        assert_eq!(energies.get(&vec![1u8]), Some(&Some(-1))); // sample_warm
-        assert_eq!(energies.get(&vec![2u8]), Some(&Some(0))); // sample
     }
 
     /// A context over a two-node instance, for routing tests.
@@ -905,12 +855,13 @@ mod stream_tests {
 
     /// Run `sampler` over warm-stream jobs and return the first energy by job id.
     fn run_warm_stream<S: Sampler>(
+        label: &str,
         sampler: S,
         jobs: Vec<(u8, Option<WarmStart>, Option<families::FamilyContext>)>,
     ) -> std::collections::HashMap<Vec<u8>, i64> {
         let rt = tokio::runtime::Builder::new_current_thread()
             .build()
-            .expect("rt");
+            .unwrap_or_else(|e| panic!("{label}: runtime: {e}"));
         let (job_tx, job_rx) = tokio::sync::mpsc::channel::<WarmStreamJob>(4);
         let (res_tx, mut res_rx) = tokio::sync::mpsc::channel::<StreamResult>(4);
         let worker = std::thread::spawn(move || {
@@ -930,36 +881,27 @@ mod stream_tests {
                         family,
                     })
                     .await
-                    .expect("send");
+                    .unwrap_or_else(|e| panic!("{label}: send job {id}: {e}"));
             }
             drop(job_tx);
             let mut energies = std::collections::HashMap::new();
             while let Some(r) = res_rx.recv().await {
+                let job_id = r.job_id.clone();
                 let StreamOutcome::Completed(Ok(reads)) = r.outcome else {
-                    panic!("every job completes");
+                    panic!("{label}: job {job_id:?} must complete");
                 };
-                let energy = reads.first().map(|x| x.energy_milli).expect("one read");
+                let energy = reads.first().map_or_else(
+                    || panic!("{label}: job {job_id:?} returned no read"),
+                    |x| x.energy_milli,
+                );
                 let _ = energies.insert(r.job_id, energy);
             }
             energies
         });
-        worker.join().expect("worker join");
+        worker
+            .join()
+            .unwrap_or_else(|_| panic!("{label}: worker panicked"));
         energies
-    }
-
-    /// The default `sample_family` ignores the context and picks `sample_warm`
-    /// for a seeded job and `sample` for a cold one.
-    #[test]
-    fn default_sample_family_routes_to_sample_or_sample_warm() {
-        let energies = run_warm_stream(
-            DefaultFamilyRoute,
-            vec![
-                (1, Some(warm_start()), Some(family_context())),
-                (2, None, Some(family_context())),
-            ],
-        );
-        assert_eq!(energies.get(&vec![1u8]), Some(&1)); // sample_warm
-        assert_eq!(energies.get(&vec![2u8]), Some(&0)); // sample
     }
 
     /// Counts `sample_family` calls and reports the context's family id length.
@@ -995,16 +937,60 @@ mod stream_tests {
         }
     }
 
+    /// The default warm stream sends a seeded job to `sample_warm` and a cold
+    /// one to `sample`. The default `sample_family` ignores the context and
+    /// does the same. A sampler that implements `sample_family` gets a family
+    /// job exactly once and a job without a context goes to `sample`.
     #[test]
-    fn a_family_job_reaches_sample_family_once() {
+    fn the_default_warm_stream_routes_each_job() {
+        let energies = run_warm_stream(
+            "warm echo",
+            WarmEcho,
+            vec![(1, Some(warm_start()), None), (2, None, None)],
+        );
+        assert_eq!(
+            energies.get(&vec![1u8]),
+            Some(&-1),
+            "warm echo: sample_warm"
+        );
+        assert_eq!(energies.get(&vec![2u8]), Some(&0), "warm echo: sample");
+
+        let energies = run_warm_stream(
+            "default sample_family",
+            DefaultFamilyRoute,
+            vec![
+                (1, Some(warm_start()), Some(family_context())),
+                (2, None, Some(family_context())),
+            ],
+        );
+        assert_eq!(
+            energies.get(&vec![1u8]),
+            Some(&1),
+            "default sample_family: sample_warm"
+        );
+        assert_eq!(
+            energies.get(&vec![2u8]),
+            Some(&0),
+            "default sample_family: sample"
+        );
+
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let energies = run_warm_stream(
+            "family counter",
             FamilyCounter(Arc::clone(&calls)),
             vec![(1, None, Some(family_context())), (2, None, None)],
         );
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
-        assert_eq!(energies.get(&vec![1u8]), Some(&101)); // sample_family
-        assert_eq!(energies.get(&vec![2u8]), Some(&0)); // no context: sample
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "sample_family calls");
+        assert_eq!(
+            energies.get(&vec![1u8]),
+            Some(&101),
+            "family counter: sample_family"
+        );
+        assert_eq!(
+            energies.get(&vec![2u8]),
+            Some(&0),
+            "family counter: no context, sample"
+        );
     }
 
     /// The advertised width defaults to the live width, so a backend that

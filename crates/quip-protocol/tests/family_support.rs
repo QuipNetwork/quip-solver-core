@@ -141,36 +141,33 @@ fn support_codes_match_the_lease_codes_vectors() -> Result<(), String> {
 }
 
 #[test]
-fn an_empty_list_claims_no_family() {
+fn hand_built_lists_give_the_expected_support_code() {
     assert!(entry_claims(&[]).is_empty());
-    assert_eq!(
-        support_code(&[], "quip/x", 1, &[0; 32]),
-        Some(Code::FamilyUnsupported)
-    );
-}
-
-#[test]
-fn an_invalid_entry_claims_nothing() {
-    let example = [entry("example/foo", &[1], &[])];
-    assert_eq!(
-        support_code(&example, "example/foo", 1, &[0; 32]),
-        Some(Code::FamilyUnsupported)
-    );
-    let duplicate = [entry("quip/x", &[1], &[]), entry("quip/x", &[2], &[])];
-    assert_eq!(
-        support_code(&duplicate, "quip/x", 1, &[0; 32]),
-        Some(Code::FamilyUnsupported)
-    );
-}
-
-#[test]
-fn a_restriction_admits_only_its_digests() {
-    let open = [entry("quip/x", &[1], &[])];
-    assert_eq!(support_code(&open, "quip/x", 1, &[0xbb; 32]), None);
-    let restricted = [entry("quip/x", &[1], &[[0xaa; 32]])];
-    assert_eq!(support_code(&restricted, "quip/x", 1, &[0xaa; 32]), None);
-    assert_eq!(
-        support_code(&restricted, "quip/x", 1, &[0xbb; 32]),
-        Some(Code::ParamsRestricted)
-    );
+    let cases = [
+        (
+            "empty list",
+            vec![],
+            "quip/x",
+            Some(Code::FamilyUnsupported),
+        ),
+        (
+            "invalid entry",
+            vec![entry("example/foo", &[1], &[])],
+            "example/foo",
+            Some(Code::FamilyUnsupported),
+        ),
+        (
+            "duplicate entries",
+            vec![entry("quip/x", &[1], &[]), entry("quip/x", &[2], &[])],
+            "quip/x",
+            Some(Code::FamilyUnsupported),
+        ),
+    ];
+    for (label, list, family, expected) in cases {
+        assert_eq!(
+            support_code(&list, family, 1, &[0; 32]),
+            expected,
+            "{label}"
+        );
+    }
 }

@@ -359,23 +359,6 @@ fn dispatched_draw_matches_scalar_stream() -> Result<(), String> {
     Ok(())
 }
 
-#[test]
-#[expect(
-    clippy::print_stderr,
-    reason = "the test must tell the reader when the AVX2 path did not run"
-)]
-fn dispatched_path_is_reported() {
-    #[cfg(target_arch = "x86_64")]
-    let avx2 = is_x86_feature_detected!("avx2");
-    #[cfg(not(target_arch = "x86_64"))]
-    let avx2 = false;
-    if avx2 {
-        eprintln!("AVX2 path exercised by the dispatched draw");
-    } else {
-        eprintln!("SKIPPED: AVX2 path not exercised, the dispatched path is the four-lane path");
-    }
-}
-
 /// Seed `000102...1f`, the first golden `chacha8` case.
 const fn vector_seed() -> [u8; 32] {
     [
@@ -399,22 +382,6 @@ macro_rules! expect_eq {
             Err(format!("{}: got {:?}, want {:?}", $label, got, want))
         }
     }};
-}
-
-#[test]
-fn validator_set_vectors() -> Result<(), String> {
-    // Semantics: quip-validator commit 1f8a1c0, `AllowedValueSpec::sample`, `Set`:
-    // `values[next_u32 % len]`.
-    expect_eq!(
-        "Set [-1000, 0, 1000]",
-        set_draw(&[-1000, 0, 1000])?,
-        [0, -1000, 1000, -1000],
-    )?;
-    expect_eq!(
-        "Set [-1000, 1000]",
-        set_draw(&[-1000, 1000])?,
-        [-1000, -1000, 1000, 1000],
-    )
 }
 
 #[test]
@@ -447,39 +414,65 @@ fn single_value_set_still_consumes_words() -> Result<(), String> {
     expect_eq!("j", j, want)
 }
 
+type DrawRow = (&'static str, Vec<i32>, [i32; 4]);
+
 #[test]
-fn validator_range_vectors() -> Result<(), String> {
+fn validator_draw_vectors() -> Result<(), String> {
     // Semantics: quip-validator commit 1f8a1c0, `AllowedValueSpec::sample`.
+    // Set: `values[next_u32 % len]`.
     // IntegerRange: `(min + word % (max - min + 1)) * 1000`, ArithmeticOverflow
     // outside i32. ContinuousRange: `min + word % (max - min + 1)` in milli.
     let integer: Vec<i32> = (-6..=6).map(|v| v * 1000).collect();
-    expect_eq!(
-        "IntegerRange {-6, 6}",
-        set_draw(&integer)?,
-        [1000, 1000, -2000, -3000],
-    )?;
-    expect_eq!(
-        "endpoints [-6000, 6000]",
-        set_draw(&[-6000, 6000])?,
-        [-6000, -6000, 6000, 6000],
-    )?;
     let continuous: Vec<i32> = (-1500..=1500).collect();
-    expect_eq!(
-        "ContinuousRange {-1500, 1500}",
-        set_draw(&continuous)?,
-        [-100, -563, 1466, 118],
-    )?;
-    expect_eq!(
-        "endpoints [-1500, 1500]",
-        set_draw(&[-1500, 1500])?,
-        [-1500, -1500, 1500, 1500],
-    )?;
+    let rows: [DrawRow; 6] = [
+        (
+            "Set [-1000, 0, 1000]",
+            vec![-1000, 0, 1000],
+            [0, -1000, 1000, -1000],
+        ),
+        (
+            "Set [-1000, 1000]",
+            vec![-1000, 1000],
+            [-1000, -1000, 1000, 1000],
+        ),
+        (
+            "IntegerRange {-6, 6}",
+            integer.clone(),
+            [1000, 1000, -2000, -3000],
+        ),
+        (
+            "endpoints [-6000, 6000]",
+            vec![-6000, 6000],
+            [-6000, -6000, 6000, 6000],
+        ),
+        (
+            "ContinuousRange {-1500, 1500}",
+            continuous.clone(),
+            [-100, -563, 1466, 118],
+        ),
+        (
+            "endpoints [-1500, 1500]",
+            vec![-1500, 1500],
+            [-1500, -1500, 1500, 1500],
+        ),
+    ];
+    for (label, set, want) in rows {
+        let got = set_draw(&set).map_err(|e| format!("{label}: {e}"))?;
+        expect_eq!(label, got, want)?;
+    }
     if set_draw(&integer)? == set_draw(&[-6000, 6000])?
         || set_draw(&continuous)? == set_draw(&[-1500, 1500])?
     {
         return Err("a range must not equal its endpoints-only list".into());
     }
+    Ok(())
+}
 
+#[test]
+fn validator_range_vectors() -> Result<(), String> {
+    // Semantics: quip-validator commit 1f8a1c0, `AllowedValueSpec::sample`.
+    // IntegerRange: `(min + word % (max - min + 1)) * 1000`, ArithmeticOverflow
+    // outside i32. ContinuousRange: `min + word % (max - min + 1)` in milli.
     // The next two rows have no `Set` equivalent. They are literal pins of the
     // validator output at commit 1f8a1c0, over the first four golden words.
     let words = [2_410_812_736_u32, 1_789_596_270, 2_070_341_849, 856_868_145];

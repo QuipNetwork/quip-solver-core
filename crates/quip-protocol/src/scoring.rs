@@ -221,26 +221,51 @@ mod tests {
     use super::*;
 
     #[test]
-    fn energy_sign_and_scaling() {
-        // spins [+1,-1]; h=[1.0, -0.5]; edge (0,1) J=2.0
-        // E = (1000*1) + (-500*-1) + (2000 * 1 * -1) = 1000 + 500 - 2000 = -500 milli
-        let e = energy_milli(&[1, -1], &[1.0, -0.5], &[2.0], &[(0, 1)]);
-        assert_eq!(e, -500);
-    }
-
-    #[test]
-    fn energy_agrees_with_integer_milli_on_tenths() {
-        // The consensus bug this module was fixed for: ten 100-milli fields with
-        // +1 spins sum to 1000 in integer milli, but 0.1 is not representable in
-        // binary, so f64 accumulation reached 0.999999999999999889 and truncated
-        // to 999 — rejecting every solver on any ordinary 0.1-valued field.
-        assert_eq!(energy_milli(&[1; 10], &[0.1; 10], &[], &[]), 1000);
-        // Three 37-milli fields: the smallest case that diverged (111 vs 110).
-        assert_eq!(energy_milli(&[1; 3], &[0.037; 3], &[], &[]), 111);
-    }
-
-    #[test]
-    fn energy_matches_integer_milli_over_the_i32_wire_range() {
+    fn energy_milli_scales_and_rounds_coefficients() {
+        type Case = (
+            &'static str,
+            Vec<i8>,
+            Vec<f64>,
+            Vec<f64>,
+            Vec<(usize, usize)>,
+            i64,
+        );
+        let cases: [Case; 3] = [
+            // spins [+1,-1]; h=[1.0, -0.5]; edge (0,1) J=2.0
+            // E = (1000*1) + (-500*-1) + (2000 * 1 * -1) = 1000 + 500 - 2000 = -500 milli
+            (
+                "sign and scaling",
+                vec![1, -1],
+                vec![1.0, -0.5],
+                vec![2.0],
+                vec![(0, 1)],
+                -500,
+            ),
+            // The consensus bug this module was fixed for: ten 100-milli fields with
+            // +1 spins sum to 1000 in integer milli, but 0.1 is not representable in
+            // binary, so f64 accumulation reached 0.999999999999999889 and truncated
+            // to 999 — rejecting every solver on any ordinary 0.1-valued field.
+            (
+                "ten 0.1 fields",
+                vec![1; 10],
+                vec![0.1; 10],
+                vec![],
+                vec![],
+                1000,
+            ),
+            // Three 37-milli fields: the smallest case that diverged (111 vs 110).
+            (
+                "three 0.037 fields",
+                vec![1; 3],
+                vec![0.037; 3],
+                vec![],
+                vec![],
+                111,
+            ),
+        ];
+        for (label, spins, h, j, edges, expected) in cases {
+            assert_eq!(energy_milli(&spins, &h, &j, &edges), expected, "{label}");
+        }
         // Rounding recovers the wire value exactly across the i32 extremes, which
         // is the precondition the coefficient_milli doc argues for.
         for v in [i32::MIN, i32::MAX, 999, 1, -1, 123_456_789, -2_147_483_647] {
@@ -254,132 +279,89 @@ mod tests {
     }
 
     #[test]
-    fn energy_rounds_sub_milli_input_to_nearest() {
-        // 0.0015 is 1.5 milli, which no i32-milli wire value can express. Such an
-        // input is out of contract; it resolves to the nearest milli (ties away
-        // from zero) rather than truncating, because the integer recovery step
-        // rounds. This replaces the old truncate-toward-zero behaviour.
-        assert_eq!(energy_milli(&[1], &[0.0015], &[], &[]), 2);
-        assert_eq!(energy_milli(&[1], &[-0.0015], &[], &[]), -2);
-        assert_eq!(energy_milli(&[1], &[0.9999], &[], &[]), 1000);
-    }
-
-    #[test]
-    fn energy_oob_edge_is_skipped_not_panicking() {
-        // edge (0, 5) references node 5, out of range for a 2-spin problem; must
-        // be skipped like a length-mismatched h/j entry, not panic.
-        // E = (1000*1) + (1000*-1) = 0 milli
-        let e = energy_milli(&[1, -1], &[1.0, 1.0], &[1.0], &[(0, 5)]);
-        assert_eq!(e, 0);
-    }
-
-    #[test]
-    fn energy_skipped_non_finite_coefficient_is_never_read() {
-        // The coupling is non-finite but its edge names an out-of-range node, so
-        // it is skipped before inspection and cannot raise the sentinel.
-        let e = energy_milli(&[1, -1], &[1.0, 1.0], &[f64::NAN], &[(0, 5)]);
-        assert_eq!(e, 0);
-    }
-
-    #[test]
-    fn energy_milli_saturates_at_i64_boundary() {
-        // 1e16 -> 1e19 milli, past i64::MAX (~9.223e18) -> saturates.
-        assert_eq!(energy_milli(&[1], &[1e16], &[], &[]), i64::MAX);
-        // Finite but so large that c*1000.0 overflows to infinity; the cast
-        // saturates rather than reporting the non-finite sentinel, because the
-        // input the caller supplied was finite.
-        assert_eq!(energy_milli(&[1], &[1e308], &[], &[]), i64::MAX);
-        // Two saturating terms accumulate in i128 and clamp once at the end.
-        assert_eq!(energy_milli(&[1, 1], &[1e308, 1e308], &[], &[]), i64::MAX);
-    }
-
-    #[test]
-    fn energy_milli_saturates_at_negative_i64_boundary() {
-        // Ground states are negative-energy, so the negative overflow path is
-        // realistic; it must saturate to i64::MIN, not wrap.
-        assert_eq!(energy_milli(&[1], &[-1e16], &[], &[]), i64::MIN);
-        assert_eq!(energy_milli(&[1], &[-1e308], &[], &[]), i64::MIN);
-        assert_eq!(energy_milli(&[1, 1], &[-1e308, -1e308], &[], &[]), i64::MIN);
-    }
-
-    #[test]
-    fn energy_milli_non_finite_input_returns_sentinel() {
-        // A non-finite *input* coefficient is a malformed problem, reported with
-        // the sentinel so it is distinguishable from a saturated finite score.
-        assert_eq!(
-            energy_milli(&[1], &[f64::INFINITY], &[], &[]),
-            ENERGY_MILLI_NON_FINITE
-        );
-        assert_eq!(
-            energy_milli(&[1], &[f64::NEG_INFINITY], &[], &[]),
-            ENERGY_MILLI_NON_FINITE
-        );
-        assert_eq!(
-            energy_milli(&[1], &[f64::NAN], &[], &[]),
-            ENERGY_MILLI_NON_FINITE
-        );
-        // A non-finite coupling on an in-range edge reports it too.
-        assert_eq!(
-            energy_milli(&[1, 1], &[0.0, 0.0], &[f64::NAN], &[(0, 1)]),
-            ENERGY_MILLI_NON_FINITE
-        );
-        assert_eq!(ENERGY_MILLI_NON_FINITE, 1i64 << 62);
-    }
-
-    #[test]
-    fn hamming_equal_width_is_flip_invariant() {
-        assert_eq!(hamming_flip_invariant(&[1, 1, 1], &[-1, 1, 1]), 1);
-        // Exact inverse: raw distance 3, complement 0 -> 0.
-        assert_eq!(hamming_flip_invariant(&[1, 1, 1], &[-1, -1, -1]), 0);
-    }
-
-    #[test]
-    fn hamming_ragged_width_is_zero_not_a_prefix_distance() {
-        // The old code zipped the common prefix (distance 2) but normalized by
-        // a.len() = 4, reporting 2 for vectors it never fully compared.
-        assert_eq!(hamming_flip_invariant(&[1, 1, 1, 1], &[-1, -1]), 0);
-        assert_eq!(hamming_flip_invariant(&[-1, -1], &[1, 1, 1, 1]), 0);
-    }
-
-    #[test]
-    fn diversity_flip_invariant() {
-        // a and its exact inverse have flip-invariant distance 0 -> diversity 0
-        #[expect(clippy::float_cmp, reason = "exact golden equality for diversity 0")]
-        {
-            assert_eq!(set_diversity(&[vec![1, 1, -1], vec![-1, -1, 1]]), 0.0);
-        }
-        // a vs one-bit-flipped: min(1, 2)=1 over N=3 -> 1/3
-        assert!((set_diversity(&[vec![1, 1, 1], vec![-1, 1, 1]]) - 1.0 / 3.0).abs() < 1e-12);
-        #[expect(clippy::float_cmp, reason = "exact golden equality for <2 solutions")]
-        {
-            assert_eq!(set_diversity(&[vec![1, 1]]), 0.0); // <2 solutions
+    fn energy_milli_skips_out_of_range_edges_without_reading_them() {
+        let cases = [
+            // edge (0, 5) references node 5, out of range for a 2-spin problem; must
+            // be skipped like a length-mismatched h/j entry, not panic.
+            // E = (1000*1) + (1000*-1) = 0 milli
+            ("out-of-range edge", 1.0),
+            // The coupling is non-finite but its edge names an out-of-range node, so
+            // it is skipped before inspection and cannot raise the sentinel.
+            ("non-finite coupling on a skipped edge", f64::NAN),
+        ];
+        for (label, coupling) in cases {
+            let e = energy_milli(&[1, -1], &[1.0, 1.0], &[coupling], &[(0, 5)]);
+            assert_eq!(e, 0, "{label}");
         }
     }
 
     #[test]
-    fn diversity_zero_width_solutions_is_zero_not_nan() {
-        // Two zero-length solution vectors would divide by width 0; must return
-        // 0.0, matching the shared reference (not NaN).
-        #[expect(clippy::float_cmp, reason = "exact golden equality for zero-width")]
-        {
-            assert_eq!(set_diversity(&[vec![], vec![]]), 0.0);
-            assert_eq!(set_diversity(&[]), 0.0);
+    fn energy_milli_saturates_both_ways() {
+        let cases = [
+            // 1e16 -> 1e19 milli, past i64::MAX (~9.223e18) -> saturates.
+            ("1e16", vec![1], vec![1e16], i64::MAX),
+            // Finite but so large that c*1000.0 overflows to infinity; the cast
+            // saturates rather than reporting the non-finite sentinel, because the
+            // input the caller supplied was finite.
+            ("1e308", vec![1], vec![1e308], i64::MAX),
+            // Two saturating terms accumulate in i128 and clamp once at the end.
+            ("two 1e308 terms", vec![1, 1], vec![1e308, 1e308], i64::MAX),
+            // Ground states are negative-energy, so the negative overflow path is
+            // realistic; it must saturate to i64::MIN, not wrap.
+            ("-1e16", vec![1], vec![-1e16], i64::MIN),
+            ("-1e308", vec![1], vec![-1e308], i64::MIN),
+            (
+                "two -1e308 terms",
+                vec![1, 1],
+                vec![-1e308, -1e308],
+                i64::MIN,
+            ),
+        ];
+        for (label, spins, h, expected) in cases {
+            assert_eq!(energy_milli(&spins, &h, &[], &[]), expected, "{label}");
         }
     }
 
     #[test]
-    fn diversity_ragged_widths_is_zero() {
-        // The bead's case: widths 2 and 4. The old code took width 2 from
-        // solutions[0] and compared only the 2-element prefix.
-        #[expect(clippy::float_cmp, reason = "exact golden equality for ragged sets")]
-        {
-            assert_eq!(set_diversity(&[vec![1, 1], vec![1, 1, 1, 1]]), 0.0);
+    fn hamming_flip_invariant_handles_equal_and_ragged_widths() {
+        let cases: [(&str, &[i8], &[i8], u32); 4] = [
+            ("one flipped bit", &[1, 1, 1], &[-1, 1, 1], 1),
+            // Exact inverse: raw distance 3, complement 0 -> 0.
+            ("exact inverse", &[1, 1, 1], &[-1, -1, -1], 0),
+            // The old code zipped the common prefix (distance 2) but normalized by
+            // a.len() = 4, reporting 2 for vectors it never fully compared.
+            ("ragged, longer first", &[1, 1, 1, 1], &[-1, -1], 0),
+            ("ragged, longer second", &[-1, -1], &[1, 1, 1, 1], 0),
+        ];
+        for (label, a, b, expected) in cases {
+            assert_eq!(hamming_flip_invariant(a, b), expected, "{label}");
+        }
+    }
+
+    #[test]
+    fn set_diversity_is_zero_for_degenerate_sets() {
+        let cases: [(&str, Vec<Vec<i8>>); 6] = [
+            ("fewer than two solutions", vec![vec![1, 1]]),
+            // Two zero-length solution vectors would divide by width 0; must return
+            // 0.0, matching the shared reference (not NaN).
+            ("zero-width solutions", vec![vec![], vec![]]),
+            ("empty set", vec![]),
+            // The bead's case: widths 2 and 4. The old code took width 2 from
+            // solutions[0] and compared only the 2-element prefix.
+            ("ragged widths", vec![vec![1, 1], vec![1, 1, 1, 1]]),
             // Ragged in the other direction, and ragged past the first pair.
-            assert_eq!(set_diversity(&[vec![1, 1, 1, 1], vec![1, 1]]), 0.0);
-            assert_eq!(
-                set_diversity(&[vec![1, 1], vec![-1, 1], vec![1, 1, 1]]),
-                0.0
-            );
+            ("ragged, longer first", vec![vec![1, 1, 1, 1], vec![1, 1]]),
+            (
+                "ragged past the first pair",
+                vec![vec![1, 1], vec![-1, 1], vec![1, 1, 1]],
+            ),
+        ];
+        #[expect(
+            clippy::float_cmp,
+            reason = "exact golden equality for degenerate sets"
+        )]
+        for (label, set) in cases {
+            assert_eq!(set_diversity(&set), 0.0, "{label}");
         }
     }
 
@@ -399,44 +381,69 @@ mod tests {
     }
 
     #[test]
-    fn energy_from_milli_sign_and_scaling() {
-        // Same problem as energy_sign_and_scaling, in milli.
-        assert_eq!(
-            energy_from_milli(&[1, -1], &[1000, -500], &[2000], &[(0, 1)]),
-            -500
+    fn energy_from_milli_scores_wire_integers() {
+        type Case = (
+            &'static str,
+            Vec<i8>,
+            Vec<i32>,
+            Vec<i32>,
+            Vec<(usize, usize)>,
+            i64,
         );
-    }
-
-    #[test]
-    fn energy_from_milli_skips_what_energy_milli_skips() {
-        // Spin 2 has no bias, coupling 1 has no edge, and edge (0, 5) names a
-        // node that does not exist. Only the two biases score: 1000 - 1000.
-        assert_eq!(
-            energy_from_milli(&[1, -1, 1], &[1000, 1000], &[1000, 7000], &[(0, 5)]),
-            0
-        );
-    }
-
-    #[test]
-    fn energy_from_milli_maps_non_positive_spins_to_minus_one() {
-        // 0 and i8::MIN score as -1. 2 and i8::MAX score as +1.
-        assert_eq!(
-            energy_from_milli(&[0, i8::MIN, 2, i8::MAX], &[1, 10, 100, 1000], &[], &[]),
-            -1 - 10 + 100 + 1000
-        );
-    }
-
-    #[test]
-    fn energy_from_milli_sums_i32_extremes_exactly() {
         let n = 1000;
-        assert_eq!(
-            energy_from_milli(&vec![1; n], &vec![i32::MIN; n], &[], &[]),
-            i64::from(i32::MIN) * 1000
-        );
-        assert_eq!(
-            energy_from_milli(&[-1, -1], &[0, 0], &[i32::MAX], &[(0, 1)]),
-            i64::from(i32::MAX)
-        );
+        let cases: [Case; 5] = [
+            // Same problem as the float scorer's sign and scaling case, in milli.
+            (
+                "sign and scaling",
+                vec![1, -1],
+                vec![1000, -500],
+                vec![2000],
+                vec![(0, 1)],
+                -500,
+            ),
+            // Spin 2 has no bias, coupling 1 has no edge, and edge (0, 5) names a
+            // node that does not exist. Only the two biases score: 1000 - 1000.
+            (
+                "skipped bias, coupling and edge",
+                vec![1, -1, 1],
+                vec![1000, 1000],
+                vec![1000, 7000],
+                vec![(0, 5)],
+                0,
+            ),
+            // 0 and i8::MIN score as -1. 2 and i8::MAX score as +1.
+            (
+                "non-positive spins score as minus one",
+                vec![0, i8::MIN, 2, i8::MAX],
+                vec![1, 10, 100, 1000],
+                vec![],
+                vec![],
+                -1 - 10 + 100 + 1000,
+            ),
+            (
+                "i32::MIN biases over many spins",
+                vec![1; n],
+                vec![i32::MIN; n],
+                vec![],
+                vec![],
+                i64::from(i32::MIN) * 1000,
+            ),
+            (
+                "i32::MAX coupling",
+                vec![-1, -1],
+                vec![0, 0],
+                vec![i32::MAX],
+                vec![(0, 1)],
+                i64::from(i32::MAX),
+            ),
+        ];
+        for (label, spins, h, j, edges, expected) in cases {
+            assert_eq!(
+                energy_from_milli(&spins, &h, &j, &edges),
+                expected,
+                "{label}"
+            );
+        }
     }
 
     #[test]

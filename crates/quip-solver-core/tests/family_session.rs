@@ -2,6 +2,9 @@
 //!
 //! The legacy pins below describe the lease path as it was at 6d272cd. They
 //! must keep passing, unedited, while family leases are added.
+mod common;
+
+use common::example_bin;
 use prost::Message as _;
 use quip_proto::v1::{
     self as wire, coord_msg, miner_msg,
@@ -112,7 +115,7 @@ impl Session {
     }
     async fn start_with(binary: &str, gated: bool, extra_args: &[&str]) -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        let bin = build_example(binary);
+        let bin = example_bin(binary);
         let dir = std::path::PathBuf::from(format!(
             "target/t7-tmp/{}-{}",
             std::process::id(),
@@ -244,6 +247,23 @@ impl Session {
     async fn refund(&mut self) {
         assert!(matches!(self.recv().await, miner_msg::Msg::JobRequest(r) if r.credits == 1));
     }
+    /// `recv` whose transport failures name `label`.
+    async fn recv_for(&mut self, label: &str) -> miner_msg::Msg {
+        let received = tokio::time::timeout(Duration::from_secs(10), self.inbound.message()).await;
+        assert!(
+            matches!(&received, Ok(Ok(Some(m))) if m.msg.is_some()),
+            "{label}: no message from the miner: {received:?}"
+        );
+        received.unwrap().unwrap().unwrap().msg.unwrap()
+    }
+    /// `refund` whose failures name `label`.
+    async fn refund_for(&mut self, label: &str) {
+        let msg = self.recv_for(label).await;
+        assert!(
+            matches!(&msg, miner_msg::Msg::JobRequest(r) if r.credits == 1),
+            "{label}: expected a one-credit refund, got {msg:?}"
+        );
+    }
     async fn finish(mut self) {
         self.send(coord_msg::Msg::Shutdown(wire::Shutdown { grace_ms: 2000 }))
             .await;
@@ -264,19 +284,6 @@ impl Session {
         );
     }
 }
-#[expect(clippy::unwrap_used, reason = "test fixture builds must succeed")]
-fn build_example(name: &str) -> std::path::PathBuf {
-    assert!(std::process::Command::new(env!("CARGO"))
-        .args(["build", "-p", "quip-solver-core", "--example", name])
-        .status()
-        .unwrap()
-        .success());
-    let mut path = std::env::current_exe().unwrap();
-    let _ = path.pop();
-    let _ = path.pop();
-    path.join("examples").join(name)
-}
-
 /// `T_SPARSE` (core.json `topologies[sparse]`), sent with the wire hash `[7; 32]`.
 #[expect(
     clippy::unwrap_used,
@@ -634,24 +641,28 @@ fn index_of(j: &wire::Job, r: &wire::Result) -> u64 {
         .unwrap()
 }
 /// Read every reply up to the lease summary. Returns the Results and the summary.
-#[expect(clippy::panic, reason = "an unexpected message is a test failure")]
 async fn drain_lease(s: &mut Session) -> (Vec<wire::Result>, wire::LeaseDone) {
+    drain_lease_for(s, "lease").await
+}
+/// `drain_lease` whose failures name `what`.
+#[expect(clippy::panic, reason = "an unexpected message is a test failure")]
+async fn drain_lease_for(s: &mut Session, what: &str) -> (Vec<wire::Result>, wire::LeaseDone) {
     let mut results = Vec::new();
     loop {
-        match s.recv().await {
+        match s.recv_for(what).await {
             miner_msg::Msg::Result(r) => results.push(r),
             miner_msg::Msg::LeaseDone(d) => return (results, d),
-            other => panic!("unexpected {other:?}"),
+            other => panic!("{what}: unexpected {other:?}"),
         }
     }
 }
 #[expect(clippy::panic, reason = "a missing reject is a test failure")]
 async fn expect_reject(s: &mut Session, reason: i32, what: &str) {
-    match s.recv().await {
+    match s.recv_for(what).await {
         miner_msg::Msg::Reject(r) => assert_eq!(r.reason, reason, "{what}"),
         other => panic!("{what}: expected a reject, got {other:?}"),
     }
-    s.refund().await;
+    s.refund_for(what).await;
 }
 
 #[tokio::test]
@@ -723,40 +734,6 @@ async fn lease_admission_vectors_hold_in_the_session() {
 }
 
 #[tokio::test]
-async fn family_lease_field_lengths_follow_the_vectors() {
-    let core = core();
-    let mut s = Session::start("mock_sampler_family_lease").await;
-    s.setup(i64::MAX).await;
-    let mut admitted = 0;
-    for case in cases(&core, "field_lengths") {
-        let field = case["field"].as_str().unwrap();
-        let name = case["name"].as_str().unwrap();
-        let length = usize::try_from(case["length"].as_u64().unwrap()).unwrap();
-        let resize = |bytes: &mut Vec<u8>| bytes.resize(length, 0);
-        let mut j = family_job(1, &UNIFORM_V1, &P_SPEC);
-        let g = j.generator.as_mut().unwrap();
-        match field {
-            "FamilyDescriptor.params_digest" => {
-                resize(&mut g.family.as_mut().unwrap().params_digest);
-            }
-            "IsingProblemGenerator.topology_order_digest" => resize(&mut g.topology_order_digest),
-            _ => continue,
-        }
-        s.send(coord_msg::Msg::Job(j)).await;
-        if case["expected_code"].is_null() {
-            let (_, done) = drain_lease(&mut s).await;
-            assert_eq!(done.salts_done, 1, "{name}");
-            s.refund().await;
-            admitted += 1;
-        } else {
-            expect_reject(&mut s, wire::RejectReason::Malformed as i32, name).await;
-        }
-    }
-    assert_eq!(admitted, 2, "one admitted case per field");
-    s.finish().await;
-}
-
-#[tokio::test]
 async fn family_leases_use_the_vector_salts_and_nonces() {
     let core = core();
     let mut s = Session::start("mock_sampler_family_lease").await;
@@ -789,7 +766,7 @@ async fn family_leases_use_the_vector_salts_and_nonces() {
                 )
             })
             .collect::<Vec<_>>();
-        let (results, done) = drain_lease(&mut s).await;
+        let (results, done) = drain_lease_for(&mut s, name).await;
         for r in &results {
             assert!(
                 pairs.contains(&(r.salt.clone(), r.nonce.clone())),
@@ -806,37 +783,7 @@ async fn family_leases_use_the_vector_salts_and_nonces() {
 }
 
 #[tokio::test]
-async fn a_family_lease_reports_regenerated_instances_then_one_lease_done() {
-    let mut s = Session::start("mock_sampler_family_lease").await;
-    s.setup(i64::MAX).await;
-    let j = family_job(4, &UNIFORM_V1, &P_SPEC);
-    s.send(coord_msg::Msg::Job(j.clone())).await;
-    let (results, done) = drain_lease(&mut s).await;
-    let spec = spec(&j).unwrap();
-    let expected = (0..4)
-        .filter_map(|i| regenerate(&UNIFORM_V1, &P_SPEC, &topology(), spec.nonce(i).unwrap()).ok())
-        .map(|instance| all_up_energy(&instance))
-        .collect::<Vec<_>>();
-    assert!(
-        !expected.is_empty(),
-        "the fixture must report at least one salt"
-    );
-    assert_eq!(results.len(), expected.len());
-    let mut best = i64::MAX;
-    for r in &results {
-        assert_eq!(r.job_id, b"lease");
-        assert_eq!(r.solutions.first().unwrap().spins.len(), 2, "ceil(12 / 8)");
-        best = best.min(check_result(r, &UNIFORM_V1, &P_SPEC, &topology()));
-    }
-    assert_eq!(done.salts_done, 4);
-    assert_eq!(done.best_energy_milli, best);
-    assert_eq!(Some(best), expected.iter().copied().min());
-    s.refund().await;
-    s.finish().await;
-}
-
-#[tokio::test]
-async fn skipped_salts_count_and_send_no_result() {
+async fn default_family_leases_report_every_unskipped_salt() {
     let j = family_job(64, &UNIFORM_V1, &P_SPEC);
     let spec = spec(&j).unwrap();
     let skipped = (0..64)
@@ -849,14 +796,13 @@ async fn skipped_salts_count_and_send_no_result() {
         .collect::<Vec<_>>();
     assert_eq!(skipped, SKIPPED_64);
     assert_eq!(skipped.first(), Some(&SKIPPED_ONE));
-    let mut s = Session::start("mock_sampler_family_lease").await;
-    s.setup(i64::MAX).await;
-    s.send(coord_msg::Msg::Job(j.clone())).await;
-    let (results, done) = drain_lease(&mut s).await;
-    let mut reported = results
+    let (default, default_done) = run_64("default").await;
+    let mut best = i64::MAX;
+    let mut reported = default
         .iter()
         .map(|r| {
-            let _ = check_result(r, &UNIFORM_V1, &P_SPEC, &topology());
+            assert_eq!(r.job_id, b"lease");
+            best = best.min(check_result(r, &UNIFORM_V1, &P_SPEC, &topology()));
             index_of(&j, r)
         })
         .collect::<Vec<_>>();
@@ -865,9 +811,27 @@ async fn skipped_salts_count_and_send_no_result() {
         .filter(|i| !SKIPPED_64.contains(i))
         .collect::<Vec<_>>();
     assert_eq!(reported, expected);
-    assert_eq!(done.salts_done, 64);
-    s.refund().await;
-    s.finish().await;
+    assert_eq!(default_done.salts_done, 64);
+    assert_eq!(default_done.best_energy_milli, best);
+    // The minimum over the 64 lease-derived nonces, computed without the miner.
+    let expected_best = (0..64)
+        .filter_map(|i| regenerate(&UNIFORM_V1, &P_SPEC, &topology(), spec.nonce(i).unwrap()).ok())
+        .map(|instance| all_up_energy(&instance))
+        .min();
+    assert_eq!(Some(best), expected_best);
+
+    // The local generator reports the same salts, nonces, and solutions.
+    let (local, local_done) = run_64("local").await;
+    assert!(!local.is_empty());
+    assert_eq!(local.len(), default.len());
+    for (l, d) in local.iter().zip(&default) {
+        assert_eq!(l.salt, d.salt);
+        assert_eq!(l.nonce, d.nonce);
+        assert_eq!(l.solutions, d.solutions);
+    }
+    assert_eq!(local_done.salts_done, 64);
+    assert_eq!(local_done.salts_done, default_done.salts_done);
+    assert_eq!(local_done.best_energy_milli, default_done.best_energy_milli);
 }
 
 /// Run a 64-salt family lease on `mode`. Returns the Results by salt, and the summary.
@@ -919,16 +883,6 @@ async fn an_aware_sampler_gets_the_context_for_each_family_salt() {
 }
 
 #[tokio::test]
-async fn a_sampler_that_does_not_opt_in_gets_the_plain_graph() {
-    let (results, done) = run_64("default").await;
-    assert_eq!(results.len(), 64 - SKIPPED_64.len());
-    for r in &results {
-        let _ = check_result(r, &UNIFORM_V1, &P_SPEC, &topology());
-    }
-    assert_eq!(done.salts_done, 64);
-}
-
-#[tokio::test]
 async fn legacy_leases_carry_no_context() {
     let mut s = Session::start_with("mock_sampler_family_lease", false, &["--mode", "aware"]).await;
     s.setup(i64::MAX).await;
@@ -939,22 +893,6 @@ async fn legacy_leases_carry_no_context() {
     assert_eq!(done.best_energy_milli, PINNED_BEST_ENERGY_MILLI);
     s.refund().await;
     s.finish().await;
-}
-
-#[tokio::test]
-async fn a_local_family_generator_matches_the_session_path() {
-    let (local, local_done) = run_64("local").await;
-    let (default, default_done) = run_64("default").await;
-    assert!(!local.is_empty());
-    assert_eq!(local.len(), default.len());
-    for (l, d) in local.iter().zip(&default) {
-        assert_eq!(l.salt, d.salt);
-        assert_eq!(l.nonce, d.nonce);
-        assert_eq!(l.solutions, d.solutions);
-    }
-    assert_eq!(local_done.salts_done, 64);
-    assert_eq!(local_done.salts_done, default_done.salts_done);
-    assert_eq!(local_done.best_energy_milli, default_done.best_energy_milli);
 }
 
 #[tokio::test]
@@ -1166,7 +1104,7 @@ async fn a_deadline_stops_a_family_lease() {
             .as_millis(),
     )
     .unwrap()
-        + 500;
+        + 100;
     s.send(coord_msg::Msg::Job(lease)).await;
     let mut held = s.blocked_sample().await;
     let (results, done) = drain_lease(&mut s).await;
@@ -1183,21 +1121,6 @@ async fn a_deadline_stops_a_family_lease() {
     s.ack().await;
     s.finish().await;
     releases.abort();
-}
-
-#[tokio::test]
-async fn a_generic_solver_answers_a_family_lease_with_code_5() {
-    let mut s = Session::start("mock_sampler_lease").await;
-    s.setup(i64::MAX).await;
-    s.send(coord_msg::Msg::Job(family_job(4, &UNIFORM_V1, &P_SPEC)))
-        .await;
-    expect_reject(
-        &mut s,
-        wire::RejectReason::FamilyUnsupported as i32,
-        "FAM-54",
-    )
-    .await;
-    s.finish().await;
 }
 
 #[tokio::test]
@@ -1345,7 +1268,7 @@ fn plain_energy(instance: &Instance, spin: i8) -> i64 {
     reason = "a missing Result is a test failure"
 )]
 async fn expect_solved(s: &mut Session, what: &str) -> wire::Solution {
-    let solution = match s.recv().await {
+    let solution = match s.recv_for(what).await {
         miner_msg::Msg::Result(r) => {
             assert_eq!(r.job_id, b"explicit", "{what}");
             assert_eq!(r.solutions.len(), 1, "{what}");
@@ -1353,7 +1276,7 @@ async fn expect_solved(s: &mut Session, what: &str) -> wire::Solution {
         }
         other => panic!("{what}: expected a Result, got {other:?}"),
     };
-    s.refund().await;
+    s.refund_for(what).await;
     solution
 }
 
@@ -1363,6 +1286,52 @@ fn layered_region(layers: u16, n: u32) -> Vec<u8> {
     region.extend_from_slice(&layers.to_le_bytes());
     region.extend_from_slice(&n.to_le_bytes());
     region
+}
+
+/// Cases the vectors do not carry, on a default-mode family session.
+#[expect(clippy::unwrap_used, reason = "every explicit job has a binding")]
+async fn explicit_job_extras(s: &mut Session, instance: &Instance) {
+    // Metadata that contradicts the instance is code 16. Three layers of six
+    // nodes: a valid layout, sealed into the digest, that contradicts the
+    // twelve-node instance and the two-layer parameters.
+    let mut parts = parts_of(instance);
+    parts.metadata = layered_region(3, 6);
+    s.send(coord_msg::Msg::Job(explicit_job(
+        &parts,
+        &UNIFORM_V1,
+        &P_SPEC,
+    )))
+    .await;
+    expect_reject(s, wire::RejectReason::Malformed as i32, "FAM-67").await;
+
+    // A valid binding is solved on the plain graph, without the offset.
+    let j = explicit_job(&parts_of(instance), &UNIFORM_V1, &P_SPEC);
+    assert_ne!(instance.offset_milli(), 0);
+    s.send(coord_msg::Msg::Job(j)).await;
+    let solution = expect_solved(s, "default").await;
+    assert_eq!(
+        solution.spins,
+        quip_protocol::wire::encode_spins_packed(&[1; 12])
+    );
+    assert_eq!(
+        solution.energy_milli,
+        plain_energy(instance, 1),
+        "no offset"
+    );
+
+    // FAM-56: a tier applies per revision. The binary lists revision 1 of
+    // `vectors/uniform-field` and no revision 2, so a damaged digest rejects at
+    // revision 1 and is ignored at revision 2.
+    let mut job = explicit_job(&parts_of(instance), &UNIFORM_V1, &P_SPEC);
+    if let Some(first) = binding(&mut job).instance_digest.first_mut() {
+        *first ^= 1;
+    }
+    s.send(coord_msg::Msg::Job(job.clone())).await;
+    expect_reject(s, wire::RejectReason::Malformed as i32, "accepted tier").await;
+    binding(&mut job).family.as_mut().unwrap().revision = 2;
+    s.send(coord_msg::Msg::Job(job)).await;
+    let solution = expect_solved(s, "generic tier for revision 2").await;
+    assert_eq!(solution.energy_milli, plain_energy(instance, 1));
 }
 
 #[tokio::test]
@@ -1438,11 +1407,23 @@ async fn explicit_job_vectors_hold_in_the_session() {
         cases_run += 1;
     }
     assert_eq!(cases_run, 6);
+
+    explicit_job_extras(&mut s, &instance).await;
+    s.finish().await;
+
+    // FAM-69: a generic solver ignores the binding, even a damaged digest.
+    let mut j = explicit_job(&parts_of(&instance), &UNIFORM_V1, &P_SPEC);
+    binding(&mut j).instance_digest = vec![0; 32];
+    let mut s = Session::start("mock_sampler_lease").await;
+    s.setup(i64::MAX).await;
+    s.send(coord_msg::Msg::Job(j)).await;
+    let solution = expect_solved(&mut s, "FAM-69").await;
+    assert_eq!(solution.energy_milli, plain_energy(&instance, 1));
     s.finish().await;
 }
 
 #[tokio::test]
-async fn binding_field_lengths_follow_the_vectors() {
+async fn field_length_vectors_hold_in_the_session() {
     let core = core();
     // A five-node, one-layer instance, so the node count case of the vectors
     // (`plain_node_count` 5) applies as written.
@@ -1466,72 +1447,95 @@ async fn binding_field_lengths_follow_the_vectors() {
     };
     let mut s = Session::start("mock_sampler_family_lease").await;
     s.setup(i64::MAX).await;
-    let mut solved = 0;
+    let (mut admitted, mut solved) = (0, 0);
     for case in cases(&core, "field_lengths") {
         let field = case["field"].as_str().unwrap();
         let name = case["name"].as_str().unwrap();
         let length = usize::try_from(case["length"].as_u64().unwrap()).unwrap();
+        let resize = |bytes: &mut Vec<u8>| bytes.resize(length, 0);
         let mut parts = five.clone();
-        let j = match field {
+        // A lease job for the lease fields, an explicit job for the binding
+        // fields.
+        let (j, is_lease) = match field {
+            "FamilyDescriptor.params_digest" => {
+                let mut j = family_job(1, &UNIFORM_V1, &P_SPEC);
+                resize(
+                    &mut j
+                        .generator
+                        .as_mut()
+                        .unwrap()
+                        .family
+                        .as_mut()
+                        .unwrap()
+                        .params_digest,
+                );
+                (j, true)
+            }
+            "IsingProblemGenerator.topology_order_digest" => {
+                let mut j = family_job(1, &UNIFORM_V1, &P_SPEC);
+                resize(&mut j.generator.as_mut().unwrap().topology_order_digest);
+                (j, true)
+            }
             "FamilyBinding.nonce" if length == 0 => {
                 parts.nonce = None;
-                explicit_job(&parts, &UNIFORM_V1, &P_L1_F0)
+                (explicit_job(&parts, &UNIFORM_V1, &P_L1_F0), false)
             }
             "FamilyBinding.nonce" => {
                 let mut j = explicit_job(&parts, &UNIFORM_V1, &P_L1_F0);
                 binding(&mut j).nonce.resize(length, 6);
-                j
+                (j, false)
             }
             "FamilyBinding.instance_digest" => {
                 let mut j = explicit_job(&parts, &UNIFORM_V1, &P_L1_F0);
                 binding(&mut j).instance_digest.resize(length, 0);
-                j
+                (j, false)
             }
             "FamilyBinding.topology_order_digest" => {
                 let mut j = explicit_job(&parts, &UNIFORM_V1, &P_L1_F0);
                 binding(&mut j).topology_order_digest.resize(length, 5);
-                j
+                (j, false)
             }
             "FamilyBinding.node_ids" => {
                 assert_eq!(case["plain_node_count"].as_u64(), Some(5), "{name}");
                 let mut j = explicit_job(&parts, &UNIFORM_V1, &P_L1_F0);
                 binding(&mut j).node_ids.resize(length, 99);
-                j
+                (j, false)
             }
-            _ => continue,
+            other => panic!("{name}: no field_lengths case for {other}"),
         };
         s.send(coord_msg::Msg::Job(j)).await;
-        if case["expected_code"].is_null() {
-            let solution = expect_solved(&mut s, name).await;
-            assert_eq!(solution.energy_milli, 0, "{name}: h 0, J sums to 0");
-            solved += 1;
-        } else {
-            assert_eq!(case["expected_code"].as_u64(), Some(15), "{name}");
-            expect_reject(&mut s, wire::RejectReason::Malformed as i32, name).await;
+        match (case["expected_code"].is_null(), is_lease) {
+            (true, true) => {
+                let (_, done) = drain_lease_for(&mut s, name).await;
+                assert_eq!(done.salts_done, 1, "{name}");
+                s.refund_for(name).await;
+                admitted += 1;
+            }
+            (true, false) => {
+                let solution = expect_solved(&mut s, name).await;
+                assert_eq!(solution.energy_milli, 0, "{name}: h 0, J sums to 0");
+                solved += 1;
+            }
+            (false, true) => {
+                expect_reject(&mut s, wire::RejectReason::Malformed as i32, name).await;
+            }
+            (false, false) => {
+                assert_eq!(case["expected_code"].as_u64(), Some(15), "{name}");
+                expect_reject(&mut s, wire::RejectReason::Malformed as i32, name).await;
+            }
         }
     }
+    assert_eq!(admitted, 2, "one admitted case per lease field");
     assert_eq!(solved, 5, "one solved case per binding field");
     s.finish().await;
 }
 
 #[tokio::test]
-async fn an_accepted_job_with_a_valid_binding_is_solved() {
+async fn an_aware_sampler_gets_the_context_for_a_bound_job() {
     let instance = explicit_instance();
     let j = explicit_job(&parts_of(&instance), &UNIFORM_V1, &P_SPEC);
     assert_ne!(instance.offset_milli(), 0);
     let packed = |spin: i8| quip_protocol::wire::encode_spins_packed(&[spin; 12]);
-
-    let mut s = Session::start("mock_sampler_family_lease").await;
-    s.setup(i64::MAX).await;
-    s.send(coord_msg::Msg::Job(j.clone())).await;
-    let solution = expect_solved(&mut s, "default").await;
-    assert_eq!(solution.spins, packed(1));
-    assert_eq!(
-        solution.energy_milli,
-        plain_energy(&instance, 1),
-        "no offset"
-    );
-    s.finish().await;
 
     let mut s = Session::start_with("mock_sampler_family_lease", false, &["--mode", "aware"]).await;
     s.setup(i64::MAX).await;
@@ -1543,63 +1547,5 @@ async fn an_accepted_job_with_a_valid_binding_is_solved() {
         plain_energy(&instance, -1),
         "no offset"
     );
-    s.finish().await;
-}
-
-#[tokio::test]
-async fn metadata_that_contradicts_the_instance_is_code_16() {
-    let instance = explicit_instance();
-    let mut parts = parts_of(&instance);
-    // Three layers of six nodes: a valid layout, sealed into the digest, that
-    // contradicts the twelve-node instance and the two-layer parameters.
-    parts.metadata = layered_region(3, 6);
-    let mut s = Session::start("mock_sampler_family_lease").await;
-    s.setup(i64::MAX).await;
-    s.send(coord_msg::Msg::Job(explicit_job(
-        &parts,
-        &UNIFORM_V1,
-        &P_SPEC,
-    )))
-    .await;
-    expect_reject(&mut s, wire::RejectReason::Malformed as i32, "FAM-67").await;
-    s.finish().await;
-}
-
-#[tokio::test]
-async fn a_generic_solver_ignores_the_binding() {
-    let instance = explicit_instance();
-    let mut j = explicit_job(&parts_of(&instance), &UNIFORM_V1, &P_SPEC);
-    binding(&mut j).instance_digest = vec![0; 32];
-    let mut s = Session::start("mock_sampler_lease").await;
-    s.setup(i64::MAX).await;
-    s.send(coord_msg::Msg::Job(j)).await;
-    let solution = expect_solved(&mut s, "FAM-69").await;
-    assert_eq!(solution.energy_milli, plain_energy(&instance, 1));
-    s.finish().await;
-}
-
-/// FAM-56: a tier applies per revision. The binary lists revision 1 of
-/// `vectors/uniform-field` and no revision 2, so a damaged digest rejects at
-/// revision 1 and is ignored at revision 2.
-#[tokio::test]
-async fn a_tier_applies_per_revision() {
-    let instance = explicit_instance();
-    let mut job = explicit_job(&parts_of(&instance), &UNIFORM_V1, &P_SPEC);
-    if let Some(first) = binding(&mut job).instance_digest.first_mut() {
-        *first ^= 1;
-    }
-    let mut s = Session::start("mock_sampler_family_lease").await;
-    s.setup(i64::MAX).await;
-    s.send(coord_msg::Msg::Job(job.clone())).await;
-    expect_reject(
-        &mut s,
-        wire::RejectReason::Malformed as i32,
-        "accepted tier",
-    )
-    .await;
-    binding(&mut job).family.as_mut().unwrap().revision = 2;
-    s.send(coord_msg::Msg::Job(job)).await;
-    let solution = expect_solved(&mut s, "generic tier for revision 2").await;
-    assert_eq!(solution.energy_milli, plain_energy(&instance, 1));
     s.finish().await;
 }

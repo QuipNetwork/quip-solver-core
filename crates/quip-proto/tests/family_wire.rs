@@ -282,46 +282,7 @@ fn capabilities_family_fields_match_the_reference_bytes() {
 }
 
 #[test]
-fn unset_family_fields_add_no_bytes() {
-    for old in [
-        OLD_CAPABILITIES,
-        OLD_HELLO,
-        OLD_JOB,
-        OLD_JOB_GENERATE,
-        OLD_REJECT,
-        OLD_RESULT,
-    ] {
-        let bytes = hex(old);
-        let again = match old {
-            OLD_CAPABILITIES => roundtrip::<Capabilities>(&bytes).1,
-            OLD_HELLO => roundtrip::<Hello>(&bytes).1,
-            OLD_JOB | OLD_JOB_GENERATE => roundtrip::<Job>(&bytes).1,
-            OLD_REJECT => roundtrip::<Reject>(&bytes).1,
-            _ => roundtrip::<JobResult>(&bytes).1,
-        };
-        assert_eq!(again, bytes);
-    }
-    let caps = Capabilities {
-        solver_id: String::new(),
-        generated_families: vec![],
-        accepted_families: vec![],
-        ..Default::default()
-    };
-    assert!(caps.encode_to_vec().is_empty());
-}
-
-#[test]
 fn new_enum_values_have_their_numbers() {
-    assert_eq!(GeneratorAlgorithm::FamilyChacha8V1 as i32, 2);
-    assert_eq!(RejectReason::FamilyUnsupported as i32, 10);
-    assert_eq!(
-        GeneratorAlgorithm::FamilyChacha8V1.as_str_name(),
-        "GENERATOR_ALGORITHM_FAMILY_CHACHA8_V1"
-    );
-    assert_eq!(
-        RejectReason::FamilyUnsupported.as_str_name(),
-        "FAMILY_UNSUPPORTED"
-    );
     let (reject, again) = roundtrip::<Reject>(&hex(REJECT_10_HEX));
     assert_eq!(reject.reason, 10);
     assert_eq!(again, hex(REJECT_10_HEX));

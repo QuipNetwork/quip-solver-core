@@ -146,28 +146,28 @@ mod tests {
     use crate::ising::IsingGraph;
 
     #[test]
-    fn empty_graph_returns_fallback_beta_range() {
-        // n == 0 short-circuits before any field walk.
-        let g = IsingGraph::new(vec![], vec![], vec![]);
-        assert_eq!(default_ising_beta_range(&g), (0.1, 1.0));
-    }
-
-    #[test]
-    fn all_zero_biases_return_fallback_beta_range() {
-        // n > 0 but every |h| and |J| is 0, so min_gaps is empty.
-        let g = IsingGraph::new(vec![0.0, 0.0], vec![0.0], vec![(0, 1)]);
-        assert_eq!(default_ising_beta_range(&g), (0.1, 1.0));
-    }
-
-    #[test]
-    fn zero_max_eff_is_dominated_by_empty_min_gaps() {
-        // The max_eff == 0.0 arm would set hot_beta = 1.0, but min_gaps is
-        // filled from the same positive magnitudes that feed sum_abs. An
-        // isolated zero-bias node has max_eff == 0.0 and empty min_gaps, so
-        // the empty-min_gaps return fires first. There is no IsingGraph that
-        // reaches hot_beta = 1.0 from that arm.
-        let g = IsingGraph::new(vec![0.0], vec![], vec![]);
-        assert_eq!(default_ising_beta_range(&g), (0.1, 1.0));
+    fn degenerate_graphs_take_the_fallback_beta_range() {
+        let rows = [
+            // n == 0 short-circuits before any field walk.
+            ("empty graph", IsingGraph::new(vec![], vec![], vec![])),
+            // n > 0 but every |h| and |J| is 0, so min_gaps is empty.
+            (
+                "all-zero biases",
+                IsingGraph::new(vec![0.0, 0.0], vec![0.0], vec![(0, 1)]),
+            ),
+            // The max_eff == 0.0 arm would set hot_beta = 1.0, but min_gaps is
+            // filled from the same positive magnitudes that feed sum_abs. An
+            // isolated zero-bias node has max_eff == 0.0 and empty min_gaps, so
+            // the empty-min_gaps return fires first. There is no IsingGraph that
+            // reaches hot_beta = 1.0 from that arm.
+            (
+                "isolated zero-bias node",
+                IsingGraph::new(vec![0.0], vec![], vec![]),
+            ),
+        ];
+        for (label, g) in rows {
+            assert_eq!(default_ising_beta_range(&g), (0.1, 1.0), "{label}");
+        }
     }
 
     #[test]
@@ -245,22 +245,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn gpu_f32_cast_matches_prior_behavior() {
-        // GPU wrapper = f64 schedule cast per element; equals computing in f64
-        // then `as f32` (cuda/metal's prior code path).
-        let f64s = geometric_beta_schedule(0.1, 10.0, 5);
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "GPU upload path intentionally narrows f64 schedule rungs to f32"
-        )]
-        let f32s: Vec<f32> = f64s.iter().map(|&b| b as f32).collect();
-        assert_eq!(f32s.len(), 5);
-        #[expect(clippy::indexing_slicing, reason = "schedule length asserted to 5")]
-        {
-            assert!((f64::from(f32s[0]) - 0.1).abs() < 1e-5);
-        }
-    }
     /// `(hot, cold)` as `f64` bits for each entry of `GOLDEN_GRAPHS`, captured
     /// from 0.0.2-rc1, where `IsingGraph` stored `v / 1000.0` floats.
     const PINNED_LADDERS: [(u64, u64); 9] = [

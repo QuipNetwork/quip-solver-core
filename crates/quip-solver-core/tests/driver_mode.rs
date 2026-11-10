@@ -1,49 +1,44 @@
 //! Driver mode: one problem on stdin, one solution array on stdout, exit.
 
+mod common;
+
+use common::example_bin;
 use std::io::Write as _;
-use std::process::{Command, Stdio};
+use std::process::{Command, Output, Stdio};
 
-fn example_bin(name: &str) -> String {
-    #[expect(
-        clippy::expect_used,
-        reason = "test helper: cargo build failure is a setup error"
-    )]
-    let status = Command::new(env!("CARGO"))
-        .args(["build", "--example", name, "-p", "quip-solver-core"])
-        .status()
-        .expect("cargo build --example");
-    assert!(status.success(), "failed to build example {name}");
-    #[expect(
-        clippy::expect_used,
-        reason = "test helper: current_exe is always available under cargo test"
-    )]
-    let mut p = std::env::current_exe().expect("test exe path");
-    let _ = p.pop();
-    let _ = p.pop();
-    p.push("examples");
-    p.push(name);
-    p.to_string_lossy().into_owned()
-}
+const PROBLEM: &[u8] = br#"{"h":[1.0,-1.0],"j":[1.0],"edges":[[0,1]],"num_reads":2,
+                 "num_sweeps":8,"sweeps_per_beta":1,"beta_range":null,"seed":7}"#;
 
-#[test]
-fn solve_reads_a_problem_and_writes_solutions() {
-    let mut child = Command::new(example_bin("mock_sampler_miner"))
+const ONE_READ: &[u8] = br#"{"h":[1.0,-1.0],"j":[1.0],"edges":[[0,1]],"num_reads":1,
+                 "num_sweeps":1,"sweeps_per_beta":1,"beta_range":null,"seed":1}"#;
+
+/// Run `<example> --solve` with `stdin` on its standard input. `label` names
+/// the case in every failure.
+#[expect(
+    clippy::expect_used,
+    reason = "test helper: each failure is asserted with its label first"
+)]
+fn run_solve(label: &str, example: &str, stdin: &[u8]) -> Output {
+    let spawned = Command::new(example_bin(example))
         .arg("--solve")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn --solve");
-    child
-        .stdin
-        .take()
-        .expect("stdin")
-        .write_all(
-            br#"{"h":[1.0,-1.0],"j":[1.0],"edges":[[0,1]],"num_reads":2,
-                 "num_sweeps":8,"sweeps_per_beta":1,"beta_range":null,"seed":7}"#,
-        )
-        .expect("write problem");
-    let out = child.wait_with_output().expect("wait");
+        .spawn();
+    assert!(spawned.is_ok(), "{label}: spawn --solve: {spawned:?}");
+    let mut child = spawned.expect("spawned");
+    let pipe = child.stdin.take();
+    assert!(pipe.is_some(), "{label}: stdin");
+    let written = pipe.expect("stdin").write_all(stdin);
+    assert!(written.is_ok(), "{label}: write problem: {written:?}");
+    let waited = child.wait_with_output();
+    assert!(waited.is_ok(), "{label}: wait: {waited:?}");
+    waited.expect("waited")
+}
+
+#[test]
+fn solve_reads_a_problem_and_writes_solutions() {
+    let out = run_solve("solve", "mock_sampler_miner", PROBLEM);
 
     assert!(out.status.success(), "exit {:?}", out.status.code());
     let sols: Vec<serde_json::Value> = serde_json::from_slice(&out.stdout).expect("valid JSON");
@@ -54,147 +49,135 @@ fn solve_reads_a_problem_and_writes_solutions() {
     }
 }
 
-#[test]
-fn malformed_input_exits_config_invalid() {
-    let mut child = Command::new(example_bin("mock_sampler_miner"))
-        .arg("--solve")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn --solve");
-    child
-        .stdin
-        .take()
-        .expect("stdin")
-        .write_all(b"not json")
-        .expect("write");
-    let out = child.wait_with_output().expect("wait");
+/// One row per `--solve` failure: a label for the failure message, the
+/// example, the stdin, the exit code, the stderr needle (if any), and whether
+/// stdout must be empty.
+type SolveFailureRow = (
+    &'static str,
+    &'static str,
+    &'static [u8],
+    i32,
+    Option<&'static str>,
+    bool,
+);
 
-    assert_eq!(out.status.code(), Some(64), "malformed input must exit 64");
-    assert!(String::from_utf8_lossy(&out.stderr).contains("malformed problem JSON on stdin"));
+const SOLVE_FAILURES: &[SolveFailureRow] = &[
+    (
+        "malformed input exits config-invalid",
+        "mock_sampler_miner",
+        b"not json",
+        64,
+        Some("malformed problem JSON on stdin"),
+        false,
+    ),
+    (
+        "a sample error exits internal-fatal",
+        "mock_sampler_faulty",
+        ONE_READ,
+        70,
+        Some("solve failed"),
+        false,
+    ),
+    // A model beyond the backend's read cap is capacity, exit 65: the caller
+    // can route it to another solver, unlike malformed input (64) or a device
+    // fault (70).
+    (
+        "a capacity refusal exits capacity",
+        "mock_sampler_capped",
+        ONE_READ,
+        65,
+        None,
+        true,
+    ),
+];
+
+#[test]
+fn solve_mode_failures_map_to_exit_codes() {
+    for &(label, example, stdin, code, needle, empty_stdout) in SOLVE_FAILURES {
+        let out = run_solve(label, example, stdin);
+        assert_eq!(out.status.code(), Some(code), "{label}");
+        if let Some(needle) = needle {
+            assert!(
+                String::from_utf8_lossy(&out.stderr).contains(needle),
+                "{label}: stderr should contain {needle:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        if empty_stdout {
+            assert!(
+                out.stdout.is_empty(),
+                "{label}: a refused model writes no solutions"
+            );
+        }
+    }
 }
 
-#[test]
-fn sample_error_exits_internal_fatal() {
-    let mut child = Command::new(example_bin("mock_sampler_faulty"))
-        .arg("--solve")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn --solve");
-    child
-        .stdin
-        .take()
-        .expect("stdin")
-        .write_all(
-            br#"{"h":[1.0,-1.0],"j":[1.0],"edges":[[0,1]],"num_reads":1,
-                 "num_sweeps":1,"sweeps_per_beta":1,"beta_range":null,"seed":1}"#,
-        )
-        .expect("write problem");
-    let out = child.wait_with_output().expect("wait");
+/// One row per startup case: a label for the failure message, the example, the
+/// arguments, the environment changes (`Some` sets, `None` removes), and the
+/// exit code.
+type StartupRow = (
+    &'static str,
+    &'static str,
+    &'static [&'static str],
+    &'static [(&'static str, Option<&'static str>)],
+    i32,
+);
 
-    assert_eq!(out.status.code(), Some(70), "SampleError must exit 70");
-    assert!(String::from_utf8_lossy(&out.stderr).contains("solve failed"));
-}
-
-#[test]
-fn missing_session_token_exits_token_rejected_before_network() {
+const STARTUP_FAILURES: &[StartupRow] = &[
     // Token is resolved before any connect. A missing QUIP_SESSION_TOKEN must
     // therefore exit 77 even when the coordinator URI cannot be reached. Exit
     // 70 here would mean the driver attempted the network first.
-    let out = Command::new(example_bin("mock_sampler_miner"))
-        .stderr(Stdio::piped())
-        .arg("--quip-coordinator")
-        .arg("unix:///nonexistent")
-        .env_remove("QUIP_SESSION_TOKEN")
-        .output()
-        .expect("spawn missing-token session");
-    assert_eq!(
-        out.status.code(),
-        Some(77),
-        "missing QUIP_SESSION_TOKEN must exit 77, not 70: {:?}",
-        out.status.code()
-    );
-}
-
-#[test]
-fn check_on_working_sampler_exits_clean() {
-    let out = Command::new(example_bin("mock_sampler_miner"))
-        .stderr(Stdio::piped())
-        .arg("--check")
-        .output()
-        .expect("spawn --check");
-    assert_eq!(
-        out.status.code(),
-        Some(0),
-        "--check on a working sampler must exit 0: {:?}",
-        out.status.code()
-    );
-}
-
-#[test]
-fn unopenable_sampler_check_exits_env_incompatible() {
-    let out = Command::new(example_bin("mock_sampler_unopenable"))
-        .stderr(Stdio::piped())
-        .arg("--check")
-        .output()
-        .expect("spawn unopenable --check");
-    assert_eq!(
-        out.status.code(),
-        Some(69),
-        "open() failure on --check must exit 69: {:?}",
-        out.status.code()
-    );
-}
-
-#[test]
-fn unopenable_sampler_session_exits_env_incompatible() {
+    (
+        "a missing session token exits token-rejected before the network",
+        "mock_sampler_miner",
+        &["--quip-coordinator", "unix:///nonexistent"],
+        &[("QUIP_SESSION_TOKEN", None)],
+        77,
+    ),
+    (
+        "--check on a working sampler exits clean",
+        "mock_sampler_miner",
+        &["--check"],
+        &[],
+        0,
+    ),
+    (
+        "an open() failure on --check exits env-incompatible",
+        "mock_sampler_unopenable",
+        &["--check"],
+        &[],
+        69,
+    ),
     // Session mode calls open() after the coordinator flag is present and
     // before the token/network path. A failing open must exit 69, not 77/70.
-    let out = Command::new(example_bin("mock_sampler_unopenable"))
-        .stderr(Stdio::piped())
-        .arg("--quip-coordinator")
-        .arg("unix:///nonexistent")
-        .env("QUIP_SESSION_TOKEN", "test-token")
-        .output()
-        .expect("spawn unopenable session");
-    assert_eq!(
-        out.status.code(),
-        Some(69),
-        "open() failure in session mode must exit 69: {:?}",
-        out.status.code()
-    );
-}
+    (
+        "an open() failure in session mode exits env-incompatible",
+        "mock_sampler_unopenable",
+        &["--quip-coordinator", "unix:///nonexistent"],
+        &[("QUIP_SESSION_TOKEN", Some("test-token"))],
+        69,
+    ),
+];
 
-/// A model beyond the backend's read cap is capacity, exit 65: the caller can
-/// route it to another solver, unlike malformed input (64) or a device fault
-/// (70).
 #[test]
-fn a_capacity_refusal_exits_capacity() {
-    let mut child = Command::new(example_bin("mock_sampler_capped"))
-        .arg("--solve")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn --solve");
-    child
-        .stdin
-        .take()
-        .expect("stdin")
-        .write_all(
-            br#"{"h":[1.0,-1.0],"j":[1.0],"edges":[[0,1]],"num_reads":1,
-                 "num_sweeps":1,"sweeps_per_beta":1,"beta_range":null,"seed":1}"#,
-        )
-        .expect("write problem");
-    let out = child.wait_with_output().expect("wait");
-
-    assert_eq!(
-        out.status.code(),
-        Some(65),
-        "a capacity refusal must exit 65"
-    );
-    assert!(out.stdout.is_empty(), "a refused model writes no solutions");
+fn startup_failures_map_to_exit_codes() {
+    for &(label, example, args, env, code) in STARTUP_FAILURES {
+        let mut command = Command::new(example_bin(example));
+        let _ = command.stderr(Stdio::piped()).args(args);
+        for &(key, value) in env {
+            let _ = match value {
+                Some(value) => command.env(key, value),
+                None => command.env_remove(key),
+            };
+        }
+        let output = command.output();
+        assert!(output.is_ok(), "{label}: spawn: {output:?}");
+        let out = output.expect("spawned");
+        assert_eq!(
+            out.status.code(),
+            Some(code),
+            "{label}: exit {:?}",
+            out.status.code()
+        );
+    }
 }

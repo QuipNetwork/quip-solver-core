@@ -77,35 +77,27 @@ mod tests {
     }
 
     #[test]
-    fn energy_units_does_not_truncate_toward_zero() {
-        // Toward-zero division would report -14536, which is better than the
-        // real floor. The helper must not do that.
-        assert_ne!(energy_units(-14_536_604), -14_536_604 / 1000);
-        assert_eq!(-14_536_604 / 1000, -14_536);
-    }
-
-    #[test]
-    fn format_duration_ms_matches_the_spec_buckets() {
-        assert_eq!(format_duration_ms(889), "889ms");
-        assert_eq!(format_duration_ms(48_900), "48.9s");
-        assert_eq!(format_duration_ms(648_889), "10m 49s");
-        assert_eq!(format_duration_ms(4_320_000), "1h 12m");
-    }
-
-    #[test]
-    fn format_duration_ms_rounds_the_last_unit() {
-        assert_eq!(format_duration_ms(0), "0ms");
-        assert_eq!(format_duration_ms(999), "999ms");
-        assert_eq!(format_duration_ms(1_000), "1.0s");
-        assert_eq!(format_duration_ms(48_850), "48.9s");
-        assert_eq!(format_duration_ms(155_002), "2m 35s");
-        assert_eq!(format_duration_ms(4_290_000), "1h 12m");
-    }
-
-    #[test]
-    fn format_duration_ms_promotes_when_the_last_unit_rounds_up() {
-        assert_eq!(format_duration_ms(59_950), "1m 0s");
-        // 59m 59.5s is still under one hour, so seconds is the last unit.
-        assert_eq!(format_duration_ms(3_599_500), "1h 0m");
+    fn format_duration_ms_follows_the_table() {
+        let rows = [
+            // The spec buckets.
+            (889, "889ms"),
+            (48_900, "48.9s"),
+            (648_889, "10m 49s"),
+            (4_320_000, "1h 12m"),
+            // The last unit rounds.
+            (0, "0ms"),
+            (999, "999ms"),
+            (1_000, "1.0s"),
+            (48_850, "48.9s"),
+            (155_002, "2m 35s"),
+            (4_290_000, "1h 12m"),
+            // The unit promotes when the last unit rounds up.
+            (59_950, "1m 0s"),
+            // 59m 59.5s is still under one hour, so seconds is the last unit.
+            (3_599_500, "1h 0m"),
+        ];
+        for (ms, text) in rows {
+            assert_eq!(format_duration_ms(ms), text, "{ms} ms");
+        }
     }
 }

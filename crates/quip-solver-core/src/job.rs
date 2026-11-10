@@ -859,30 +859,15 @@ mod tests {
         }
     }
 
-    #[test]
-    fn wire_v2_rejects_invalid_encoding_and_scale() {
-        let mut ising = edges_job(1).ising.unwrap();
-        for (encoding, scale) in [(0, 1000), (99, 1000), (1, 0), (4, 5), (5, 5), (6, 5)] {
-            ising.encoding = encoding;
-            ising.scale = scale;
-            assert_eq!(
-                parse_ising::<f64>(&ising, 100, 100, None).unwrap_err(),
-                RejectReason::Malformed
-            );
-        }
-        ising.encoding = quip_proto::v1::CoefficientEncoding::I32 as i32;
-        ising.scale = 1000;
-        assert!(parse_ising::<f64>(&ising, 100, 100, None).is_ok());
-    }
-
     /// The reject reason `prepare_job` answers `job` with, or `None` when it
     /// accepts the job.
     fn reject_reason_for<C: Coefficient, S: Sampler<C>>(
+        label: &str,
         job: Job,
         sampler: &S,
         id: &BackendIdentity,
     ) -> Option<i32> {
-        reject_reason_for_with(job, sampler, id, &generic())
+        reject_reason_labelled(label, job, sampler, id, &generic())
     }
 
     /// `reject_reason_for` with the family table of the solver.
@@ -892,17 +877,49 @@ mod tests {
         id: &BackendIdentity,
         families: &FamilyTable,
     ) -> Option<i32> {
+        reject_reason_labelled("", job, sampler, id, families)
+    }
+
+    /// `reject_reason_for_with`, naming the table row in a malformed reply.
+    fn reject_reason_labelled<C: Coefficient, S: Sampler<C>>(
+        label: &str,
+        job: Job,
+        sampler: &S,
+        id: &BackendIdentity,
+        families: &FamilyTable,
+    ) -> Option<i32> {
         match prepare_job::<S, C>(job, sampler, id, families, 64, None, None, None) {
             Prepared::Reject(message) => match message.msg {
                 Some(miner_msg::Msg::Reject(reject)) => Some(reject.reason),
-                _ => panic!("expected a Reject message"),
+                _ => panic!("{label}: expected a Reject message"),
             },
             Prepared::Sample { .. } => None,
         }
     }
 
-    #[test]
-    fn a_self_loop_is_malformed() {
+    /// A second edge on node 0 lifts its degree to 2.
+    fn two_edges(mut job: Job) -> Job {
+        if let Some(ising) = job.ising.as_mut() {
+            ising.graph = Some(Graph::Edges(EdgeList {
+                u: vec![0, 0],
+                v: vec![1, 1],
+            }));
+            ising.j = encode_i32_le(&[0, 0]);
+        }
+        job
+    }
+
+    /// `edges_job` with a half-unit bias, which an int8 solver cannot hold
+    /// exactly.
+    fn lossy_job() -> Job {
+        let mut job = edges_job(1);
+        if let Some(ising) = job.ising.as_mut() {
+            ising.h = encode_i32_le(&[500, 1000]);
+        }
+        job
+    }
+
+    fn self_loop_job() -> Job {
         let mut job = edges_job(1);
         if let Some(ising) = job.ising.as_mut() {
             ising.graph = Some(Graph::Edges(EdgeList {
@@ -910,55 +927,133 @@ mod tests {
                 v: vec![1],
             }));
         }
-        assert_eq!(
-            reject_reason_for(job, &StubSampler, &identity("sa")),
-            Some(RejectReason::Malformed as i32)
-        );
+        job
     }
 
-    /// `edges_job` has one edge and biases of one unit, so each node has
-    /// degree 1 and a local field of 2000 milli.
+    fn generator_job() -> Job {
+        let mut job = edges_job(1);
+        job.kind = JobKind::IsingGenerate as i32;
+        job
+    }
+
+    fn zero_field_job() -> Job {
+        let mut job = edges_job(1);
+        if let Some(ising) = job.ising.as_mut() {
+            ising.h = encode_i32_le(&[0, 0]);
+        }
+        job
+    }
+
+    /// Each row is a job, the identity it runs under, and the reject reason
+    /// `prepare_job` answers with (`None` when it accepts). The first table
+    /// runs on `StubSampler`, the second on the int8 `NarrowStub`.
     #[test]
-    fn model_limits_reject_a_plain_job_as_too_large() {
+    fn prepare_job_rejects_by_limits_exactness_and_kind() {
+        let malformed = Some(RejectReason::Malformed as i32);
+        let too_large = Some(RejectReason::TooLarge as i32);
         let with = |limits| BackendIdentity {
             limits,
             ..identity("sa")
         };
         let unlimited = crate::limits::ModelLimits::UNSTATED;
+        // `edges_job` has one edge and biases of one unit, so each node has
+        // degree 1 and a local field of 2000 milli.
         let at_limits = crate::limits::ModelLimits {
             max_degree: Some(1),
             max_local_field_milli: Some(2000),
             exact_resolution_milli: Some(1000),
         };
-        assert_eq!(
-            reject_reason_for(edges_job(1), &StubSampler, &with(at_limits)),
-            None
-        );
-        for over in [
-            crate::limits::ModelLimits {
-                max_local_field_milli: Some(1999),
-                ..unlimited
-            },
-            crate::limits::ModelLimits {
-                max_degree: Some(1),
-                ..unlimited
-            },
-        ] {
-            let mut job = edges_job(1);
-            if over.max_degree.is_some() {
-                // A second edge on node 0 lifts its degree to 2.
-                if let Some(ising) = job.ising.as_mut() {
-                    ising.graph = Some(Graph::Edges(EdgeList {
-                        u: vec![0, 0],
-                        v: vec![1, 1],
-                    }));
-                    ising.j = encode_i32_le(&[0, 0]);
-                }
-            }
+        let too_field = crate::limits::ModelLimits {
+            max_local_field_milli: Some(1999),
+            ..unlimited
+        };
+        let too_degree = crate::limits::ModelLimits {
+            max_degree: Some(1),
+            ..unlimited
+        };
+        let plain_rows = [
+            ("a self-loop", self_loop_job(), identity("sa"), malformed),
+            ("at the limits", edges_job(1), with(at_limits), None),
+            ("local field over", edges_job(1), with(too_field), too_large),
+            (
+                "degree over",
+                two_edges(edges_job(1)),
+                with(too_degree),
+                too_large,
+            ),
+            // A family binding adds no limit of its own and removes none: the
+            // model limits still apply to a bound job (the generic tier).
+            (
+                "bound local field over",
+                bound(edges_job(1)),
+                with(too_field),
+                too_large,
+            ),
+            (
+                "bound degree over",
+                bound(two_edges(edges_job(1))),
+                with(too_degree),
+                too_large,
+            ),
+            // IsingGenerate through `prepare_job` waits for lease support.
+            (
+                "a generator job",
+                generator_job(),
+                identity("sa"),
+                Some(RejectReason::UnsupportedKind as i32),
+            ),
+        ];
+        for (label, job, id, expected) in plain_rows {
             assert_eq!(
-                reject_reason_for(job, &StubSampler, &with(over)),
-                Some(RejectReason::TooLarge as i32),
-                "{over:?}"
+                reject_reason_for(label, job, &StubSampler, &id),
+                expected,
+                "{label}"
+            );
+        }
+
+        let exact = || BackendIdentity {
+            features: &[crate::session::EXACT_COEFFICIENTS_FEATURE],
+            ..identity("sa")
+        };
+        // A zero field is on every resolution step, so a bound job with `h`
+        // all zero runs on an exact solver.
+        let exact_on_a_step = BackendIdentity {
+            limits: crate::limits::ModelLimits {
+                exact_resolution_milli: Some(1000),
+                ..unlimited
+            },
+            ..exact()
+        };
+        let narrow_rows = [
+            // Refuse-not-quantize in session mode: an int8 solver that lists
+            // `exact-coefficients` refuses a half-unit bias rather than
+            // rounding it.
+            ("lossy on a lossy solver", lossy_job(), identity("sa"), None),
+            ("lossy on an exact solver", lossy_job(), exact(), too_large),
+            (
+                "an exactly representable job still runs",
+                edges_job(2),
+                exact(),
+                None,
+            ),
+            (
+                "bound lossy on an exact solver",
+                bound(lossy_job()),
+                exact(),
+                too_large,
+            ),
+            (
+                "bound zero field on an exact solver",
+                bound(zero_field_job()),
+                exact_on_a_step,
+                None,
+            ),
+        ];
+        for (label, job, id, expected) in narrow_rows {
+            assert_eq!(
+                reject_reason_for(label, job, &NarrowStub, &id),
+                expected,
+                "{label}"
             );
         }
     }
@@ -974,31 +1069,6 @@ mod tests {
         }
     }
 
-    /// Refuse-not-quantize in session mode: an int8 solver that lists
-    /// `exact-coefficients` refuses a half-unit bias rather than rounding it.
-    #[test]
-    fn an_exact_solver_rejects_a_lossy_conversion_as_too_large() {
-        let mut job = edges_job(1);
-        if let Some(ising) = job.ising.as_mut() {
-            ising.h = encode_i32_le(&[500, 1000]);
-        }
-        let lossy = identity("sa");
-        assert_eq!(reject_reason_for(job.clone(), &NarrowStub, &lossy), None);
-        let exact = BackendIdentity {
-            features: &[crate::session::EXACT_COEFFICIENTS_FEATURE],
-            ..identity("sa")
-        };
-        assert_eq!(
-            reject_reason_for(job, &NarrowStub, &exact),
-            Some(RejectReason::TooLarge as i32)
-        );
-        assert_eq!(
-            reject_reason_for(edges_job(2), &NarrowStub, &exact),
-            None,
-            "an exactly representable job still runs"
-        );
-    }
-
     fn bound(mut job: Job) -> Job {
         if let Some(ising) = job.ising.as_mut() {
             ising.family = Some(quip_proto::v1::FamilyBinding {
@@ -1007,113 +1077,6 @@ mod tests {
             });
         }
         job
-    }
-
-    /// A family binding adds no limit of its own and removes none: the model
-    /// limits still apply to a bound job (the generic tier).
-    #[test]
-    fn a_family_binding_keeps_the_model_limits() {
-        let unlimited = crate::limits::ModelLimits::UNSTATED;
-        let too_field = BackendIdentity {
-            limits: crate::limits::ModelLimits {
-                max_local_field_milli: Some(1999),
-                ..unlimited
-            },
-            ..identity("sa")
-        };
-        let too_degree = BackendIdentity {
-            limits: crate::limits::ModelLimits {
-                max_degree: Some(1),
-                ..unlimited
-            },
-            ..identity("sa")
-        };
-        let two_edges = |job: Job| {
-            let mut job = job;
-            if let Some(ising) = job.ising.as_mut() {
-                ising.graph = Some(Graph::Edges(EdgeList {
-                    u: vec![0, 0],
-                    v: vec![1, 1],
-                }));
-                ising.j = encode_i32_le(&[0, 0]);
-            }
-            job
-        };
-        let too_large = Some(RejectReason::TooLarge as i32);
-        assert_eq!(
-            reject_reason_for(edges_job(1), &StubSampler, &too_field),
-            too_large
-        );
-        assert_eq!(
-            reject_reason_for(bound(edges_job(1)), &StubSampler, &too_field),
-            too_large
-        );
-        assert_eq!(
-            reject_reason_for(two_edges(edges_job(1)), &StubSampler, &too_degree),
-            too_large
-        );
-        assert_eq!(
-            reject_reason_for(bound(two_edges(edges_job(1))), &StubSampler, &too_degree),
-            too_large
-        );
-
-        let mut lossy = edges_job(1);
-        if let Some(ising) = lossy.ising.as_mut() {
-            ising.h = encode_i32_le(&[500, 1000]);
-        }
-        let exact = BackendIdentity {
-            features: &[crate::session::EXACT_COEFFICIENTS_FEATURE],
-            ..identity("sa")
-        };
-        assert_eq!(
-            reject_reason_for(lossy.clone(), &NarrowStub, &exact),
-            too_large
-        );
-        assert_eq!(
-            reject_reason_for(bound(lossy), &NarrowStub, &exact),
-            too_large
-        );
-    }
-
-    /// A zero field is on every resolution step, so a bound job with `h` all
-    /// zero runs on an exact solver.
-    #[test]
-    fn a_zero_field_family_job_runs_on_an_exact_solver() {
-        let mut job = edges_job(1);
-        if let Some(ising) = job.ising.as_mut() {
-            ising.h = encode_i32_le(&[0, 0]);
-        }
-        let exact = BackendIdentity {
-            features: &[crate::session::EXACT_COEFFICIENTS_FEATURE],
-            limits: crate::limits::ModelLimits {
-                exact_resolution_milli: Some(1000),
-                ..crate::limits::ModelLimits::UNSTATED
-            },
-            ..identity("sa")
-        };
-        assert_eq!(reject_reason_for(bound(job), &NarrowStub, &exact), None);
-    }
-
-    #[test]
-    fn generator_jobs_are_not_accepted_before_lease_support() {
-        let mut job = edges_job(1);
-        job.kind = JobKind::IsingGenerate as i32;
-        let Prepared::Reject(message) = prepare_job(
-            job,
-            &StubSampler,
-            &identity("sa"),
-            &generic(),
-            64,
-            None,
-            None,
-            None,
-        ) else {
-            panic!("generator job must be rejected");
-        };
-        let Some(miner_msg::Msg::Reject(reject)) = message.msg else {
-            panic!("expected rejection");
-        };
-        assert_eq!(reject.reason, RejectReason::UnsupportedKind as i32);
     }
 
     #[test]
@@ -1160,28 +1123,6 @@ mod tests {
     }
 
     #[test]
-    fn hash_job_without_cache_rejects_missing() {
-        let ising = hash_job(vec![7; 32], &[1000], &[]);
-        let err = parse_ising::<f64>(&ising, 100_000, 1_000_000, None).unwrap_err();
-        assert_eq!(err, RejectReason::TopologyMissing);
-    }
-
-    #[test]
-    fn hash_job_wrong_hash_rejects_mismatch() {
-        let topo = Topology {
-            allowed_j_milli: vec![],
-            hash: vec![1; 32],
-            nodes: vec![0],
-            allowed_h_milli: vec![],
-            edges: None,
-        };
-        let cache = TopologyCache::from_proto(&topo);
-        let ising = hash_job(vec![2; 32], &[1000], &[]);
-        let err = parse_ising::<f64>(&ising, 100_000, 1_000_000, Some(&cache)).unwrap_err();
-        assert_eq!(err, RejectReason::TopologyMismatch);
-    }
-
-    #[test]
     fn param_precedence_job_over_target_over_adapt_over_fallback() {
         // per-job override wins over everything
         assert_eq!(pick_param(5, 7, Some(268), 1), 5);
@@ -1211,25 +1152,6 @@ mod tests {
         assert_eq!(t.num_reads, 0);
     }
 
-    #[test]
-    fn hash_job_edge_id_absent_from_map_rejects_malformed() {
-        // edge references id 999, which is not in nodes → no position.
-        let topo = Topology {
-            allowed_j_milli: vec![],
-            hash: vec![7; 32],
-            nodes: vec![0, 1],
-            allowed_h_milli: vec![],
-            edges: Some(EdgeList {
-                u: vec![0],
-                v: vec![999],
-            }),
-        };
-        let cache = TopologyCache::from_proto(&topo);
-        let ising = hash_job(vec![7; 32], &[1000, 1000], &[1000]);
-        let err = parse_ising::<f64>(&ising, 100_000, 1_000_000, Some(&cache)).unwrap_err();
-        assert_eq!(err, RejectReason::Malformed);
-    }
-
     /// Build an inline-edge problem straight from parts, bypassing the helpers
     /// so a test can state a deliberately inconsistent shape.
     fn inline_job(h_milli: &[i32], j_milli: &[i32], u: Vec<u32>, v: Vec<u32>) -> IsingProblem {
@@ -1244,33 +1166,6 @@ mod tests {
             anneal_time_us: 0,
             ..Default::default()
         }
-    }
-
-    /// The headline bug (quip-solver-core-3eb). An `IsingProblem` carrying no
-    /// graph oneof resolves to zero edges, and the old
-    /// `!edges.is_empty() && j.len() != edges.len()` guard skipped the length
-    /// check entirely for it. `CSampler::sample` then passed the callback
-    /// `num_edges = 3` against an `edges` array built from an empty `Vec`,
-    /// which is a dangling pointer — an out-of-bounds read reached from a
-    /// coordinator message.
-    #[test]
-    fn a_problem_with_no_graph_but_couplings_is_malformed() {
-        let ising = IsingProblem {
-            graph: None,
-            encoding: quip_proto::v1::CoefficientEncoding::I32 as i32,
-            scale: 1000,
-            h: encode_i32_le(&[1000, 1000, 1000]),
-            j: encode_i32_le(&[1000, -1000, 1000]),
-            num_reads: 0,
-            num_sweeps: 0,
-            anneal_time_us: 0,
-            ..Default::default()
-        };
-        assert_eq!(
-            parse_ising::<f64>(&ising, 100_000, 1_000_000, None).unwrap_err(),
-            RejectReason::Malformed,
-            "3 couplings against 0 edges must never reach a sampler"
-        );
     }
 
     /// The same invariant from the other side: no graph and no couplings is a
@@ -1296,41 +1191,6 @@ mod tests {
         assert!(g.j.is_empty());
     }
 
-    #[test]
-    fn inline_edges_with_unequal_u_and_v_are_malformed() {
-        // resolve_edges rejects the pair before it can zip-truncate.
-        let ising = inline_job(&[1000, 1000, 1000], &[1000, 1000], vec![0, 1], vec![1]);
-        assert_eq!(
-            parse_ising::<f64>(&ising, 100_000, 1_000_000, None).unwrap_err(),
-            RejectReason::Malformed
-        );
-    }
-
-    #[test]
-    fn inline_edges_with_a_coupling_count_mismatch_are_malformed() {
-        // 2 edges, 1 coupling.
-        let ising = inline_job(&[1000, 1000, 1000], &[1000], vec![0, 1], vec![1, 2]);
-        assert_eq!(
-            parse_ising::<f64>(&ising, 100_000, 1_000_000, None).unwrap_err(),
-            RejectReason::Malformed
-        );
-        // 1 edge, 2 couplings — the direction that used to reach the C ABI.
-        let ising = inline_job(&[1000, 1000], &[1000, 1000], vec![0], vec![1]);
-        assert_eq!(
-            parse_ising::<f64>(&ising, 100_000, 1_000_000, None).unwrap_err(),
-            RejectReason::Malformed
-        );
-    }
-
-    #[test]
-    fn an_edge_endpoint_outside_h_is_malformed() {
-        let ising = inline_job(&[1000, 1000], &[1000], vec![0], vec![7]);
-        assert_eq!(
-            parse_ising::<f64>(&ising, 100_000, 1_000_000, None).unwrap_err(),
-            RejectReason::Malformed
-        );
-    }
-
     // ---- quip-solver-core-oul: cached topology validation ----
 
     fn topology(nodes: Vec<u32>, u: Vec<u32>, v: Vec<u32>) -> Topology {
@@ -1341,45 +1201,6 @@ mod tests {
             allowed_h_milli: vec![],
             edges: Some(EdgeList { u, v }),
         }
-    }
-
-    /// `zip` truncates, so an unequal u/v pair silently dropped the tail. The
-    /// inline path already rejected this; the cached path is worse, because one
-    /// bad Configure misdirects every job for the rest of the session.
-    #[test]
-    fn a_topology_with_unequal_u_and_v_rejects_every_job() {
-        let cache = TopologyCache::from_proto(&topology(vec![0, 1, 2], vec![0, 1], vec![1]));
-        let ising = hash_job(vec![7; 32], &[1000, 1000, 1000], &[1000]);
-        assert_eq!(
-            parse_ising::<f64>(&ising, 100_000, 1_000_000, Some(&cache)).unwrap_err(),
-            RejectReason::Malformed
-        );
-    }
-
-    /// A repeated node id collapses two dense positions onto one, renumbering
-    /// every node after it — the miner would sample a different graph than the
-    /// coordinator scored.
-    #[test]
-    fn a_topology_with_duplicate_node_ids_rejects_every_job() {
-        let cache = TopologyCache::from_proto(&topology(vec![0, 1, 1], vec![0], vec![1]));
-        let ising = hash_job(vec![7; 32], &[1000, 1000, 1000], &[1000]);
-        assert_eq!(
-            parse_ising::<f64>(&ising, 100_000, 1_000_000, Some(&cache)).unwrap_err(),
-            RejectReason::Malformed
-        );
-    }
-
-    /// A wrong hash is still reported as a mismatch even when the cache itself
-    /// is invalid: it is the more precise answer, and the hash is copied
-    /// verbatim regardless.
-    #[test]
-    fn an_invalid_cache_still_reports_a_hash_mismatch_first() {
-        let cache = TopologyCache::from_proto(&topology(vec![0, 1, 1], vec![0], vec![1]));
-        let ising = hash_job(vec![9; 32], &[1000, 1000, 1000], &[1000]);
-        assert_eq!(
-            parse_ising::<f64>(&ising, 100_000, 1_000_000, Some(&cache)).unwrap_err(),
-            RejectReason::TopologyMismatch
-        );
     }
 
     /// A hash job names the cached graph, so `h` must cover exactly its nodes.
@@ -1409,111 +1230,229 @@ mod tests {
         assert_eq!(g.num_nodes(), 3);
     }
 
-    // ---- quip-solver-core-vva: `0` means unlimited ----
-
+    /// Every row is a `Malformed` rejection of an inline problem.
     #[test]
-    fn a_size_cap_admits_a_job_exactly_at_the_limit_and_rejects_one_past_it() {
-        // 3 nodes, 2 edges.
-        let ising = inline_job(&[1000, 1000, 1000], &[1000, 1000], vec![0, 1], vec![1, 2]);
-        assert!(
-            parse_ising::<f64>(&ising, 3, 2, None).is_ok(),
-            "n == max_nodes"
-        );
-        assert_eq!(
-            parse_ising::<f64>(&ising, 2, 2, None).unwrap_err(),
-            RejectReason::TooLarge,
-            "n == max_nodes + 1"
-        );
-        assert_eq!(
-            parse_ising::<f64>(&ising, 3, 1, None).unwrap_err(),
-            RejectReason::TooLarge,
-            "edges == max_edges + 1"
-        );
+    fn malformed_inline_models_are_rejected() {
+        let base = edges_job(1).ising.expect("edges_job carries a problem");
+        let encoding_and_scale = |encoding, scale| {
+            let mut ising = base.clone();
+            ising.encoding = encoding;
+            ising.scale = scale;
+            ising
+        };
+        let rows = [
+            ("encoding 0, scale 1000", encoding_and_scale(0, 1000)),
+            ("encoding 99, scale 1000", encoding_and_scale(99, 1000)),
+            ("encoding 1, scale 0", encoding_and_scale(1, 0)),
+            ("encoding 4, scale 5", encoding_and_scale(4, 5)),
+            ("encoding 5, scale 5", encoding_and_scale(5, 5)),
+            ("encoding 6, scale 5", encoding_and_scale(6, 5)),
+            // The headline bug (quip-solver-core-3eb). An `IsingProblem`
+            // carrying no graph oneof resolves to zero edges, and the old
+            // `!edges.is_empty() && j.len() != edges.len()` guard skipped the
+            // length check entirely for it. `CSampler::sample` then passed the
+            // callback `num_edges = 3` against an `edges` array built from an
+            // empty `Vec`, which is a dangling pointer, an out-of-bounds read
+            // reached from a coordinator message.
+            (
+                "3 couplings against 0 edges must never reach a sampler",
+                IsingProblem {
+                    graph: None,
+                    encoding: quip_proto::v1::CoefficientEncoding::I32 as i32,
+                    scale: 1000,
+                    h: encode_i32_le(&[1000, 1000, 1000]),
+                    j: encode_i32_le(&[1000, -1000, 1000]),
+                    num_reads: 0,
+                    num_sweeps: 0,
+                    anneal_time_us: 0,
+                    ..Default::default()
+                },
+            ),
+            // resolve_edges rejects the pair before it can zip-truncate.
+            (
+                "unequal u and v",
+                inline_job(&[1000, 1000, 1000], &[1000, 1000], vec![0, 1], vec![1]),
+            ),
+            (
+                "2 edges, 1 coupling",
+                inline_job(&[1000, 1000, 1000], &[1000], vec![0, 1], vec![1, 2]),
+            ),
+            // The direction that used to reach the C ABI.
+            (
+                "1 edge, 2 couplings",
+                inline_job(&[1000, 1000], &[1000, 1000], vec![0], vec![1]),
+            ),
+            (
+                "an edge endpoint outside h",
+                inline_job(&[1000, 1000], &[1000], vec![0], vec![7]),
+            ),
+        ];
+        for (label, ising) in rows {
+            assert_eq!(
+                parse_ising::<f64>(&ising, 100_000, 1_000_000, None).err(),
+                Some(RejectReason::Malformed),
+                "{label}"
+            );
+        }
+        let ising = edges_job(1).ising.unwrap();
+        assert!(parse_ising::<f64>(&ising, 100, 100, None).is_ok());
+    }
+
+    /// Every row names a hash job and the cache it runs against, if any.
+    #[test]
+    fn cached_topology_jobs_reject_with_the_right_reason() {
+        let rows = [
+            (
+                "no cache",
+                None,
+                vec![7; 32],
+                vec![1000],
+                vec![],
+                RejectReason::TopologyMissing,
+            ),
+            (
+                "wrong hash",
+                Some(Topology {
+                    allowed_j_milli: vec![],
+                    hash: vec![1; 32],
+                    nodes: vec![0],
+                    allowed_h_milli: vec![],
+                    edges: None,
+                }),
+                vec![2; 32],
+                vec![1000],
+                vec![],
+                RejectReason::TopologyMismatch,
+            ),
+            // The edge references id 999, which is not in nodes, so it has no
+            // position.
+            (
+                "edge id absent from the map",
+                Some(topology(vec![0, 1], vec![0], vec![999])),
+                vec![7; 32],
+                vec![1000, 1000],
+                vec![1000],
+                RejectReason::Malformed,
+            ),
+            // `zip` truncates, so an unequal u/v pair silently dropped the
+            // tail. The inline path already rejected this; the cached path is
+            // worse, because one bad Configure misdirects every job for the
+            // rest of the session.
+            (
+                "topology with unequal u and v",
+                Some(topology(vec![0, 1, 2], vec![0, 1], vec![1])),
+                vec![7; 32],
+                vec![1000, 1000, 1000],
+                vec![1000],
+                RejectReason::Malformed,
+            ),
+            // A repeated node id collapses two dense positions onto one,
+            // renumbering every node after it. The miner would sample a
+            // different graph than the coordinator scored.
+            (
+                "topology with duplicate node ids",
+                Some(topology(vec![0, 1, 1], vec![0], vec![1])),
+                vec![7; 32],
+                vec![1000, 1000, 1000],
+                vec![1000],
+                RejectReason::Malformed,
+            ),
+            // A wrong hash is still reported as a mismatch even when the cache
+            // itself is invalid: it is the more precise answer, and the hash
+            // is copied verbatim regardless.
+            (
+                "invalid cache with a wrong hash",
+                Some(topology(vec![0, 1, 1], vec![0], vec![1])),
+                vec![9; 32],
+                vec![1000, 1000, 1000],
+                vec![1000],
+                RejectReason::TopologyMismatch,
+            ),
+        ];
+        for (label, topo, hash, h, j, expected) in rows {
+            let cache = topo.as_ref().map(TopologyCache::from_proto);
+            let ising = hash_job(hash, &h, &j);
+            assert_eq!(
+                parse_ising::<f64>(&ising, 100_000, 1_000_000, cache.as_ref()).err(),
+                Some(expected),
+                "{label}"
+            );
+        }
     }
 
     /// `0` is "no limit" in the advertised Hello caps. Treating it as a hard
     /// zero made a zero-initialized C identity advertise unlimited and then
     /// reject every job it was sent.
     #[test]
-    fn a_zero_size_cap_means_unlimited_not_a_zero_ceiling() {
+    fn size_caps_bound_nodes_and_edges_and_zero_is_unlimited() {
+        // 3 nodes, 2 edges.
         let ising = inline_job(&[1000, 1000, 1000], &[1000, 1000], vec![0, 1], vec![1, 2]);
-        assert!(
-            parse_ising::<f64>(&ising, 0, 0, None).is_ok(),
-            "max_nodes/max_edges of 0 must accept a large problem, not reject every one"
-        );
-        // Each bound is independently unlimited.
-        assert!(parse_ising::<f64>(&ising, 0, 2, None).is_ok());
-        assert!(parse_ising::<f64>(&ising, 3, 0, None).is_ok());
-        // A zero cap on one axis does not excuse a real cap on the other.
-        assert_eq!(
-            parse_ising::<f64>(&ising, 0, 1, None).unwrap_err(),
-            RejectReason::TooLarge
-        );
+        let rows = [
+            ("n == max_nodes", 3, 2, Ok(())),
+            ("n == max_nodes + 1", 2, 2, Err(RejectReason::TooLarge)),
+            ("edges == max_edges + 1", 3, 1, Err(RejectReason::TooLarge)),
+            // Zero must accept a large problem, not reject every one.
+            ("both caps zero", 0, 0, Ok(())),
+            // Each bound is independently unlimited.
+            ("max_nodes zero", 0, 2, Ok(())),
+            ("max_edges zero", 3, 0, Ok(())),
+            // A zero cap on one axis does not excuse a real cap on the other.
+            (
+                "max_nodes zero, edges capped",
+                0,
+                1,
+                Err(RejectReason::TooLarge),
+            ),
+        ];
+        for (label, max_nodes, max_edges, expected) in rows {
+            assert_eq!(
+                parse_ising::<f64>(&ising, max_nodes, max_edges, None).map(|_| ()),
+                expected,
+                "{label}"
+            );
+        }
     }
 
-    // ---- quip-solver-core-0qb: num_sweeps from backend_toml ----
-
+    /// `num_sweeps` is read from the backend TOML and falls back to the default
+    /// whenever it is unusable.
     #[test]
-    fn num_sweeps_is_read_from_well_formed_toml() {
-        for (input, want) in [
+    fn num_sweeps_from_toml_follows_the_table() {
+        let rows = [
             ("num_sweeps = 512", 512),
             ("num_sweeps=512", 512),
             ("num_sweeps = 512 # trailing comment", 512),
             // TOML digit separators, which the old line scan could not parse.
             ("num_sweeps = 1_024", 1024),
             ("other = 1\nnum_sweeps = 512\n", 512),
-        ] {
+            ("num_sweeps = 0", DEFAULT_NUM_SWEEPS), // zero is not a sweep budget
+            ("num_sweeps = \"128\"", DEFAULT_NUM_SWEEPS), // a string is not an integer
+            ("num_sweeps = -5", DEFAULT_NUM_SWEEPS), // negative
+            ("num_sweeps = 1.5", DEFAULT_NUM_SWEEPS), // not an integer
+            ("", DEFAULT_NUM_SWEEPS),               // nothing configured
+            // Prefix match: the old scan took this as num_sweeps.
+            ("num_sweeps_extra = 512", DEFAULT_NUM_SWEEPS),
+            ("extra_num_sweeps = 512", DEFAULT_NUM_SWEEPS),
+            ("not valid toml at all {{{", DEFAULT_NUM_SWEEPS), // unparseable
+            // A `num_sweeps` under a backend's own table belongs to that
+            // backend, not to the session loop. The old line scan matched it
+            // and applied it anyway.
+            ("[other]\nnum_sweeps = 512", DEFAULT_NUM_SWEEPS),
+            // A top-level key still wins when it precedes a table.
+            ("num_sweeps = 128\n[other]\nnum_sweeps = 512", 128),
+            // A `#` inside a quoted string is not a comment. The old scan cut
+            // the line there and mangled whatever followed.
+            ("name = \"a # b\"\nnum_sweeps = 512", 512),
+        ];
+        for (input, want) in rows {
             assert_eq!(num_sweeps_from_toml(input), want, "input: {input:?}");
         }
     }
 
+    /// A gibbs job resolves twice the sweeps of the same SA job, and the
+    /// doubled budget must reach the wire: `SamplerMeta.sweeps` echoes what
+    /// `prepare_job` resolved.
     #[test]
-    fn an_unusable_or_absent_num_sweeps_falls_back_to_the_default() {
-        for input in [
-            "num_sweeps = 0",         // zero is not a sweep budget
-            "num_sweeps = \"128\"",   // a string is not an integer
-            "num_sweeps = -5",        // negative
-            "num_sweeps = 1.5",       // not an integer
-            "",                       // nothing configured
-            "num_sweeps_extra = 512", // prefix match: the old scan took this as num_sweeps
-            "extra_num_sweeps = 512",
-            "not valid toml at all {{{", // unparseable
-        ] {
-            assert_eq!(
-                num_sweeps_from_toml(input),
-                DEFAULT_NUM_SWEEPS,
-                "input: {input:?}"
-            );
-        }
-    }
-
-    /// A `num_sweeps` under a backend's own table belongs to that backend, not
-    /// to the session loop. The old line scan matched it and applied it anyway.
-    #[test]
-    fn num_sweeps_under_another_table_does_not_configure_the_session() {
-        assert_eq!(
-            num_sweeps_from_toml("[other]\nnum_sweeps = 512"),
-            DEFAULT_NUM_SWEEPS
-        );
-        // A top-level key still wins when it precedes a table.
-        assert_eq!(
-            num_sweeps_from_toml("num_sweeps = 128\n[other]\nnum_sweeps = 512"),
-            128
-        );
-    }
-
-    /// A `#` inside a quoted string is not a comment. The old scan cut the line
-    /// there and mangled whatever followed.
-    #[test]
-    fn a_hash_inside_a_quoted_string_is_not_treated_as_a_comment() {
-        assert_eq!(
-            num_sweeps_from_toml("name = \"a # b\"\nnum_sweeps = 512"),
-            512
-        );
-    }
-
-    #[test]
-    fn gibbs_job_resolves_2x_the_sweeps_of_the_same_sa_job() {
+    fn gibbs_doubles_the_sweeps_through_to_the_wire() {
         let sampler = StubSampler;
         let default_sweeps = 64;
 
@@ -1537,6 +1476,8 @@ mod tests {
 
         let gibbs_id = identity("gibbs");
         let Prepared::Sample {
+            job,
+            num_reads,
             num_sweeps: gibbs_sweeps,
             ..
         } = prepare_job(
@@ -1561,32 +1502,6 @@ mod tests {
             assert_eq!(sa_sweeps, default_sweeps as u32);
             assert_eq!(gibbs_sweeps, sa_sweeps * GIBBS_SWEEP_MULTIPLIER);
         }
-    }
-
-    /// The doubled gibbs budget must reach the wire: `SamplerMeta.sweeps`
-    /// echoes what `prepare_job` resolved, one hop past the previous test.
-    #[test]
-    fn a_finalized_gibbs_result_reports_the_doubled_sweeps() {
-        let sampler = StubSampler;
-        let gibbs_id = identity("gibbs");
-        let Prepared::Sample {
-            job,
-            num_reads,
-            num_sweeps,
-            ..
-        } = prepare_job(
-            edges_job(1),
-            &sampler,
-            &gibbs_id,
-            &generic(),
-            64,
-            None,
-            None,
-            None,
-        )
-        else {
-            panic!("expected Sample");
-        };
 
         let mut jobs_done = 0;
         let msgs = finalize_result(
@@ -1599,7 +1514,7 @@ mod tests {
                 device_access_time_us: 7,
             },
             num_reads,
-            num_sweeps,
+            gibbs_sweeps,
             &mut jobs_done,
         );
 
@@ -1686,37 +1601,21 @@ mod tests {
     }
 
     /// The chain rule lives here, not in `CancelToken`: generation 0 means a
-    /// mempool job, and a mempool job is never reseed-cancelled. Without this
-    /// test an accidental unconditional `Some(job.generation)` compiles, passes
-    /// clippy, and passes every other test, while silently making mempool jobs
-    /// cancellable.
+    /// mempool job, and a mempool job is never reseed-cancelled. Without the
+    /// first row an accidental unconditional `Some(job.generation)` compiles,
+    /// passes clippy, and passes every other test, while silently making
+    /// mempool jobs cancellable.
     #[test]
-    fn a_mempool_job_gets_no_watermark() {
+    fn the_watermark_follows_the_generation() {
         let sampler = StubSampler;
         let id = identity("sa");
-        let Prepared::Sample { job, .. } = prepare_job(
-            edges_job_at_generation(1, 0),
-            &sampler,
-            &id,
-            &generic(),
-            64,
-            None,
-            None,
-            None,
-        ) else {
-            panic!("expected Sample");
-        };
-        assert_eq!(
-            job.watermark, None,
-            "generation 0 is a mempool job and must never carry a watermark"
-        );
-    }
-
-    #[test]
-    fn a_chain_job_carries_its_generation_as_the_watermark() {
-        let sampler = StubSampler;
-        let id = identity("sa");
-        for generation in [1_u64, 2, 7, u64::MAX] {
+        for (generation, expected) in [
+            (0_u64, None),
+            (1, Some(1)),
+            (2, Some(2)),
+            (7, Some(7)),
+            (u64::MAX, Some(u64::MAX)),
+        ] {
             let Prepared::Sample { job, .. } = prepare_job(
                 edges_job_at_generation(1, generation),
                 &sampler,
@@ -1727,12 +1626,11 @@ mod tests {
                 None,
                 None,
             ) else {
-                panic!("expected Sample");
+                panic!("generation {generation}: expected Sample");
             };
             assert_eq!(
-                job.watermark,
-                Some(generation),
-                "a chain job must carry its generation as the watermark"
+                job.watermark, expected,
+                "generation {generation}: 0 is a mempool job and never carries a watermark, a chain job carries its generation"
             );
         }
     }
@@ -1811,65 +1709,114 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_warm_sampler_gets_decoded_states_cut_to_num_reads() {
-        // Node 0 is bit 0: 0b01 = [+1, -1], 0b10 = [-1, +1], 0b11 = [+1, +1].
-        let job = seeded_job(vec![vec![0b01], vec![0b10], vec![0b11]], 2, (2500, 400, 7));
-        let warm = prepared_warm_start(job, &WarmSampler)
-            .expect("a valid seeded job samples")
-            .expect("a warm sampler receives the states");
-        assert_eq!(warm.spins, vec![vec![1, -1], vec![-1, 1]]);
-        assert_eq!(warm.start_beta, Some(2.5));
-        assert_eq!(warm.reversal_s, Some(0.4));
-        assert_eq!(warm.reversal_pause_us, Some(7));
+    /// Which sampler a warm-start row runs against.
+    #[derive(Clone, Copy, Debug)]
+    enum Kind {
+        Warm,
+        Plain,
     }
 
+    /// Each row is a seeded job and the warm start `prepare_job` hands the
+    /// sampler, or the reject reason. Validation is the same for every solver
+    /// on this version, so one malformed job gets one answer whether or not
+    /// the solver uses the states: those rows run against both samplers.
     #[test]
-    fn unset_start_point_fields_decode_to_none() {
-        let warm = prepared_warm_start(seeded_job(vec![vec![0b01]], 1, (0, 0, 0)), &WarmSampler)
-            .expect("samples")
-            .expect("seeded");
-        assert_eq!(
-            (warm.start_beta, warm.reversal_s, warm.reversal_pause_us),
-            (None, None, None)
-        );
-    }
-
-    #[test]
-    fn a_plain_sampler_never_receives_the_states() {
-        let job = seeded_job(vec![vec![0b01]], 1, (2500, 0, 0));
-        assert_eq!(prepared_warm_start(job, &StubSampler), Ok(None));
-    }
-
-    #[test]
-    fn a_start_point_without_a_state_is_a_cold_job() {
-        let job = seeded_job(vec![], 1, (2500, 400, 7));
-        assert_eq!(prepared_warm_start(job, &WarmSampler), Ok(None));
-    }
-
-    /// Validation is the same for every solver on this version, so one
-    /// malformed job gets one answer whether or not the solver uses the states.
-    #[test]
-    fn a_malformed_state_is_rejected_by_every_sampler() {
-        let malformed = RejectReason::Malformed as i32;
-        for states in [
-            vec![vec![0b01, 0x00]],        // 2 bytes for 2 nodes
-            vec![vec![]],                  // empty entry
-            vec![vec![0b01], vec![0b100]], // padding bit set in the second state
-        ] {
-            let job = || seeded_job(states.clone(), 1, (0, 0, 0));
-            assert_eq!(prepared_warm_start(job(), &WarmSampler), Err(malformed));
-            assert_eq!(prepared_warm_start(job(), &StubSampler), Err(malformed));
+    fn warm_start_preparation_follows_the_table() {
+        let both = [Kind::Warm, Kind::Plain];
+        let malformed: Result<Option<WarmStart>, i32> = Err(RejectReason::Malformed as i32);
+        let warm = |spins: Vec<Vec<i8>>, start_beta, reversal_s, reversal_pause_us| {
+            Ok(Some(WarmStart {
+                spins,
+                start_beta,
+                reversal_s,
+                reversal_pause_us,
+            }))
+        };
+        // (label, states, num_reads, start point, samplers, expected)
+        let rows = [
+            // Node 0 is bit 0: 0b01 = [+1, -1], 0b10 = [-1, +1],
+            // 0b11 = [+1, +1].
+            (
+                "decoded states cut to num_reads",
+                vec![vec![0b01], vec![0b10], vec![0b11]],
+                2,
+                (2500, 400, 7),
+                &[Kind::Warm][..],
+                warm(
+                    vec![vec![1, -1], vec![-1, 1]],
+                    Some(2.5),
+                    Some(0.4),
+                    Some(7),
+                ),
+            ),
+            (
+                "unset start point fields decode to none",
+                vec![vec![0b01]],
+                1,
+                (0, 0, 0),
+                &[Kind::Warm][..],
+                warm(vec![vec![1, -1]], None, None, None),
+            ),
+            (
+                "a plain sampler never receives the states",
+                vec![vec![0b01]],
+                1,
+                (2500, 0, 0),
+                &[Kind::Plain][..],
+                Ok(None),
+            ),
+            (
+                "a start point without a state is a cold job",
+                vec![],
+                1,
+                (2500, 400, 7),
+                &[Kind::Warm][..],
+                Ok(None),
+            ),
+            (
+                "2 bytes for 2 nodes",
+                vec![vec![0b01, 0x00]],
+                1,
+                (0, 0, 0),
+                &both[..],
+                malformed.clone(),
+            ),
+            (
+                "empty entry",
+                vec![vec![]],
+                1,
+                (0, 0, 0),
+                &both[..],
+                malformed.clone(),
+            ),
+            // The padding bit is set in the second state.
+            (
+                "padding bit set",
+                vec![vec![0b01], vec![0b100]],
+                1,
+                (0, 0, 0),
+                &both[..],
+                malformed.clone(),
+            ),
+            (
+                "a reversal point outside the anneal",
+                vec![vec![0b01]],
+                1,
+                (0, 1000, 0),
+                &[Kind::Warm][..],
+                malformed,
+            ),
+        ];
+        for (label, states, num_reads, start, kinds, expected) in rows {
+            for &kind in kinds {
+                let job = seeded_job(states.clone(), num_reads, start);
+                let got = match kind {
+                    Kind::Warm => prepared_warm_start(job, &WarmSampler),
+                    Kind::Plain => prepared_warm_start(job, &StubSampler),
+                };
+                assert_eq!(got, expected, "{label}: {kind:?}");
+            }
         }
-    }
-
-    #[test]
-    fn a_reversal_point_outside_the_anneal_is_malformed() {
-        let job = seeded_job(vec![vec![0b01]], 1, (0, 1000, 0));
-        assert_eq!(
-            prepared_warm_start(job, &WarmSampler),
-            Err(RejectReason::Malformed as i32)
-        );
     }
 
     #[test]

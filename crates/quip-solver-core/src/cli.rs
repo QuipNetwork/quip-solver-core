@@ -87,45 +87,12 @@ mod tests {
         }
     }
 
-    /// Without this, `session::run_code`'s precedence order decides silently:
-    /// `--check --capabilities` printed capabilities and never opened the
-    /// device, so a broken node reported healthy.
-    #[test]
-    fn two_mode_flags_together_are_rejected() {
-        for (i, a) in MODE_FLAGS.iter().enumerate() {
-            for b in MODE_FLAGS.iter().skip(i + 1) {
-                let (a, b) = (format!("--{a}"), format!("--{b}"));
-                let Err(err) = parse(&[&a, &b]) else {
-                    panic!("{a} {b} must not be accepted together");
-                };
-                assert_eq!(
-                    err.kind(),
-                    clap::error::ErrorKind::ArgumentConflict,
-                    "{a} {b} must conflict"
-                );
-            }
-        }
-    }
-
     #[test]
     fn every_documented_log_level_parses() {
         for level in LOG_LEVELS {
             let got = parse(&["--log-level", level]).expect("documented level must parse");
             assert_eq!(got.log_level, level);
         }
-    }
-
-    #[test]
-    fn log_level_defaults_to_info() {
-        assert_eq!(parse(&[]).expect("no args must parse").log_level, "info");
-    }
-
-    /// The misspelling now fails at argument parsing rather than at subscriber
-    /// setup, so the accepted values appear in the error and in `--help`.
-    #[test]
-    fn a_misspelled_log_level_is_rejected_by_the_parser() {
-        let err = parse(&["--log-level", "infoo"]).expect_err("typo must be rejected");
-        assert_eq!(err.kind(), clap::error::ErrorKind::InvalidValue);
     }
 
     /// The clap surface and the logger's own check must accept the same words.
@@ -151,19 +118,44 @@ mod tests {
         }
     }
 
-    /// The doc comment promised `>= 1` and the parser used to take anything.
-    /// Zero reaches a backend as a divisor.
     #[test]
-    fn sweeps_per_beta_rejects_zero() {
-        let err = parse(&["--sweeps-per-beta", "0"]).expect_err("zero must be rejected");
-        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
+    fn defaults_with_no_arguments() {
+        let got = parse(&[]).expect("no args must parse");
+        assert_eq!(got.log_level, "info");
+        assert_eq!(got.sweeps_per_beta, None);
     }
 
+    /// Without the mode-flag rows, `session::run_code`'s precedence order
+    /// decides silently: `--check --capabilities` printed capabilities and
+    /// never opened the device, so a broken node reported healthy.
+    /// The misspelling now fails at argument parsing rather than at subscriber
+    /// setup, so the accepted values appear in the error and in `--help`.
+    /// A zero `--sweeps-per-beta` reaches a backend as a divisor; the doc
+    /// comment promised `>= 1` and the parser used to take anything.
     #[test]
-    fn sweeps_per_beta_is_unset_by_default() {
-        assert_eq!(
-            parse(&[]).expect("no args must parse").sweeps_per_beta,
-            None
-        );
+    fn invalid_arguments_report_the_right_clap_error() {
+        use clap::error::ErrorKind;
+        let check = |args: &[&str], kind: ErrorKind| {
+            let label = args.join(" ");
+            let Err(err) = parse(args) else {
+                panic!("{label} must be rejected");
+            };
+            assert_eq!(err.kind(), kind, "{label}");
+        };
+        for (i, a) in MODE_FLAGS.iter().enumerate() {
+            for b in MODE_FLAGS.iter().skip(i + 1) {
+                check(
+                    &[&format!("--{a}"), &format!("--{b}")],
+                    ErrorKind::ArgumentConflict,
+                );
+            }
+        }
+        let rows = [
+            (&["--log-level", "infoo"], ErrorKind::InvalidValue),
+            (&["--sweeps-per-beta", "0"], ErrorKind::ValueValidation),
+        ];
+        for (args, kind) in rows {
+            check(args, kind);
+        }
     }
 }

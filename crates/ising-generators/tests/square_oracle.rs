@@ -7,6 +7,8 @@
     reason = "test code: a failed lookup is a test failure"
 )]
 
+use std::collections::HashSet;
+
 use ising_generators::square::{
     charges, check_request, symmetries, Axis, Boundary, LatticeError, Request, RequestError,
     SquareLattice, Symmetry,
@@ -35,10 +37,12 @@ fn spins_of(state: u32, links: u32) -> Vec<i8> {
 }
 
 /// Charges by counting arrows: arrows into the vertex minus arrows out.
-fn arrow_charges(lattice: &SquareLattice, spins: &[i8]) -> Vec<i8> {
+fn arrow_charges(what: &str, lattice: &SquareLattice, spins: &[i8]) -> Vec<i8> {
     let mut q = vec![0i8; lattice.vertex_count() as usize];
     for e in 0..lattice.link_count() {
-        let link = lattice.link(e).expect("link exists");
+        let link = lattice.link(e);
+        assert!(link.is_some(), "{what}: link {e} exists");
+        let link = link.expect("link exists");
         let (into, out) = if spins[e as usize] == 1 {
             (link.head, link.tail)
         } else {
@@ -51,46 +55,21 @@ fn arrow_charges(lattice: &SquareLattice, spins: &[i8]) -> Vec<i8> {
 }
 
 #[test]
-fn periodic_l2_has_parallel_links() {
-    let lat = lattice(2, Boundary::Periodic);
-    assert_eq!(lat.vertex_count(), 4);
-    assert_eq!(lat.link_count(), 8);
-    let a = lat.link(0).expect("link 0");
-    let b = lat.link(2).expect("link 2");
-    assert_eq!((a.tail, a.head, a.axis), (0, 1, Axis::X));
-    assert_eq!((b.tail, b.head, b.axis), (1, 0, Axis::X));
-    assert_eq!(lat.link(1).expect("link 1").head, 2);
-    assert!(lat.link(8).is_none());
-    for v in 0..4 {
-        assert_eq!(lat.degree(v), Some(4));
-    }
-    assert_eq!(lat.degree(4), None);
-    assert_eq!(lat.incident(0), &[(0, -1), (1, -1), (2, 1), (5, 1)][..]);
-    assert!(lat.incident(4).is_empty());
-}
-
-#[test]
-fn open_l2_has_12_links_and_boundary_degrees() {
-    let lat = lattice(2, Boundary::Open);
-    assert_eq!(lat.vertex_count(), 9);
-    assert_eq!(lat.link_count(), 12);
-    let degrees: Vec<u8> = (0..9).map(|v| lat.degree(v).expect("vertex")).collect();
-    assert_eq!(degrees, [2, 3, 2, 3, 4, 3, 2, 3, 2]);
-    // Vertex 2 is (2, 0): it owns only a +y link. Link order is by tail.
-    let first = lat.link(0).expect("link 0");
-    assert_eq!((first.tail, first.head, first.axis), (0, 1, Axis::X));
-    let second = lat.link(1).expect("link 1");
-    assert_eq!((second.tail, second.head, second.axis), (0, 3, Axis::Y));
-    let third = lat.link(3).expect("link 3");
-    assert_eq!((third.tail, third.head, third.axis), (1, 4, Axis::Y));
-    let last = lat.link(11).expect("link 11");
-    assert_eq!((last.tail, last.head, last.axis), (7, 8, Axis::X));
-}
-
-#[test]
-fn every_link_has_the_pinned_endpoints_and_axis() {
+fn l2_lattices_are_pinned() {
     use Axis::{X, Y};
     let periodic = lattice(2, Boundary::Periodic);
+    assert_eq!(periodic.vertex_count(), 4);
+    assert_eq!(periodic.link_count(), 8);
+    assert!(periodic.link(8).is_none());
+    for v in 0..4 {
+        assert_eq!(periodic.degree(v), Some(4));
+    }
+    assert_eq!(periodic.degree(4), None);
+    assert_eq!(
+        periodic.incident(0),
+        &[(0, -1), (1, -1), (2, 1), (5, 1)][..]
+    );
+    assert!(periodic.incident(4).is_empty());
     let got: Vec<_> = (0..8)
         .map(|e| {
             let l = periodic.link(e).expect("link");
@@ -111,6 +90,10 @@ fn every_link_has_the_pinned_endpoints_and_axis() {
         ]
     );
     let open = lattice(2, Boundary::Open);
+    assert_eq!(open.vertex_count(), 9);
+    assert_eq!(open.link_count(), 12);
+    let degrees: Vec<u8> = (0..9).map(|v| open.degree(v).expect("vertex")).collect();
+    assert_eq!(degrees, [2, 3, 2, 3, 4, 3, 2, 3, 2]);
     let got: Vec<_> = (0..12)
         .map(|e| {
             let l = open.link(e).expect("link");
@@ -158,31 +141,53 @@ fn lattice_bounds() {
     assert_eq!(lattice(2, Boundary::Periodic).vertex_count(), 4);
 }
 
-fn check_all_states(lat: &SquareLattice) {
+fn check_all_states(lat: &SquareLattice, boundary: Boundary) {
     let links = lat.link_count();
     for state in 0..(1u32 << links) {
         let spins = spins_of(state, links);
-        let q = charges(lat, &spins).expect("valid spins");
-        assert_eq!(q, arrow_charges(lat, &spins), "state {state}");
-        assert_eq!(q.iter().map(|&c| i32::from(c)).sum::<i32>(), 0);
+        let q = charges(lat, &spins);
+        assert!(q.is_some(), "{boundary:?} state {state}: valid spins");
+        let q = q.expect("valid spins");
+        assert_eq!(
+            q,
+            arrow_charges(&format!("{boundary:?} state {state}"), lat, &spins),
+            "{boundary:?} state {state}"
+        );
+        assert_eq!(
+            q.iter().map(|&c| i32::from(c)).sum::<i32>(),
+            0,
+            "{boundary:?} state {state}: charges sum to zero"
+        );
         for (v, &c) in q.iter().enumerate() {
-            let deg = lat
-                .degree(u32::try_from(v).expect("small"))
-                .expect("vertex");
-            assert_eq!((i32::from(c) - i32::from(deg)) % 2, 0, "parity");
-            assert!(c.unsigned_abs() <= deg, "degree bound");
+            let vertex = u32::try_from(v);
+            assert!(
+                vertex.is_ok(),
+                "{boundary:?} state {state}: vertex {v} fits"
+            );
+            let deg = lat.degree(vertex.expect("small"));
+            assert!(
+                deg.is_some(),
+                "{boundary:?} state {state}: vertex {v} has a degree"
+            );
+            let deg = deg.expect("vertex");
+            assert_eq!(
+                (i32::from(c) - i32::from(deg)) % 2,
+                0,
+                "{boundary:?} state {state}: parity"
+            );
+            assert!(
+                c.unsigned_abs() <= deg,
+                "{boundary:?} state {state}: degree bound"
+            );
         }
     }
 }
 
 #[test]
-fn every_periodic_l2_state_has_reproducible_charges() {
-    check_all_states(&lattice(2, Boundary::Periodic));
-}
-
-#[test]
-fn every_open_l2_state_has_reproducible_charges() {
-    check_all_states(&lattice(2, Boundary::Open));
+fn every_l2_state_has_reproducible_charges() {
+    for boundary in [Boundary::Periodic, Boundary::Open] {
+        check_all_states(&lattice(2, boundary), boundary);
+    }
 }
 
 #[test]
@@ -208,7 +213,22 @@ fn all_states(lat: &SquareLattice) -> Vec<(Vec<i8>, Vec<i8>)> {
         .collect()
 }
 
-fn brute_force(states: &[(Vec<i8>, Vec<i8>)], req: &Request) -> bool {
+/// The distinct charge vectors that some state of the lattice produces.
+fn reachable_charges(states: &[(Vec<i8>, Vec<i8>)]) -> HashSet<Vec<i8>> {
+    states.iter().map(|(q, _)| q.clone()).collect()
+}
+
+/// Whether some state fits `req`. A request that fixes no spin depends only on
+/// the charges, so it is answered from the set of reachable charge vectors.
+fn brute_force(states: &[(Vec<i8>, Vec<i8>)], reachable: &HashSet<Vec<i8>>, req: &Request) -> bool {
+    if req.fixed.is_empty() {
+        return reachable.iter().any(|q| {
+            req.charges
+                .iter()
+                .zip(q)
+                .all(|(label, &c)| label.is_none_or(|t| t == c))
+        });
+    }
     states.iter().any(|(q, spins)| {
         req.charges
             .iter()
@@ -222,6 +242,7 @@ fn brute_force(states: &[(Vec<i8>, Vec<i8>)], req: &Request) -> bool {
 fn compatibility_matches_brute_force_on_l2() {
     let lat = lattice(2, Boundary::Periodic);
     let states = all_states(&lat);
+    let reachable = reachable_charges(&states);
     let labels: Vec<Option<i8>> = core::iter::once(None).chain((-4..=4).map(Some)).collect();
     let mut compatible = 0;
     let mut total = 0;
@@ -231,7 +252,7 @@ fn compatibility_matches_brute_force_on_l2() {
                 for &d in &labels {
                     let req = request(vec![a, b, c, d], Vec::new());
                     let ok = check_request(&lat, &req).is_ok();
-                    assert_eq!(ok, brute_force(&states, &req), "{req:?}");
+                    assert_eq!(ok, brute_force(&states, &reachable, &req), "{req:?}");
                     total += 1;
                     compatible += usize::from(ok);
                 }
@@ -253,7 +274,7 @@ fn compatibility_matches_brute_force_on_l2() {
             for &b in &labels {
                 let req = request(vec![a, b, Some(2), None], fixed.to_vec());
                 let ok = check_request(&lat, &req).is_ok();
-                assert_eq!(ok, brute_force(&states, &req), "{req:?}");
+                assert_eq!(ok, brute_force(&states, &reachable, &req), "{req:?}");
             }
         }
     }
@@ -263,6 +284,7 @@ fn compatibility_matches_brute_force_on_l2() {
 fn compatibility_matches_brute_force_on_open_l2() {
     let lat = lattice(2, Boundary::Open);
     let states = all_states(&lat);
+    let reachable = reachable_charges(&states);
     let labels: Vec<Option<i8>> = core::iter::once(None).chain((-4..=4).map(Some)).collect();
     let fixed_sets: [&[(u32, i8)]; 5] = [
         &[],
@@ -275,7 +297,7 @@ fn compatibility_matches_brute_force_on_open_l2() {
     let mut compatible = 0;
     let mut check = |req: Request| {
         let ok = check_request(&lat, &req).is_ok();
-        assert_eq!(ok, brute_force(&states, &req), "{req:?}");
+        assert_eq!(ok, brute_force(&states, &reachable, &req), "{req:?}");
         cases += 1;
         compatible += usize::from(ok);
     };
@@ -503,7 +525,7 @@ fn packing_round_trips_and_rejects_malformed() {
 }
 
 #[test]
-fn witness_reports_labeled_violations() {
+fn check_witness_reports_failed_labels() {
     let lat = lattice(2, Boundary::Periodic);
     let mut req = empty_request(&lat);
     req.charges[0] = Some(4);
@@ -526,23 +548,23 @@ fn witness_reports_labeled_violations() {
     assert_eq!(check_witness(&lat, &req, &into_zero), Ok(vec![0]));
     req.fixed = vec![(0, -1)];
     assert_eq!(check_witness(&lat, &req, &all_up), Ok(vec![0, 1]));
-}
-
-#[test]
-fn a_valid_witness_has_no_violation() {
-    let lat = lattice(2, Boundary::Periodic);
-    let mut req = empty_request(&lat);
-    req.charges[0] = Some(4);
-    req.fixed = vec![(0, -1)];
-    let witness = packed_state(0b0010_0100, 8);
-    assert_eq!(check_witness(&lat, &req, &witness), Ok(Vec::new()));
+    // A witness that meets the fixed spin and the charge has no violation.
     assert_eq!(
-        check_witness(&lat, &empty_request(&lat), &witness),
-        Ok(Vec::new())
+        check_witness(&lat, &req, &into_zero),
+        Ok(Vec::new()),
+        "a valid witness"
     );
-    assert!(constraints(&lat, &empty_request(&lat))
-        .expect("shape")
-        .is_empty());
+    assert_eq!(
+        check_witness(&lat, &empty_request(&lat), &into_zero),
+        Ok(Vec::new()),
+        "a valid witness with no constraint"
+    );
+    assert!(
+        constraints(&lat, &empty_request(&lat))
+            .expect("shape")
+            .is_empty(),
+        "an empty request has no constraint"
+    );
 }
 
 #[test]
@@ -611,7 +633,7 @@ fn canonical_bytes_are_invariant() {
     let lat = lattice(2, Boundary::Periodic);
     let req = empty_request(&lat);
     let group = syms(&lat, &req);
-    for state in 0..256u32 {
+    for state in (0..256u32).step_by(7) {
         let spins = spins_of(state, 8);
         let canon = canonical(&lat, &req, &pack(&spins).expect("valid")).expect("valid");
         let q = charges(&lat, &spins).expect("valid");

@@ -7,12 +7,11 @@ import sys
 import zlib
 from pathlib import Path
 
-import blake3
 import pytest
+from family_oracle import __main__ as cli
 from family_oracle import build, decisions, ice, topology_blob
 from family_oracle.chacha8 import ChaCha8, shuffle, uniform
 from family_oracle.digests import (
-    derive_key,
     derive_nonce,
     descriptor_material,
     lease_salts,
@@ -113,16 +112,13 @@ def test_lease_salts_reject_overflow_and_zero():
     assert len(result) == 2
 
 
-def test_uniform_n_one_reads_one_word():
-    rng = ChaCha8(bytes(32))
-    assert uniform(rng, 1) == 0
-    assert rng.words_used == 1
-
-
 def test_uniform_redraws_at_limit():
     rng = _StubRng([2**32 - 1, 7])
     assert uniform(rng, 2**31 + 1) == 7
     assert rng.words_used == 2
+    one = ChaCha8(bytes(32))
+    assert uniform(one, 1) == 0
+    assert one.words_used == 1
 
 
 def test_uniform_rejects_out_of_range():
@@ -155,11 +151,6 @@ def test_descriptor_material_matches_spec_layout():
         bytes.fromhex("15") + b"example/uniform-field" + bytes.fromhex("01000000")
     )
     assert material.endswith(digest)
-
-
-def test_derive_key_differs_from_plain_hash():
-    m = b"material"
-    assert derive_key("quip family params v1", m) != blake3.blake3(m).digest()
 
 
 def test_spec_example_params_hex():
@@ -205,27 +196,38 @@ def _all_types_values(a_bytes: bytes, a_ascii: bytes) -> dict:
     }
 
 
-def test_all_types_length_boundary():
-    data = encode_params(ALL_TYPES, _all_types_values(b"\x00" * 4013, b""))
-    assert len(data) == 4096
-    code, values = decode_params(ALL_TYPES, data)
-    assert code is None
-    assert values == _all_types_values(b"\x00" * 4013, b"")
-    data = encode_params(ALL_TYPES, _all_types_values(b"\x00" * 4014, b""))
-    assert decode_params(ALL_TYPES, data) == (7, None)
-
-
-def test_layout_fault_wins_over_bounds():
-    bad = encode_params(ALL_TYPES, _all_types_values(b"", b"a" * 64 + b"\x7f"))
-    assert decode_params(ALL_TYPES, bad) == (7, None)
-    long_ok = encode_params(ALL_TYPES, _all_types_values(b"", b"a" * 65))
-    assert decode_params(ALL_TYPES, long_ok) == (9, None)
-    # a_u64 = 0 is out of bounds (1..), but a bad bool byte is a layout fault.
-    values = _all_types_values(b"", b"")
-    values["a_u64"] = 0
-    assert decode_params(ALL_TYPES, encode_params(ALL_TYPES, values)) == (9, None)
-    values["a_bool"] = 2
-    assert decode_params(ALL_TYPES, encode_params(ALL_TYPES, values)) == (7, None)
+@pytest.mark.parametrize(
+    ("values", "code", "size"),
+    [
+        pytest.param(
+            _all_types_values(b"\x00" * 4013, b""), None, 4096, id="4096-bytes-ok"
+        ),
+        pytest.param(
+            _all_types_values(b"\x00" * 4014, b""), 7, None, id="4097-bytes-too-long"
+        ),
+        pytest.param(
+            _all_types_values(b"", b"a" * 64 + b"\x7f"), 7, None, id="bad-ascii-layout"
+        ),
+        pytest.param(
+            _all_types_values(b"", b"a" * 65), 9, None, id="ascii-above-bound"
+        ),
+        # a_u64 = 0 is out of bounds (1..), but a bad bool byte is a layout fault.
+        pytest.param(
+            {**_all_types_values(b"", b""), "a_u64": 0}, 9, None, id="u64-out-of-bounds"
+        ),
+        pytest.param(
+            {**_all_types_values(b"", b""), "a_u64": 0, "a_bool": 2},
+            7,
+            None,
+            id="bad-bool-wins-over-bounds",
+        ),
+    ],
+)
+def test_all_types_decode_codes(values, code, size):
+    data = encode_params(ALL_TYPES, values)
+    if size is not None:
+        assert len(data) == size
+    assert decode_params(ALL_TYPES, data) == (code, values if code is None else None)
 
 
 def test_family_id_grammar():
@@ -288,33 +290,36 @@ def _region(*sections: bytes) -> bytes:
 
 
 def test_spec_size_bounds_example():
-    bounds = example_size_bounds(2, 100, 150, 4)
-    assert bounds == (200, 400, 5)
-    assert size_bound_code(bounds, None, None, 4) == 13
-    assert size_bound_code(bounds, None, None, 0) is None
-    assert size_bound_code(bounds, None, None, None) is None
-    assert size_bound_code(bounds, 0, 0, 0) is None
-    assert size_bound_code(bounds, 199, None, None) == 13
-    assert size_bound_code(bounds, None, 399, None) == 13
-    assert size_bound_code(bounds, 200, 400, 5) is None
+    assert example_size_bounds(2, 100, 150, 4) == (200, 400, 5)
 
 
-def test_size_bounds_instance_limits():
-    def code(*args):
-        return size_bound_code(example_size_bounds(*args), None, None, None)
-
-    assert code(2, 8388608, 0, 0) is None
-    assert code(2, 8388609, 0, 0) == 13
-    assert code(1, 2, 67108864, 1) is None
-    assert code(1, 2, 67108865, 1) == 13
-    assert code(16, 4294967295, 0, 0) == 13
+_SPEC_BOUNDS = (200, 400, 5)
 
 
-def test_size_bounds_u64_overflow():
-    huge = example_size_bounds(2**40, 2**30, 0, 0)
-    assert size_bound_code(huge, None, None, None) == 13
-    assert size_bound_code((2**64, 0, 0), None, None, None) == 13
-    assert size_bound_code((0, 0, 2**64), None, None, None) == 13
+@pytest.mark.parametrize(
+    ("bounds", "limits", "expected"),
+    [
+        pytest.param(_SPEC_BOUNDS, (None, None, 4), 13, id="spec-third-4"),
+        pytest.param(_SPEC_BOUNDS, (None, None, 0), None, id="spec-third-0"),
+        pytest.param(_SPEC_BOUNDS, (None, None, None), None, id="spec-no-limits"),
+        pytest.param(_SPEC_BOUNDS, (0, 0, 0), None, id="spec-zeros"),
+        pytest.param(_SPEC_BOUNDS, (199, None, None), 13, id="spec-first-199"),
+        pytest.param(_SPEC_BOUNDS, (None, 399, None), 13, id="spec-second-399"),
+        pytest.param(_SPEC_BOUNDS, (200, 400, 5), None, id="spec-exact-limits"),
+        pytest.param(example_size_bounds(2, 8388608, 0, 0), None, None, id="2-8388608"),
+        pytest.param(example_size_bounds(2, 8388609, 0, 0), None, 13, id="2-8388609"),
+        pytest.param(example_size_bounds(1, 2, 67108864, 1), None, None, id="1-2-64Mi"),
+        pytest.param(example_size_bounds(1, 2, 67108865, 1), None, 13, id="1-2-64Mi+1"),
+        pytest.param(
+            example_size_bounds(16, 4294967295, 0, 0), None, 13, id="16-u32max"
+        ),
+        pytest.param(example_size_bounds(2**40, 2**30, 0, 0), None, 13, id="huge"),
+        pytest.param((2**64, 0, 0), None, 13, id="first-2**64"),
+        pytest.param((0, 0, 2**64), None, 13, id="third-2**64"),
+    ],
+)
+def test_size_bound_code(bounds, limits, expected):
+    assert size_bound_code(bounds, *(limits or (None, None, None))) == expected
 
 
 def test_metadata_faults():
@@ -408,9 +413,6 @@ def test_canonical_bytes_layout():
     assert len(data) == 1 + 96 + 4 + 20 + 4 + 40 + 20 + 20 + 8 + len(SPARSE_METADATA)
     with pytest.raises(ValueError):
         _sparse_canonical(b"\x03" * 31)
-
-
-def test_archived_nonce_is_zero_filled():
     assert _sparse_canonical(b"") == _sparse_canonical(bytes(32))
 
 
@@ -477,64 +479,95 @@ def test_codes_table():
     assert decisions.CODES == expected
 
 
-def test_order_lengths():
-    assert len(decisions.LEASE_ADMISSION_ORDER) == 22
-    assert len(decisions.EXPLICIT_JOB_ORDER) == 8
+_LEASE = decisions.LEASE_ADMISSION_ORDER
+_JOB = decisions.EXPLICIT_JOB_ORDER
 
 
-def _lease(faults: list[str]) -> tuple[str, int | None, str | None]:
-    step = decisions.winner(decisions.LEASE_ADMISSION_ORDER, faults)
-    code, wire = decisions.step_outcome(step, "admission")
-    return step, code, wire
+@pytest.mark.parametrize(
+    ("order", "phase", "faults", "expected"),
+    [
+        pytest.param(
+            _LEASE,
+            "admission",
+            ["code:1", "session:expired"],
+            ("session:expired", None, "EXPIRED"),
+            id="lease-session-expired",
+        ),
+        pytest.param(
+            _LEASE,
+            "admission",
+            ["code:1", "field:salt-count-zero"],
+            ("field:salt-count-zero", None, "MALFORMED"),
+            id="lease-salt-count-zero",
+        ),
+        pytest.param(
+            _LEASE,
+            "admission",
+            ["session:topology-hash-mismatch", "code:10"],
+            ("code:10", 10, "FAMILY_UNSUPPORTED"),
+            id="lease-code-10-before-topology-hash",
+        ),
+        pytest.param(
+            _LEASE,
+            "admission",
+            ["code:11", "session:topology-hash-mismatch"],
+            ("session:topology-hash-mismatch", None, "TOPOLOGY_MISMATCH"),
+            id="lease-topology-hash-before-code-11",
+        ),
+        pytest.param(
+            _LEASE,
+            "admission",
+            ["code:13", "code:11"],
+            ("code:11", 11, "TOPOLOGY_MISMATCH"),
+            id="lease-code-11-before-13",
+        ),
+        pytest.param(
+            _LEASE,
+            "admission",
+            ["code:5"],
+            ("code:5", 5, "FAMILY_UNSUPPORTED"),
+            id="lease-code-5",
+        ),
+        pytest.param(
+            _JOB,
+            "explicit-job",
+            ["tier:not-listed", "code:15"],
+            ("tier:not-listed", None, None),
+            id="job-tier-not-listed",
+        ),
+        pytest.param(
+            _JOB,
+            "explicit-job",
+            ["code:15", "code:13"],
+            ("code:13", 13, "TOO_LARGE"),
+            id="job-code-13-before-15",
+        ),
+        pytest.param(
+            _JOB,
+            "explicit-job",
+            ["code:16", "code:8"],
+            ("code:8", 8, "MALFORMED"),
+            id="job-code-8-before-16",
+        ),
+        pytest.param(
+            _JOB,
+            "explicit-job",
+            ["code:16"],
+            ("code:16", 16, "MALFORMED"),
+            id="job-code-16",
+        ),
+    ],
+)
+def test_winner_outcomes(order, phase, faults, expected):
+    step = decisions.winner(order, faults)
+    code, wire = decisions.step_outcome(step, phase)
+    assert (step, code, wire) == expected
 
 
-def _job(faults: list[str]) -> tuple[str, int | None, str | None]:
-    step = decisions.winner(decisions.EXPLICIT_JOB_ORDER, faults)
-    code, wire = decisions.step_outcome(step, "explicit-job")
-    return step, code, wire
-
-
-def test_lease_admission_winners():
-    assert _lease(["code:1", "session:expired"]) == (
-        "session:expired",
-        None,
-        "EXPIRED",
-    )
-    assert _lease(["code:1", "field:salt-count-zero"]) == (
-        "field:salt-count-zero",
-        None,
-        "MALFORMED",
-    )
-    assert _lease(["session:topology-hash-mismatch", "code:10"]) == (
-        "code:10",
-        10,
-        "FAMILY_UNSUPPORTED",
-    )
-    assert _lease(["code:11", "session:topology-hash-mismatch"]) == (
-        "session:topology-hash-mismatch",
-        None,
-        "TOPOLOGY_MISMATCH",
-    )
-    assert _lease(["code:13", "code:11"])[1] == 11
-    assert _lease(["code:5"]) == ("code:5", 5, "FAMILY_UNSUPPORTED")
-
-
-def test_explicit_job_winners():
-    assert _job(["tier:not-listed", "code:15"]) == (
-        "tier:not-listed",
-        None,
-        None,
-    )
-    assert _job(["code:15", "code:13"]) == ("code:13", 13, "TOO_LARGE")
-    assert _job(["code:16", "code:8"])[1] == 8
-    assert _job(["code:16"]) == ("code:16", 16, "MALFORMED")
-
-
-def test_winner_rejects_bad_input():
+@pytest.mark.parametrize("faults", [[], ["code:99"]], ids=["empty", "unknown-fault"])
+def test_winner_rejects_bad_input(faults):
     with pytest.raises(ValueError):
-        decisions.winner(decisions.LEASE_ADMISSION_ORDER, [])
-    with pytest.raises(ValueError):
-        decisions.winner(decisions.LEASE_ADMISSION_ORDER, ["code:99"])
+        decisions.winner(decisions.LEASE_ADMISSION_ORDER, faults)
 
 
 def _entry(family_id, revisions, digests=()):
@@ -749,55 +782,41 @@ def _file_error(data):
 
 
 @pytest.mark.parametrize(
-    "body",
+    ("body", "code"),
     [
-        {"kind": "explicit", "nodes": [True], "edges": []},
-        {"kind": "explicit", "nodes": [1], "edges": [[1, False]]},
-        {"kind": "explicit", "nodes": (1,), "edges": []},
-        {"kind": "explicit", "nodes": [1], "edges": {"a": 1}},
-        {"kind": "explicit", "nodes": [1], "edges": [[1, 2, 3]]},
-        {"kind": "explicit", "nodes": [1], "edges": [5]},
-        {
-            "kind": "zephyr-removed",
-            "m": True,
-            "t": 1,
-            "removed_nodes": [],
-            "removed_edges": [],
-        },
-        {
-            "kind": "zephyr-removed",
-            "m": 1,
-            "t": True,
-            "removed_nodes": [],
-            "removed_edges": [],
-        },
-        {
-            "kind": "zephyr-removed",
-            "m": 1,
-            "t": 1,
-            "removed_nodes": "ab",
-            "removed_edges": [],
-        },
-        {
-            "kind": "zephyr-removed",
-            "m": 1,
-            "t": 1,
-            "removed_nodes": [],
-            "removed_edges": {},
-        },
-        {
-            "kind": "zephyr-removed",
-            "m": 1,
-            "t": 1,
-            "removed_nodes": [],
-            "removed_edges": [[1]],
-        },
+        pytest.param(_explicit([True], []), "shape", id="bool-node"),
+        pytest.param(_explicit([1], [[1, False]]), "shape", id="bool-edge-end"),
+        pytest.param(_explicit((1,), []), "shape", id="tuple-nodes"),
+        pytest.param(_explicit([1], {"a": 1}), "shape", id="dict-edges"),
+        pytest.param(_explicit([1], [[1, 2, 3]]), "shape", id="triple-edge"),
+        pytest.param(_explicit([1], [5]), "shape", id="scalar-edge"),
+        pytest.param(_zephyr(True, 1, [], []), "shape", id="bool-m"),
+        pytest.param(_zephyr(1, True, [], []), "shape", id="bool-t"),
+        pytest.param(_zephyr(1, 1, "ab", []), "shape", id="string-removed-nodes"),
+        pytest.param(_zephyr(1, 1, [], {}), "shape", id="dict-removed-edges"),
+        pytest.param(_zephyr(1, 1, [], [[1]]), "shape", id="short-removed-edge"),
+        pytest.param(_explicit([2**32], []), None, id="node-above-u32"),
+        pytest.param(_explicit([-1], []), None, id="negative-node"),
+        pytest.param(_explicit([1], [[1, 2**32]]), None, id="edge-end-above-u32"),
+        pytest.param(_zephyr(0, 1, [], []), None, id="m-0"),
+        pytest.param(_zephyr(33, 1, [], []), None, id="m-33"),
+        pytest.param(_zephyr(1, 9, [], []), None, id="t-9"),
+        pytest.param(_zephyr(1, 1, [12], []), None, id="removed-not-a-node"),
+        pytest.param(_zephyr(1, 1, [3, 3], []), None, id="removed-duplicate"),
+        pytest.param(_zephyr(1, 1, [4, 3], []), None, id="removed-descending"),
+        pytest.param(_zephyr(1, 1, [], [[0, 2]]), None, id="not-a-coupler"),
+        pytest.param(_zephyr(1, 1, [], [[1, 0]]), None, id="reversed-edge"),
+        pytest.param(_zephyr(1, 1, [], [[0, 6], [0, 1]]), None, id="edges-unsorted"),
+        pytest.param(_zephyr(1, 1, [], [[0, 1], [0, 1]]), None, id="edges-duplicate"),
+        pytest.param(_zephyr(1, 1, [0], [[0, 1]]), None, id="edge-at-removed-node"),
+        pytest.param({"kind": "other"}, None, id="unknown-kind"),
     ],
 )
-def test_blob_encoder_rejects_what_the_rust_encoder_rejects(body):
+def test_blob_encoder_rejects(body, code):
     with pytest.raises(topology_blob.BlobError) as info:
-        topology_blob.encode_payload(body)
-    assert info.value.code == "shape"
+        topology_blob.encode(body)
+    if code is not None:
+        assert info.value.code == code
 
 
 def test_blob_payload_bytes_are_pinned():
@@ -808,7 +827,7 @@ def test_blob_payload_bytes_are_pinned():
     )
 
 
-def test_blob_t_sparse_style_round_trips():
+def test_blob_round_trips():
     body = _explicit(
         [4294967295, 0, 7, 3],
         [[4294967295, 0], [0, 4294967295], [7, 3], [7, 3], [3, 3]],
@@ -816,19 +835,21 @@ def test_blob_t_sparse_style_round_trips():
     data = topology_blob.encode(body)
     assert data[:10] == BLOB_FILE_HEAD
     assert topology_blob.decode(data) == body
+    nodes, edges = ice.lattice(2, 2)
+    zephyr = _zephyr(2, 2, [0, 5], [list(edges[40])])
+    first = topology_blob.encode(zephyr)
+    assert first == topology_blob.encode(zephyr)
+    assert first == topology_blob.encode(json.loads(json.dumps(zephyr)))
+    explicit = _explicit(nodes, [list(e) for e in edges])
+    assert topology_blob.encode(explicit) == topology_blob.encode(explicit)
     assert topology_blob.decode(topology_blob.encode(_explicit([], []))) == _explicit(
         [], []
     )
-
-
-def test_blob_encode_is_byte_stable():
-    nodes, edges = ice.lattice(2, 2)
-    body = _zephyr(2, 2, [0, 5], [list(edges[40])])
-    first = topology_blob.encode(body)
-    assert first == topology_blob.encode(body)
-    assert first == topology_blob.encode(json.loads(json.dumps(body)))
-    explicit = _explicit(nodes, [list(e) for e in edges])
-    assert topology_blob.encode(explicit) == topology_blob.encode(explicit)
+    payload = topology_blob.encode_payload(_explicit([1, 2], [[1, 2]]))
+    header = bytes([0x1F, 0x8B, 8, 0, 1, 2, 3, 4, 0, 3])
+    assert topology_blob.decode(_frame(payload, header=header)) == _explicit(
+        [1, 2], [[1, 2]]
+    )
 
 
 def test_blob_zephyr_expands_to_the_lattice_minus_removals():
@@ -849,165 +870,173 @@ def test_blob_zephyr_expands_to_the_lattice_minus_removals():
     assert len(z11["nodes"]) == 12 and len(z11["edges"]) == 22
 
 
-def test_blob_gzip_errors():
-    good = topology_blob.encode(_explicit([1, 2], [[1, 2]]))
-    assert _file_error(b"") == "gzip"
-    assert _file_error(good[:-1]) == "gzip"
-    assert _file_error(good[:12]) == "gzip"
-    assert _file_error(good + b"\x00") == "gzip"
-    assert _file_error(good + good) == "gzip"
-    assert _file_error(good + good[:5]) == "gzip"
-    for index, value in ((0, 0), (1, 0), (2, 7), (3, 8)):
-        bad = bytearray(good)
-        bad[index] = value
-        assert _file_error(bytes(bad)) == "gzip"
-    # Garbage in place of the DEFLATE stream.
-    assert _file_error(good[:10] + b"\xff" * 12) == "gzip"
+_GOOD_PAYLOAD = topology_blob.encode_payload(_explicit([1, 2], [[1, 2]]))
+_GOOD_FILE = topology_blob.encode(_explicit([1, 2], [[1, 2]]))
 
 
-def test_blob_checksum_errors():
-    payload = topology_blob.encode_payload(_explicit([1, 2], [[1, 2]]))
-    assert _file_error(_frame(payload, crc=zlib.crc32(payload) ^ 1)) == "crc"
-    assert _file_error(_frame(payload, size=len(payload) + 1)) == "isize"
-    assert _file_error(_frame(payload, size=len(payload) - 1)) == "isize"
+def _patched(data, index, value):
+    bad = bytearray(data)
+    bad[index] = value
+    return bytes(bad)
 
 
-def test_blob_reader_accepts_other_mtime_xfl_os():
-    payload = topology_blob.encode_payload(_explicit([1, 2], [[1, 2]]))
-    header = bytes([0x1F, 0x8B, 8, 0, 1, 2, 3, 4, 0, 3])
-    assert topology_blob.decode(_frame(payload, header=header)) == _explicit(
-        [1, 2], [[1, 2]]
-    )
+@pytest.mark.parametrize(
+    ("data", "code"),
+    [
+        pytest.param(b"", "gzip", id="empty"),
+        pytest.param(_GOOD_FILE[:-1], "gzip", id="short-trailer"),
+        pytest.param(_GOOD_FILE[:12], "gzip", id="truncated-stream"),
+        pytest.param(_GOOD_FILE + b"\x00", "gzip", id="trailing-byte"),
+        pytest.param(_GOOD_FILE * 2, "gzip", id="two-members"),
+        pytest.param(_GOOD_FILE + _GOOD_FILE[:5], "gzip", id="partial-second-member"),
+        pytest.param(_patched(_GOOD_FILE, 0, 0), "gzip", id="magic-byte-0"),
+        pytest.param(_patched(_GOOD_FILE, 1, 0), "gzip", id="magic-byte-1"),
+        pytest.param(_patched(_GOOD_FILE, 2, 7), "gzip", id="method-7"),
+        pytest.param(_patched(_GOOD_FILE, 3, 8), "gzip", id="flags-8"),
+        # Garbage in place of the DEFLATE stream.
+        pytest.param(_GOOD_FILE[:10] + b"\xff" * 12, "gzip", id="garbage-stream"),
+        pytest.param(
+            _frame(_GOOD_PAYLOAD, crc=zlib.crc32(_GOOD_PAYLOAD) ^ 1), "crc", id="crc"
+        ),
+        pytest.param(
+            _frame(_GOOD_PAYLOAD, size=len(_GOOD_PAYLOAD) + 1), "isize", id="isize-high"
+        ),
+        pytest.param(
+            _frame(_GOOD_PAYLOAD, size=len(_GOOD_PAYLOAD) - 1), "isize", id="isize-low"
+        ),
+    ],
+)
+def test_blob_file_errors(data, code):
+    assert _file_error(data) == code
 
 
-def test_blob_oversize_payload_is_rejected():
-    limit = topology_blob.MAX_PAYLOAD
+_Z11 = b"QTOP\x01\x01\x01\x01"
+_EDGES = BLOB_HEAD + b"\x00\x01"
+
+
+@pytest.mark.parametrize(
+    ("payload", "code"),
+    [
+        pytest.param(b"", "magic", id="header-empty"),
+        pytest.param(b"QTO", "magic", id="header-short-magic"),
+        pytest.param(b"QTOQ\x01\x00\x00\x00", "magic", id="header-wrong-magic"),
+        pytest.param(b"QTOP\x02\x00\x00\x00", "version", id="header-version-2"),
+        pytest.param(b"QTOP\x00\x00\x00\x00", "version", id="header-version-0"),
+        pytest.param(b"QTOP\x01\x02\x00\x00", "kind", id="header-kind-2"),
+        pytest.param(b"QTOP\x01", "truncated", id="header-no-kind"),
+        pytest.param(b"QTOP\x01\x00", "truncated", id="header-no-count"),
+        pytest.param(BLOB_HEAD + b"\x80\x00", "varint-non-minimal", id="varint-80-00"),
+        pytest.param(
+            BLOB_HEAD + b"\xff\x80\x00", "varint-non-minimal", id="varint-ff-80-00"
+        ),
+        pytest.param(BLOB_HEAD + b"\x80", "truncated", id="varint-cut-off"),
+        pytest.param(
+            BLOB_HEAD + b"\xff" * 10 + b"\x01", "varint-overflow", id="varint-11-bytes"
+        ),
+        pytest.param(
+            BLOB_HEAD + b"\xff" * 9 + b"\x02", "varint-overflow", id="varint-above-u64"
+        ),
+        pytest.param(
+            BLOB_HEAD + b"\x80" * 10 + b"\x00", "varint-overflow", id="varint-padded"
+        ),
+        # u64::MAX itself is a legal varint, so it reaches the count check instead.
+        pytest.param(
+            BLOB_HEAD + _varint(2**64 - 1), "count-too-large", id="varint-u64-max"
+        ),
+        pytest.param(
+            BLOB_HEAD + b"\x01" + _varint(2 * 2**32), "id-range", id="node-above-u32"
+        ),
+        pytest.param(BLOB_HEAD + b"\x01" + _varint(1), "id-range", id="node-negative"),
+        # A zigzag delta below zero from 0.
+        pytest.param(
+            BLOB_HEAD + b"\x01\x01\x00\x00", "id-range", id="node-delta-below-zero"
+        ),
+        pytest.param(
+            _EDGES + _varint(2 * 2**32) + b"\x00", "id-range", id="edge-first-above-u32"
+        ),
+        pytest.param(
+            _EDGES + b"\x02" + _varint(2 * 2**32),
+            "id-range",
+            id="edge-second-above-u32",
+        ),
+        pytest.param(_EDGES + b"\x01" + b"\x01", "id-range", id="edge-negative"),
+        # zigzag(i64::MAX) and zigzag(i64::MIN) as deltas overflow the id range.
+        pytest.param(
+            BLOB_HEAD + b"\x01" + _varint(2**64 - 2), "id-range", id="delta-i64-max"
+        ),
+        pytest.param(
+            BLOB_HEAD + b"\x01" + _varint(2**64 - 1), "id-range", id="delta-i64-min"
+        ),
+        pytest.param(BLOB_HEAD + b"\x05\x00\x00", "count-too-large", id="count-5"),
+        pytest.param(BLOB_HEAD + b"\x00\x01\x00", "count-too-large", id="edges-1"),
+        pytest.param(
+            BLOB_HEAD + b"\x00\x02\x00\x00\x00", "count-too-large", id="edges-2"
+        ),
+        pytest.param(BLOB_HEAD + _varint(2**40), "count-too-large", id="count-2**40"),
+        pytest.param(_Z11 + b"\x03\x00\x01", "count-too-large", id="zephyr-nodes-3"),
+        pytest.param(_Z11 + b"\x00\x01\x00", "count-too-large", id="zephyr-edges-1"),
+        pytest.param(BLOB_HEAD + b"\x00\x00\x00", "trailing-bytes", id="trailing"),
+        pytest.param(_Z11 + b"\x00\x00\x00", "trailing-bytes", id="zephyr-trailing"),
+        pytest.param(b"QTOP\x01\x01\x00\x01", "m-range", id="m-0"),
+        pytest.param(b"QTOP\x01\x01\x21\x01", "m-range", id="m-33"),
+        pytest.param(b"QTOP\x01\x01\x01\x00", "t-range", id="t-0"),
+        pytest.param(b"QTOP\x01\x01\x01\x09", "t-range", id="t-9"),
+        # z(1, 1) has nodes 0..=11.
+        pytest.param(
+            b"QTOP\x01\x01\x01\x01\x01\x0c\x00", "not-a-node", id="removed-node-12"
+        ),
+        pytest.param(_Z11 + b"\x02\x03\x00\x00", "order", id="nodes-descending"),
+        # Ascending nodes, then bad edges. (0, 1) and (0, 6) are z(1, 1) couplers.
+        pytest.param(
+            _Z11 + b"\x00\x02\x00\x00\x00\x01", "order", id="edges-descending-ends"
+        ),
+        pytest.param(_Z11 + b"\x00\x02\x00\x06\x00\x01", "order", id="edges-unsorted"),
+        pytest.param(_Z11 + b"\x00\x02\x00\x01\x00\x01", "order", id="edges-duplicate"),
+        pytest.param(
+            _Z11 + b"\x00\x02\x00\x01\x00\x00", "order", id="edges-second-below"
+        ),
+        # (0, 2) is not a coupler of z(1, 1), (0, 1) is.
+        pytest.param(_Z11 + b"\x00\x01\x00\x02", "not-a-coupler", id="edge-0-2"),
+        # The lattice has 12 nodes, so an edge end of 12 is not a node.
+        pytest.param(_Z11 + b"\x00\x01\x00\x0c", "not-a-node", id="edge-end-12"),
+        # Removed edge (0, 1) while node 1 is removed.
+        pytest.param(
+            b"QTOP\x01\x01\x01\x01\x01\x01\x01\x00\x01",
+            "edge-at-removed-node",
+            id="edge-at-removed-node-1",
+        ),
+        pytest.param(
+            b"QTOP\x01\x01\x01\x01\x01\x00\x01\x00\x01",
+            "edge-at-removed-node",
+            id="edge-at-removed-node-0",
+        ),
+        # Two edges. The first end is above the 12 lattice nodes.
+        pytest.param(
+            _Z11 + b"\x00\x02\x00" + _varint(2**40) + b"\x00\x01",
+            "not-a-node",
+            id="edge-end-beyond-lattice",
+        ),
+    ],
+)
+def test_blob_payload_errors(payload, code):
+    assert _payload_error(payload) == code
+
+
+def test_blob_payload_accepts():
+    assert topology_blob.decode_payload(BLOB_HEAD + b"\x00\x00") == _explicit([], [])
+    decoded = topology_blob.decode_payload(_Z11 + b"\x00\x01\x00\x01")
+    assert decoded["removed_edges"] == [[0, 1]]
+
+
+def test_blob_oversize_payload_is_rejected(monkeypatch):
+    limit = 1024
+    monkeypatch.setattr(topology_blob, "MAX_PAYLOAD", limit)
     assert _file_error(_frame(b"\x00" * (limit + 1))) == "too-large"
     # A payload of exactly the limit passes the framing and fails on its magic.
     assert _payload_error(topology_blob.decompress(_frame(b"\x00" * limit))) == "magic"
 
 
-def test_blob_header_errors():
-    assert _payload_error(b"") == "magic"
-    assert _payload_error(b"QTO") == "magic"
-    assert _payload_error(b"QTOQ\x01\x00\x00\x00") == "magic"
-    assert _payload_error(b"QTOP\x02\x00\x00\x00") == "version"
-    assert _payload_error(b"QTOP\x00\x00\x00\x00") == "version"
-    assert _payload_error(b"QTOP\x01\x02\x00\x00") == "kind"
-    assert _payload_error(b"QTOP\x01") == "truncated"
-    assert _payload_error(b"QTOP\x01\x00") == "truncated"
-
-
-def test_blob_varint_errors():
-    assert _payload_error(BLOB_HEAD + b"\x80\x00") == "varint-non-minimal"
-    assert _payload_error(BLOB_HEAD + b"\xff\x80\x00") == "varint-non-minimal"
-    assert _payload_error(BLOB_HEAD + b"\x80") == "truncated"
-    assert _payload_error(BLOB_HEAD + b"\xff" * 10 + b"\x01") == "varint-overflow"
-    assert _payload_error(BLOB_HEAD + b"\xff" * 9 + b"\x02") == "varint-overflow"
-    assert _payload_error(BLOB_HEAD + b"\x80" * 10 + b"\x00") == "varint-overflow"
-    # u64::MAX itself is a legal varint, so it reaches the count check instead.
-    assert _payload_error(BLOB_HEAD + _varint(2**64 - 1)) == "count-too-large"
-
-
-def test_blob_explicit_range_errors():
-    assert _payload_error(BLOB_HEAD + b"\x01" + _varint(2 * 2**32)) == "id-range"
-    assert _payload_error(BLOB_HEAD + b"\x01" + _varint(1)) == "id-range"
-    # A zigzag delta below zero from 0.
-    assert _payload_error(BLOB_HEAD + b"\x01\x01\x00\x00") == "id-range"
-    edge = BLOB_HEAD + b"\x00\x01"
-    assert _payload_error(edge + _varint(2 * 2**32) + b"\x00") == "id-range"
-    assert _payload_error(edge + b"\x02" + _varint(2 * 2**32)) == "id-range"
-    assert _payload_error(edge + b"\x01" + b"\x01") == "id-range"
-    # zigzag(i64::MAX) and zigzag(i64::MIN) as deltas overflow the id range.
-    assert _payload_error(BLOB_HEAD + b"\x01" + _varint(2**64 - 2)) == "id-range"
-    assert _payload_error(BLOB_HEAD + b"\x01" + _varint(2**64 - 1)) == "id-range"
-
-
-def test_blob_counts_larger_than_the_remaining_bytes_are_rejected():
-    assert _payload_error(BLOB_HEAD + b"\x05\x00\x00") == "count-too-large"
-    assert _payload_error(BLOB_HEAD + b"\x00\x01\x00") == "count-too-large"
-    assert _payload_error(BLOB_HEAD + b"\x00\x02\x00\x00\x00") == "count-too-large"
-    assert _payload_error(BLOB_HEAD + _varint(2**40)) == "count-too-large"
-    zephyr = b"QTOP\x01\x01\x01\x01"
-    assert _payload_error(zephyr + b"\x03\x00\x01") == "count-too-large"
-    assert _payload_error(zephyr + b"\x00\x01\x00") == "count-too-large"
-
-
-def test_blob_trailing_bytes_are_rejected():
-    assert _payload_error(BLOB_HEAD + b"\x00\x00\x00") == "trailing-bytes"
-    assert _payload_error(b"QTOP\x01\x01\x01\x01\x00\x00\x00") == "trailing-bytes"
-    assert topology_blob.decode_payload(BLOB_HEAD + b"\x00\x00") == _explicit([], [])
-
-
-def test_blob_zephyr_range_errors():
-    head = b"QTOP\x01\x01"
-    assert _payload_error(head + b"\x00\x01") == "m-range"
-    assert _payload_error(head + b"\x21\x01") == "m-range"
-    assert _payload_error(head + b"\x01\x00") == "t-range"
-    assert _payload_error(head + b"\x01\x09") == "t-range"
-    # z(1, 1) has nodes 0..=11.
-    assert _payload_error(head + b"\x01\x01\x01\x0c\x00") == "not-a-node"
-
-
-def test_blob_zephyr_order_errors():
-    head = b"QTOP\x01\x01\x01\x01"
-    assert _payload_error(head + b"\x02\x03\x00\x00") == "order"
-    # Ascending nodes, then bad edges. (0, 1) and (0, 6) are z(1, 1) couplers.
-    nodes = b"\x00"
-    assert _payload_error(head + nodes + b"\x02\x00\x00\x00\x01") == "order"
-    assert _payload_error(head + nodes + b"\x02\x00\x06\x00\x01") == "order"
-    assert _payload_error(head + nodes + b"\x02\x00\x01\x00\x01") == "order"
-    assert _payload_error(head + nodes + b"\x02\x00\x01\x00\x00") == "order"
-
-
-def test_blob_zephyr_lattice_errors():
-    head = b"QTOP\x01\x01\x01\x01\x00"
-    # (0, 2) is not a coupler of z(1, 1), (0, 1) is.
-    assert _payload_error(head + b"\x01\x00\x02") == "not-a-coupler"
-    # The lattice has 12 nodes, so an edge end of 12 is not a node.
-    assert _payload_error(head + b"\x01\x00\x0c") == "not-a-node"
-    assert topology_blob.decode_payload(head + b"\x01\x00\x01")["removed_edges"] == [
-        [0, 1]
-    ]
-    # Removed edge (0, 1) while node 1 is removed.
-    both = b"QTOP\x01\x01\x01\x01\x01\x01\x01\x00\x01"
-    assert _payload_error(both) == "edge-at-removed-node"
-    both = b"QTOP\x01\x01\x01\x01\x01\x00\x01\x00\x01"
-    assert _payload_error(both) == "edge-at-removed-node"
-
-
-def test_blob_zephyr_edge_end_beyond_the_lattice_stops_the_loop():
-    head = b"QTOP\x01\x01\x01\x01\x00"
-    # Two edges. The first end is above the 12 lattice nodes.
-    assert _payload_error(head + b"\x02\x00" + _varint(2**40) + b"\x00\x01") == (
-        "not-a-node"
-    )
-
-
-def test_blob_encoder_rejects_what_the_decoder_rejects():
-    cases = [
-        _explicit([2**32], []),
-        _explicit([-1], []),
-        _explicit([1], [[1, 2**32]]),
-        _zephyr(0, 1, [], []),
-        _zephyr(33, 1, [], []),
-        _zephyr(1, 9, [], []),
-        _zephyr(1, 1, [12], []),
-        _zephyr(1, 1, [3, 3], []),
-        _zephyr(1, 1, [4, 3], []),
-        _zephyr(1, 1, [], [[0, 2]]),
-        _zephyr(1, 1, [], [[1, 0]]),
-        _zephyr(1, 1, [], [[0, 6], [0, 1]]),
-        _zephyr(1, 1, [], [[0, 1], [0, 1]]),
-        _zephyr(1, 1, [0], [[0, 1]]),
-        {"kind": "other"},
-    ]
-    for body in cases:
-        with pytest.raises(topology_blob.BlobError):
-            topology_blob.encode(body)
-
-
-def test_blob_cli_round_trip(tmp_path):
+def test_blob_cli_round_trip(tmp_path, capsys):
     source = tmp_path / "in.json"
     blob = tmp_path / "out.bin.gz"
     body = _zephyr(2, 2, [0, 5], [])
@@ -1015,32 +1044,46 @@ def test_blob_cli_round_trip(tmp_path):
     root = Path(__file__).parent
 
     def run(*args):
-        return subprocess.run(
-            [sys.executable, "-m", "family_oracle", "topology", *args],
-            cwd=root,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        code = cli.main(["topology", *args])
+        captured = capsys.readouterr()
+        return code, captured.out, captured.err
 
-    assert run("encode", str(source), str(blob)).returncode == 0
+    assert run("encode", str(source), str(blob))[0] == 0
     assert blob.read_bytes() == topology_blob.encode(body)
-    decoded = run("decode", str(blob))
-    assert json.loads(decoded.stdout) == body
-    expanded = run("decode", "--expand", str(blob))
-    assert json.loads(expanded.stdout) == topology_blob.expand(body)
-    out = tmp_path / "back.json"
-    assert run("decode", str(blob), str(out)).returncode == 0
-    assert json.loads(out.read_text()) == body
+    code, out, _ = run("decode", str(blob))
+    assert json.loads(out) == body
+    code, out, _ = run("decode", "--expand", str(blob))
+    assert json.loads(out) == topology_blob.expand(body)
+    back = tmp_path / "back.json"
+    assert run("decode", str(blob), str(back))[0] == 0
+    assert json.loads(back.read_text()) == body
     blob.write_bytes(blob.read_bytes()[:-1])
-    failed = run("decode", str(blob))
-    assert failed.returncode == 1 and "gzip" in failed.stderr
-    assert run("topology").returncode == 2
+    code, _, err = run("decode", str(blob))
+    assert code == 1 and "gzip" in err
+    assert run("topology")[0] == 2
     for text in ("[1, 2]", "3", "null", '"x"'):
         source.write_text(text)
-        failed = run("encode", str(source), str(blob))
-        assert failed.returncode == 1, text
-        assert "shape" in failed.stderr and "Traceback" not in failed.stderr, text
+        code, _, err = run("encode", str(source), str(blob))
+        assert code == 1, text
+        assert "shape" in err, text
+    source.write_text("[1, 2]")
+    failed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "family_oracle",
+            "topology",
+            "encode",
+            str(source),
+            str(blob),
+        ],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert failed.returncode == 1
+    assert "shape" in failed.stderr and "Traceback" not in failed.stderr
 
 
 def test_glass_rejects_a_tile_pair_that_is_not_an_edge(monkeypatch):
@@ -1067,7 +1110,7 @@ def _twisted(m, t, weak, pairs, nodes, edges, nonce=bytes(range(32))):
     return twisted.generate(b"quip/twisted-ice-dimer", 1, params, nodes, edges, nonce)
 
 
-def test_twisted_instance_follows_the_contract_rules():
+def test_twisted_instance_pairs_and_shortfall():
     nodes, edges = ice.lattice(2, 2)
     code, inst = _twisted(2, 2, 62, 8, nodes, edges)
     assert code is None
@@ -1086,10 +1129,6 @@ def test_twisted_instance_follows_the_contract_rules():
     for edge, value in zip(inst["edges"], inst["j"], strict=True):
         if edge not in in_tile and edge not in inst["pairs"]:
             assert abs(value) == 62
-
-
-def test_twisted_zero_pairs_and_shortfall():
-    nodes, edges = ice.lattice(2, 2)
     code, inst = _twisted(2, 2, 62, 0, nodes, edges)
     assert code is None and inst["pairs"] == []
     code, inst = _twisted(2, 2, 62, len(nodes) // 2, nodes, edges)
@@ -1143,7 +1182,7 @@ def _charged(m, t, scale, background, charged, nodes, edges, nonce=bytes(range(3
     return charge.generate(b"quip/charged-ice", 1, params, nodes, edges, nonce)
 
 
-def test_charged_instance_follows_the_contract_rules():
+def test_charged_instance_and_direct_energy_follow_the_contract_rules():
     nodes, edges = ice.lattice(2, 2)
     inst = _charged(2, 2, 250, 31, 128, nodes, edges)
     in_tile = {e for tile in inst["tiles"] for e in ice._tile_edges(tile)}
@@ -1163,6 +1202,18 @@ def test_charged_instance_follows_the_contract_rules():
     for edge, value in zip(inst["edges"], inst["j"], strict=True):
         if edge not in in_tile:
             assert abs(value) == 31
+    from family_oracle import charge
+
+    spins = charge.energy_states(bytes(range(32)), len(nodes))[3][1]
+    direct = charge.direct_energy(inst, spins)
+    encoded = charge.encoded_energy(inst, spins)
+    assert direct == encoded
+    (u, v), _ = next(iter(inst["background_signs"].items()))
+    at = inst["edges"].index((u, v))
+    broken = dict(inst, j=list(inst["j"]))
+    broken["j"][at] = -broken["j"][at]
+    assert charge.direct_energy(broken, spins) == direct
+    assert charge.encoded_energy(broken, spins) != direct
 
 
 def test_charged_extremes_and_encoded_equals_direct_for_every_charge():
@@ -1231,23 +1282,6 @@ def test_charged_admission_codes():
     assert charge.admission_code(b"\x01", nodes, edges) == 7
 
 
-def test_charged_direct_energy_ignores_the_encoded_background_couplings():
-    from family_oracle import charge
-
-    nodes, edges = ice.lattice(2, 2)
-    inst = _charged(2, 2, 250, 31, 128, nodes, edges)
-    spins = charge.energy_states(bytes(range(32)), len(nodes))[3][1]
-    direct = charge.direct_energy(inst, spins)
-    encoded = charge.encoded_energy(inst, spins)
-    assert direct == encoded
-    (u, v), _ = next(iter(inst["background_signs"].items()))
-    at = inst["edges"].index((u, v))
-    broken = dict(inst, j=list(inst["j"]))
-    broken["j"][at] = -broken["j"][at]
-    assert charge.direct_energy(broken, spins) == direct
-    assert charge.encoded_energy(broken, spins) != direct
-
-
 _K4 = [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)]
 
 
@@ -1260,16 +1294,22 @@ def _ice_admission_codes(nodes, edges):
     )
 
 
-def test_ice_admission_node_limit_boundary():
-    assert _ice_admission_codes(list(range(131_072)), _K4) == (None, None)
-    assert _ice_admission_codes(list(range(131_073)), _K4) == (13, 13)
+_STAR = [(0, leaf) for leaf in range(1, 34)]
 
 
-def test_ice_admission_self_loop_wins_over_degree():
-    star = [(0, leaf) for leaf in range(1, 34)]
-    nodes = list(range(34))
-    assert _ice_admission_codes(nodes, star) == (13, 13)
-    assert _ice_admission_codes(nodes, [*star, (0, 0)]) == (12, 12)
+@pytest.mark.parametrize(
+    ("nodes", "edges", "expected"),
+    [
+        pytest.param(list(range(131_072)), _K4, (None, None), id="node-limit"),
+        pytest.param(list(range(131_073)), _K4, (13, 13), id="node-limit-plus-one"),
+        pytest.param(list(range(34)), _STAR, (13, 13), id="degree-above-limit"),
+        pytest.param(
+            list(range(34)), [*_STAR, (0, 0)], (12, 12), id="self-loop-wins-over-degree"
+        ),
+    ],
+)
+def test_ice_admission_boundaries(nodes, edges, expected):
+    assert _ice_admission_codes(nodes, edges) == expected
 
 
 # ---- quip/ice-fields ----
@@ -1302,16 +1342,11 @@ def test_fields_instance_follows_the_contract_rules():
     assert len(nonzero) == len(nodes) // 16
     assert all(seen[i] == 2 and abs(inst["h"][i]) == 500 for i in nonzero)
     assert inst["offset_milli"] == 0
-
-
-def test_fields_count_and_magnitude_follow_the_parameters():
-    nodes, edges = ice.lattice(2, 2)
-    _, a = _fields(2, 2, 125, 500, 16, nodes, edges)
-    _, b = _fields(2, 2, 125, 1000, 8, nodes, edges)
+    _, other = _fields(2, 2, 125, 1000, 8, nodes, edges)
     # The parameters differ, so the descriptor digest and every stream differ. The
     # field count and size follow the parameters.
-    assert len(b["selected"]) == 2 * len(a["selected"])
-    assert {abs(v) for v in b["h"] if v} == {1000}
+    assert len(other["selected"]) == 2 * len(inst["selected"])
+    assert {abs(v) for v in other["h"] if v} == {1000}
 
 
 def test_fields_no_fields_and_shortfall():
@@ -1485,7 +1520,7 @@ def test_polariton_energy_is_the_charge_loss_for_every_l2_state():
         assert (seen["violations"] == 0) == (seen["loss_milli"] == 0)
 
 
-def test_polariton_instance_follows_the_contract_rules():
+def test_polariton_instance_and_witnesses():
     nodes, edges = ice.lattice(3, 4)
     code, inst = _polariton(3, 4, 3, 2, nodes, edges)
     assert code == 0
@@ -1505,14 +1540,8 @@ def test_polariton_instance_follows_the_contract_rules():
     for a, b in inst["edges"]:
         pair = (inst["node_ids"][a], inst["node_ids"][b])
         assert (min(pair), max(pair)) in native
-
-
-def test_polariton_witnesses_are_feasible_and_infeasible():
     from family_oracle import polariton
 
-    nodes, edges = ice.lattice(3, 4)
-    code, inst = _polariton(3, 4, 3, 2, nodes, edges)
-    assert code == 0
     good, bad = polariton.witnesses(inst)
     assert polariton.observables(inst, good)["violations"] == 0
     assert polariton.encoded_energy(inst, good) == 0

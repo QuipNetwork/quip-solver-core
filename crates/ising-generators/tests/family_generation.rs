@@ -16,6 +16,10 @@ use ising_generators::rng::uniform;
 use ising_generators::Code;
 use serde_json::Value;
 
+#[path = "common/size_bounds.rs"]
+mod size_bounds;
+use size_bounds::bounds;
+
 const UNIFORM_FIELD: &[FieldSpec] = &[
     FieldSpec {
         tag: 1,
@@ -474,13 +478,7 @@ fn nonce_where(topology: &BaseTopology, want: impl Fn(u32) -> bool) -> Result<[u
 }
 
 fn bounds_of(admitted: &Admitted<'_>, topology: &BaseTopology) -> Result<SizeBounds, String> {
-    admit_topology(
-        admitted,
-        topology,
-        topology.order_digest(),
-        &AdvertisedLimits::default(),
-    )
-    .map_err(|c| format!("admit_topology failed with {c}"))
+    bounds(admitted, topology).map_err(|c| format!("admit_topology failed with {c}"))
 }
 
 // ---- tests ----
@@ -527,19 +525,6 @@ fn streams_match_the_vectors() -> Result<(), String> {
 }
 
 #[test]
-fn an_unlisted_label_is_a_defect() -> Result<(), String> {
-    let contracts = [contract(Some(&UNLISTED), example_size_bounds)];
-    let admitted = admitted(&contracts, P_L2_F0)?;
-    let topology = sparse()?;
-    let bounds = bounds_of(&admitted, &topology)?;
-    ensure_eq!(
-        generate_instance(&admitted, &topology, &bounds, nonce_of(0)).err(),
-        Some(SaltFault::Defect(Defect::UnlistedLabel))
-    );
-    Ok(())
-}
-
-#[test]
 fn base_topologies_match_the_topology_vectors() -> Result<(), String> {
     let doc = core()?;
     for case in section(&doc, "topologies")? {
@@ -581,7 +566,7 @@ fn a_base_topology_refuses_bad_input() -> Result<(), String> {
 }
 
 #[test]
-fn generation_fills_the_digests_and_the_nonce() -> Result<(), String> {
+fn layered_generation_fills_the_digests() -> Result<(), String> {
     let contracts = [contract(Some(&LAYERED), example_size_bounds)];
     let admitted = admitted(&contracts, P_SPEC)?;
     let topology = sparse()?;
@@ -600,22 +585,14 @@ fn generation_fills_the_digests_and_the_nonce() -> Result<(), String> {
     let mut hasher = blake3::Hasher::new_derive_key("quip family instance v1");
     let _updated = hasher.update(&bytes);
     ensure_eq!(instance.digest(), *hasher.finalize().as_bytes());
-    Ok(())
-}
-
-#[test]
-fn generation_is_deterministic() -> Result<(), String> {
-    let contracts = [contract(Some(&LAYERED), example_size_bounds)];
-    let admitted = admitted(&contracts, P_SPEC)?;
-    let topology = sparse()?;
-    let bounds = bounds_of(&admitted, &topology)?;
-    let nonce = nonce_where(&topology, |w| w >= 3)?;
-    let build = || {
-        generate_instance(&admitted, &topology, &bounds, nonce)
-            .map_err(|f| format!("{f:?}"))
-            .and_then(|i| i.canonical_bytes().map_err(|e| e.to_string()))
-    };
-    ensure_eq!(build()?, build()?);
+    // The same nonce gives the same bytes.
+    let again =
+        generate_instance(&admitted, &topology, &bounds, nonce).map_err(|f| format!("{f:?}"))?;
+    ensure_eq!(
+        again.canonical_bytes().map_err(|e| e.to_string())?,
+        bytes,
+        "the same nonce gives the same bytes"
+    );
     Ok(())
 }
 
@@ -640,86 +617,106 @@ fn the_layered_construction_skips_the_salts_it_should() -> Result<(), String> {
     Ok(())
 }
 
-#[test]
-fn codes_13_and_14_from_a_construction_skip_the_salt() -> Result<(), String> {
-    let topology = sparse()?;
-    for (construction, code) in [
-        (&OVERFLOW, Code::BoundsExceeded),
-        (&EXHAUSTED, Code::NoInstance),
-    ] {
-        let contracts = [contract(Some(construction), example_size_bounds)];
-        let admitted = admitted(&contracts, P_L2_F0)?;
-        let bounds = bounds_of(&admitted, &topology)?;
-        ensure_eq!(
-            generate_instance(&admitted, &topology, &bounds, nonce_of(0)).err(),
-            Some(SaltFault::Skip(code))
-        );
-    }
-    Ok(())
-}
+/// One `generate_instance` case: label, construction, bounds override, fault.
+type OutcomeRow = (
+    &'static str,
+    &'static Construction,
+    Option<SizeBounds>,
+    Option<SaltFault>,
+);
 
 #[test]
-fn an_instance_over_the_bounds_item_skips_the_salt() -> Result<(), String> {
-    let contracts = [contract(Some(&BIG_H), example_size_bounds)];
-    let admitted = admitted(&contracts, P_L2_F0)?;
+fn construction_outcomes() -> Result<(), String> {
     let topology = sparse()?;
-    let bounds = bounds_of(&admitted, &topology)?;
-    ensure_eq!(
-        generate_instance(&admitted, &topology, &bounds, nonce_of(0)).err(),
-        Some(SaltFault::Skip(Code::BoundsExceeded))
-    );
-    Ok(())
-}
-
-#[test]
-fn construction_defects_are_reported() -> Result<(), String> {
-    let topology = sparse()?;
-    let run = |construction: Option<&'static Construction>,
-               override_bounds: Option<SizeBounds>|
-     -> Result<Option<SaltFault>, String> {
-        let contracts = [contract(construction, example_size_bounds)];
-        let admitted = admitted(&contracts, P_L2_F0)?;
-        let bounds = match override_bounds {
-            Some(bounds) => bounds,
-            None => bounds_of(&admitted, &topology)?,
-        };
-        Ok(generate_instance(&admitted, &topology, &bounds, nonce_of(0)).err())
-    };
     let roomy = SizeBounds {
         nodes: 100,
         edges: 100,
         degree: 100,
     };
     let defect = |d| Some(SaltFault::Defect(d));
-    ensure_eq!(
-        run(Some(&OTHER_CODE), None)?,
-        defect(Defect::ConstructionCode(Code::ParamsMalformed))
-    );
-    ensure_eq!(
-        run(Some(&UNSORTED), Some(roomy))?,
-        defect(Defect::InstanceInvalid(Code::InstanceDigestMismatch))
-    );
-    ensure_eq!(
-        run(Some(&BAD_REGION), Some(roomy))?,
-        defect(Defect::InstanceInvalid(Code::MetadataInvalid))
-    );
-    ensure_eq!(
-        run(Some(&HONEST), Some(SizeBounds { nodes: 1, ..roomy }))?,
-        defect(Defect::SizeBound)
-    );
-    ensure_eq!(
-        run(Some(&HONEST), Some(SizeBounds { edges: 0, ..roomy }))?,
-        defect(Defect::SizeBound)
-    );
-    ensure_eq!(
-        run(Some(&HONEST), Some(SizeBounds { degree: 0, ..roomy }))?,
-        defect(Defect::SizeBound)
-    );
-    ensure_eq!(
-        run(Some(&REJECTS_METADATA), Some(roomy))?,
-        defect(Defect::MetadataRejected)
-    );
-    ensure_eq!(run(Some(&HONEST), Some(roomy))?, None);
+    let skip = |c| Some(SaltFault::Skip(c));
+    let rows: [OutcomeRow; 12] = [
+        (
+            "an unlisted label",
+            &UNLISTED,
+            None,
+            defect(Defect::UnlistedLabel),
+        ),
+        (
+            "code 13 from the construction",
+            &OVERFLOW,
+            None,
+            skip(Code::BoundsExceeded),
+        ),
+        (
+            "code 14 from the construction",
+            &EXHAUSTED,
+            None,
+            skip(Code::NoInstance),
+        ),
+        (
+            "an instance over the bounds item",
+            &BIG_H,
+            None,
+            skip(Code::BoundsExceeded),
+        ),
+        (
+            "another code from the construction",
+            &OTHER_CODE,
+            None,
+            defect(Defect::ConstructionCode(Code::ParamsMalformed)),
+        ),
+        (
+            "unsorted edges",
+            &UNSORTED,
+            Some(roomy),
+            defect(Defect::InstanceInvalid(Code::InstanceDigestMismatch)),
+        ),
+        (
+            "a bad metadata region",
+            &BAD_REGION,
+            Some(roomy),
+            defect(Defect::InstanceInvalid(Code::MetadataInvalid)),
+        ),
+        (
+            "nodes over the size bound",
+            &HONEST,
+            Some(SizeBounds { nodes: 1, ..roomy }),
+            defect(Defect::SizeBound),
+        ),
+        (
+            "edges over the size bound",
+            &HONEST,
+            Some(SizeBounds { edges: 0, ..roomy }),
+            defect(Defect::SizeBound),
+        ),
+        (
+            "degree over the size bound",
+            &HONEST,
+            Some(SizeBounds { degree: 0, ..roomy }),
+            defect(Defect::SizeBound),
+        ),
+        (
+            "metadata rejected by the construction",
+            &REJECTS_METADATA,
+            Some(roomy),
+            defect(Defect::MetadataRejected),
+        ),
+        ("an honest construction", &HONEST, Some(roomy), None),
+    ];
+    for (label, construction, override_bounds, want) in rows {
+        let contracts = [contract(Some(construction), example_size_bounds)];
+        let admitted = admitted(&contracts, P_L2_F0).map_err(|e| format!("{label}: {e}"))?;
+        let bounds = match override_bounds {
+            Some(bounds) => bounds,
+            None => bounds_of(&admitted, &topology).map_err(|e| format!("{label}: {e}"))?,
+        };
+        ensure_eq!(
+            generate_instance(&admitted, &topology, &bounds, nonce_of(0)).err(),
+            want,
+            label
+        );
+    }
     // A contract without a construction cannot pass admission, but a caller
     // that skips it still gets a defect, not a panic.
     let with_construction = [contract(Some(&HONEST), example_size_bounds)];

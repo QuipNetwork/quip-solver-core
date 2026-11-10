@@ -6,6 +6,8 @@
 //! touches the file system at run time. The live topology comes from the
 //! topology files that `quip_solver_conformance::vectors` embeds.
 
+use std::sync::OnceLock;
+
 use ising_generators::family::BaseTopology;
 use serde_json::Value;
 
@@ -170,15 +172,18 @@ pub(crate) fn live_entry() -> Value {
 /// # Panics
 ///
 /// When the live cases are missing or name different files.
-pub(crate) fn live_reference() -> String {
-    let doc = parse(STRUCTURE_JSON);
-    let references: Vec<&str> = array(&doc, "live")
-        .iter()
-        .map(|case| text(case, "topology"))
-        .collect();
-    let first = *references.first().expect("a live case");
-    assert!(references.iter().all(|r| *r == first), "one live file");
-    first.to_owned()
+pub(crate) fn live_reference() -> &'static str {
+    static LIVE: OnceLock<String> = OnceLock::new();
+    LIVE.get_or_init(|| {
+        let doc = parse(STRUCTURE_JSON);
+        let references: Vec<&str> = array(&doc, "live")
+            .iter()
+            .map(|case| text(case, "topology"))
+            .collect();
+        let first = *references.first().expect("a live case");
+        assert!(references.iter().all(|r| *r == first), "one live file");
+        first.to_owned()
+    })
 }
 
 /// The live z(12, 4) topology, decoded from its file (kind 1).
@@ -186,9 +191,12 @@ pub(crate) fn live_reference() -> String {
 /// # Panics
 ///
 /// When the file does not decode or the topology is invalid.
-pub(crate) fn live_topology() -> BaseTopology {
-    let stored = quip_solver_conformance::topology(&live_reference()).expect("live file");
-    BaseTopology::new(stored.nodes, &stored.edges).expect("live topology")
+pub(crate) fn live_topology() -> &'static BaseTopology {
+    static LIVE: OnceLock<BaseTopology> = OnceLock::new();
+    LIVE.get_or_init(|| {
+        let stored = quip_solver_conformance::topology(live_reference()).expect("live file");
+        BaseTopology::new(stored.nodes, &stored.edges).expect("live topology")
+    })
 }
 
 /// One archived model: its nonce and its tiles in dense positions.

@@ -1,7 +1,7 @@
 //! Test-support miner that declares family support: the same trivial sampler
 //! as `mock_sampler_miner`, with `solver_id` `quip-mock/families`, one
 //! restricted generated claim and one unrestricted accepted claim. Used by
-//! `cli_prints_the_family_fields` and `cli_and_session_answers_agree` in
+//! `cli_and_session_capabilities_agree` in
 //! `tests/family_capabilities.rs`.
 
 use clap::Parser;

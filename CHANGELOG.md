@@ -5,6 +5,31 @@ This file documents changes to the Quip solver contract.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Changed
+
+- The test suite is smaller and faster. No public interface changed. Rust test
+  functions went from 1093 to 685 and Python test functions from 182 to 121.
+  Tests that differed only in their inputs became one table test per behavior,
+  with a label per row, and the change removes tests whose assertions another
+  test already made. The Rust test binaries now finish in about 40 seconds of test
+  time, down from 171 seconds in the last pipeline before this change.
+  Integration tests locate the example binaries that `cargo test` already built
+  instead of running a nested `cargo build` in every test. The ising-generators
+  tests decode the live topology once per test binary, and the slow sweeps in
+  the twisted dimer, two commodity, polariton, square oracle, and topology blob
+  tests use pinned nonces, a precomputed charge set, and two committed gzip
+  fixtures. The full 32-nonce twisted dimer sweep stays as an ignored test. The
+  conformance driver's unit tests reach the lease budget and the stderr drain
+  wait through `pub(crate)` parameters. The production values did not change.
+  When a miner process exits before the gate accepts any connection, the gate
+  reports the never-connected outcome at once instead of after the outcome
+  timeout. The Python oracle decodes the live blob once per process.
+  `make test` runs the ising-generators suite once and the `cli` feature test
+  on its own. The coverage table in `docs/family-conformance.md` cites the
+  merged test names.
+
 ## 0.0.7
 
 The SAT algorithm value, a way to decline a job, and the polariton family.

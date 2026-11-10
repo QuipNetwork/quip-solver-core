@@ -130,74 +130,155 @@ mod tests {
         }
     }
 
-    #[test]
-    fn unstated_limits_accept_anything() {
-        let h = [1e12, -0.5];
-        assert!(ModelLimits::UNSTATED
-            .check(&h, &[3.0], &[(0, 1)], true)
-            .is_ok());
-    }
+    /// `(label, limits, h, j, edges, exact, expected)`. `expected` is `None`
+    /// when the check passes and `Some(needle)` when it fails with a message
+    /// containing the needle.
+    type Case<'a> = (
+        &'a str,
+        ModelLimits,
+        &'a [f64],
+        &'a [f64],
+        &'a [(usize, usize)],
+        bool,
+        Option<&'a str>,
+    );
 
-    #[test]
-    fn zero_degree_and_field_are_unbounded() {
-        let h = [0.0; 4];
-        assert!(limits(0, 0, 1)
-            .check(&h, &[1e9, 1e9, 1e9], &STAR, true)
-            .is_ok());
-    }
-
-    #[test]
-    fn a_node_at_the_degree_limit_passes_and_one_above_fails() {
-        let h = [0.0; 4];
-        let j = [1000.0; 3];
-        assert!(limits(3, 0, 1).check(&h, &j, &STAR, false).is_ok());
-        let err = limits(2, 0, 1)
-            .check(&h, &j, &STAR, false)
-            .expect_err("degree 3 exceeds 2");
-        assert!(err.contains("degree 3"), "{err}");
-    }
-
-    #[test]
-    fn the_field_sums_bias_and_incident_couplings() {
+    fn limit_cases() -> [Case<'static>; 7] {
+        let zeros: &[f64] = &[0.0; 4];
+        let ones: &[f64] = &[1000.0; 3];
         // Node 0: |h| 500 + three couplings of 1000 = 3500.
-        let h = [-500.0, 0.0, 0.0, 0.0];
-        let j = [1000.0, -1000.0, 1000.0];
-        assert!(limits(0, 3500, 1).check(&h, &j, &STAR, false).is_ok());
-        let err = limits(0, 3499, 1)
-            .check(&h, &j, &STAR, false)
-            .expect_err("field 3500 exceeds 3499");
-        assert!(err.contains("local field 3500"), "{err}");
+        let field_h: &[f64] = &[-500.0, 0.0, 0.0, 0.0];
+        let field_j: &[f64] = &[1000.0, -1000.0, 1000.0];
+        let pair: &[(usize, usize)] = &[(0, 1)];
+        [
+            (
+                "unstated limits accept anything",
+                ModelLimits::UNSTATED,
+                &[1e12, -0.5],
+                &[3.0],
+                pair,
+                true,
+                None,
+            ),
+            (
+                "zero degree and field are unbounded",
+                limits(0, 0, 1),
+                zeros,
+                &[1e9, 1e9, 1e9],
+                &STAR,
+                true,
+                None,
+            ),
+            (
+                "a node at the degree limit passes",
+                limits(3, 0, 1),
+                zeros,
+                ones,
+                &STAR,
+                false,
+                None,
+            ),
+            (
+                "one above the degree limit fails",
+                limits(2, 0, 1),
+                zeros,
+                ones,
+                &STAR,
+                false,
+                Some("degree 3"),
+            ),
+            (
+                "a field at the limit passes",
+                limits(0, 3500, 1),
+                field_h,
+                field_j,
+                &STAR,
+                false,
+                None,
+            ),
+            (
+                "a field one above the limit fails",
+                limits(0, 3499, 1),
+                field_h,
+                field_j,
+                &STAR,
+                false,
+                Some("local field 3500"),
+            ),
+            (
+                "duplicate edges count twice",
+                limits(1, 0, 1),
+                &[0.0, 0.0],
+                &[1000.0, 1000.0],
+                &[(0, 1), (0, 1)],
+                false,
+                Some(""),
+            ),
+        ]
+    }
+
+    fn step_cases() -> [Case<'static>; 5] {
+        let off_step_h: &[f64] = &[1500.0, 0.0];
+        let pair: &[(usize, usize)] = &[(0, 1)];
+        [
+            (
+                "an off-step coefficient passes for a non-exact binary",
+                limits(0, 0, 1000),
+                off_step_h,
+                &[1000.0],
+                pair,
+                false,
+                None,
+            ),
+            (
+                "an off-step coefficient fails for an exact binary",
+                limits(0, 0, 1000),
+                off_step_h,
+                &[1000.0],
+                pair,
+                true,
+                Some("1500"),
+            ),
+            (
+                "a finer step accepts the same coefficient",
+                limits(0, 0, 500),
+                off_step_h,
+                &[1000.0],
+                pair,
+                true,
+                None,
+            ),
+            (
+                "sub-milli is off any step",
+                limits(0, 0, 1),
+                &[0.5],
+                &[],
+                &[],
+                true,
+                Some(""),
+            ),
+            (
+                "a zero step makes no claim",
+                limits(0, 0, 0),
+                &[0.5],
+                &[],
+                &[],
+                true,
+                None,
+            ),
+        ]
     }
 
     #[test]
-    fn duplicate_edges_count_twice() {
-        let h = [0.0, 0.0];
-        let edges = [(0, 1), (0, 1)];
-        assert!(limits(1, 0, 1)
-            .check(&h, &[1000.0, 1000.0], &edges, false)
-            .is_err());
-    }
-
-    #[test]
-    fn off_step_coefficients_fail_only_for_an_exact_binary() {
-        let h = [1500.0, 0.0];
-        let j = [1000.0];
-        let edges = [(0, 1)];
-        assert!(limits(0, 0, 1000).check(&h, &j, &edges, false).is_ok());
-        let err = limits(0, 0, 1000)
-            .check(&h, &j, &edges, true)
-            .expect_err("1500 is off a 1000 step");
-        assert!(err.contains("1500"), "{err}");
-        assert!(limits(0, 0, 500).check(&h, &j, &edges, true).is_ok());
-    }
-
-    #[test]
-    fn sub_milli_is_off_any_step() {
-        assert!(limits(0, 0, 1).check(&[0.5], &[], &[], true).is_err());
-    }
-
-    #[test]
-    fn a_zero_step_makes_no_claim() {
-        assert!(limits(0, 0, 0).check(&[0.5], &[], &[], true).is_ok());
+    fn model_limits_check_follows_the_table() {
+        for (label, limits, h, j, edges, exact, expected) in
+            limit_cases().into_iter().chain(step_cases())
+        {
+            match (limits.check(h, j, edges, exact), expected) {
+                (Ok(()), None) => {}
+                (Err(err), Some(needle)) => assert!(err.contains(needle), "{label}: {err}"),
+                (got, expected) => panic!("{label}: got {got:?}, expected {expected:?}"),
+            }
+        }
     }
 }

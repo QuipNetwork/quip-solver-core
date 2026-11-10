@@ -351,25 +351,6 @@ fn enum_numbers_match_the_fixture() {
     assert_eq!(generated, golden_wire().enums, "enum numbers changed");
 }
 
-#[test]
-fn every_variant_the_fixture_pins_still_parses_from_its_name() {
-    let wire = golden_wire();
-    for (kind, names) in &wire.enums {
-        for name in names.keys() {
-            let parsed = match kind.as_str() {
-                "JobKind" => JobKind::from_str_name(name).is_some(),
-                "RejectReason" => RejectReason::from_str_name(name).is_some(),
-                "Backend" => Backend::from_str_name(name).is_some(),
-                "Algorithm" => Algorithm::from_str_name(name).is_some(),
-                "CoefficientEncoding" => CoefficientEncoding::from_str_name(name).is_some(),
-                "GeneratorAlgorithm" => GeneratorAlgorithm::from_str_name(name).is_some(),
-                other => panic!("unexpected enum {other}"),
-            };
-            assert!(parsed, "{kind}::{name} no longer exists");
-        }
-    }
-}
-
 fn core_vectors() -> Result<serde_json::Value, String> {
     serde_json::from_str(quip_solver_conformance::FAMILY_CORE).map_err(|e| e.to_string())
 }

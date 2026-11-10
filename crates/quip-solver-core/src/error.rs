@@ -67,36 +67,42 @@ mod tests {
     use quip_proto::v1::RejectReason;
 
     #[test]
-    fn capacity_maps_to_too_large() {
-        assert_eq!(
-            SampleError::Capacity.to_reject_reason(),
-            RejectReason::TooLarge
-        );
-    }
-
-    #[test]
-    fn busy_and_fault_both_map_to_overloaded() {
-        assert_eq!(
-            SampleError::DeviceBusy.to_reject_reason(),
-            RejectReason::Overloaded
-        );
-        assert_eq!(
-            SampleError::DeviceFault("nvml: GPU 0 lost".to_owned()).to_reject_reason(),
-            RejectReason::Overloaded
-        );
-    }
-
-    #[test]
-    fn a_declined_job_maps_to_no_solution_and_is_not_fatal() {
-        let declined = SampleError::Declined("UNSAT".to_owned());
-        assert_eq!(declined.to_reject_reason(), RejectReason::NoSolution);
-        assert!(!declined.is_fatal());
-    }
-
-    #[test]
-    fn only_a_fault_ends_the_session() {
-        assert!(!SampleError::Capacity.is_fatal());
-        assert!(!SampleError::DeviceBusy.is_fatal());
-        assert!(SampleError::DeviceFault(String::new()).is_fatal());
+    fn sample_errors_map_to_reasons_and_fatality() {
+        let rows = [
+            (
+                "capacity",
+                SampleError::Capacity,
+                RejectReason::TooLarge,
+                false,
+            ),
+            (
+                "busy",
+                SampleError::DeviceBusy,
+                RejectReason::Overloaded,
+                false,
+            ),
+            (
+                "fault",
+                SampleError::DeviceFault("nvml: GPU 0 lost".to_owned()),
+                RejectReason::Overloaded,
+                true,
+            ),
+            (
+                "fault with an empty message",
+                SampleError::DeviceFault(String::new()),
+                RejectReason::Overloaded,
+                true,
+            ),
+            (
+                "declined",
+                SampleError::Declined("UNSAT".to_owned()),
+                RejectReason::NoSolution,
+                false,
+            ),
+        ];
+        for (label, error, reason, fatal) in rows {
+            assert_eq!(error.to_reject_reason(), reason, "{label}: reason");
+            assert_eq!(error.is_fatal(), fatal, "{label}: fatal");
+        }
     }
 }

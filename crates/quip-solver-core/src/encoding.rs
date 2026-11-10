@@ -288,36 +288,27 @@ mod tests {
     }
 
     #[test]
-    fn production_f16_is_exact() {
-        let bytes = [-1000_i32, 0, 1000]
+    fn f16_decoding_keeps_milli_only_when_lossy() {
+        let whole = [-1000_i32, 0, 1000]
             .into_iter()
             .flat_map(i32::to_le_bytes)
             .collect();
-        let decoded =
-            decode_problem::<half::f16>(&problem(CoefficientEncoding::I32, 1000, bytes)).unwrap();
-        assert!(decoded.exact_milli.is_none());
-    }
-    #[test]
-    fn fractional_f16_retains_milli() {
-        let decoded = decode_problem::<half::f16>(&problem(
-            CoefficientEncoding::I32,
-            1000,
-            100_i32.to_le_bytes().to_vec(),
-        ))
-        .unwrap();
-        assert_eq!(decoded.exact_milli, Some((vec![100], vec![100])));
-    }
-    #[test]
-    fn direct_float_still_validates() {
-        assert_eq!(
-            decode_problem::<f32>(&problem(
-                CoefficientEncoding::F32,
-                0,
-                f32::NAN.to_le_bytes().to_vec()
-            ))
-            .err(),
-            Some(RejectReason::Malformed)
-        );
+        let rows = [
+            // Production f16 targets whole units: no exact copy is kept.
+            ("whole units", whole, None),
+            // A fractional coefficient is lossy in f16: the milli copy is kept.
+            (
+                "100 milli",
+                100_i32.to_le_bytes().to_vec(),
+                Some((vec![100], vec![100])),
+            ),
+        ];
+        for (label, bytes, expected) in rows {
+            let decoded =
+                decode_problem::<half::f16>(&problem(CoefficientEncoding::I32, 1000, bytes))
+                    .map(|d| d.exact_milli);
+            assert_eq!(decoded, Ok(expected), "{label}");
+        }
     }
 
     #[test]

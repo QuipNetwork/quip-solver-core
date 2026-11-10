@@ -17,10 +17,7 @@
 
 use std::collections::BTreeSet;
 
-use ising_generators::descriptor::{admit, params_digest, Admitted, AdvertisedLimits, SizeBounds};
-use ising_generators::family::{
-    admit_topology, feasible, generate_instance, BaseTopology, SaltFault, Streams,
-};
+use ising_generators::family::{feasible, generate_instance, BaseTopology, SaltFault, Streams};
 use ising_generators::ice::zephyr_lattice;
 use ising_generators::instance::{Instance, InstanceParts};
 use ising_generators::polariton::{
@@ -33,7 +30,16 @@ use ising_generators::Code;
 #[expect(dead_code, reason = "this test uses only the live topology loader")]
 mod common;
 
-const CONTRACTS: &[ising_generators::descriptor::Contract] = &[POLARITON_V1];
+#[path = "common/admit.rs"]
+mod admit;
+#[path = "common/lattice.rs"]
+mod lattice;
+#[path = "common/size_bounds.rs"]
+mod size_bounds;
+
+use admit::admitted;
+use lattice::lattice_topology;
+use size_bounds::bounds;
 
 /// The labels value of a free vertex.
 const FREE: i8 = 127;
@@ -49,30 +55,6 @@ fn params(m: u16, t: u8, side: u16, pairs: u16) -> Vec<u8> {
     bytes.extend_from_slice(&[4, 0, 2, 0, 0, 0]);
     bytes.extend_from_slice(&pairs.to_le_bytes());
     bytes
-}
-
-fn admitted(bytes: &[u8]) -> Result<Admitted<'_>, Code> {
-    admit(
-        CONTRACTS,
-        b"quip/polariton-static",
-        1,
-        bytes,
-        &params_digest(bytes),
-    )
-}
-
-fn bounds(admitted: &Admitted<'_>, topology: &BaseTopology) -> Result<SizeBounds, Code> {
-    admit_topology(
-        admitted,
-        topology,
-        topology.order_digest(),
-        &AdvertisedLimits::default(),
-    )
-}
-
-fn lattice_topology(m: u16, t: u8) -> BaseTopology {
-    let (nodes, edges) = zephyr_lattice(m, t).expect("lattice");
-    BaseTopology::new(nodes, &edges).expect("topology")
 }
 
 /// The Zephyr id of the segment `(u, w, k, p)` of `z(m, t)`.
@@ -104,15 +86,22 @@ fn try_build(
     topology: &BaseTopology,
     nonce: [u8; 32],
 ) -> Result<Instance, SaltFault> {
-    let admitted = admitted(bytes).expect("admit");
+    let admitted = admitted(&POLARITON_V1, bytes).expect("admit");
     let bounds = bounds(&admitted, topology).expect("admit topology");
     generate_instance(&admitted, topology, &bounds, nonce)
 }
 
-fn build(bytes: &[u8], topology: &BaseTopology, nonce: [u8; 32]) -> Instance {
-    try_build(bytes, topology, nonce)
-        .map_err(|fault| format!("{fault:?}"))
-        .expect("generate")
+fn build(what: &str, bytes: &[u8], topology: &BaseTopology, nonce: [u8; 32]) -> Instance {
+    let admitted = admitted(&POLARITON_V1, bytes);
+    assert!(admitted.is_ok(), "{what}: admit");
+    let admitted = admitted.expect("admit");
+    let bounds = bounds(&admitted, topology);
+    assert!(bounds.is_ok(), "{what}: admit topology");
+    let bounds = bounds.expect("admit topology");
+    let built = generate_instance(&admitted, topology, &bounds, nonce)
+        .map_err(|fault| format!("{fault:?}"));
+    assert!(built.is_ok(), "{what}: generate: {built:?}");
+    built.expect("generate")
 }
 
 /// The decoded metadata.
@@ -125,16 +114,16 @@ struct Meta {
     positions: Vec<u32>,
 }
 
-fn decode(instance: &Instance) -> Meta {
+fn decode(what: &str, instance: &Instance) -> Meta {
     let region = instance.metadata();
-    assert_eq!(&region[..4], &[2, 0, 4, 0], "kind 4 first");
+    assert_eq!(&region[..4], &[2, 0, 4, 0], "{what}: kind 4 first");
     let len = u32::from_le_bytes(region[4..8].try_into().expect("four")) as usize;
     let charges = &region[8..8 + len];
     let rest = &region[8 + len..];
-    assert_eq!(&rest[..2], &[5, 0], "kind 5 second");
+    assert_eq!(&rest[..2], &[5, 0], "{what}: kind 5 second");
     let len5 = u32::from_le_bytes(rest[2..6].try_into().expect("four")) as usize;
     let incidence = &rest[6..];
-    assert_eq!(incidence.len(), len5, "no trailing bytes");
+    assert_eq!(incidence.len(), len5, "{what}: no trailing bytes");
     let side = u16::from_le_bytes(charges[..2].try_into().expect("two"));
     let u16_at =
         |bytes: &[u8], at: usize| u16::from_le_bytes(bytes[at..at + 2].try_into().expect("two"));
@@ -321,9 +310,14 @@ fn feasible_state(instance: &Instance, meta: &Meta) -> Vec<i8> {
 #[test]
 fn every_l2_state_matches_the_direct_charge_loss() {
     let bytes = params(2, 4, 2, 0);
-    let instance = build(&bytes, &lattice_topology(2, 4), nonce_of(1));
-    let meta = decode(&instance);
-    let admitted = admitted(&bytes).expect("admit");
+    let instance = build(
+        "every_l2_state_matches_the_direct_charge_loss",
+        &bytes,
+        &lattice_topology(2, 4),
+        nonce_of(1),
+    );
+    let meta = decode("every_l2_state_matches_the_direct_charge_loss", &instance);
+    let admitted = admitted(&POLARITON_V1, &bytes).expect("admit");
     assert_eq!(instance.node_ids().len(), 12);
     assert_eq!(meta.labels.iter().filter(|&&l| l != FREE).count(), 1);
     for bits in 0..4096u64 {
@@ -341,9 +335,14 @@ fn every_l2_state_matches_the_direct_charge_loss() {
 #[test]
 fn feasible_matches_zero_loss() {
     let bytes = params(3, 4, 4, 1);
-    let instance = build(&bytes, &lattice_topology(3, 4), nonce_of(2));
-    let meta = decode(&instance);
-    let admitted = admitted(&bytes).expect("admit");
+    let instance = build(
+        "feasible_matches_zero_loss",
+        &bytes,
+        &lattice_topology(3, 4),
+        nonce_of(2),
+    );
+    let meta = decode("feasible_matches_zero_loss", &instance);
+    let admitted = admitted(&POLARITON_V1, &bytes).expect("admit");
     let good = feasible_state(&instance, &meta);
     assert!(feasible(&admitted, &instance, &good));
     assert_eq!(energy(&instance, &good), 0);
@@ -404,7 +403,10 @@ fn windows_skip_dead_cells() {
     let (m, t) = (3u32, 1u32);
     let bytes = params(3, 1, 2, 0);
     let window = |topology: &BaseTopology| {
-        let meta = decode(&build(&bytes, topology, nonce_of(3)));
+        let meta = decode(
+            "windows_skip_dead_cells",
+            &build("windows_skip_dead_cells", &bytes, topology, nonce_of(3)),
+        );
         (meta.c0, meta.r0)
     };
     assert_eq!(window(&lattice_topology(3, 1)), (1, 1));
@@ -419,7 +421,7 @@ fn windows_skip_dead_cells() {
     // Cell (3, 3) is in every 3 by 3 window, so no window is alive.
     let center = seg_id(m, t, 0, 3, 0, 2);
     let topology = damaged(3, 1, &[center], &[]);
-    let admitted = admitted(&bytes).expect("admit");
+    let admitted = admitted(&POLARITON_V1, &bytes).expect("admit");
     assert_eq!(
         bounds(&admitted, &topology),
         Err(Code::TopologyIncompatible)
@@ -429,7 +431,7 @@ fn windows_skip_dead_cells() {
 #[test]
 fn admission_codes() {
     let topology = lattice_topology(2, 4);
-    let code = |bytes: Vec<u8>| match admitted(&bytes) {
+    let code = |bytes: Vec<u8>| match admitted(&POLARITON_V1, &bytes) {
         Err(code) => code,
         Ok(admitted) => bounds(&admitted, &topology).expect_err("refused"),
     };
@@ -444,19 +446,22 @@ fn admission_codes() {
     assert_eq!(code(params(2, 4, 2, 2049)), Code::ParamsOutOfBounds);
     assert_eq!(POLARITON_SCHEMA.len(), 4);
     // The boundary case builds.
-    assert!(admitted(&params(2, 4, 2, 0)).is_ok());
+    assert!(admitted(&POLARITON_V1, &params(2, 4, 2, 0)).is_ok());
 }
 
 /// The labels drawn by the stream of `nonce`, tries 1 to 4, and the try that
 /// passes `check_request`.
 fn replay(
+    what: &str,
     bytes: &[u8],
     side: u16,
     pairs: usize,
     nonce: [u8; 32],
     order: [u8; 32],
 ) -> Option<(usize, Vec<Option<i8>>)> {
-    let admitted = admitted(bytes).expect("admit");
+    let admitted = admitted(&POLARITON_V1, bytes);
+    assert!(admitted.is_ok(), "{what}: admit");
+    let admitted = admitted.expect("admit");
     let mut streams = Streams::new(
         nonce,
         admitted.descriptor().digest(),
@@ -495,32 +500,6 @@ fn replay(
 }
 
 #[test]
-fn charges_are_balanced_and_interior() {
-    let bytes = params(3, 4, 4, 1);
-    let topology = lattice_topology(3, 4);
-    for i in 0..8 {
-        let instance = build(&bytes, &topology, nonce_of(i));
-        let meta = decode(&instance);
-        assert_eq!(meta.side, 4);
-        assert_eq!(meta.labels.len(), 25);
-        assert_eq!(meta.labels.iter().filter(|&&l| l == 2).count(), 1);
-        assert_eq!(meta.labels.iter().filter(|&&l| l == -2).count(), 1);
-        for (v, &label) in meta.labels.iter().enumerate() {
-            let (x, y) = (v % 5, v / 5);
-            if x == 0 || y == 0 || x == 4 || y == 4 {
-                assert_eq!(label, FREE, "boundary vertex {v}");
-            } else {
-                assert!([-2, 0, 2].contains(&label), "interior vertex {v}");
-            }
-        }
-        let (_, expected) =
-            replay(&bytes, 4, 1, nonce_of(i), *topology.order_digest()).expect("a draw passes");
-        let want: Vec<i8> = expected.iter().map(|l| l.unwrap_or(FREE)).collect();
-        assert_eq!(meta.labels, want, "the stream replay");
-    }
-}
-
-#[test]
 fn infeasible_draws_retry_then_give_14() {
     // L = 5 on z(4, 4): 16 interior vertices, all charged, so a draw can
     // cluster charges of one sign and fail check_request.
@@ -530,7 +509,14 @@ fn infeasible_draws_retry_then_give_14() {
     let mut exhausted = None;
     for i in 0..4000 {
         let nonce = nonce_of(i);
-        match replay(&bytes, 5, 8, nonce, *topology.order_digest()) {
+        match replay(
+            "infeasible_draws_retry_then_give_14",
+            &bytes,
+            5,
+            8,
+            nonce,
+            *topology.order_digest(),
+        ) {
             Some((attempt, _)) if attempt > 1 && retried.is_none() => retried = Some((i, attempt)),
             None if exhausted.is_none() => exhausted = Some(i),
             _ => {}
@@ -540,11 +526,24 @@ fn infeasible_draws_retry_then_give_14() {
         }
     }
     let (i, attempt) = retried.expect("a salt that passes after a failed try");
-    let instance = build(&bytes, &topology, nonce_of(i));
-    let (_, labels) = replay(&bytes, 5, 8, nonce_of(i), *topology.order_digest()).expect("passes");
+    let instance = build(
+        "infeasible_draws_retry_then_give_14",
+        &bytes,
+        &topology,
+        nonce_of(i),
+    );
+    let (_, labels) = replay(
+        "infeasible_draws_retry_then_give_14",
+        &bytes,
+        5,
+        8,
+        nonce_of(i),
+        *topology.order_digest(),
+    )
+    .expect("passes");
     let want: Vec<i8> = labels.iter().map(|l| l.unwrap_or(FREE)).collect();
     assert_eq!(
-        decode(&instance).labels,
+        decode("infeasible_draws_retry_then_give_14", &instance).labels,
         want,
         "try {attempt} supplies the labels"
     );
@@ -556,40 +555,20 @@ fn infeasible_draws_retry_then_give_14() {
 }
 
 #[test]
-fn every_coupler_is_a_topology_edge() {
-    let bytes = params(3, 4, 4, 1);
-    let topology = lattice_topology(3, 4);
-    let instance = build(&bytes, &topology, nonce_of(4));
-    let native: BTreeSet<(u32, u32)> = topology
-        .edges()
-        .iter()
-        .map(|&(a, b)| {
-            let (a, b) = (
-                topology.node_ids()[a as usize],
-                topology.node_ids()[b as usize],
-            );
-            (a.min(b), a.max(b))
-        })
-        .collect();
-    assert!(!instance.edges().is_empty());
-    for &(a, b) in instance.edges() {
-        let (a, b) = (
-            instance.node_ids()[a as usize],
-            instance.node_ids()[b as usize],
-        );
-        assert!(native.contains(&(a.min(b), a.max(b))), "coupler {a} {b}");
-    }
-    // The nodes follow topology registration order.
-    assert!(instance.node_ids().windows(2).all(|w| w[0] < w[1]));
-}
-
-#[test]
 fn check_metadata_rejects_each_rule() {
     let bytes = params(3, 4, 4, 1);
-    let instance = build(&bytes, &lattice_topology(3, 4), nonce_of(5));
-    let meta = decode(&instance);
+    let instance = build(
+        "check_metadata_rejects_each_rule",
+        &bytes,
+        &lattice_topology(3, 4),
+        nonce_of(5),
+    );
+    let meta = decode("check_metadata_rejects_each_rule", &instance);
     let accepts = |candidate: &Instance| {
-        (POLARITON.check_metadata)(admitted(&bytes).expect("admit").params(), candidate)
+        (POLARITON.check_metadata)(
+            admitted(&POLARITON_V1, &bytes).expect("admit").params(),
+            candidate,
+        )
     };
     assert!(accepts(&instance));
     // The same mutation with the energy rebuilt from the mutated labels.
@@ -706,9 +685,14 @@ fn check_metadata_rejects_each_rule() {
 #[test]
 fn observables_report_static_charges_only() {
     let bytes = params(3, 4, 4, 1);
-    let instance = build(&bytes, &lattice_topology(3, 4), nonce_of(6));
-    let meta = decode(&instance);
-    let admitted = admitted(&bytes).expect("admit");
+    let instance = build(
+        "observables_report_static_charges_only",
+        &bytes,
+        &lattice_topology(3, 4),
+        nonce_of(6),
+    );
+    let meta = decode("observables_report_static_charges_only", &instance);
+    let admitted = admitted(&POLARITON_V1, &bytes).expect("admit");
     let good = feasible_state(&instance, &meta);
     let seen = polariton_observables(admitted.params(), &instance, &good).expect("observables");
     assert_eq!(seen.violations, 0);
@@ -737,17 +721,90 @@ fn observables_report_static_charges_only() {
 }
 
 #[test]
-fn generation_is_repeatable() {
+fn generation_invariants() {
     let bytes = params(3, 4, 4, 1);
     let topology = lattice_topology(3, 4);
-    let a = build(&bytes, &topology, nonce_of(7));
-    let b = build(&bytes, &topology, nonce_of(7));
-    assert_eq!(a, b);
-    assert_eq!(a.digest(), b.digest());
-    let others: BTreeSet<Vec<i8>> = (0..16)
-        .map(|i| decode(&build(&bytes, &topology, nonce_of(i))).labels)
+    let native: BTreeSet<(u32, u32)> = topology
+        .edges()
+        .iter()
+        .map(|&(a, b)| {
+            let (a, b) = (
+                topology.node_ids()[a as usize],
+                topology.node_ids()[b as usize],
+            );
+            (a.min(b), a.max(b))
+        })
         .collect();
-    assert!(others.len() > 1, "the nonce changes the charges");
+    let mut charges_seen = BTreeSet::new();
+    for i in 0..16 {
+        let context = format!("nonce {i}");
+        let instance = build(&context, &bytes, &topology, nonce_of(i));
+        let meta = decode(&context, &instance);
+
+        // The charges are balanced and interior, and replay from the stream.
+        assert_eq!(meta.side, 4, "nonce {i}: side");
+        assert_eq!(meta.labels.len(), 25, "nonce {i}: label count");
+        assert_eq!(
+            meta.labels.iter().filter(|&&l| l == 2).count(),
+            1,
+            "nonce {i}: one +2 charge"
+        );
+        assert_eq!(
+            meta.labels.iter().filter(|&&l| l == -2).count(),
+            1,
+            "nonce {i}: one -2 charge"
+        );
+        for (v, &label) in meta.labels.iter().enumerate() {
+            let (x, y) = (v % 5, v / 5);
+            if x == 0 || y == 0 || x == 4 || y == 4 {
+                assert_eq!(label, FREE, "nonce {i}: boundary vertex {v}");
+            } else {
+                assert!(
+                    [-2, 0, 2].contains(&label),
+                    "nonce {i}: interior vertex {v}"
+                );
+            }
+        }
+        let replayed = replay(
+            &context,
+            &bytes,
+            4,
+            1,
+            nonce_of(i),
+            *topology.order_digest(),
+        );
+        assert!(replayed.is_some(), "{context}: a draw passes");
+        let (_, expected) = replayed.expect("a draw passes");
+        let want: Vec<i8> = expected.iter().map(|l| l.unwrap_or(FREE)).collect();
+        assert_eq!(meta.labels, want, "nonce {i}: the stream replay");
+
+        // Every coupler is a topology edge, and the nodes follow topology
+        // registration order.
+        assert!(!instance.edges().is_empty(), "nonce {i}: couplers");
+        for &(a, b) in instance.edges() {
+            let (a, b) = (
+                instance.node_ids()[a as usize],
+                instance.node_ids()[b as usize],
+            );
+            assert!(
+                native.contains(&(a.min(b), a.max(b))),
+                "nonce {i}: coupler {a} {b}"
+            );
+        }
+        assert!(
+            instance.node_ids().windows(2).all(|w| w[0] < w[1]),
+            "nonce {i}: node order"
+        );
+
+        // The same nonce gives the same instance.
+        if i == 7 {
+            let again = build(&context, &bytes, &topology, nonce_of(i));
+            assert_eq!(instance, again, "nonce {i}: repeatable");
+            assert_eq!(instance.digest(), again.digest(), "nonce {i}: digest");
+        }
+        let _ = charges_seen.insert(meta.labels);
+    }
+    assert!(charges_seen.len() > 1, "the nonce changes the charges");
 }
 
 #[test]
@@ -763,29 +820,28 @@ fn recipes_are_canonical() {
         assert_eq!(recipe.cell, cell);
         assert_eq!(recipe.params, params(12, 4, side, pairs).as_slice());
         assert_eq!(pairs, (side - 1) * (side - 1) / 8);
-        assert!(admitted(recipe.params).is_ok());
+        assert!(admitted(&POLARITON_V1, recipe.params).is_ok());
     }
 }
+
+/// The salt that builds for each recipe, in recipe order. Found by running the
+/// `0..64` salt search at commit 9b5d380: every recipe builds at salt 0.
+const BUILDING_SALTS: [u32; 3] = [0, 0, 0];
 
 #[test]
 fn live_recipes_build() {
     let topology = common::live_topology();
-    for recipe in &POLARITON_RECIPES {
-        let admitted = admitted(recipe.params).expect("admit");
-        let bounds = bounds(&admitted, &topology).expect("admit topology");
-        let mut built = None;
-        for i in 0..64 {
-            if let Ok(instance) = generate_instance(&admitted, &topology, &bounds, nonce_of(i)) {
-                built = Some((i, instance));
-                break;
-            }
-        }
-        let (i, instance) = built.expect("a salt builds");
-        let meta = decode(&instance);
+    for (recipe, i) in POLARITON_RECIPES.iter().zip(BUILDING_SALTS) {
+        let admitted = admitted(&POLARITON_V1, recipe.params).expect("admit");
+        let bounds = bounds(&admitted, topology).expect("admit topology");
+        let instance =
+            generate_instance(&admitted, topology, &bounds, nonce_of(i)).expect("the salt builds");
+        let meta = decode("live_recipes_build", &instance);
         let side = u32::from(meta.side);
         assert_eq!(instance.node_ids().len() as u32, 2 * side * (side + 1));
         let pairs = (side - 1) * (side - 1) / 8;
         let (attempt, _) = replay(
+            "live_recipes_build",
             recipe.params,
             meta.side,
             pairs as usize,
@@ -806,9 +862,6 @@ fn a_side_16_request_has_no_window_on_the_live_topology() {
     // topology has none: its largest alive block of cells is 10 by 10.
     let topology = common::live_topology();
     let bytes = params(12, 4, 16, 28);
-    let admitted = admitted(&bytes).expect("admit");
-    assert_eq!(
-        bounds(&admitted, &topology),
-        Err(Code::TopologyIncompatible)
-    );
+    let admitted = admitted(&POLARITON_V1, &bytes).expect("admit");
+    assert_eq!(bounds(&admitted, topology), Err(Code::TopologyIncompatible));
 }

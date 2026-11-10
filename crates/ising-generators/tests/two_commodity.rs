@@ -21,7 +21,7 @@
 use std::collections::BTreeSet;
 use std::num::NonZeroU32;
 
-use ising_generators::descriptor::{admit, params_digest, Admitted, AdvertisedLimits, SizeBounds};
+use ising_generators::descriptor::AdvertisedLimits;
 use ising_generators::family::{
     admit_topology, generate_instance, BaseTopology, SaltFault, Streams,
 };
@@ -36,7 +36,19 @@ use ising_generators::Code;
 #[expect(dead_code, reason = "this test uses only the live topology loader")]
 mod common;
 
-const CONTRACTS: &[ising_generators::descriptor::Contract] = &[ROUTING_V1];
+#[path = "common/admit.rs"]
+mod admit;
+#[path = "common/lattice.rs"]
+mod lattice;
+#[path = "common/nonce.rs"]
+mod nonce;
+#[path = "common/size_bounds.rs"]
+mod size_bounds;
+
+use admit::admitted;
+use lattice::lattice_topology;
+use nonce::nonce_of;
+use size_bounds::bounds;
 
 /// The twelve native ids of the 2 by 2 street block of `z(2, 4)` that holds
 /// four arcs in a directed cycle: the spins of cells (1, 2), (2, 2), (2, 3),
@@ -52,30 +64,6 @@ fn params(m: u16, t: u8, divisor: u16) -> Vec<u8> {
     bytes.extend_from_slice(&[3, 0, 2, 0, 0, 0]);
     bytes.extend_from_slice(&divisor.to_le_bytes());
     bytes
-}
-
-fn admitted(bytes: &[u8]) -> Result<Admitted<'_>, Code> {
-    admit(
-        CONTRACTS,
-        b"quip/two-commodity-routing",
-        1,
-        bytes,
-        &params_digest(bytes),
-    )
-}
-
-fn bounds(admitted: &Admitted<'_>, topology: &BaseTopology) -> Result<SizeBounds, Code> {
-    admit_topology(
-        admitted,
-        topology,
-        topology.order_digest(),
-        &AdvertisedLimits::default(),
-    )
-}
-
-fn lattice_topology(m: u16, t: u8) -> BaseTopology {
-    let (nodes, edges) = zephyr_lattice(m, t).expect("lattice");
-    BaseTopology::new(nodes, &edges).expect("topology")
 }
 
 /// The subgraph of `z(m, t)` induced by `ids`.
@@ -94,16 +82,12 @@ fn tiny_topology() -> BaseTopology {
     induced(2, 4, &TINY_IDS)
 }
 
-fn nonce_of(i: u8) -> [u8; 32] {
-    [i; 32]
-}
-
 fn try_build(
     bytes: &[u8],
     topology: &BaseTopology,
     nonce: [u8; 32],
 ) -> Result<Instance, SaltFault> {
-    let admitted = admitted(bytes).expect("admit");
+    let admitted = admitted(&ROUTING_V1, bytes).expect("admit");
     let bounds = bounds(&admitted, topology).expect("admit topology");
     generate_instance(&admitted, topology, &bounds, nonce)
 }
@@ -201,7 +185,13 @@ fn section(payload: &[u8]) -> Vec<u8> {
 }
 
 /// A copy of `instance` with new fields and metadata.
-fn rebuilt(instance: &Instance, h: Vec<i32>, j: Vec<i32>, metadata: Vec<u8>) -> Instance {
+fn rebuilt(
+    what: &str,
+    instance: &Instance,
+    h: Vec<i32>,
+    j: Vec<i32>,
+    metadata: Vec<u8>,
+) -> Instance {
     let parts = InstanceParts {
         descriptor_digest: *instance.descriptor_digest(),
         topology_order_digest: *instance.topology_order_digest(),
@@ -213,12 +203,14 @@ fn rebuilt(instance: &Instance, h: Vec<i32>, j: Vec<i32>, metadata: Vec<u8>) -> 
         offset_milli: instance.offset_milli(),
         metadata,
     };
-    Instance::new(parts, &ROUTING_V1.limits, ROUTING_V1.metadata_kinds, None)
-        .expect("rebuilt instance is well formed")
+    let built = Instance::new(parts, &ROUTING_V1.limits, ROUTING_V1.metadata_kinds, None);
+    assert!(built.is_ok(), "{what}: rebuilt instance is well formed");
+    built.expect("rebuilt instance is well formed")
 }
 
 /// A copy of `instance` with every coefficient field replaced.
 fn make(
+    what: &str,
     instance: &Instance,
     edges: Vec<(u32, u32)>,
     h: Vec<i32>,
@@ -237,8 +229,9 @@ fn make(
         offset_milli,
         metadata,
     };
-    Instance::new(parts, &ROUTING_V1.limits, ROUTING_V1.metadata_kinds, None)
-        .expect("well formed instance")
+    let built = Instance::new(parts, &ROUTING_V1.limits, ROUTING_V1.metadata_kinds, None);
+    assert!(built.is_ok(), "{what}: well formed instance");
+    built.expect("well formed instance")
 }
 
 /// Fields, edges, couplings, and offset of an energy, in milli.
@@ -247,7 +240,7 @@ type Coefficients = (Vec<i32>, Vec<(u32, u32)>, Vec<i32>, i64);
 /// The Ising form of the structured energy of `meta` over `n` spins, found by
 /// finite differences from the all-up state, independent of the generator:
 /// `(h, edges, j, offset)`, with every pair of nonzero coupling as an edge.
-fn fit(meta: &Meta, n: usize) -> Coefficients {
+fn fit(what: &str, meta: &Meta, n: usize) -> Coefficients {
     let up = vec![1i64; n];
     let flip = |flips: &[usize]| {
         let mut state = up.clone();
@@ -263,7 +256,7 @@ fn fit(meta: &Meta, n: usize) -> Coefficients {
     for i in 0..n {
         for k in i + 1..n {
             let sum = flip(&[i, k]) - single[i] - single[k] + base;
-            assert_eq!(sum % 4, 0, "coupling ({i}, {k})");
+            assert_eq!(sum % 4, 0, "{what}: coupling ({i}, {k})");
             if sum != 0 {
                 couplings.push(((i as u32, k as u32), sum / 4));
                 row[i] += sum / 4;
@@ -273,7 +266,7 @@ fn fit(meta: &Meta, n: usize) -> Coefficients {
     }
     let h: Vec<i64> = (0..n)
         .map(|i| {
-            assert_eq!((base - single[i]) % 2, 0, "field {i}");
+            assert_eq!((base - single[i]) % 2, 0, "{what}: field {i}");
             (base - single[i]) / 2 - row[i]
         })
         .collect();
@@ -293,10 +286,10 @@ fn fit(meta: &Meta, n: usize) -> Coefficients {
 
 /// `meta` with the chain strength its own energy implies, and the matching
 /// instance fields, so that only a structural rule can reject it.
-fn consistent(meta: &Meta, n: usize) -> (Meta, Coefficients) {
+fn consistent(what: &str, meta: &Meta, n: usize) -> (Meta, Coefficients) {
     let mut bare = meta.clone();
     bare.strength = 0;
-    let (h, edges, j, _) = fit(&bare, n);
+    let (h, edges, j, _) = fit(what, &bare, n);
     let mut load = vec![0i64; n];
     for (&(u, v), &value) in edges.iter().zip(&j) {
         load[u as usize] += i64::from(value).abs();
@@ -313,14 +306,15 @@ fn consistent(meta: &Meta, n: usize) -> (Meta, Coefficients) {
     full.strength = u16::try_from(worst + 1).expect("strength");
     assert!(
         full.strength <= 1000,
-        "the mutation keeps the strength in range"
+        "{what}: the mutation keeps the strength in range"
     );
-    let (h, edges, j, offset) = fit(&full, n);
+    let (h, edges, j, offset) = fit(what, &full, n);
     (full, (h, edges, j, offset))
 }
 
-fn with_metadata(instance: &Instance, metadata: Vec<u8>) -> Instance {
+fn with_metadata(what: &str, instance: &Instance, metadata: Vec<u8>) -> Instance {
     rebuilt(
+        what,
         instance,
         instance.h().to_vec(),
         instance.j().to_vec(),
@@ -329,7 +323,7 @@ fn with_metadata(instance: &Instance, metadata: Vec<u8>) -> Instance {
 }
 
 fn check(bytes: &[u8], instance: &Instance) -> bool {
-    let admitted = admitted(bytes).expect("admit");
+    let admitted = admitted(&ROUTING_V1, bytes).expect("admit");
     let construction = ROUTING_V1.construction.expect("construction");
     (construction.check_metadata)(admitted.params(), instance)
 }
@@ -509,103 +503,111 @@ fn the_contract_is_pinned() {
 }
 
 #[test]
-fn template_follows_the_street_pattern() {
+fn template_invariants() {
     let topology = lattice_topology(4, 4);
     let instance = build(&params(4, 4, 8), &topology, nonce_of(1));
     let meta = decode(&instance);
-    assert!(meta.arcs.len() > 10);
-    let n = meta.cells.len();
-    let mut out = vec![0usize; n];
-    let mut inward = vec![0usize; n];
-    for arc in &meta.arcs {
-        let tail = meta.cells[arc.tail as usize];
-        let head = meta.cells[arc.head as usize];
-        if tail.1 == head.1 {
-            let step = i32::from(head.0) - i32::from(tail.0);
-            assert_eq!(
-                step,
-                if tail.1.is_multiple_of(2) { 1 } else { -1 },
-                "row {tail:?}"
-            );
-        } else {
-            assert_eq!(tail.0, head.0, "a vertical arc stays in its column");
-            let step = i32::from(head.1) - i32::from(tail.1);
-            assert_eq!(
-                step,
-                if tail.0.is_multiple_of(2) { 1 } else { -1 },
-                "column {tail:?}"
-            );
+
+    // The template follows the street pattern.
+    {
+        assert!(meta.arcs.len() > 10, "template: arc count");
+        let n = meta.cells.len();
+        let mut out = vec![0usize; n];
+        let mut inward = vec![0usize; n];
+        for arc in &meta.arcs {
+            let tail = meta.cells[arc.tail as usize];
+            let head = meta.cells[arc.head as usize];
+            if tail.1 == head.1 {
+                let step = i32::from(head.0) - i32::from(tail.0);
+                assert_eq!(
+                    step,
+                    if tail.1.is_multiple_of(2) { 1 } else { -1 },
+                    "row {tail:?}"
+                );
+            } else {
+                assert_eq!(tail.0, head.0, "a vertical arc stays in its column");
+                let step = i32::from(head.1) - i32::from(tail.1);
+                assert_eq!(
+                    step,
+                    if tail.0.is_multiple_of(2) { 1 } else { -1 },
+                    "column {tail:?}"
+                );
+            }
+            out[arc.tail as usize] += 1;
+            inward[arc.head as usize] += 1;
         }
-        out[arc.tail as usize] += 1;
-        inward[arc.head as usize] += 1;
-    }
-    assert!(out.iter().chain(&inward).all(|&degree| degree <= 2));
-    // Strongly connected: every node reaches node 0 and node 0 reaches every
-    // node.
-    for forward in [true, false] {
-        let mut seen = vec![false; n];
-        let mut stack = vec![0usize];
-        seen[0] = true;
-        while let Some(v) = stack.pop() {
-            for arc in &meta.arcs {
-                let (from, to) = if forward {
-                    (arc.tail as usize, arc.head as usize)
-                } else {
-                    (arc.head as usize, arc.tail as usize)
-                };
-                if from == v && !seen[to] {
-                    seen[to] = true;
-                    stack.push(to);
+        assert!(
+            out.iter().chain(&inward).all(|&degree| degree <= 2),
+            "template: degree at most 2"
+        );
+        // Strongly connected: every node reaches node 0 and node 0 reaches every
+        // node.
+        for forward in [true, false] {
+            let mut seen = vec![false; n];
+            let mut stack = vec![0usize];
+            seen[0] = true;
+            while let Some(v) = stack.pop() {
+                for arc in &meta.arcs {
+                    let (from, to) = if forward {
+                        (arc.tail as usize, arc.head as usize)
+                    } else {
+                        (arc.head as usize, arc.tail as usize)
+                    };
+                    if from == v && !seen[to] {
+                        seen[to] = true;
+                        stack.push(to);
+                    }
                 }
             }
+            assert!(seen.iter().all(|&s| s), "forward {forward}");
         }
-        assert!(seen.iter().all(|&s| s), "forward {forward}");
     }
-}
 
-#[test]
-fn spin_roles_are_disjoint() {
-    let topology = lattice_topology(4, 4);
-    let instance = build(&params(4, 4, 8), &topology, nonce_of(2));
-    let meta = decode(&instance);
-    let spins: Vec<u32> = meta
-        .arcs
-        .iter()
-        .flat_map(|arc| [arc.x1, arc.chain[0], arc.chain[1]])
-        .collect();
-    let distinct: BTreeSet<u32> = spins.iter().copied().collect();
-    assert_eq!(distinct.len(), spins.len(), "every spin is used once");
-    assert_eq!(spins.len(), instance.node_ids().len(), "and is a node");
-    assert!(distinct.iter().copied().eq(0..spins.len() as u32));
-    // The chain and the capacity couplers are topology edges.
-    let pairs = spin_pairs(&topology);
-    let id = |pos: u32| instance.node_ids()[pos as usize];
-    for arc in &meta.arcs {
-        assert!(pairs.contains(&(id(arc.chain[0]), id(arc.chain[1]))));
-        assert!(pairs.contains(&(id(arc.x1), id(arc.chain[0]))));
-    }
-}
-
-/// After pruning, the spins of every two arcs at a cell share a coupler, for
-/// each commodity.
-#[test]
-fn pruning_leaves_no_conflicts() {
-    let topology = lattice_topology(4, 4);
-    let instance = build(&params(4, 4, 8), &topology, nonce_of(3));
-    let meta = decode(&instance);
-    let pairs = spin_pairs(&topology);
-    let id = |pos: u32| instance.node_ids()[pos as usize];
-    for v in 0..meta.cells.len() as u32 {
-        let at: Vec<&Arc> = meta
+    // Every spin is used once, and the chain and capacity couplers are edges.
+    {
+        let spins: Vec<u32> = meta
             .arcs
             .iter()
-            .filter(|arc| arc.tail == v || arc.head == v)
+            .flat_map(|arc| [arc.x1, arc.chain[0], arc.chain[1]])
             .collect();
-        for k in 0..2 {
-            for (i, first) in at.iter().enumerate() {
-                for second in &at[i + 1..] {
-                    let pair = (id(spin_at(first, v, k)), id(spin_at(second, v, k)));
-                    assert!(pairs.contains(&pair), "cell {v} commodity {k}");
+        let distinct: BTreeSet<u32> = spins.iter().copied().collect();
+        assert_eq!(distinct.len(), spins.len(), "every spin is used once");
+        assert_eq!(spins.len(), instance.node_ids().len(), "and is a node");
+        assert!(
+            distinct.iter().copied().eq(0..spins.len() as u32),
+            "spin roles: the spins are 0..n"
+        );
+        // The chain and the capacity couplers are topology edges.
+        let pairs = spin_pairs(&topology);
+        let id = |pos: u32| instance.node_ids()[pos as usize];
+        for arc in &meta.arcs {
+            assert!(
+                pairs.contains(&(id(arc.chain[0]), id(arc.chain[1]))),
+                "spin roles: chain coupler of {arc:?}"
+            );
+            assert!(
+                pairs.contains(&(id(arc.x1), id(arc.chain[0]))),
+                "spin roles: capacity coupler of {arc:?}"
+            );
+        }
+    }
+
+    // After pruning, the spins of every two arcs at a cell share a coupler, for each commodity.
+    {
+        let pairs = spin_pairs(&topology);
+        let id = |pos: u32| instance.node_ids()[pos as usize];
+        for v in 0..meta.cells.len() as u32 {
+            let at: Vec<&Arc> = meta
+                .arcs
+                .iter()
+                .filter(|arc| arc.tail == v || arc.head == v)
+                .collect();
+            for k in 0..2 {
+                for (i, first) in at.iter().enumerate() {
+                    for second in &at[i + 1..] {
+                        let pair = (id(spin_at(first, v, k)), id(spin_at(second, v, k)));
+                        assert!(pairs.contains(&pair), "cell {v} commodity {k}");
+                    }
                 }
             }
         }
@@ -632,11 +634,17 @@ fn terminals_are_balanced_and_distinct() {
     }
 }
 
+/// Nonce bytes for the four outcomes of the terminal retry: a build on the
+/// first try, a build on a later try, a build on the fourth try, and four
+/// failed tries where the fifth would pass. Found by running the full
+/// `0..=255` sweep at commit 9b5d380 and taking the first byte of each outcome.
+const RETRY_NONCES: [u8; 4] = [0, 2, 3, 1];
+
 #[test]
 fn infeasible_terminals_retry_then_give_14() {
     let topology = lattice_topology(3, 4);
     let bytes = params(3, 4, 4);
-    let admitted = admitted(&bytes).expect("admit");
+    let admitted = admitted(&ROUTING_V1, &bytes).expect("admit");
     let digest = admitted.descriptor().digest();
     // The template does not depend on the nonce.
     let template = decode(&build(&bytes, &topology, nonce_of(0)));
@@ -644,7 +652,7 @@ fn infeasible_terminals_retry_then_give_14() {
     let pairs = n / 4;
     let (mut first_try, mut later_try, mut exhausted, mut fifth_would_pass) = (0, 0, 0, 0);
     let mut latest = 0;
-    for byte in 0..=255u8 {
+    for byte in RETRY_NONCES {
         let nonce = nonce_of(byte);
         let mut streams = Streams::new(nonce, digest, *topology.order_digest(), ROUTING.labels);
         let mut stream = streams.open("terminal").expect("terminal stream");
@@ -810,7 +818,7 @@ fn ground_state(instance: &Instance) -> Vec<i64> {
 fn defects_find_broken_chains_and_capacity() {
     let tiny = tiny_topology();
     let bytes = params(2, 4, 4);
-    let admitted = admitted(&bytes).expect("admit");
+    let admitted = admitted(&ROUTING_V1, &bytes).expect("admit");
     let defects = |instance: &Instance, state: &[i64]| {
         let spins: Vec<i8> = state.iter().map(|&s| s as i8).collect();
         routing_defects(admitted.params(), instance, &spins)
@@ -864,31 +872,35 @@ fn defects_find_broken_chains_and_capacity() {
     assert!(defects(&instance, &zero).is_none(), "a value outside ±1");
     let mut wrong = meta.clone();
     wrong.arcs[0].cost[0] = 63;
-    let bad = with_metadata(&instance, encode(&wrong));
+    let bad = with_metadata(
+        "defects_find_broken_chains_and_capacity",
+        &instance,
+        encode(&wrong),
+    );
     assert!(defects(&bad, &ground).is_none(), "an invalid instance");
 }
 
 #[test]
 fn admission_codes() {
     let tiny = tiny_topology();
-    let admit_tiny = |bytes: &[u8]| bounds(&admitted(bytes).expect("admit"), &tiny);
+    let admit_tiny = |bytes: &[u8]| bounds(&admitted(&ROUTING_V1, bytes).expect("admit"), &tiny);
     assert!(admit_tiny(&params(2, 4, 4)).is_ok());
 
     // Parameter bounds: code 9.
     assert_eq!(
-        admitted(&params(2, 4, 3)).err(),
+        admitted(&ROUTING_V1, &params(2, 4, 3)).err(),
         Some(Code::ParamsOutOfBounds)
     );
     assert_eq!(
-        admitted(&params(2, 2, 4)).err(),
+        admitted(&ROUTING_V1, &params(2, 2, 4)).err(),
         Some(Code::ParamsOutOfBounds)
     );
     assert_eq!(
-        admitted(&params(0, 4, 4)).err(),
+        admitted(&ROUTING_V1, &params(0, 4, 4)).err(),
         Some(Code::ParamsOutOfBounds)
     );
     assert_eq!(
-        admitted(&params(33, 4, 4)).err(),
+        admitted(&ROUTING_V1, &params(33, 4, 4)).err(),
         Some(Code::ParamsOutOfBounds)
     );
 
@@ -896,14 +908,20 @@ fn admission_codes() {
     let (nodes, _) = zephyr_lattice(2, 4).expect("lattice");
     let bare = BaseTopology::new(nodes, &[]).expect("topology");
     assert_eq!(
-        bounds(&admitted(&params(2, 4, 4)).expect("admit"), &bare),
+        bounds(
+            &admitted(&ROUTING_V1, &params(2, 4, 4)).expect("admit"),
+            &bare
+        ),
         Err(Code::TopologyIncompatible),
         "no arc"
     );
     // A self-loop: code 12.
     let looped = BaseTopology::new(vec![17, 21], &[(17, 17), (17, 21)]).expect("topology");
     assert_eq!(
-        bounds(&admitted(&params(2, 4, 4)).expect("admit"), &looped),
+        bounds(
+            &admitted(&ROUTING_V1, &params(2, 4, 4)).expect("admit"),
+            &looped
+        ),
         Err(Code::TopologyIncompatible),
         "self-loop"
     );
@@ -914,14 +932,17 @@ fn admission_codes() {
     extra.push((0, nodes.len() as u32 - 1));
     let crossed = BaseTopology::new(nodes, &extra).expect("topology");
     assert_eq!(
-        bounds(&admitted(&params(2, 4, 4)).expect("admit"), &crossed),
+        bounds(
+            &admitted(&ROUTING_V1, &params(2, 4, 4)).expect("admit"),
+            &crossed
+        ),
         Err(Code::TopologyIncompatible),
         "not a coupler"
     );
     // The lattice of a larger grid is not a subgraph of the named grid.
     assert_eq!(
         bounds(
-            &admitted(&params(2, 4, 4)).expect("admit"),
+            &admitted(&ROUTING_V1, &params(2, 4, 4)).expect("admit"),
             &lattice_topology(3, 4)
         ),
         Err(Code::TopologyIncompatible),
@@ -930,7 +951,7 @@ fn admission_codes() {
 
     // Size bounds above an advertised limit: code 13.
     let tiny_bytes = params(2, 4, 4);
-    let admitted_tiny = admitted(&tiny_bytes).expect("admit");
+    let admitted_tiny = admitted(&ROUTING_V1, &tiny_bytes).expect("admit");
     for limits in [
         AdvertisedLimits {
             max_nodes: 11,
@@ -954,7 +975,8 @@ fn admission_codes() {
     // No degree ceiling: the full z(2, 8) has degree 35 and is admitted.
     let wide = lattice_topology(2, 8);
     let wide_bytes = params(2, 8, 4);
-    let wide_bounds = bounds(&admitted(&wide_bytes).expect("admit"), &wide).expect("z(2, 8)");
+    let wide_bounds =
+        bounds(&admitted(&ROUTING_V1, &wide_bytes).expect("admit"), &wide).expect("z(2, 8)");
     assert_eq!(wide_bounds.nodes, 320);
     assert_eq!(wide_bounds.degree, 35);
     let sized = admit_tiny(&params(2, 4, 4)).expect("bounds");
@@ -995,19 +1017,6 @@ fn disjoint_arcs(meta: &Meta) -> (usize, usize) {
     panic!("two arcs without a shared cell");
 }
 
-#[test]
-fn a_rebuilt_energy_reproduces_the_instance() {
-    let topology = lattice_topology(2, 4);
-    let instance = build(&params(2, 4, 4), &topology, nonce_of(0));
-    let meta = decode(&instance);
-    let (full, (h, edges, j, offset)) = consistent(&meta, instance.node_ids().len());
-    assert_eq!(full, meta);
-    assert_eq!(h, instance.h());
-    assert_eq!(edges, instance.edges());
-    assert_eq!(j, instance.j());
-    assert_eq!(offset, instance.offset_milli());
-}
-
 /// Each rule rejects a mutation on its own. A structural mutation of the
 /// metadata comes with the energy rebuilt from the mutated metadata, so no
 /// coefficient mismatch can reject it. The coefficient rules get mutations of
@@ -1021,14 +1030,26 @@ fn check_metadata_rejects_each_rule() {
     let n = instance.node_ids().len();
     assert!(check(&bytes, &instance), "positive control");
     assert_eq!(encode(&meta), instance.metadata(), "the codec round-trips");
+    // The rebuilt energy reproduces the instance.
+    let (full, (rebuilt_h, rebuilt_edges, rebuilt_j, rebuilt_offset)) =
+        consistent("rebuilt energy", &meta, n);
+    assert_eq!(full, meta, "the rebuild keeps the metadata");
+    assert_eq!(rebuilt_h, instance.h(), "the rebuilt fields");
+    assert_eq!(rebuilt_edges, instance.edges(), "the rebuilt edges");
+    assert_eq!(rebuilt_j, instance.j(), "the rebuilt couplings");
+    assert_eq!(
+        rebuilt_offset,
+        instance.offset_milli(),
+        "the rebuilt offset"
+    );
 
     let mut accepted: Vec<&str> = Vec::new();
     // Mutated metadata with the matching energy.
     let mut structural = |what: &'static str, edit: &dyn Fn(&mut Meta)| {
         let mut edited = meta.clone();
         edit(&mut edited);
-        let (edited, (h, edges, j, offset)) = consistent(&edited, n);
-        let bad = make(&instance, edges, h, j, offset, encode(&edited));
+        let (edited, (h, edges, j, offset)) = consistent(what, &edited, n);
+        let bad = make(what, &instance, edges, h, j, offset, encode(&edited));
         if check(&bytes, &bad) {
             accepted.push(what);
         }
@@ -1100,7 +1121,7 @@ fn check_metadata_rejects_each_rule() {
     let mut metadata_only = |what: &'static str, edit: &dyn Fn(&mut Meta)| {
         let mut edited = meta.clone();
         edit(&mut edited);
-        if check(&bytes, &with_metadata(&instance, encode(&edited))) {
+        if check(&bytes, &with_metadata(what, &instance, encode(&edited))) {
             accepted.push(what);
         }
     };
@@ -1125,7 +1146,7 @@ fn check_metadata_rejects_each_rule() {
     let region = instance.metadata().to_vec();
     let mut fields =
         |what: &'static str, edges: Vec<(u32, u32)>, h: Vec<i32>, j: Vec<i32>, offset: i64| {
-            let bad = make(&instance, edges, h, j, offset, region.clone());
+            let bad = make(what, &instance, edges, h, j, offset, region.clone());
             if check(&bytes, &bad) {
                 accepted.push(what);
             }
@@ -1216,6 +1237,47 @@ fn check_metadata_rejects_each_rule() {
     if check(&bytes, &none) {
         accepted.push("an instance with no node and no arc");
     }
+    // One valid cell with no supply, no arc, and an instance of no spin: only
+    // the arc count guard rejects it.
+    let one_cell = Meta {
+        cells: vec![(1, 1)],
+        supply: vec![[0, 0]],
+        arcs: Vec::new(),
+        strength: 1,
+    };
+    let parts = InstanceParts {
+        descriptor_digest: *instance.descriptor_digest(),
+        topology_order_digest: *instance.topology_order_digest(),
+        nonce: instance.nonce().copied(),
+        node_ids: Vec::new(),
+        edges: Vec::new(),
+        h: Vec::new(),
+        j: Vec::new(),
+        offset_milli: 0,
+        metadata: encode(&one_cell),
+    };
+    let no_spin = Instance::new(parts, &ROUTING_V1.limits, ROUTING_V1.metadata_kinds, None)
+        .expect("an instance of no spin");
+    if check(&bytes, &no_spin) {
+        accepted.push("one cell and no arc");
+    }
+    // Arc ends that are node indices past the last node, with the energy
+    // rebuilt for the mutated metadata: only the range check rejects them.
+    let past = meta.cells.len() as u32;
+    for (what, tail, head) in [
+        ("both ends past the last node", past, past + 1),
+        ("the tail past the last node", past, meta.arcs[0].head),
+        ("the head past the last node", meta.arcs[0].tail, past),
+    ] {
+        let mut edited = meta.clone();
+        edited.arcs[0].tail = tail;
+        edited.arcs[0].head = head;
+        let (edited, (h, edges, j, offset)) = consistent(what, &edited, n);
+        let bad = make(what, &instance, edges, h, j, offset, encode(&edited));
+        if check(&bytes, &bad) {
+            accepted.push(what);
+        }
+    }
     assert!(accepted.is_empty(), "accepted: {accepted:?}");
 
     // The section layout.
@@ -1244,90 +1306,30 @@ fn check_metadata_rejects_each_rule() {
         } else {
             let _ = payload.pop();
         }
-        let bad = with_metadata(&instance, section(&payload));
+        let bad = with_metadata(
+            &format!("payload length edit {edit}"),
+            &instance,
+            section(&payload),
+        );
         assert!(!check(&bytes, &bad), "payload length edit {edit}");
     }
-    let empty = with_metadata(&instance, vec![0, 0]);
+    let empty = with_metadata("no section", &instance, vec![0, 0]);
     assert!(!check(&bytes, &empty), "no section");
-}
 
-/// One valid cell with no supply, no arc, and an instance of no spin: only
-/// the arc count guard rejects it.
-#[test]
-fn the_arc_count_guard_rejects_alone() {
-    let topology = lattice_topology(2, 4);
-    let bytes = params(2, 4, 4);
-    let instance = build(&bytes, &topology, nonce_of(0));
-    let meta = Meta {
-        cells: vec![(1, 1)],
-        supply: vec![[0, 0]],
-        arcs: Vec::new(),
-        strength: 1,
-    };
-    let parts = InstanceParts {
-        descriptor_digest: *instance.descriptor_digest(),
-        topology_order_digest: *instance.topology_order_digest(),
-        nonce: instance.nonce().copied(),
-        node_ids: Vec::new(),
-        edges: Vec::new(),
-        h: Vec::new(),
-        j: Vec::new(),
-        offset_milli: 0,
-        metadata: encode(&meta),
-    };
-    let none = Instance::new(parts, &ROUTING_V1.limits, ROUTING_V1.metadata_kinds, None)
-        .expect("an instance of no spin");
-    assert!(!check(&bytes, &none));
-}
-
-/// An arc whose end cells are node indices past the last node, with the
-/// energy rebuilt for the mutated metadata: only the range check rejects it.
-#[test]
-fn the_node_range_check_rejects_alone() {
-    let topology = lattice_topology(2, 4);
-    let bytes = params(2, 4, 4);
-    let instance = build(&bytes, &topology, nonce_of(0));
-    let meta = decode(&instance);
-    let n = instance.node_ids().len();
-    let past = meta.cells.len() as u32;
-    let mut accepted = Vec::new();
-    for (what, tail, head) in [
-        ("both ends past the last node", past, past + 1),
-        ("the tail past the last node", past, meta.arcs[0].head),
-        ("the head past the last node", meta.arcs[0].tail, past),
-    ] {
-        let mut edited = meta.clone();
-        edited.arcs[0].tail = tail;
-        edited.arcs[0].head = head;
-        let (edited, (h, edges, j, offset)) = consistent(&edited, n);
-        let bad = make(&instance, edges, h, j, offset, encode(&edited));
-        if check(&bytes, &bad) {
-            accepted.push(what);
-        }
-    }
-    assert!(accepted.is_empty(), "accepted: {accepted:?}");
-}
-
-#[test]
-fn oversized_counts_are_rejected_without_allocation() {
-    let topology = lattice_topology(3, 4);
-    let bytes = params(3, 4, 8);
-    let instance = build(&bytes, &topology, nonce_of(11));
-    assert!(check(&bytes, &instance));
-    let region = instance.metadata().to_vec();
-    let n = decode(&instance).cells.len();
-    // The node count is at payload offset 0 and the arc count follows the
-    // node records. The payload starts after the 8-byte section head.
-    for at in [8, 8 + 4 + 6 * n] {
+    // Counts of u32::MAX. The node count is at payload offset 0 and the arc
+    // count follows the node records. The payload starts after the 8-byte
+    // section head.
+    let cells = meta.cells.len();
+    for at in [8, 8 + 4 + 6 * cells] {
         let mut damaged = region.clone();
         damaged[at..at + 4].copy_from_slice(&u32::MAX.to_le_bytes());
-        let bad = with_metadata(&instance, damaged);
+        let bad = with_metadata(&format!("count at {at}"), &instance, damaged);
         assert!(!check(&bytes, &bad), "count at {at}");
     }
     // A short payload that names a huge node count.
     let mut payload = u32::MAX.to_le_bytes().to_vec();
     payload.extend_from_slice(&[0; 12]);
-    let bad = with_metadata(&instance, section(&payload));
+    let bad = with_metadata("a short payload", &instance, section(&payload));
     assert!(!check(&bytes, &bad), "a short payload");
 }
 
@@ -1338,14 +1340,14 @@ fn recipe_is_canonical() {
     assert_eq!(recipe.alias, "r32");
     assert_eq!(recipe.cell, "two-commodity-routing");
     assert_eq!(recipe.params, params(12, 4, 32));
-    assert!(admitted(recipe.params).is_ok());
+    assert!(admitted(&ROUTING_V1, recipe.params).is_ok());
 }
 
 #[test]
 fn live_template_matches_the_research_template() {
     let topology = common::live_topology();
     let recipe = &ROUTING_RECIPES[0];
-    let instance = build(recipe.params, &topology, nonce_of(0));
+    let instance = build(recipe.params, topology, nonce_of(0));
     let meta = decode(&instance);
     assert_eq!(meta.cells.len(), 505, "template nodes");
     assert_eq!(meta.arcs.len(), 880, "template arcs");

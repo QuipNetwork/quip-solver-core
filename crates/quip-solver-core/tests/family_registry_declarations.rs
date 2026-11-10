@@ -1,6 +1,9 @@
 //! SC-7 #1 and #28: the family declarations of every example miner agree with
 //! the family registry.
 
+mod common;
+
+use common::example_bin;
 use quip_solver_conformance::families::registry::{
     archived_among, parse_registry, unregistered_quip_ids, RegistryEntry,
 };
@@ -36,27 +39,6 @@ fn example_names() -> Result<Vec<String>, String> {
     Ok(names)
 }
 
-fn build_examples() -> Result<(), String> {
-    let status = Command::new(env!("CARGO"))
-        .args(["build", "-p", "quip-solver-core", "--examples"])
-        .status()
-        .map_err(|e| e.to_string())?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err("cargo build --examples failed".to_owned())
-    }
-}
-
-fn example_bin(name: &str) -> Result<PathBuf, String> {
-    let mut path = std::env::current_exe().map_err(|e| e.to_string())?;
-    let _ = path.pop(); // deps/
-    let _ = path.pop(); // <profile>/
-    path.push("examples");
-    path.push(name);
-    Ok(path)
-}
-
 fn claims<'a>(caps: &'a Value, key: &str) -> Result<&'a [Value], String> {
     match caps.get(key) {
         None => Ok(&[]),
@@ -84,7 +66,7 @@ fn extra_args(example: &str) -> &'static [&'static str] {
 }
 
 fn declared(example: &str) -> Result<Declared, String> {
-    let out = Command::new(example_bin(example)?)
+    let out = Command::new(example_bin(example))
         .args(extra_args(example))
         .arg("--capabilities")
         .output()
@@ -119,7 +101,6 @@ fn declared(example: &str) -> Result<Declared, String> {
 
 fn all_declared() -> Result<(Vec<RegistryEntry>, Vec<Declared>), String> {
     let registry = parse_registry(FAMILY_REGISTRY)?;
-    build_examples()?;
     let names = example_names()?;
     if names.is_empty() {
         return Err("no examples found".to_owned());
@@ -138,7 +119,7 @@ fn all_declared() -> Result<(Vec<RegistryEntry>, Vec<Declared>), String> {
 }
 
 #[test]
-fn every_advertised_quip_family_is_registered() -> Result<(), String> {
+fn example_declarations_agree_with_the_registry() -> Result<(), String> {
     let (registry, all) = all_declared()?;
     let mut problems = Vec::new();
     for d in &all {
@@ -146,19 +127,6 @@ fn every_advertised_quip_family_is_registered() -> Result<(), String> {
         if !missing.is_empty() {
             problems.push(format!("{}: unregistered {missing:?}", d.example));
         }
-    }
-    if problems.is_empty() {
-        Ok(())
-    } else {
-        Err(problems.join("; "))
-    }
-}
-
-#[test]
-fn no_example_generates_an_archived_revision() -> Result<(), String> {
-    let (registry, all) = all_declared()?;
-    let mut problems = Vec::new();
-    for d in &all {
         let archived = archived_among(&registry, &d.generated);
         if !archived.is_empty() {
             problems.push(format!("{}: archived {archived:?}", d.example));

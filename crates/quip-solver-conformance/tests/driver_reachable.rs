@@ -2,33 +2,34 @@
 //! dev-dependency a solver repository takes.
 
 #[test]
-fn drive_miner_is_exported_from_the_conformance_crate() {
-    // A compile-time check: naming the paths proves they resolve. The values
-    // are never called. Do NOT annotate these as `fn(&str, &str) -> _`: both
-    // are `async fn`, so the return is an opaque future that borrows both
-    // arguments, and it does not coerce to a fn pointer (E0308).
+fn public_surface_is_exported() {
+    use quip_solver_conformance::driver::{DriverReport, LeaseOutcome, Terminal};
+    use quip_solver_conformance::families::layered::{LAYERED, RESTRICTED_V1, UNIFORM_V1};
+    use quip_solver_conformance::families::registry::{
+        archived_among, parse_registry, unregistered_quip_ids, RegistryEntry, Status,
+    };
+    use quip_solver_conformance::families::{
+        check_case, compare, drive_miner_family, export_instances, first_diff, parse_vector_cases,
+        reference_revision, CaseMismatch, Component, Expected, ExpectedSalt, FamilyCase,
+        FamilyReport, FirstDiff, VectorCase,
+    };
+    use quip_solver_conformance::solve::CaseOutcome;
+
+    // The drive functions. A compile-time check: naming the paths proves they
+    // resolve. The values are never called. Do NOT annotate these as
+    // `fn(&str, &str) -> _`: both are `async fn`, so the return is an opaque
+    // future that borrows both arguments, and it does not coerce to a fn pointer
+    // (E0308).
     let _ = quip_solver_conformance::driver::drive_miner;
     let _ = quip_solver_conformance::driver::drive_miner_bad_welcome;
     let _ = quip_solver_conformance::driver::drive_miner_one_job;
     let _ = quip_solver_conformance::driver::drive_miner_close_after_welcome;
     let _ = quip_solver_conformance::driver::drive_miner_close_before_welcome;
-}
 
-#[test]
-fn the_verdict_surface_is_exported_too() {
-    // A solver repository grades itself with these, so they are as much of the
-    // contract as the drive functions are.
-    use quip_solver_conformance::driver::{DriverReport, LeaseOutcome, Terminal};
-
+    // The verdict surface. A solver repository grades itself with these, so they
+    // are as much of the contract as the drive functions are.
     let _ = DriverReport::is_conformant;
     let _ = DriverReport::lease_conformant;
-    let lease = LeaseOutcome {
-        results: 4,
-        results_verified: 4,
-        lease_done: Some((4, -1000)),
-        credit_refunded: true,
-    };
-    assert_eq!(lease.results, lease.results_verified);
     let _ = DriverReport::bad_welcome_conformant;
     let _ = DriverReport::close_after_welcome_conformant;
     let _ = DriverReport::close_before_welcome_conformant;
@@ -36,11 +37,15 @@ fn the_verdict_surface_is_exported_too() {
     let _ = DriverReport::energies_rescore_clean;
     let _ = DriverReport::live_cancel_conformant;
     let _ = DriverReport::summary;
-    assert_eq!(Terminal::default(), Terminal::Open);
-}
+    let _ = LeaseOutcome {
+        results: 4,
+        results_verified: 4,
+        lease_done: Some((4, -1000)),
+        credit_refunded: true,
+    };
+    let _ = Terminal::Open;
 
-#[test]
-fn the_wire_fixture_is_reachable() {
+    // The wire fixture.
     let wire = quip_solver_conformance::golden_wire();
     assert!(
         wire.messages.contains_key("hello"),
@@ -50,22 +55,13 @@ fn the_wire_fixture_is_reachable() {
         wire.enums.contains_key("RejectReason"),
         "golden_wire.json must carry the RejectReason numbers"
     );
-}
 
-#[test]
-fn the_layered_construction_is_exported() {
-    use quip_solver_conformance::families::layered::{LAYERED, RESTRICTED_V1, UNIFORM_V1};
+    // The layered construction.
     assert_eq!(UNIFORM_V1.family_id, "vectors/uniform-field");
     assert_eq!(RESTRICTED_V1.family_id, "vectors/restricted-field");
     assert_eq!(LAYERED.labels, ["salt", "couplings"]);
-}
 
-#[test]
-fn the_family_checker_is_exported() {
-    use quip_solver_conformance::families::{
-        check_case, compare, export_instances, first_diff, parse_vector_cases, CaseMismatch,
-        Component, Expected, ExpectedSalt, FirstDiff, VectorCase,
-    };
+    // The family checker.
     let _ = (
         export_instances,
         parse_vector_cases,
@@ -81,35 +77,21 @@ fn the_family_checker_is_exported() {
         FirstDiff,
         VectorCase,
     )> = None;
-}
 
-#[test]
-fn the_family_gate_surface_is_exported() {
-    use quip_solver_conformance::families::{
-        drive_miner_family, reference_revision, FamilyCase, FamilyReport,
-    };
-    use quip_solver_conformance::solve::CaseOutcome;
-
+    // The family gate surface.
     let _ = drive_miner_family;
-
     let _ = FamilyReport::is_conformant;
     let _ = FamilyReport::outcome;
     let _ = FamilyReport::summary;
-    let case = FamilyCase {
+    let _ = FamilyCase {
         name: "revision-plus-one",
         subject: None,
         outcome: CaseOutcome::Passed,
     };
-    assert_eq!(case.name, "revision-plus-one");
     assert!(reference_revision("vectors/uniform-field", 1).is_some());
     assert!(reference_revision("vectors/uniform-field", 2).is_none());
-}
 
-#[test]
-fn the_family_registry_is_exported() {
-    use quip_solver_conformance::families::registry::{
-        archived_among, parse_registry, unregistered_quip_ids, RegistryEntry, Status,
-    };
+    // The family registry.
     let registry = parse_registry(quip_solver_conformance::FAMILY_REGISTRY);
     let _ = archived_among;
     assert_eq!(unregistered_quip_ids(&[], ["quip/ice"]), ["quip/ice"]);

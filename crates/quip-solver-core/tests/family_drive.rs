@@ -1,6 +1,9 @@
 //! End-to-end runs of the `quip-solver-drive --family` gate against real
 //! example binaries. Each mode of the family binary is graded on its own run.
 
+mod common;
+
+use common::{example_bin, profile_dir, profile_name};
 use quip_solver_conformance::families::{drive_miner_family, FamilyReport};
 use quip_solver_conformance::solve::CaseOutcome;
 use std::process::Command;
@@ -16,54 +19,35 @@ const LISTS_FAMILIES: &str = "the binary lists generated families";
 /// for a pass.
 type Expected = (&'static str, Option<&'static str>, Option<&'static str>);
 
-/// Build the named example and return its binary path.
-fn example_bin(name: &str) -> String {
-    #[expect(
-        clippy::expect_used,
-        reason = "test helper: cargo build failure is a setup error"
-    )]
-    let status = Command::new(env!("CARGO"))
-        .args(["build", "--example", name, "-p", "quip-solver-core"])
-        .status()
-        .expect("cargo build --example");
-    assert!(status.success(), "failed to build example {name}");
-    target_profile_dir()
-        .join("examples")
-        .join(name)
-        .to_string_lossy()
-        .into_owned()
-}
-
-/// The `target/<profile>` directory of the running test executable.
-fn target_profile_dir() -> std::path::PathBuf {
-    #[expect(
-        clippy::expect_used,
-        reason = "test helper: current_exe is always available under cargo test"
-    )]
-    let mut p = std::env::current_exe().expect("test exe path");
-    let _ = p.pop(); // deps/
-    let _ = p.pop(); // <profile>/
-    p
-}
-
-/// Build the gate binary and return its path.
+/// The gate binary, built first when it is missing.
 fn drive_bin() -> std::path::PathBuf {
-    #[expect(
-        clippy::expect_used,
-        reason = "test helper: cargo build failure is a setup error"
-    )]
-    let status = Command::new(env!("CARGO"))
-        .args([
-            "build",
-            "-p",
-            "quip-solver-conformance",
-            "--bin",
-            "quip-solver-drive",
-        ])
-        .status()
-        .expect("cargo build --bin");
-    assert!(status.success(), "failed to build quip-solver-drive");
-    target_profile_dir().join("quip-solver-drive")
+    let profile = profile_dir();
+    let path = profile.join("quip-solver-drive");
+    if !path.is_file() {
+        #[expect(
+            clippy::expect_used,
+            reason = "test helper: cargo build failure is a setup error"
+        )]
+        let status = Command::new(env!("CARGO"))
+            .args([
+                "build",
+                "-p",
+                "quip-solver-conformance",
+                "--bin",
+                "quip-solver-drive",
+                "--profile",
+                &profile_name(&profile),
+            ])
+            .status()
+            .expect("cargo build --bin");
+        assert!(status.success(), "failed to build quip-solver-drive");
+        assert!(
+            path.is_file(),
+            "quip-solver-drive not found at {}",
+            path.display()
+        );
+    }
+    path
 }
 
 fn unique_socket(tag: &str) -> String {
@@ -142,7 +126,7 @@ type Got = (String, Option<String>, Option<String>);
 
 /// Assert the report holds exactly `expected`, in order, with the pinned
 /// skip reasons. A failed case shows as `FAILED: why`.
-fn assert_cases(report: &FamilyReport, expected: &[Expected]) {
+fn assert_cases(label: &str, report: &FamilyReport, expected: &[Expected]) {
     let got: Vec<Got> = report
         .cases
         .iter()
@@ -165,42 +149,40 @@ fn assert_cases(report: &FamilyReport, expected: &[Expected]) {
             )
         })
         .collect();
-    assert_eq!(got, want, "{}", report.summary());
+    assert_eq!(got, want, "{label}: {}", report.summary());
 }
 
-#[tokio::test]
-async fn the_default_path_passes_the_family_gate() {
-    let bin = example_bin("mock_sampler_family_lease");
-    let socket = unique_socket("fam-default");
-    let report =
-        drive_miner_family(&bin, &["--mode", "default"], &format!("unix://{socket}")).await;
-    assert!(report.is_conformant(), "{}", report.summary());
-    assert_cases(&report, &family_binary_cases());
+/// Grade one mode of the family binary on its own session.
+async fn family_mode_report(mode: &str) -> FamilyReport {
+    let bin = example_bin("mock_sampler_family_lease")
+        .to_string_lossy()
+        .into_owned();
+    let socket = unique_socket(&format!("fam-{mode}"));
+    drive_miner_family(&bin, &["--mode", mode], &format!("unix://{socket}")).await
 }
 
+/// The three modes run their sessions at the same time; each is graded on its
+/// own report.
 #[tokio::test]
-async fn the_local_path_passes_the_family_gate() {
-    let bin = example_bin("mock_sampler_family_lease");
-    let socket = unique_socket("fam-local");
-    let report = drive_miner_family(&bin, &["--mode", "local"], &format!("unix://{socket}")).await;
-    assert!(report.is_conformant(), "{}", report.summary());
-    assert_cases(&report, &family_binary_cases());
-}
-
-#[tokio::test]
-async fn the_aware_path_passes_the_family_gate() {
-    let bin = example_bin("mock_sampler_family_lease");
-    let socket = unique_socket("fam-aware");
-    let report = drive_miner_family(&bin, &["--mode", "aware"], &format!("unix://{socket}")).await;
-    assert!(report.is_conformant(), "{}", report.summary());
-    assert_cases(&report, &family_binary_cases());
+async fn every_mode_passes_the_family_gate() {
+    let (default, local, aware) = tokio::join!(
+        family_mode_report("default"),
+        family_mode_report("local"),
+        family_mode_report("aware")
+    );
+    for (mode, report) in [("default", default), ("local", local), ("aware", aware)] {
+        assert!(report.is_conformant(), "{mode}: {}", report.summary());
+        assert_cases(mode, &report, &family_binary_cases());
+    }
 }
 
 /// An ice binary lists `quip/ice-glass@1` (z12) and `quip/twisted-ice-dimer@1`
 /// (z22), so the gate sends a different topology to each subject.
 #[tokio::test]
 async fn an_ice_binary_passes_the_family_gate_on_the_topology_of_each_revision() {
-    let bin = example_bin("mock_sampler_family_ice");
+    let bin = example_bin("mock_sampler_family_ice")
+        .to_string_lossy()
+        .into_owned();
     let socket = unique_socket("fam-ice");
     let report = drive_miner_family(&bin, &[], &format!("unix://{socket}")).await;
     assert!(report.is_conformant(), "{}", report.summary());
@@ -224,16 +206,20 @@ async fn an_ice_binary_passes_the_family_gate_on_the_topology_of_each_revision()
 
 #[tokio::test]
 async fn a_generic_binary_is_not_asked_to_generate() {
-    let bin = example_bin("mock_sampler_lease");
+    let bin = example_bin("mock_sampler_lease")
+        .to_string_lossy()
+        .into_owned();
     let socket = unique_socket("fam-generic");
     let report = drive_miner_family(&bin, &[], &format!("unix://{socket}")).await;
     assert!(report.is_conformant(), "{}", report.summary());
-    assert_cases(&report, &generic_binary_cases());
+    assert_cases("generic binary", &report, &generic_binary_cases());
 }
 
 #[test]
 fn the_family_gate_cli_reports_and_exits_zero() {
-    let bin = example_bin("mock_sampler_family_lease");
+    let bin = example_bin("mock_sampler_family_lease")
+        .to_string_lossy()
+        .into_owned();
     let socket = unique_socket("fam-cli");
     let out = Command::new(drive_bin())
         .args(["--family", &bin, &format!("unix://{socket}")])

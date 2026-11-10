@@ -96,24 +96,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rust_log_beats_the_level_flag() {
-        let d = resolve_directives("info", Some("quip_solver_core=trace")).unwrap();
-        assert_eq!(d, "quip_solver_core=trace");
-    }
-
-    #[test]
-    fn blank_rust_log_falls_back_to_the_level_flag() {
-        assert_eq!(
-            resolve_directives("debug", Some("   ")).unwrap(),
-            default_filter("debug")
-        );
-        assert_eq!(
-            resolve_directives("debug", None).unwrap(),
-            default_filter("debug")
-        );
-    }
-
-    #[test]
     fn default_filter_keeps_the_transport_quiet() {
         let d = default_filter("debug");
         assert!(d.starts_with("debug,"), "{d}");
@@ -121,29 +103,53 @@ mod tests {
         assert!(d.contains("h2=warn"), "{d}");
     }
 
-    #[test]
-    fn every_level_the_cli_accepts_parses_as_directives() {
-        for level in ["trace", "debug", "info", "warn", "error"] {
-            let d = default_filter(level);
-            assert!(EnvFilter::try_new(&d).is_ok(), "{d}");
-        }
-    }
-
     /// A misspelled level must not degrade into a target filter that silences
-    /// the miner. `EnvFilter` accepts any bare word as a target, so this only
-    /// fails because [`resolve_directives`] checks the level itself.
-    #[test]
-    fn a_misspelled_level_is_rejected_rather_than_silencing_the_miner() {
-        let e = resolve_directives("infoo", None).unwrap_err();
-        assert!(e.contains("infoo"), "{e}");
-        assert!(EnvFilter::try_new(default_filter("infoo")).is_ok());
-    }
-
-    /// `RUST_LOG` does not excuse a bad level: the operator still typed it
-    /// wrong, and reporting it is cheaper than a silent surprise on the next
+    /// the miner. `EnvFilter` accepts any bare word as a target, so the
+    /// misspelled-level rows only fail because [`resolve_directives`] checks the level
+    /// itself. `RUST_LOG` does not excuse a bad level: the operator still typed
+    /// it wrong, and reporting it is cheaper than a silent surprise on the next
     /// run without `RUST_LOG` set.
     #[test]
-    fn a_misspelled_level_is_rejected_even_when_rust_log_overrides_it() {
-        assert!(resolve_directives("infoo", Some("trace")).is_err());
+    fn resolve_directives_follows_the_table() {
+        let rows = [
+            (
+                "RUST_LOG beats the level flag",
+                "info",
+                Some("quip_solver_core=trace"),
+                Ok("quip_solver_core=trace".to_owned()),
+            ),
+            (
+                "blank RUST_LOG falls back to the level flag",
+                "debug",
+                Some("   "),
+                Ok(default_filter("debug")),
+            ),
+            (
+                "absent RUST_LOG falls back to the level flag",
+                "debug",
+                None,
+                Ok(default_filter("debug")),
+            ),
+            (
+                "a misspelled level is rejected",
+                "infoo",
+                None,
+                Err("infoo"),
+            ),
+            (
+                "a misspelled level is rejected even when RUST_LOG overrides it",
+                "infoo",
+                Some("trace"),
+                Err(""),
+            ),
+        ];
+        for (label, level, rust_log, expected) in rows {
+            match (resolve_directives(level, rust_log), expected) {
+                (Ok(got), Ok(want)) => assert_eq!(got, want, "{label}"),
+                (Err(err), Err(needle)) => assert!(err.contains(needle), "{label}: {err}"),
+                (got, want) => panic!("{label}: got {got:?}, expected {want:?}"),
+            }
+        }
+        assert!(EnvFilter::try_new(default_filter("infoo")).is_ok());
     }
 }

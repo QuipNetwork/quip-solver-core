@@ -342,15 +342,39 @@ mod tests {
     use ising_generators::rng::ChaCha8Rng;
 
     #[test]
-    fn draw_rejects_empty_allowed_h_when_nodes_present() {
-        let err = draw_ising_milli([0u8; 32], 2, 0, &[], &[]);
-        assert_eq!(err, Err(DrawError::EmptyAllowedValues));
-    }
-
-    #[test]
-    fn draw_rejects_empty_allowed_j_when_edges_present() {
-        let err = draw_ising_milli([0u8; 32], 1, 1, &[-1000, 1000], &[]);
-        assert_eq!(err, Err(DrawError::EmptyAllowedValues));
+    fn draw_ising_milli_requires_allowed_values_only_when_drawing() {
+        type Case = (
+            &'static str,
+            usize,
+            usize,
+            &'static [i32],
+            &'static [i32],
+            bool,
+        );
+        let cases: [Case; 3] = [
+            ("empty h with nodes present", 2, 0, &[], &[], false),
+            (
+                "empty j with edges present",
+                1,
+                1,
+                &[-1000, 1000],
+                &[],
+                false,
+            ),
+            // Zero nodes and zero edges: nothing to draw, empty sets are fine.
+            ("no nodes and no edges", 0, 0, &[], &[], true),
+        ];
+        for (label, nodes, edges, h, j, ok) in cases {
+            let drawn = draw_ising_milli([0u8; 32], nodes, edges, h, j);
+            if ok {
+                assert!(drawn.is_ok(), "{label}: {drawn:?}");
+                let (h, j) = drawn.unwrap();
+                assert!(h.is_empty(), "{label}");
+                assert!(j.is_empty(), "{label}");
+            } else {
+                assert_eq!(drawn, Err(DrawError::EmptyAllowedValues), "{label}");
+            }
+        }
     }
 
     /// Words `first..first + len` of the scalar reference stream.
@@ -429,13 +453,5 @@ mod tests {
                 .map(|&m| i8::try_from(m / 1000).unwrap())
                 .collect::<Vec<_>>()
         );
-    }
-
-    #[test]
-    fn draw_allows_empty_sets_when_no_draws_needed() {
-        // Zero nodes and zero edges: nothing to draw, empty sets are fine.
-        let (h, j) = draw_ising_milli([0u8; 32], 0, 0, &[], &[]).unwrap();
-        assert!(h.is_empty());
-        assert!(j.is_empty());
     }
 }

@@ -579,21 +579,6 @@ fn contract_status_equals_the_registry_status() -> Result<(), String> {
 }
 
 #[test]
-fn parameter_schemas_use_no_float_type() -> Result<(), String> {
-    for (entry, doc) in contracts()? {
-        for row in schema_rows(&doc)? {
-            if !is_allowed_type(&row.kind) {
-                return Err(format!(
-                    "{}: type {} not allowed",
-                    entry.family_id, row.kind
-                ));
-            }
-        }
-    }
-    Ok(())
-}
-
-#[test]
 fn parameter_schemas_list_tag_name_type_scale_bounds() -> Result<(), String> {
     for (entry, doc) in contracts()? {
         let rows = schema_rows(&doc)?;
@@ -673,19 +658,8 @@ fn contract_class(entry: &RegistryEntry) -> Result<String, String> {
 }
 
 #[test]
-fn adapted_families_are_hard_with_separate_ids() -> Result<(), String> {
-    check_adapted(&registry()?, &contract_class)
-}
-
-#[test]
 fn adapted_families_have_research_status() -> Result<(), String> {
-    check_adapted(&registry()?, &contract_class)?;
-    for entry in registry()? {
-        if entry.adapted_from.is_some() && entry.status != Status::Research {
-            return Err(format!("{}: adapted and not research", entry.family_id));
-        }
-    }
-    Ok(())
+    check_adapted(&registry()?, &contract_class)
 }
 
 #[test]
@@ -729,14 +703,24 @@ fn row(kind: &str, scale: Option<u32>, min: i128, max: i128) -> SchemaRow {
 }
 
 #[test]
-fn a_float_schema_type_fails() -> Result<(), String> {
-    expect_err(check_schema(&[row("f64", Some(1), 0, 1)]), "an f64 field")
-}
-
-#[test]
-fn a_bool_field_with_a_scale_fails() -> Result<(), String> {
-    check_schema(&[row("bool", None, 0, 1)])?;
-    expect_err(check_schema(&[row("bool", Some(1), 0, 1)]), "a scaled bool")
+fn invalid_schema_rows_fail() -> Result<(), String> {
+    // (label, a row that must fail, a row that differs only by being valid, if the
+    // original test checked one)
+    let rows = [
+        ("an f64 field", row("f64", Some(1), 0, 1), None),
+        (
+            "a scaled bool",
+            row("bool", Some(1), 0, 1),
+            Some(row("bool", None, 0, 1)),
+        ),
+    ];
+    for (label, bad, valid) in rows {
+        if let Some(valid) = valid {
+            check_schema(&[valid]).map_err(|e| format!("{label}: the valid row failed: {e}"))?;
+        }
+        expect_err(check_schema(&[bad]), label)?;
+    }
+    Ok(())
 }
 
 #[test]
@@ -751,40 +735,67 @@ fn a_hard_contract_without_constraints_fails() -> Result<(), String> {
     )
 }
 
-#[test]
-fn an_adapted_soft_family_fails() -> Result<(), String> {
-    let entries = synthetic(&[("vectors/a", "research", Some("vectors/b"))])?;
-    check_adapted(&entries, &|_| Ok("hard".to_owned()))?;
-    expect_err(
-        check_adapted(&entries, &|_| Ok("soft".to_owned())),
-        "an adapted soft family",
-    )
+/// `synthetic` with the row label on its error.
+fn synthetic_labelled(
+    label: &str,
+    entries: &[(&str, &str, Option<&str>)],
+) -> Result<Vec<RegistryEntry>, String> {
+    synthetic(entries).map_err(|e| format!("{label}: {e}"))
 }
 
 #[test]
-fn an_adapted_family_sharing_an_original_id_fails() -> Result<(), String> {
-    let entries = synthetic(&[
-        ("vectors/a", "research", Some("vectors/b")),
-        ("vectors/a", "research", None),
-    ])?;
-    expect_err(
-        check_adapted(&entries, &|_| Ok("hard".to_owned())),
-        "a shared id",
-    )?;
-    let itself = synthetic(&[("vectors/a", "research", Some("vectors/a"))])?;
-    expect_err(
-        check_adapted(&itself, &|_| Ok("hard".to_owned())),
-        "an adapted-from-itself family",
-    )
-}
-
-#[test]
-fn an_adapted_family_outside_research_fails() -> Result<(), String> {
-    let entries = synthetic(&[("vectors/a", "chain-authorized", Some("vectors/b"))])?;
-    expect_err(
-        check_adapted(&entries, &|_| Ok("hard".to_owned())),
-        "an adapted family outside research",
-    )
+fn adapted_family_rule_violations_fail() -> Result<(), String> {
+    // (label, entries, class of every family, whether the same entries pass with
+    // the hard class)
+    let rows = [
+        (
+            "an adapted soft family",
+            synthetic_labelled(
+                "an adapted soft family",
+                &[("vectors/a", "research", Some("vectors/b"))],
+            )?,
+            "soft",
+            true,
+        ),
+        (
+            "a shared id",
+            synthetic_labelled(
+                "a shared id",
+                &[
+                    ("vectors/a", "research", Some("vectors/b")),
+                    ("vectors/a", "research", None),
+                ],
+            )?,
+            "hard",
+            false,
+        ),
+        (
+            "an adapted-from-itself family",
+            synthetic_labelled(
+                "an adapted-from-itself family",
+                &[("vectors/a", "research", Some("vectors/a"))],
+            )?,
+            "hard",
+            false,
+        ),
+        (
+            "an adapted family outside research",
+            synthetic_labelled(
+                "an adapted family outside research",
+                &[("vectors/a", "chain-authorized", Some("vectors/b"))],
+            )?,
+            "hard",
+            false,
+        ),
+    ];
+    for (label, entries, class, passes_when_hard) in rows {
+        if passes_when_hard {
+            check_adapted(&entries, &|_| Ok("hard".to_owned()))
+                .map_err(|e| format!("{label}: the hard class failed: {e}"))?;
+        }
+        expect_err(check_adapted(&entries, &|_| Ok(class.to_owned())), label)?;
+    }
+    Ok(())
 }
 
 #[test]

@@ -8,30 +8,9 @@ use quip_solver_conformance::driver::{
     drive_miner, drive_miner_bad_welcome, drive_miner_close_after_welcome,
     drive_miner_close_before_welcome, drive_miner_one_job,
 };
-use std::process::Command;
+mod common;
 
-/// Build the named example and return its binary path.
-fn example_bin(name: &str) -> String {
-    #[expect(
-        clippy::expect_used,
-        reason = "test helper: cargo build failure is a setup error"
-    )]
-    let status = Command::new(env!("CARGO"))
-        .args(["build", "--example", name, "-p", "quip-solver-core"])
-        .status()
-        .expect("cargo build --example");
-    assert!(status.success(), "failed to build example {name}");
-    #[expect(
-        clippy::expect_used,
-        reason = "test helper: current_exe is always available under cargo test"
-    )]
-    let mut p = std::env::current_exe().expect("test exe path");
-    let _ = p.pop(); // deps/
-    let _ = p.pop(); // <profile>/
-    p.push("examples");
-    p.push(name);
-    p.to_string_lossy().into_owned()
-}
+use common::example_bin;
 
 fn unique_socket(tag: &str) -> String {
     let nanos = {
@@ -50,7 +29,9 @@ fn unique_socket(tag: &str) -> String {
 /// A solver that uses warm starts is graded on them and passes.
 #[tokio::test]
 async fn warm_sampler_passes_the_initial_spins_grade() {
-    let bin = example_bin("mock_sampler_warm");
+    let bin = example_bin("mock_sampler_warm")
+        .to_string_lossy()
+        .into_owned();
     let socket = unique_socket("warm");
     let report = drive_miner(&bin, &format!("unix://{socket}")).await;
     assert!(report.advertises_initial_spins(), "{report:?}");
@@ -62,7 +43,9 @@ async fn warm_sampler_passes_the_initial_spins_grade() {
 /// it never reaches the proof ring's planted ground state.
 #[tokio::test]
 async fn a_solver_that_ignores_its_seeds_fails_the_initial_spins_grade() {
-    let bin = example_bin("mock_sampler_warm_ignored");
+    let bin = example_bin("mock_sampler_warm_ignored")
+        .to_string_lossy()
+        .into_owned();
     let socket = unique_socket("warm-ignored");
     let report = drive_miner(&bin, &format!("unix://{socket}")).await;
     assert!(report.advertises_initial_spins(), "{report:?}");
@@ -76,7 +59,9 @@ async fn a_solver_that_ignores_its_seeds_fails_the_initial_spins_grade() {
 
 #[tokio::test]
 async fn mock_sampler_passes_loop_conformance() {
-    let bin = example_bin("mock_sampler_miner");
+    let bin = example_bin("mock_sampler_miner")
+        .to_string_lossy()
+        .into_owned();
     let socket = unique_socket("loop");
     let report = drive_miner(&bin, &format!("unix://{socket}")).await;
 
@@ -128,7 +113,9 @@ async fn mock_sampler_passes_loop_conformance() {
 
 #[tokio::test]
 async fn capped_sampler_rejects_too_large() {
-    let bin = example_bin("mock_sampler_capped");
+    let bin = example_bin("mock_sampler_capped")
+        .to_string_lossy()
+        .into_owned();
     let socket = unique_socket("capped");
     let report = drive_miner(&bin, &format!("unix://{socket}")).await;
 
@@ -147,9 +134,20 @@ async fn capped_sampler_rejects_too_large() {
     assert_eq!(report.exit_code, 0, "clean shutdown expected");
 }
 
+/// The other half of the bad-Welcome contract: the miner must say *why* it is
+/// leaving before it leaves.
+///
+/// From the coordinator's side, a bare exit 64 is indistinguishable from a
+/// crash during startup — the operator sees a disconnect and no reason.
+/// `drive_miner_bad_welcome`'s documentation has always claimed a conformant
+/// miner sends `Fatal` first, the driver grades it
+/// (`DriverReport::bad_welcome_conformant`), and the session loop now sends
+/// `Fatal { exit_code: 64 }` before returning `SessionError::BadWelcome`.
 #[tokio::test]
-async fn a_bad_welcome_ends_the_session_with_config_invalid() {
-    let bin = example_bin("mock_sampler_miner");
+async fn a_bad_welcome_is_explained_then_exits_config_invalid() {
+    let bin = example_bin("mock_sampler_miner")
+        .to_string_lossy()
+        .into_owned();
     let socket = unique_socket("bad-welcome");
     let report = drive_miner_bad_welcome(&bin, &format!("unix://{socket}")).await;
 
@@ -163,23 +161,6 @@ async fn a_bad_welcome_ends_the_session_with_config_invalid() {
         "a miner that rejected the Welcome must not have run jobs: {:?}",
         report.result_job_ids()
     );
-}
-
-/// The other half of the bad-Welcome contract: the miner must say *why* it is
-/// leaving before it leaves.
-///
-/// From the coordinator's side, a bare exit 64 is indistinguishable from a
-/// crash during startup — the operator sees a disconnect and no reason.
-/// `drive_miner_bad_welcome`'s documentation has always claimed a conformant
-/// miner sends `Fatal` first, the driver grades it
-/// (`DriverReport::bad_welcome_conformant`), and the session loop now sends
-/// `Fatal { exit_code: 64 }` before returning `SessionError::BadWelcome`.
-#[tokio::test]
-async fn a_bad_welcome_is_explained_before_the_exit() {
-    let bin = example_bin("mock_sampler_miner");
-    let socket = unique_socket("bad-welcome-fatal");
-    let report = drive_miner_bad_welcome(&bin, &format!("unix://{socket}")).await;
-
     assert!(
         report.fatal.is_some(),
         "a conformant miner sends Fatal before exiting ConfigInvalid: {report:?}"
@@ -194,7 +175,9 @@ async fn a_bad_welcome_is_explained_before_the_exit() {
 /// reports exit 0 for it tells its supervisor nothing went wrong.
 #[tokio::test]
 async fn a_coordinator_lost_after_welcome_exits_internal_fatal() {
-    let bin = example_bin("mock_sampler_miner");
+    let bin = example_bin("mock_sampler_miner")
+        .to_string_lossy()
+        .into_owned();
     let socket = unique_socket("close-after-welcome");
     let report = drive_miner_close_after_welcome(&bin, &format!("unix://{socket}")).await;
 
@@ -221,7 +204,9 @@ async fn a_coordinator_lost_after_welcome_exits_internal_fatal() {
 /// wrong place.
 #[tokio::test]
 async fn a_coordinator_lost_before_welcome_exits_token_rejected() {
-    let bin = example_bin("mock_sampler_miner");
+    let bin = example_bin("mock_sampler_miner")
+        .to_string_lossy()
+        .into_owned();
     let socket = unique_socket("close-before-welcome");
     let report = drive_miner_close_before_welcome(&bin, &format!("unix://{socket}")).await;
 
@@ -240,7 +225,9 @@ async fn a_coordinator_lost_before_welcome_exits_token_rejected() {
 
 #[tokio::test]
 async fn a_device_fault_ends_the_session_instead_of_requesting_more_work() {
-    let bin = example_bin("mock_sampler_faulty");
+    let bin = example_bin("mock_sampler_faulty")
+        .to_string_lossy()
+        .into_owned();
     let socket = unique_socket("faulty");
     let report = drive_miner_one_job(&bin, &format!("unix://{socket}")).await;
 
@@ -261,43 +248,4 @@ async fn a_device_fault_ends_the_session_instead_of_requesting_more_work() {
         "a wedged device must exit InternalFatal, not keep accepting jobs"
     );
     assert!(report.stderr.contains("test: wedged"), "{}", report.stderr);
-}
-
-#[tokio::test]
-async fn stderr_capture_preserves_partial_output_when_a_descendant_holds_the_pipe_open() {
-    use std::os::unix::fs::PermissionsExt as _;
-
-    let miner = std::fs::canonicalize(example_bin("mock_sampler_miner"))
-        .expect("canonicalize miner binary");
-    let dir = std::path::PathBuf::from(format!("{}-wrapper", unique_socket("stderr-capture")));
-    std::fs::create_dir_all(&dir).expect("create wrapper directory");
-    let wrapper = dir.join("miner-wrapper");
-    let script = format!(
-        "#!/bin/sh\nsleep 30 &\nprintf '%s\\n' 'known wrapper diagnostic' >&2\nexec '{}' \"$@\"\n",
-        miner.display()
-    );
-    std::fs::write(&wrapper, script).expect("write miner wrapper");
-    let mut permissions = std::fs::metadata(&wrapper)
-        .expect("read wrapper metadata")
-        .permissions();
-    permissions.set_mode(0o755);
-    std::fs::set_permissions(&wrapper, permissions).expect("make wrapper executable");
-
-    let wrapper = wrapper.to_string_lossy().into_owned();
-    let socket = unique_socket("stderr-capture-session");
-    let report = drive_miner(&wrapper, &format!("unix://{socket}")).await;
-
-    assert!(
-        report.stderr.contains("known wrapper diagnostic"),
-        "{}",
-        report.stderr
-    );
-    assert!(
-        report
-            .stderr
-            .contains("[stderr capture incomplete: the pipe stayed open after the miner exited]"),
-        "{}",
-        report.stderr
-    );
-    std::fs::remove_dir_all(dir).expect("remove wrapper directory");
 }

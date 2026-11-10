@@ -941,11 +941,31 @@ fn instance_bound_vectors() -> Result<(), String> {
             "offset" => two_node_parts(0, 0, i64_of(case.get("value").ok_or("no value")?)?),
             other => return Err(format!("{name}: quantity {other}")),
         };
+        let bounds = parts.check_bounds(&InstanceLimits::FAM_37);
         let got = Instance::new(parts, &InstanceLimits::FAM_37, &[], None);
         if code_of(&got) != expected(case)? {
             return Err(format!("{name}: got {:?}", code_of(&got)));
         }
+        if bounds.as_ref().err() != got.as_ref().err() {
+            return Err(format!(
+                "{name}: check_bounds {:?}, Instance::new {:?}",
+                bounds.as_ref().err(),
+                got.as_ref().err()
+            ));
+        }
     }
+    // `check_bounds` is the bounds step of `Instance::new`: it has no opinion
+    // on the later steps.
+    let mut later = two_node_parts(0, 0, 0);
+    later.h = vec![0];
+    later.edges = vec![(1, 0)];
+    later.metadata = vec![];
+    expect_eq!(later.check_bounds(&InstanceLimits::FAM_37), Ok(()))?;
+    let tight = InstanceLimits::new(1, 1, 1000, 1000, 16).ok_or("limits are at most FAM-37")?;
+    expect_eq!(
+        two_node_parts(0, 0, 0).check_bounds(&tight),
+        Err(Code::BoundsExceeded)
+    )?;
     Ok(())
 }
 
@@ -987,95 +1007,79 @@ fn metadata_kind_seven_is_registered_and_kind_eight_is_not() {
     );
 }
 
+type ShapeRow<'a> = (&'a str, InstanceParts);
+
 #[test]
-fn bounds_beat_edges_beat_metadata() {
-    let mut parts = two_node_parts(0, 0, 72_057_594_037_927_937);
-    parts.node_ids = vec![0, 1, 2];
-    parts.h = vec![0, 0, 0];
-    parts.edges = vec![(1, 2), (0, 1)];
-    parts.j = vec![0, 0];
-    parts.metadata = vec![1, 0, 6, 0, 0, 0, 0, 0];
-    let limits = InstanceLimits::FAM_37;
-    let code = |p: &InstanceParts| code_of(&Instance::new(p.clone(), &limits, &[1, 2, 3], None));
-    assert_eq!(code(&parts), Some(13));
-    parts.offset_milli = 0;
-    assert_eq!(code(&parts), Some(15));
-    parts.edges = vec![(0, 1), (1, 2)];
-    assert_eq!(code(&parts), Some(16));
+fn instance_shape_faults_are_code_15() {
+    let with = |edit: fn(&mut InstanceParts)| {
+        let mut parts = two_node_parts(0, 0, 0);
+        edit(&mut parts);
+        parts
+    };
+    let rows: [ShapeRow<'_>; 4] = [
+        ("short h", with(|p| p.h = vec![0])),
+        ("long j", with(|p| p.j = vec![0, 0])),
+        ("reversed edge", with(|p| p.edges = vec![(1, 0)])),
+        ("edge out of range", with(|p| p.edges = vec![(0, 2)])),
+    ];
+    for (label, parts) in rows {
+        assert_eq!(
+            code_of(&Instance::new(parts, &InstanceLimits::FAM_37, &[], None)),
+            Some(15),
+            "{label}"
+        );
+    }
 }
 
-/// `check_bounds` is the bounds step of `Instance::new`: the same code 13 on
-/// every bound vector, and no opinion on the later steps.
+type LimitRow<'a> = (&'a str, Option<InstanceLimits>, InstanceParts, &'a [u16]);
+
 #[test]
-fn check_bounds_is_the_bounds_step_of_instance_new() -> Result<(), String> {
-    let doc = core()?;
-    for case in section(&doc, "instance_bounds")? {
-        let name = str_field(case, "name")?;
-        let value = str_field(case, "value")?;
-        let parts = match str_field(case, "quantity")? {
-            "h" => two_node_parts(value.parse::<i32>().map_err(|e| format!("{e}"))?, 0, 0),
-            "j" => two_node_parts(0, value.parse::<i32>().map_err(|e| format!("{e}"))?, 0),
-            _ => two_node_parts(0, 0, i64_of(case.get("value").ok_or("no value")?)?),
-        };
-        let bounds = parts.check_bounds(&InstanceLimits::FAM_37).err();
-        let full = Instance::new(parts, &InstanceLimits::FAM_37, &[], None).err();
-        if bounds != full {
-            return Err(format!(
-                "{name}: check_bounds {bounds:?}, Instance::new {full:?}"
-            ));
+fn tight_instance_limits_give_code_13() -> Result<(), String> {
+    let three_nodes = |edges: Vec<(u32, u32)>| {
+        let mut parts = two_node_parts(0, 0, 0);
+        parts.node_ids = vec![0, 1, 2];
+        parts.h = vec![0; 3];
+        parts.j = vec![0; edges.len()];
+        parts.edges = edges;
+        parts
+    };
+    let mut five_nodes = two_node_parts(0, 0, 0);
+    five_nodes.node_ids = vec![0, 1, 2, 3, 4];
+    five_nodes.h = vec![0; 5];
+    let mut big_metadata = two_node_parts(0, 0, 0);
+    big_metadata.metadata = vec![1, 0, 1, 0, 0, 0, 0, 0];
+    let rows: [LimitRow<'_>; 3] = [
+        (
+            "node count",
+            InstanceLimits::new(4, 1, 1_073_741_824, 72_057_594_037_927_936, 67_108_864),
+            five_nodes,
+            &[],
+        ),
+        (
+            "edge count",
+            InstanceLimits::new(8, 1, 1000, 1000, 16),
+            three_nodes(vec![(0, 1), (1, 2)]),
+            &[],
+        ),
+        (
+            "metadata size",
+            InstanceLimits::new(8, 8, 1000, 1000, 2),
+            big_metadata,
+            &[1],
+        ),
+    ];
+    for (label, limits, parts, kinds) in rows {
+        let limits = limits.ok_or_else(|| format!("{label}: limits are at most FAM-37"))?;
+        let got = code_of(&Instance::new(parts, &limits, kinds, None));
+        if got != Some(13) {
+            return Err(format!("{label}: got {got:?}, want Some(13)"));
         }
     }
-    let mut later = two_node_parts(0, 0, 0);
-    later.h = vec![0];
-    later.edges = vec![(1, 0)];
-    later.metadata = vec![];
-    expect_eq!(later.check_bounds(&InstanceLimits::FAM_37), Ok(()))?;
-    let tight = InstanceLimits::new(1, 1, 1000, 1000, 16).ok_or("limits are at most FAM-37")?;
-    expect_eq!(
-        two_node_parts(0, 0, 0).check_bounds(&tight),
-        Err(Code::BoundsExceeded)
-    )?;
     Ok(())
 }
 
 #[test]
-fn length_mismatch_is_code_15() {
-    let mut parts = two_node_parts(0, 0, 0);
-    parts.h = vec![0];
-    assert_eq!(
-        code_of(&Instance::new(parts, &InstanceLimits::FAM_37, &[], None)),
-        Some(15)
-    );
-}
-
-#[test]
-fn edge_faults_are_code_15() {
-    let mut parts = two_node_parts(0, 0, 0);
-    parts.edges = vec![(1, 0)];
-    assert_eq!(
-        code_of(&Instance::new(
-            parts.clone(),
-            &InstanceLimits::FAM_37,
-            &[],
-            None
-        )),
-        Some(15)
-    );
-    parts.edges = vec![(0, 2)];
-    assert_eq!(
-        code_of(&Instance::new(parts, &InstanceLimits::FAM_37, &[], None)),
-        Some(15)
-    );
-}
-
-#[test]
 fn tighter_limits_apply() -> Result<(), String> {
-    let tight = InstanceLimits::new(4, 1, 1_073_741_824, 72_057_594_037_927_936, 67_108_864)
-        .ok_or("limits are at most FAM-37")?;
-    let mut parts = two_node_parts(0, 0, 0);
-    parts.node_ids = vec![0, 1, 2, 3, 4];
-    parts.h = vec![0; 5];
-    expect_eq!(code_of(&Instance::new(parts, &tight, &[], None)), Some(13))?;
     expect_eq!(InstanceLimits::new(16_777_217, 1, 1, 1, 1), None)?;
     expect_eq!(InstanceLimits::new(1, 67_108_865, 1, 1, 1), None)?;
     expect_eq!(InstanceLimits::new(1, 1, 1_073_741_825, 1, 1), None)?;
@@ -1095,40 +1099,6 @@ fn tighter_limits_apply() -> Result<(), String> {
         Some(InstanceLimits::FAM_37)
     )?;
     Ok(())
-}
-
-#[test]
-fn edge_count_over_the_limit_is_code_13() -> Result<(), String> {
-    let limits = InstanceLimits::new(8, 1, 1000, 1000, 16).ok_or("limits are at most FAM-37")?;
-    let mut parts = two_node_parts(0, 0, 0);
-    parts.node_ids = vec![0, 1, 2];
-    parts.h = vec![0; 3];
-    parts.edges = vec![(0, 1), (1, 2)];
-    parts.j = vec![0, 0];
-    expect_eq!(code_of(&Instance::new(parts, &limits, &[], None)), Some(13))?;
-    Ok(())
-}
-
-#[test]
-fn metadata_size_over_the_limit_is_code_13() -> Result<(), String> {
-    let limits = InstanceLimits::new(8, 8, 1000, 1000, 2).ok_or("limits are at most FAM-37")?;
-    let mut parts = two_node_parts(0, 0, 0);
-    parts.metadata = vec![1, 0, 1, 0, 0, 0, 0, 0];
-    expect_eq!(
-        code_of(&Instance::new(parts, &limits, &[1], None)),
-        Some(13)
-    )?;
-    Ok(())
-}
-
-#[test]
-fn j_length_mismatch_is_code_15() {
-    let mut parts = two_node_parts(0, 0, 0);
-    parts.j = vec![0, 0];
-    assert_eq!(
-        code_of(&Instance::new(parts, &InstanceLimits::FAM_37, &[], None)),
-        Some(15)
-    );
 }
 
 /// The digest of `parts` as given, computed without `Instance`: the canonical
@@ -1155,49 +1125,54 @@ fn new_with_digest(
 }
 
 #[test]
-fn digest_mismatch_beats_metadata() -> Result<(), String> {
+fn instance_new_check_order() -> Result<(), String> {
+    // Bounds, then edges, then metadata.
+    let mut parts = two_node_parts(0, 0, 72_057_594_037_927_937);
+    parts.node_ids = vec![0, 1, 2];
+    parts.h = vec![0, 0, 0];
+    parts.edges = vec![(1, 2), (0, 1)];
+    parts.j = vec![0, 0];
+    parts.metadata = vec![1, 0, 6, 0, 0, 0, 0, 0];
+    let limits = InstanceLimits::FAM_37;
+    let code = |p: &InstanceParts| code_of(&Instance::new(p.clone(), &limits, &[1, 2, 3], None));
+    expect_eq!(code(&parts), Some(13)).map_err(|e| format!("bounds beat edges: {e}"))?;
+    parts.offset_milli = 0;
+    expect_eq!(code(&parts), Some(15)).map_err(|e| format!("edges beat metadata: {e}"))?;
+    parts.edges = vec![(0, 1), (1, 2)];
+    expect_eq!(code(&parts), Some(16)).map_err(|e| format!("metadata last: {e}"))?;
+
+    // Bounds beat a digest mismatch.
+    let parts = two_node_parts(0, 0, 72_057_594_037_927_937);
+    expect_eq!(
+        code_of(&new_with_digest(&parts, &[], &[0xEE; 32])),
+        Some(13)
+    )
+    .map_err(|e| format!("bounds beat the digest: {e}"))?;
+
+    // The digest beats metadata.
     let mut parts = two_node_parts(0, 0, 0);
     parts.metadata = vec![1, 0, 6, 0, 0, 0, 0, 0];
     let kinds = [1, 2, 3];
-    let right = digest_over(&parts)?;
+    let right = digest_over(&parts).map_err(|e| format!("digest beats metadata, setup: {e}"))?;
     let wrong = [0xEE; 32];
-    expect_eq!(code_of(&new_with_digest(&parts, &kinds, &wrong)), Some(15))?;
-    expect_eq!(code_of(&new_with_digest(&parts, &kinds, &right)), Some(16))?;
+    expect_eq!(code_of(&new_with_digest(&parts, &kinds, &wrong)), Some(15))
+        .map_err(|e| format!("wrong digest on a bad kind: {e}"))?;
+    expect_eq!(code_of(&new_with_digest(&parts, &kinds, &right)), Some(16))
+        .map_err(|e| format!("right digest on a bad kind: {e}"))?;
     // A kind the contract does not list gives the same order.
     parts.metadata = vec![1, 0, 2, 0, 0, 0, 0, 0];
-    let right = digest_over(&parts)?;
-    expect_eq!(code_of(&new_with_digest(&parts, &[1], &wrong)), Some(15))?;
-    expect_eq!(code_of(&new_with_digest(&parts, &[1], &right)), Some(16))?;
+    let right = digest_over(&parts).map_err(|e| format!("unlisted kind, setup: {e}"))?;
+    expect_eq!(code_of(&new_with_digest(&parts, &[1], &wrong)), Some(15))
+        .map_err(|e| format!("wrong digest on an unlisted kind: {e}"))?;
+    expect_eq!(code_of(&new_with_digest(&parts, &[1], &right)), Some(16))
+        .map_err(|e| format!("right digest on an unlisted kind: {e}"))?;
     // Valid metadata and the right digest is Ok, and the digest matches.
-    let ok = new_with_digest(&parts, &[1, 2], &right).map_err(|c| c.to_string())?;
-    expect_eq!(ok.digest(), right)?;
-    expect_eq!(code_of(&new_with_digest(&parts, &[1, 2], &wrong)), Some(15))?;
+    let ok = new_with_digest(&parts, &[1, 2], &right)
+        .map_err(|c| format!("valid metadata with the right digest: code {c}"))?;
+    expect_eq!(ok.digest(), right).map_err(|e| format!("the digest matches: {e}"))?;
+    expect_eq!(code_of(&new_with_digest(&parts, &[1, 2], &wrong)), Some(15))
+        .map_err(|e| format!("wrong digest on valid metadata: {e}"))?;
     Ok(())
-}
-
-#[test]
-fn edge_fault_beats_digest_mismatch() {
-    // Both faults are code 15, so the code cannot show which check ran first.
-    // The test still runs the edge step and the digest step on the same
-    // input, and `digest_mismatch_beats_metadata` pins the later steps.
-    let mut parts = two_node_parts(0, 0, 0);
-    parts.node_ids = vec![0, 1, 2];
-    parts.h = vec![0; 3];
-    parts.edges = vec![(1, 2), (0, 1)];
-    parts.j = vec![0, 0];
-    assert_eq!(
-        new_with_digest(&parts, &[], &[0xEE; 32]),
-        Err(Code::InstanceDigestMismatch)
-    );
-}
-
-#[test]
-fn bounds_beat_digest_mismatch() {
-    let parts = two_node_parts(0, 0, 72_057_594_037_927_937);
-    assert_eq!(
-        code_of(&new_with_digest(&parts, &[], &[0xEE; 32])),
-        Some(13)
-    );
 }
 
 fn example_size_bounds(params: &Params<'_>, stats: &TopologyStats) -> Result<SizeBounds, Code> {
@@ -1288,21 +1263,6 @@ fn size_bound_vectors() -> Result<(), String> {
 }
 
 #[test]
-fn size_bound_overflow_is_code_13() -> Result<(), String> {
-    let bytes = uniform_params(16, 0);
-    let params = Params::parse(UNIFORM_FIELD, &bytes).map_err(|c| c.to_string())?;
-    let stats = TopologyStats {
-        n_nodes: u64::MAX,
-        n_edges: 0,
-        max_degree: 0,
-    };
-    if code_of(&example_size_bounds(&params, &stats)) != Some(13) {
-        return Err("overflow must give 13".into());
-    }
-    Ok(())
-}
-
-#[test]
 fn revision_vectors() -> Result<(), String> {
     let doc = core()?;
     for case in section(&doc, "revisions")? {
@@ -1317,74 +1277,48 @@ fn revision_vectors() -> Result<(), String> {
     Ok(())
 }
 
+/// One admission case: label, family id, revision, params, digest, code.
+type AdmissionRow<'a> = (&'a str, &'a [u8], u32, &'a [u8], &'a [u8], Option<u8>);
+
 #[test]
-fn unknown_family_beats_params_length() {
+fn admission_codes() {
+    let id: &[u8] = b"vectors/uniform-field";
     let big = [0_u8; 4097];
-    let got = admit(&[VECTOR_CONTRACT], b"quip/routing", 1, &big, &[0; 32]);
-    assert_eq!(code_of(&got), Some(5));
-}
-
-#[test]
-fn unknown_revision_is_code_6() {
-    let got = admit(
-        &[VECTOR_CONTRACT],
-        b"vectors/uniform-field",
-        2,
-        &[],
-        &[0; 32],
-    );
-    assert_eq!(code_of(&got), Some(6));
-}
-
-#[test]
-fn example_namespace_is_code_3_in_a_lease() {
-    let got = admit(
-        &[VECTOR_CONTRACT],
-        b"example/uniform-field",
-        1,
-        &[],
-        &[0; 32],
-    );
-    assert_eq!(code_of(&got), Some(3));
-}
-
-#[test]
-fn admission_codes_7_8_9() {
-    let id = b"vectors/uniform-field";
     let good = uniform_params(2, -4);
     let digest = params_digest(&good);
-    assert!(admit(&[VECTOR_CONTRACT], id, 1, &good, &digest).is_ok());
-    let bad = [0x01, 0x01];
-    assert_eq!(
-        code_of(&admit(
-            &[VECTOR_CONTRACT],
-            id,
-            1,
-            &bad,
-            &params_digest(&bad)
-        )),
-        Some(7)
-    );
-    let short = digest.get(..31).unwrap_or(&[]);
-    assert_eq!(
-        code_of(&admit(&[VECTOR_CONTRACT], id, 1, &good, short)),
-        Some(8)
-    );
-    assert_eq!(
-        code_of(&admit(&[VECTOR_CONTRACT], id, 1, &good, &[0; 32])),
-        Some(8)
-    );
+    let bad: &[u8] = &[0x01, 0x01];
+    let bad_digest = params_digest(bad);
     let out = uniform_params(2, -4001);
-    assert_eq!(
-        code_of(&admit(
-            &[VECTOR_CONTRACT],
-            id,
+    let out_digest = params_digest(&out);
+    let short = digest.get(..31).unwrap_or(&[]);
+    let rows: [AdmissionRow<'_>; 8] = [
+        (
+            "unknown family beats params length",
+            b"quip/routing",
             1,
-            &out,
-            &params_digest(&out)
-        )),
-        Some(9)
-    );
+            &big,
+            &[0; 32],
+            Some(5),
+        ),
+        ("unknown revision", id, 2, &[], &[0; 32], Some(6)),
+        (
+            "example namespace in a lease",
+            b"example/uniform-field",
+            1,
+            &[],
+            &[0; 32],
+            Some(3),
+        ),
+        ("admitted", id, 1, &good, &digest, None),
+        ("malformed params", id, 1, bad, &bad_digest, Some(7)),
+        ("short digest", id, 1, &good, short, Some(8)),
+        ("wrong digest", id, 1, &good, &[0; 32], Some(8)),
+        ("params out of bounds", id, 1, &out, &out_digest, Some(9)),
+    ];
+    for (label, family_id, revision, params, digest, want) in rows {
+        let got = admit(&[VECTOR_CONTRACT], family_id, revision, params, digest);
+        assert_eq!(code_of(&got), want, "{label}");
+    }
 }
 
 #[test]
@@ -1491,30 +1425,33 @@ fn measure_sees_an_allocation() {
     );
 }
 
-#[test]
-fn unknown_family_admission_allocates_nothing() {
-    let big = vec![0_u8; 1 << 20];
-    let contracts = [VECTOR_CONTRACT];
-    let (got, allocs) = measure(|| code_of(&admit(&contracts, b"quip/routing", 1, &big, &[0; 32])));
-    assert_eq!(got, Some(5));
-    assert_eq!(allocs, NONE);
-}
+/// One rejection: label, family id, params, code.
+type RejectionRow<'a> = (&'a str, &'a [u8], &'a [u8], Option<u8>);
 
 #[test]
-fn oversized_params_allocate_nothing() {
-    let big = vec![0_u8; MAX_PARAMS_LEN + 1];
-    let contracts = [VECTOR_CONTRACT];
-    let (got, allocs) = measure(|| {
-        code_of(&admit(
-            &contracts,
+fn admission_rejections_allocate_nothing() {
+    let unknown_family_params = vec![0_u8; 1 << 20];
+    let oversized_params = vec![0_u8; MAX_PARAMS_LEN + 1];
+    let rows: [RejectionRow<'_>; 2] = [
+        (
+            "unknown family with 1 MiB params",
+            b"quip/routing",
+            &unknown_family_params,
+            Some(5),
+        ),
+        (
+            "oversized params",
             b"vectors/uniform-field",
-            1,
-            &big,
-            &[0; 32],
-        ))
-    });
-    assert_eq!(got, Some(7));
-    assert_eq!(allocs, NONE);
+            &oversized_params,
+            Some(7),
+        ),
+    ];
+    let contracts = [VECTOR_CONTRACT];
+    for (label, family_id, params, want) in rows {
+        let (got, allocs) = measure(|| code_of(&admit(&contracts, family_id, 1, params, &[0; 32])));
+        assert_eq!(got, want, "{label}");
+        assert_eq!(allocs, NONE, "{label}");
+    }
 }
 
 #[test]
@@ -1662,71 +1599,11 @@ fn canonical_bytes_allocate_exactly_once() -> Result<(), String> {
     Ok(())
 }
 
-#[test]
-fn size_bound_check_allocates_nothing() {
-    let bounds = SizeBounds {
-        nodes: 200,
-        edges: 400,
-        degree: 5,
-    };
-    let advertised = AdvertisedLimits {
-        max_nodes: 100,
-        max_edges: 0,
-        max_degree: 4,
-    };
-    let (got, allocs) = measure(|| {
-        code_of(&check_size_bounds(
-            &bounds,
-            &InstanceLimits::FAM_37,
-            &advertised,
-        ))
-    });
-    assert_eq!(got, Some(13));
-    assert_eq!(allocs, NONE);
-}
+/// One size bound check: label, instance limits, advertised limits, code.
+type SizeCheckRow<'a> = (&'a str, InstanceLimits, AdvertisedLimits, Option<u8>);
 
 #[test]
-fn size_bound_check_ok_path_allocates_nothing() {
-    let bounds = SizeBounds {
-        nodes: 200,
-        edges: 400,
-        degree: 5,
-    };
-    let advertised = AdvertisedLimits {
-        max_nodes: 0,
-        max_edges: 0,
-        max_degree: 0,
-    };
-    let (got, allocs) = measure(|| {
-        code_of(&check_size_bounds(
-            &bounds,
-            &InstanceLimits::FAM_37,
-            &advertised,
-        ))
-    });
-    assert_eq!(got, None);
-    assert_eq!(allocs, NONE);
-}
-
-#[test]
-fn family_id_rejection_allocates_nothing() {
-    let (got, allocs) = measure(|| code_of(&check_family_id(b"example/x", IdContext::Lease)));
-    assert_eq!(got, Some(3));
-    assert_eq!(allocs, NONE);
-}
-
-#[test]
-fn example_namespace_is_exactly_example() {
-    let lease = |id: &[u8]| code_of(&check_family_id(id, IdContext::Lease));
-    assert_eq!(lease(b"example.foo/x"), None);
-    assert_eq!(lease(b"examples/x"), None);
-    assert_eq!(lease(b"example/x"), Some(3));
-}
-
-#[test]
-fn contract_limits_tighter_than_fam_37_apply() -> Result<(), String> {
-    let tight =
-        InstanceLimits::new(199, 400, 4000, 1000, 1024).ok_or("limits are at most FAM-37")?;
+fn size_bound_check_codes_allocate_nothing() -> Result<(), String> {
     let bounds = SizeBounds {
         nodes: 200,
         edges: 400,
@@ -1737,15 +1614,42 @@ fn contract_limits_tighter_than_fam_37_apply() -> Result<(), String> {
         max_edges: 0,
         max_degree: 0,
     };
-    expect_eq!(
-        code_of(&check_size_bounds(&bounds, &tight, &none)),
-        Some(13)
-    )?;
-    expect_eq!(
-        code_of(&check_size_bounds(&bounds, &InstanceLimits::FAM_37, &none)),
-        None
-    )?;
+    let tight =
+        InstanceLimits::new(199, 400, 4000, 1000, 1024).ok_or("limits are at most FAM-37")?;
+    let rows: [SizeCheckRow<'_>; 3] = [
+        (
+            "advertised limits exceeded",
+            InstanceLimits::FAM_37,
+            AdvertisedLimits {
+                max_nodes: 100,
+                max_edges: 0,
+                max_degree: 4,
+            },
+            Some(13),
+        ),
+        ("within the limits", InstanceLimits::FAM_37, none, None),
+        ("contract limits tighter than FAM-37", tight, none, Some(13)),
+    ];
+    for (label, limits, advertised, want) in rows {
+        let (got, allocs) = measure(|| code_of(&check_size_bounds(&bounds, &limits, &advertised)));
+        expect_eq!(got, want).map_err(|e| format!("{label}: {e}"))?;
+        expect_eq!(allocs, NONE).map_err(|e| format!("{label}: {e}"))?;
+    }
     Ok(())
+}
+
+#[test]
+fn example_namespace_is_exactly_example() {
+    let lease = |id: &[u8]| code_of(&check_family_id(id, IdContext::Lease));
+    let (got, allocs) = measure(|| {
+        (
+            lease(b"example.foo/x"),
+            lease(b"examples/x"),
+            lease(b"example/x"),
+        )
+    });
+    assert_eq!(got, (None, None, Some(3)));
+    assert_eq!(allocs, NONE);
 }
 
 #[test]
@@ -1754,32 +1658,4 @@ fn trailing_bytes_are_code_7() {
     assert_eq!(code_of(&Params::parse(UNIFORM_FIELD, &bytes)), None);
     bytes.push(0);
     assert_eq!(code_of(&Params::parse(UNIFORM_FIELD, &bytes)), Some(7));
-}
-
-#[test]
-fn size_function_overflow_in_the_edges_arm_is_code_13() -> Result<(), String> {
-    let bytes = uniform_params(16, 0);
-    let params = Params::parse(UNIFORM_FIELD, &bytes).map_err(|c| c.to_string())?;
-    // layers * n_edges overflows u64 while layers * n_nodes does not.
-    let stats = TopologyStats {
-        n_nodes: 1,
-        n_edges: u64::MAX / 2,
-        max_degree: 0,
-    };
-    expect_eq!(code_of(&example_size_bounds(&params, &stats)), Some(13))?;
-    Ok(())
-}
-
-#[test]
-fn size_function_overflow_in_the_degree_arm_is_code_13() -> Result<(), String> {
-    let bytes = uniform_params(16, 0);
-    let params = Params::parse(UNIFORM_FIELD, &bytes).map_err(|c| c.to_string())?;
-    // nodes and edges fit, and max_degree + 2 overflows u64.
-    let stats = TopologyStats {
-        n_nodes: 1,
-        n_edges: 0,
-        max_degree: u64::MAX,
-    };
-    expect_eq!(code_of(&example_size_bounds(&params, &stats)), Some(13))?;
-    Ok(())
 }

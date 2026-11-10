@@ -1,4 +1,7 @@
 //! Lease protocol tests against a real session and deterministic sampler.
+mod common;
+
+use common::example_bin;
 use quip_proto::v1::{
     self as wire, coord_msg, miner_msg,
     miner_service_server::{MinerService, MinerServiceServer},
@@ -8,10 +11,7 @@ use quip_protocol::{
     target::Target,
 };
 use std::{
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        OnceLock,
-    },
+    sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
 };
 use tokio::sync::{mpsc, Mutex};
@@ -131,7 +131,7 @@ impl Session {
         );
         let local = mode.map(|mode| {
             if mode == "wide" {
-                build_example("mock_sampler_lease_wide")
+                example_bin("mock_sampler_lease_wide")
             } else {
                 local_binary()
             }
@@ -274,6 +274,23 @@ impl Session {
     async fn refund(&mut self) {
         assert!(matches!(self.recv().await, miner_msg::Msg::JobRequest(r) if r.credits == 1));
     }
+    /// `recv` whose transport failures name `label`.
+    async fn recv_for(&mut self, label: &str) -> miner_msg::Msg {
+        let received = tokio::time::timeout(Duration::from_secs(10), self.inbound.message()).await;
+        assert!(
+            matches!(&received, Ok(Ok(Some(m))) if m.msg.is_some()),
+            "{label}: no message from the miner: {received:?}"
+        );
+        received.unwrap().unwrap().unwrap().msg.unwrap()
+    }
+    /// `refund` whose failures name `label`.
+    async fn refund_for(&mut self, label: &str) {
+        let msg = self.recv_for(label).await;
+        assert!(
+            matches!(&msg, miner_msg::Msg::JobRequest(r) if r.credits == 1),
+            "{label}: expected a one-credit refund, got {msg:?}"
+        );
+    }
     async fn finish(mut self) {
         self.send(coord_msg::Msg::Shutdown(wire::Shutdown { grace_ms: 2000 }))
             .await;
@@ -363,24 +380,17 @@ async fn first(s: &mut Session) {
 }
 
 #[tokio::test]
-async fn status_counts_default_lease_salts_as_jobs_done() {
-    let mut s = Session::start(true).await;
-    s.setup(i64::MAX).await;
-    s.send(coord_msg::Msg::Job(job(5))).await;
-    assert!(matches!(s.recv().await, miner_msg::Msg::LeaseDone(d) if d.salts_done == 5));
-    s.refund().await;
-    s.send(coord_msg::Msg::Ping(wire::Ping {})).await;
-    assert!(matches!(s.recv().await, miner_msg::Msg::Status(v) if v.jobs_done == 5));
-    s.finish().await;
-}
-
-#[tokio::test]
-async fn status_counts_local_lease_salts_as_jobs_done() {
+async fn a_local_lease_reports_unique_verified_winners_and_counts_them() {
     let mut s = Session::start_mode(false, false, Some("honest")).await;
     s.setup(i64::MAX).await;
     s.send(coord_msg::Msg::Job(job(5))).await;
+    let mut salts = std::collections::HashSet::new();
     for _ in 0..5 {
-        first(&mut s).await;
+        let miner_msg::Msg::Result(r) = s.recv().await else {
+            panic!("expected winner")
+        };
+        verify(&r);
+        assert!(salts.insert(r.salt));
     }
     assert!(matches!(s.recv().await, miner_msg::Msg::LeaseDone(d) if d.salts_done == 5));
     s.refund().await;
@@ -444,52 +454,6 @@ async fn a_lease_reports_every_salt_even_below_an_unreachable_target() {
         matches!(s.recv().await, miner_msg::Msg::LeaseDone(d) if d.salts_done == 5 && d.best_energy_milli == best)
     );
     s.refund().await;
-    s.finish().await;
-}
-#[tokio::test]
-async fn malformed_leases_are_rejected_before_drawing() {
-    let mut s = Session::start(false).await;
-    s.setup(i64::MAX).await;
-    for variant in 0..4 {
-        let mut j = job(5);
-        let g = j.generator.as_mut().unwrap();
-        match variant {
-            0 => g.salt_count = 0,
-            1 => g.salt_start = u64::MAX,
-            2 => g.base_salt = vec![0; 31],
-            _ => g.algorithm = 0,
-        }
-        s.send(coord_msg::Msg::Job(j)).await;
-        assert!(
-            matches!(s.recv().await, miner_msg::Msg::Reject(r) if r.reason == wire::RejectReason::Malformed as i32)
-        );
-        s.refund().await;
-    }
-    s.finish().await;
-}
-#[tokio::test]
-async fn a_lease_needs_a_topology_and_a_target() {
-    let mut s = Session::start(false).await;
-    for (index, reason) in [
-        wire::RejectReason::TopologyMissing,
-        wire::RejectReason::TargetMissing,
-        wire::RejectReason::TargetMissing,
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        s.send(coord_msg::Msg::Job(job(5))).await;
-        assert!(matches!(s.recv().await, miner_msg::Msg::Reject(r) if r.reason == reason as i32));
-        s.refund().await;
-        if index == 0 {
-            s.send(coord_msg::Msg::Topology(topology())).await;
-        }
-        if index == 1 {
-            let mut t = target(i64::MAX);
-            t.max_proof_solutions = 0;
-            s.send(coord_msg::Msg::SetTarget(t)).await;
-        }
-    }
     s.finish().await;
 }
 #[tokio::test]
@@ -578,7 +542,7 @@ async fn a_deadline_reports_a_lease_while_its_salt_is_still_running() {
             .as_millis(),
     )
     .unwrap()
-        + 500;
+        + 100;
     s.send(coord_msg::Msg::Job(lease)).await;
     let mut held = s.blocked_sample().await;
     assert!(matches!(s.recv().await, miner_msg::Msg::LeaseDone(d) if d.salts_done == 0));
@@ -714,6 +678,8 @@ async fn zero_read_salts_count_but_never_win() {
         matches!(s.recv().await, miner_msg::Msg::LeaseDone(d) if d.salts_done == 5 && d.best_energy_milli == i64::MAX)
     );
     s.refund().await;
+    s.send(coord_msg::Msg::Ping(wire::Ping {})).await;
+    assert!(matches!(s.recv().await, miner_msg::Msg::Status(v) if v.jobs_done == 5));
     s.finish().await;
 }
 #[tokio::test]
@@ -771,9 +737,9 @@ async fn an_expired_lease_is_rejected_and_a_deadline_mid_lease_stops_it() {
             .as_millis(),
     )
     .unwrap()
-        + 5000;
+        + 500;
     // Model a coordinator task descheduled between constructing and sending a job.
-    let _ = tokio::time::timeout(Duration::from_millis(300), std::future::pending::<()>()).await;
+    let _ = tokio::time::timeout(Duration::from_millis(100), std::future::pending::<()>()).await;
     let deadline_ms = j.deadline_ms;
     s.send(coord_msg::Msg::Job(j)).await;
     first(&mut s).await;
@@ -782,7 +748,7 @@ async fn an_expired_lease_is_rejected_and_a_deadline_mid_lease_stops_it() {
             miner_msg::Msg::Result(r) => verify(&r),
             miner_msg::Msg::LeaseDone(d) => {
                 assert!(d.salts_done < 10_000);
-                assert!(start.elapsed() < Duration::from_secs(7));
+                assert!(start.elapsed() < Duration::from_secs(2));
                 assert!(
                     std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
@@ -861,44 +827,10 @@ async fn plain_id_equal_to_an_old_salt_id_keeps_its_metadata_and_credit() {
 }
 
 fn local_binary() -> std::path::PathBuf {
-    static BIN: OnceLock<std::path::PathBuf> = OnceLock::new();
-    BIN.get_or_init(|| build_example("mock_sampler_lease_local"))
-        .clone()
+    example_bin("mock_sampler_lease_local")
 }
 fn default_binary() -> std::path::PathBuf {
-    static BIN: OnceLock<std::path::PathBuf> = OnceLock::new();
-    BIN.get_or_init(|| build_example("mock_sampler_lease"))
-        .clone()
-}
-#[expect(clippy::unwrap_used, reason = "test fixture builds must succeed")]
-fn build_example(name: &str) -> std::path::PathBuf {
-    assert!(std::process::Command::new(env!("CARGO"))
-        .args(["build", "-p", "quip-solver-core", "--example", name])
-        .status()
-        .unwrap()
-        .success());
-    let mut path = std::env::current_exe().unwrap();
-    let _ = path.pop();
-    let _ = path.pop();
-    path.join("examples").join(name)
-}
-
-#[tokio::test]
-async fn a_local_generator_with_a_correct_draw_wins() {
-    let mut s = Session::start_mode(false, false, Some("honest")).await;
-    s.setup(i64::MAX).await;
-    s.send(coord_msg::Msg::Job(job(5))).await;
-    let mut salts = std::collections::HashSet::new();
-    for _ in 0..5 {
-        let miner_msg::Msg::Result(r) = s.recv().await else {
-            panic!("expected winner")
-        };
-        verify(&r);
-        assert!(salts.insert(r.salt));
-    }
-    assert!(matches!(s.recv().await, miner_msg::Msg::LeaseDone(d) if d.salts_done == 5));
-    s.refund().await;
-    s.finish().await;
+    example_bin("mock_sampler_lease")
 }
 
 #[tokio::test]
@@ -969,72 +901,6 @@ async fn a_mismatched_local_draw_is_forwarded_unchanged() {
 }
 
 #[tokio::test]
-async fn a_sampler_that_ignores_stop_sends_nothing_after_cancel() {
-    let mut s = Session::start_mode(false, false, Some("ignore-stop")).await;
-    s.setup(i64::MAX).await;
-    s.send(coord_msg::Msg::Job(job(u64::MAX - 10))).await;
-    first(&mut s).await;
-    s.send(coord_msg::Msg::Cancel(wire::Cancel { max_generation: 1 }))
-        .await;
-    let mut acknowledged = false;
-    let mut done = false;
-    let mut refunded = false;
-    // The local monitor can send completion before the writer sends Status.
-    // Consume the Cancel reply before sending a Ping with its own Status reply.
-    while !(acknowledged && done && refunded) {
-        match s.recv().await {
-            miner_msg::Msg::Result(r) => {
-                assert!(
-                    !acknowledged && !done,
-                    "winner after cancellation or completion"
-                );
-                verify(&r);
-            }
-            miner_msg::Msg::Status(status) => {
-                assert!(!acknowledged, "duplicate Cancel acknowledgement");
-                assert_eq!(status.abandoned_generation, 1);
-                acknowledged = true;
-            }
-            miner_msg::Msg::LeaseDone(d) => {
-                assert!(!done, "duplicate lease completion");
-                assert_eq!(d.job_id, b"lease");
-                assert!(d.salts_done >= 1);
-                done = true;
-            }
-            miner_msg::Msg::JobRequest(request) => {
-                assert!(done && !refunded, "refund must follow one completion");
-                assert_eq!(request.credits, 1);
-                refunded = true;
-            }
-            other => panic!("unexpected message: {other:?}"),
-        }
-    }
-    s.wait_for_log("push returned LeaseStopped").await;
-    s.ack().await;
-    s.finish().await;
-}
-
-#[tokio::test]
-async fn capabilities_are_the_same_for_both_paths() {
-    let s = Session::start(false).await;
-    let default = local_binary().with_file_name("mock_sampler_lease");
-    let caps = |bin: &std::path::Path| {
-        let output = std::process::Command::new(bin)
-            .arg("--capabilities")
-            .output()
-            .unwrap();
-        assert!(output.status.success());
-        let mut value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-        let object = value.as_object_mut().unwrap();
-        let _ = object.remove("backend");
-        let _ = object.remove("algorithm");
-        value
-    };
-    assert_eq!(caps(&local_binary()), caps(&default));
-    s.finish().await;
-}
-
-#[tokio::test]
 async fn local_shutdown_accepts_a_finished_salt_during_grace() {
     let mut s = Session::start_mode(false, true, Some("grace")).await;
     s.setup(i64::MAX).await;
@@ -1051,8 +917,63 @@ async fn local_shutdown_accepts_a_finished_salt_during_grace() {
     assert!(s.child.wait().await.unwrap().success());
 }
 
+/// Read the replies to a Cancel of `generation` until the acknowledgement, the
+/// lease completion, and the refund have each arrived. A `strict` drain also
+/// rejects duplicate acknowledgements, duplicate refunds, and winners after the
+/// completion, and checks the acknowledged generation and each winner.
+#[expect(clippy::panic, reason = "an unexpected message is a test failure")]
+async fn drain_cancelled_lease(s: &mut Session, generation: u64, strict: bool) {
+    let (mut acknowledged, mut done, mut refunded) = (false, false, false);
+    // The local monitor can send completion before the writer sends Status.
+    // Consume the Cancel reply before sending a Ping with its own Status reply.
+    while !(acknowledged && done && refunded) {
+        let label = format!("generation {generation}");
+        match s.recv_for(&label).await {
+            miner_msg::Msg::Result(r) => {
+                assert!(
+                    !acknowledged && (!strict || !done),
+                    "generation {generation}: winner after cancellation or completion"
+                );
+                if strict {
+                    verify(&r);
+                }
+            }
+            miner_msg::Msg::Status(status) => {
+                assert!(
+                    !strict || !acknowledged,
+                    "generation {generation}: duplicate Cancel acknowledgement"
+                );
+                if strict {
+                    assert_eq!(status.abandoned_generation, generation);
+                }
+                acknowledged = true;
+            }
+            miner_msg::Msg::LeaseDone(d) => {
+                assert!(!done, "generation {generation}: duplicate lease completion");
+                if strict {
+                    assert_eq!(d.job_id, b"lease");
+                    assert!(d.salts_done >= 1);
+                }
+                done = true;
+            }
+            miner_msg::Msg::JobRequest(request) => {
+                assert!(
+                    done && (!strict || !refunded),
+                    "generation {generation}: refund must follow one completion"
+                );
+                assert_eq!(request.credits, 1, "generation {generation}");
+                refunded = true;
+            }
+            other => panic!("generation {generation}: unexpected message: {other:?}"),
+        }
+    }
+}
+
+/// Sixteen cancelled leases on an ignore-stop sampler fill the credit window;
+/// the seventeenth is Fatal. The first cycle also pins the strict ordering of a
+/// Cancel and that the sampler sends nothing after it.
 #[tokio::test]
-async fn stopped_local_workers_cannot_exceed_the_credit_window() {
+async fn an_ignore_stop_sampler_stays_inside_the_credit_window() {
     let mut s = Session::start_mode(false, false, Some("ignore-stop")).await;
     s.setup(i64::MAX).await;
     // Configure requests eight credits, clamped to the session capacity, and
@@ -1066,22 +987,10 @@ async fn stopped_local_workers_cannot_exceed_the_credit_window() {
             max_generation: generation,
         }))
         .await;
-        let (mut ack, mut done, mut refund) = (false, false, false);
-        while !(ack && done && refund) {
-            match s.recv().await {
-                miner_msg::Msg::Status(_) => ack = true,
-                miner_msg::Msg::LeaseDone(_) => {
-                    assert!(!done);
-                    done = true;
-                }
-                miner_msg::Msg::JobRequest(r) => {
-                    assert!(done);
-                    assert_eq!(r.credits, 1);
-                    refund = true;
-                }
-                miner_msg::Msg::Result(_) => assert!(!ack),
-                other => panic!("unexpected {other:?}"),
-            }
+        drain_cancelled_lease(&mut s, generation, generation == 1).await;
+        if generation == 1 {
+            s.wait_for_log("push returned LeaseStopped").await;
+            s.ack().await;
         }
     }
     let mut lease = job(1);
@@ -1194,7 +1103,7 @@ async fn shutdown_reports_a_lease_whose_salt_never_returns() {
     s.send(coord_msg::Msg::Job(job(40))).await;
     // Hold the salt through the whole grace window.
     let held = s.blocked_sample().await;
-    s.send(coord_msg::Msg::Shutdown(wire::Shutdown { grace_ms: 400 }))
+    s.send(coord_msg::Msg::Shutdown(wire::Shutdown { grace_ms: 100 }))
         .await;
     assert!(matches!(s.recv().await, miner_msg::Msg::LeaseDone(d) if d.salts_done == 0));
     s.refund().await;
@@ -1218,37 +1127,114 @@ async fn shutdown_reports_a_lease_whose_salt_never_returns() {
             .success()
     );
 }
+/// A family descriptor naming a family this solver does not generate.
+fn descriptor() -> quip_proto::v1::FamilyDescriptor {
+    quip_proto::v1::FamilyDescriptor {
+        family_id: "quip/x".into(),
+        revision: 1,
+        ..Default::default()
+    }
+}
+
+type Mutation = fn(&mut wire::IsingProblemGenerator);
+
+/// One row per bad lease: a label for the failure message, the change to a
+/// valid legacy lease, and the reason the miner must give.
+const REJECTED_LEASES: [(&str, Mutation, wire::RejectReason); 8] = [
+    (
+        "zero salts",
+        |g| g.salt_count = 0,
+        wire::RejectReason::Malformed,
+    ),
+    (
+        "salt range past the end",
+        |g| g.salt_start = u64::MAX,
+        wire::RejectReason::Malformed,
+    ),
+    (
+        "short base salt",
+        |g| g.base_salt = vec![0; 31],
+        wire::RejectReason::Malformed,
+    ),
+    (
+        "algorithm 0",
+        |g| g.algorithm = 0,
+        wire::RejectReason::Malformed,
+    ),
+    (
+        "family descriptor on a legacy lease",
+        |g| g.family = Some(descriptor()),
+        wire::RejectReason::Malformed,
+    ),
+    (
+        "topology order digest on a legacy lease",
+        |g| g.topology_order_digest = vec![7; 32],
+        wire::RejectReason::Malformed,
+    ),
+    // FAM-54: value 2 is known; no generated family is code 5
+    (
+        "family algorithm with a descriptor and digest",
+        |g| {
+            g.algorithm = quip_proto::v1::GeneratorAlgorithm::FamilyChacha8V1 as i32;
+            g.family = Some(descriptor());
+            g.topology_order_digest = vec![7; 32];
+        },
+        wire::RejectReason::FamilyUnsupported,
+    ),
+    (
+        "family algorithm alone",
+        |g| g.algorithm = quip_proto::v1::GeneratorAlgorithm::FamilyChacha8V1 as i32,
+        wire::RejectReason::Malformed,
+    ),
+];
+
 #[tokio::test]
-async fn family_tagged_leases_are_rejected_before_drawing() {
+async fn malformed_and_unsupported_leases_are_rejected_before_drawing() {
     let mut s = Session::start(false).await;
-    s.setup(i64::MAX).await;
-    for variant in 0..4 {
-        let mut j = job(5);
-        let g = j.generator.as_mut().unwrap();
-        let descriptor = || quip_proto::v1::FamilyDescriptor {
-            family_id: "quip/x".into(),
-            revision: 1,
-            ..Default::default()
-        };
-        match variant {
-            0 => g.family = Some(descriptor()),
-            1 => g.topology_order_digest = vec![7; 32],
-            2 => {
-                g.algorithm = quip_proto::v1::GeneratorAlgorithm::FamilyChacha8V1 as i32;
-                g.family = Some(descriptor());
-                g.topology_order_digest = vec![7; 32];
-            }
-            _ => g.algorithm = quip_proto::v1::GeneratorAlgorithm::FamilyChacha8V1 as i32,
+    for (index, (label, reason)) in [
+        (
+            "a lease before any topology",
+            wire::RejectReason::TopologyMissing,
+        ),
+        (
+            "a lease before any target",
+            wire::RejectReason::TargetMissing,
+        ),
+        (
+            "a lease whose target admits no proof solutions",
+            wire::RejectReason::TargetMissing,
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        s.send(coord_msg::Msg::Job(job(5))).await;
+        let msg = s.recv_for(label).await;
+        assert!(
+            matches!(&msg, miner_msg::Msg::Reject(r) if r.reason == reason as i32),
+            "{label}: expected {reason:?}, got {msg:?}"
+        );
+        s.refund_for(label).await;
+        if index == 0 {
+            s.send(coord_msg::Msg::Topology(topology())).await;
         }
+        if index == 1 {
+            let mut t = target(i64::MAX);
+            t.max_proof_solutions = 0;
+            s.send(coord_msg::Msg::SetTarget(t)).await;
+        }
+    }
+    s.setup(i64::MAX).await;
+    for (label, mutate, reason) in REJECTED_LEASES {
+        let mut j = job(5);
+        mutate(j.generator.as_mut().unwrap());
         s.send(coord_msg::Msg::Job(j)).await;
-        // FAM-54: value 2 is known; no generated family is code 5
-        let expected = if variant == 2 {
-            wire::RejectReason::FamilyUnsupported
-        } else {
-            wire::RejectReason::Malformed
-        };
-        assert!(matches!(s.recv().await, miner_msg::Msg::Reject(r) if r.reason == expected as i32));
-        s.refund().await;
+        let msg = s.recv_for(label).await;
+        assert!(
+            matches!(&msg, miner_msg::Msg::Reject(r) if r.reason == reason as i32),
+            "{label}: expected {reason:?}, got {msg:?}"
+        );
+        s.refund_for(label).await;
     }
     s.finish().await;
 }

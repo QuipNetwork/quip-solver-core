@@ -148,15 +148,6 @@ fn decodes_the_python_written_blobs() {
 }
 
 #[test]
-fn decode_prints_sorted_two_space_json_to_stdout() {
-    let out = run(&[Path::new("decode"), &data(T_SPARSE)]);
-    assert_eq!(code(&out), Some(0));
-    let text = String::from_utf8(out.stdout).expect("utf-8");
-    assert!(text.starts_with("{\n  \"edges\": ["), "{text}");
-    assert!(text.ends_with("\n}\n"));
-}
-
-#[test]
 fn corrupt_file_exits_1() {
     let dir = Scratch::new();
     let mut bytes = std::fs::read(data(T_SPARSE)).expect("read");

@@ -55,17 +55,23 @@ fn file_err(bytes: &[u8]) -> BlobError {
     decode(bytes).expect_err("file must be rejected")
 }
 
-fn round_trip(body: &Body) {
-    let file = encode(body).expect("encode");
-    assert_eq!(&decode(&file).expect("decode"), body);
-    assert_eq!(&file[..10], &[0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 2, 0xff]);
-    assert_eq!(file, encode(body).expect("encode again"));
+fn round_trip(label: &str, body: &Body) {
+    let file = encode(body);
+    assert!(file.is_ok(), "{label}: encode");
+    let file = file.expect("encode");
+    assert_eq!(decode(&file).as_ref(), Ok(body), "{label}: decode");
+    assert_eq!(
+        &file[..10],
+        &[0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 2, 0xff],
+        "{label}: gzip header"
+    );
+    assert_eq!(Ok(file), encode(body), "{label}: encoding is deterministic");
 }
 
 #[test]
-fn t_sparse_style_extremes_round_trip() {
+fn explicit_bodies_round_trip() {
     // u32::MAX next to 0, a reordered list, a flipped edge, a duplicate, a self-loop.
-    let body = explicit(
+    let extremes = explicit(
         &[4_294_967_295, 0, 7, 3],
         &[
             (4_294_967_295, 0),
@@ -75,28 +81,32 @@ fn t_sparse_style_extremes_round_trip() {
             (3, 3),
         ],
     );
-    round_trip(&body);
-}
-
-#[test]
-fn empty_explicit_round_trips() {
-    round_trip(&explicit(&[], &[]));
+    let bodies = [
+        ("t_sparse-style extremes", extremes),
+        ("empty", explicit(&[], &[])),
+    ];
+    for (label, body) in &bodies {
+        round_trip(label, body);
+    }
 }
 
 #[test]
 fn z22_bodies_round_trip() {
     let (nodes, edges) = zephyr_lattice(2, 2).expect("z(2,2)");
-    round_trip(&Body::Explicit(Topology {
-        nodes: nodes.clone(),
-        edges: edges.clone(),
-    }));
+    round_trip(
+        "z22 explicit",
+        &Body::Explicit(Topology {
+            nodes: nodes.clone(),
+            edges: edges.clone(),
+        }),
+    );
     let removed_edge = edges
         .iter()
         .copied()
         .find(|&(a, b)| a != 0 && b != 0 && a != 5 && b != 5)
         .expect("edge");
     let body = zephyr(2, 2, &[0, 5], &[removed_edge]);
-    round_trip(&body);
+    round_trip("z22 removed", &body);
     let topology = body.topology().expect("expand");
     assert_eq!(topology.nodes.len(), nodes.len() - 2);
     assert!(!topology.edges.contains(&removed_edge));
@@ -124,28 +134,52 @@ fn explicit_topology_returns_itself() {
     );
 }
 
+/// One gzip framing fault: label and the mutated file.
+type GzipRow = (&'static str, Vec<u8>);
+
 #[test]
-fn gzip_errors() {
+fn gzip_framing_errors() {
     let good = encode(&explicit(&[1, 2], &[(1, 2)])).expect("encode");
-    assert_eq!(file_err(&[]), BlobError::Gzip);
-    assert_eq!(file_err(&good[..good.len() - 1]), BlobError::Gzip);
-    assert_eq!(file_err(&good[..12]), BlobError::Gzip);
-    let mut bad = good.clone();
-    bad[2] = 7;
-    assert_eq!(file_err(&bad), BlobError::Gzip);
-    let mut bad = good.clone();
-    bad[3] = 8;
-    assert_eq!(file_err(&bad), BlobError::Gzip);
-    let mut bad = good.clone();
-    bad[0] = 0;
-    assert_eq!(file_err(&bad), BlobError::Gzip);
-    // A second member after the first.
-    let mut two = good.clone();
-    two.extend_from_slice(&good);
-    assert_eq!(file_err(&two), BlobError::Gzip);
-    let mut extra = good;
-    extra.push(0);
-    assert_eq!(file_err(&extra), BlobError::Gzip);
+    let with_header = |at: usize, value: u8| {
+        let mut bad = good.clone();
+        bad[at] = value;
+        bad
+    };
+    let appended = |extra: &[u8]| {
+        let mut file = good.clone();
+        file.extend_from_slice(extra);
+        file
+    };
+    let longer = encode(&explicit(&[1, 2, 3], &[(1, 2), (2, 3)])).expect("encode");
+    let n = longer.len();
+    // Keep the header, drop the last deflate byte, keep the 8-byte tail.
+    let mut cut = longer[..n - 9].to_vec();
+    cut.extend_from_slice(&longer[n - 8..]);
+    // Keep only part of the deflate stream with the tail.
+    let mut half = longer[..12].to_vec();
+    half.extend_from_slice(&longer[n - 8..]);
+    let rows: [GzipRow; 17] = [
+        ("empty file", Vec::new()),
+        ("last byte dropped", good[..good.len() - 1].to_vec()),
+        ("cut after the header", good[..12].to_vec()),
+        ("bad compression method", with_header(2, 7)),
+        ("reserved flag bit", with_header(3, 8)),
+        ("bad magic", with_header(0, 0)),
+        ("a second member after the first", appended(&good)),
+        ("one trailing zero byte", appended(&[0])),
+        ("truncated deflate with a full tail", cut),
+        ("part of the deflate stream with a full tail", half),
+        ("partial second member, 1 byte", appended(&good[..1])),
+        ("partial second member, 2 bytes", appended(&good[..2])),
+        ("partial second member, 3 bytes", appended(&good[..3])),
+        ("partial second member, 4 bytes", appended(&good[..4])),
+        ("partial second member, 5 bytes", appended(&good[..5])),
+        ("partial second member, 6 bytes", appended(&good[..6])),
+        ("partial second member, 7 bytes", appended(&good[..7])),
+    ];
+    for (label, bytes) in &rows {
+        assert_eq!(decode(bytes).err(), Some(BlobError::Gzip), "{label}");
+    }
 }
 
 #[test]
@@ -170,15 +204,20 @@ fn python_style_header_is_accepted() {
     assert_eq!(decode(&file).expect("decode"), body);
 }
 
+/// The two gzip files hold only zero bytes: 64 MiB plus one byte, and exactly
+/// 64 MiB. They are built once with:
+/// `head -c 67108865 /dev/zero | gzip -9n > tests/data/zeros-64mib-plus-1.bin.gz`
+/// `head -c 67108864 /dev/zero | gzip -9n > tests/data/zeros-64mib.bin.gz`
 #[test]
 fn oversize_payload_is_rejected() {
+    let file = include_bytes!("data/zeros-64mib-plus-1.bin.gz");
+    assert_eq!(decompress(file), Err(BlobError::TooLarge));
     let big = vec![0_u8; MAX_PAYLOAD + 1];
-    let file = compress(&big);
-    assert_eq!(decompress(&file), Err(BlobError::TooLarge));
     assert_eq!(decode_payload(&big), Err(BlobError::TooLarge));
-    let max = vec![0_u8; MAX_PAYLOAD];
     assert_eq!(
-        decompress(&compress(&max)).expect("at the limit").len(),
+        decompress(include_bytes!("data/zeros-64mib.bin.gz"))
+            .expect("at the limit")
+            .len(),
         MAX_PAYLOAD
     );
 }
@@ -393,30 +432,6 @@ fn z11_lattice_matches_the_spec_example() {
         (10, 11),
     ];
     assert_eq!(edges, expected);
-}
-
-#[test]
-fn truncated_deflate_with_a_full_tail_is_rejected() {
-    let good = encode(&explicit(&[1, 2, 3], &[(1, 2), (2, 3)])).expect("encode");
-    let n = good.len();
-    // Keep the header, drop the last deflate byte, keep the 8-byte tail.
-    let mut cut = good[..n - 9].to_vec();
-    cut.extend_from_slice(&good[n - 8..]);
-    assert_eq!(file_err(&cut), BlobError::Gzip);
-    // Keep only part of the deflate stream with the tail.
-    let mut half = good[..12].to_vec();
-    half.extend_from_slice(&good[n - 8..]);
-    assert_eq!(file_err(&half), BlobError::Gzip);
-}
-
-#[test]
-fn partial_second_member_is_rejected() {
-    let good = encode(&explicit(&[1, 2], &[(1, 2)])).expect("encode");
-    for extra in 1..=7 {
-        let mut file = good.clone();
-        file.extend_from_slice(&good[..extra]);
-        assert_eq!(file_err(&file), BlobError::Gzip, "extra bytes: {extra}");
-    }
 }
 
 #[test]

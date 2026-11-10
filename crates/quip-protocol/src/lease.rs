@@ -463,17 +463,15 @@ mod tests {
     }
 
     #[test]
-    fn a_zero_base_salt_reproduces_the_coordinator_counter_salt() {
+    fn salt_places_the_counter_in_the_first_eight_bytes() {
         let s =
             LeaseSpec::new(Generator::Blake3Chacha8V1, [0; 32], [0; 32], [0; 32], 7, 3).unwrap();
         let mut expected = [0u8; 32];
         expected[..8].copy_from_slice(&9u64.to_le_bytes());
         assert_eq!(s.salt(2), Some(expected));
         assert_eq!(s.salt(3), None);
-    }
 
-    #[test]
-    fn the_counter_overwrites_bytes_zero_to_seven_only() {
+        // The counter overwrites bytes zero to seven only.
         let s = spec(5, 4);
         let salt = s.salt(1).unwrap();
         assert_eq!(&salt[..8], &6u64.to_le_bytes());
@@ -554,73 +552,15 @@ mod tests {
     };
 
     #[test]
-    fn honest_solutions_verify() {
-        let s = spec(5, 4);
-        let topo = tiny_topology();
-        let (salt, nonce) = (s.salt(1).unwrap(), s.nonce(1).unwrap());
-        let sols = vec![scored(&topo, nonce, vec![1, -1, 1, -1])];
-        let v = verify_lease_solutions(&s, &topo, &EASY, &salt, &nonce, &sols).unwrap();
-        assert_eq!(v.salt, salt);
-        assert_eq!(v.stats.valid_solution_count, 1);
-    }
-
-    #[test]
-    fn empty_required_values_report_draw_error() {
-        let s = spec(5, 4);
-        let mut topo = tiny_topology();
-        topo.allowed_h_milli.clear();
-        assert!(matches!(
-            verify_lease_solutions(
-                &s,
-                &topo,
-                &EASY,
-                &s.salt(0).unwrap(),
-                &s.nonce(0).unwrap(),
-                &[]
-            ),
-            Err(VerifyError::Draw(_))
-        ));
-    }
-
-    #[cfg(feature = "session")]
-    #[test]
-    fn wire_membership_and_nonce_precede_malformed_spins() {
-        let s = spec(5, 4);
-        let generator = quip_proto::v1::IsingProblemGenerator {
-            algorithm: 1,
-            last_proof_block_hash: s.last_proof_block_hash.to_vec(),
-            miner_account: s.miner_account.to_vec(),
-            base_salt: s.base_salt.to_vec(),
-            salt_start: 5,
-            salt_count: 4,
-            ..Default::default()
-        };
-        let mut result = quip_proto::v1::Result {
-            salt: salt_with_counter(&s.base_salt, 100).to_vec(),
-            nonce: vec![0; 32],
-            solutions: vec![quip_proto::v1::Solution {
-                spins: vec![],
-                energy_milli: 0,
-            }],
-            ..Default::default()
-        };
-        assert_eq!(
-            verify_lease_result(&generator, &tiny_topology(), &EASY, &result).err(),
-            Some(VerifyError::SaltOutsideLease)
-        );
-        result.salt = s.salt(0).unwrap().to_vec();
-        assert_eq!(
-            verify_lease_result(&generator, &tiny_topology(), &EASY, &result).err(),
-            Some(VerifyError::NonceMismatch)
-        );
-    }
-
-    #[test]
     fn each_failure_has_its_own_error() {
         let s = spec(5, 4);
         let topo = tiny_topology();
         let (salt, nonce) = (s.salt(1).unwrap(), s.nonce(1).unwrap());
         let good = vec![scored(&topo, nonce, vec![1, -1, 1, -1])];
+
+        let v = verify_lease_solutions(&s, &topo, &EASY, &salt, &nonce, &good).unwrap();
+        assert_eq!(v.salt, salt);
+        assert_eq!(v.stats.valid_solution_count, 1);
 
         let outside = salt_with_counter(&s.base_salt, 100);
         assert_eq!(
@@ -650,5 +590,11 @@ mod tests {
             verify_lease_solutions(&s, &topo, &hard, &salt, &nonce, &good).err(),
             Some(VerifyError::BelowTarget(TargetMiss::InsufficientEnergy))
         );
+        let mut empty_h = tiny_topology();
+        empty_h.allowed_h_milli.clear();
+        assert!(matches!(
+            verify_lease_solutions(&s, &empty_h, &EASY, &salt, &nonce, &[]),
+            Err(VerifyError::Draw(_))
+        ));
     }
 }

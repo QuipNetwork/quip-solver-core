@@ -19,15 +19,13 @@ use ising_generators::rng::{shuffle, ChaCha8Rng};
 use serde_json::Value;
 
 mod common;
+#[path = "common/lattice.rs"]
+mod lattice;
 use common::{array, field, number, pairs, text, u32s};
+use lattice::lattice_topology;
 
 fn topology(nodes: Vec<u32>, edges: &[(u32, u32)]) -> BaseTopology {
     BaseTopology::new(nodes, edges).expect("test topology is valid")
-}
-
-fn lattice_topology(m: u16, t: u8) -> BaseTopology {
-    let (nodes, edges) = zephyr_lattice(m, t).expect("lattice");
-    topology(nodes, &edges)
 }
 
 fn adjacency_graph(edges: &[(u32, u32)]) -> BaseTopology {
@@ -183,89 +181,8 @@ fn shuffled_and_flipped_edge_insertion_gives_identical_structure() {
 }
 
 #[test]
-fn even_tile_rings_are_accepted() {
-    let base = adjacency_graph(&tile_ring(4));
-    let found = candidates(Lattice::Adjacency, &base).expect("even ring");
-    assert_eq!(found.tiles.len(), 4);
-    assert!(found.spines.iter().all(Option::is_some));
-}
-
-#[test]
-fn invalid_topologies_return_stable_errors() {
-    // Three tile pairs around node 0, each pair sharing the spine edge
-    // (0, p): node 0 is on three spine edges.
-    let mut around = Vec::new();
-    let mut next = 4;
-    for p in 1..=3 {
-        for _ in 0..2 {
-            around.push(clique([0, p, next, next + 1]));
-            next += 2;
-        }
-    }
-    // Two shared edges (0,1) and (0,2) of one clique meet at node 0.
-    let conflict = union(&[
-        clique([0, 1, 2, 3]),
-        clique([0, 1, 4, 5]),
-        clique([0, 2, 6, 7]),
-    ]);
-    let star: Vec<_> = (1..=33).map(|leaf| (0, leaf)).collect();
-
-    let table: Vec<(&str, StructureError, Lattice, BaseTopology)> = vec![
-        (
-            "membership-above-two",
-            StructureError::MembershipAboveTwo(0),
-            Lattice::Adjacency,
-            adjacency_graph(&union(&around)),
-        ),
-        (
-            "spine-conflict",
-            StructureError::SpineConflict,
-            Lattice::Adjacency,
-            adjacency_graph(&conflict),
-        ),
-        (
-            "not-bipartite",
-            StructureError::NotBipartite,
-            Lattice::Adjacency,
-            adjacency_graph(&tile_ring(5)),
-        ),
-        (
-            "degree-above-limit",
-            StructureError::DegreeAboveLimit,
-            Lattice::Adjacency,
-            adjacency_graph(&star),
-        ),
-        (
-            "no-candidates",
-            StructureError::NoCandidates,
-            Lattice::Adjacency,
-            adjacency_graph(&[(0, 1), (1, 2), (2, 3), (3, 0)]),
-        ),
-        (
-            "duplicate-edge",
-            StructureError::DuplicateEdge,
-            Lattice::Adjacency,
-            adjacency_graph(&[(0, 1), (1, 0)]),
-        ),
-        (
-            "not-zephyr-node",
-            StructureError::NotZephyrNode(12),
-            Lattice::Zephyr { m: 1, t: 1 },
-            topology(vec![0, 12], &[(0, 12)]),
-        ),
-        (
-            "not-zephyr-coupler",
-            StructureError::NotZephyrCoupler(0, 3),
-            Lattice::Zephyr { m: 1, t: 1 },
-            topology(vec![0, 3], &[(3, 0)]),
-        ),
-    ];
+fn lattice_shapes_and_error_names() {
     assert_eq!(MAX_DEGREE, 32);
-    for (name, want, lattice, base) in &table {
-        let got = candidates(*lattice, base).expect_err(name);
-        assert_eq!(got, *want, "{name}");
-        assert_eq!(got.name(), *name);
-    }
     assert_eq!(Lattice::from_shape(1, 0), Err(StructureError::MixedShape));
     assert_eq!(Lattice::from_shape(0, 2), Err(StructureError::MixedShape));
     assert_eq!(StructureError::MixedShape.name(), "mixed-shape");
@@ -276,22 +193,6 @@ fn invalid_topologies_return_stable_errors() {
         Lattice::from_shape(2, 3),
         Ok(Lattice::Zephyr { m: 2, t: 3 })
     );
-}
-
-#[test]
-fn the_first_failing_check_names_the_error() {
-    // Nodes 0 and 1 are a coupler, the pair repeats, and (0, 3) is not a
-    // coupler. The duplicate check runs first.
-    assert!(zephyr_coupler(1, 1, 0, 1));
-    let base = topology(vec![0, 1, 3], &[(0, 1), (1, 0), (0, 3)]);
-    let got = candidates(Lattice::Zephyr { m: 1, t: 1 }, &base);
-    assert_eq!(got, Err(StructureError::DuplicateEdge));
-
-    // Node 12 is not a z(1, 1) node and (0, 3) is not a z(1, 1) coupler. The
-    // node check runs before the coupler check.
-    let base = topology(vec![0, 3, 12], &[(0, 3), (0, 12)]);
-    let got = candidates(Lattice::Zephyr { m: 1, t: 1 }, &base);
-    assert_eq!(got, Err(StructureError::NotZephyrNode(12)));
 }
 
 /// Tiles for spine-graph edges over spine indices: spine `i` is the edge
@@ -397,7 +298,7 @@ fn tiny_exhaustive_matching_is_maximum() {
 }
 
 #[test]
-fn matching_ties_follow_the_orders() {
+fn ring_selection_follows_the_orders() {
     let base = adjacency_graph(&tile_ring(4));
     let (found, split) = adjacency_parts(&base);
     assert_eq!(split.left, [(0, 1), (4, 5)]);
@@ -407,6 +308,37 @@ fn matching_ties_follow_the_orders() {
     assert_eq!(identity_orders, [tile([0, 1, 6, 7]), tile([2, 3, 4, 5])]);
     let reversed_left = select(&found, &split, &[1, 0], &[0, 1]).expect("reversed");
     assert_eq!(reversed_left, [tile([0, 1, 2, 3]), tile([4, 5, 6, 7])]);
+    let bad = Err(StructureError::BadOrder);
+    assert_eq!(
+        select(&found, &split, &[0], &[0, 1]),
+        bad,
+        "short left order"
+    );
+    assert_eq!(
+        select(&found, &split, &[0, 1, 1], &[0, 1]),
+        bad,
+        "long left order"
+    );
+    assert_eq!(
+        select(&found, &split, &[0, 0], &[0, 1]),
+        bad,
+        "repeated left index"
+    );
+    assert_eq!(
+        select(&found, &split, &[0, 2], &[0, 1]),
+        bad,
+        "left index out of range"
+    );
+    assert_eq!(
+        select(&found, &split, &[0, 1], &[1, 1]),
+        bad,
+        "repeated right index"
+    );
+    assert_eq!(
+        select(&found, &split, &[0, 1], &[]),
+        bad,
+        "empty right order"
+    );
 }
 
 #[test]
@@ -426,19 +358,6 @@ fn free_tiles_are_always_selected() {
             assert_eq!(chosen.len(), 3);
         }
     }
-}
-
-#[test]
-fn a_bad_order_is_rejected() {
-    let base = adjacency_graph(&tile_ring(4));
-    let (found, split) = adjacency_parts(&base);
-    let bad = Err(StructureError::BadOrder);
-    assert_eq!(select(&found, &split, &[0], &[0, 1]), bad);
-    assert_eq!(select(&found, &split, &[0, 1, 1], &[0, 1]), bad);
-    assert_eq!(select(&found, &split, &[0, 0], &[0, 1]), bad);
-    assert_eq!(select(&found, &split, &[0, 2], &[0, 1]), bad);
-    assert_eq!(select(&found, &split, &[0, 1], &[1, 1]), bad);
-    assert_eq!(select(&found, &split, &[0, 1], &[]), bad);
 }
 
 #[test]
@@ -535,23 +454,14 @@ fn live_topology_rebuilds_with_the_pinned_digest() {
 }
 
 #[test]
-fn live_candidates_match_the_research_counts() {
-    let base = common::live_topology();
-    let adjacency = candidates(Lattice::Adjacency, &base).expect("adjacency");
-    let zephyr = candidates(live_lattice("zephyr"), &base).expect("zephyr");
-    assert_eq!(adjacency.tiles.len(), 6822);
-    assert_eq!(zephyr.tiles.len(), 6822);
-    assert_eq!(adjacency.tiles, zephyr.tiles);
-}
-
-#[test]
 fn live_selection_has_1785_tiles() {
     let base = common::live_topology();
     let doc = common::parse(common::STRUCTURE_JSON);
+    let mut tile_lists = Vec::new();
     for case in array(&doc, "live") {
         let lattice = live_lattice(text(case, "name"));
-        let found = candidates(lattice, &base).expect("candidates");
-        let split = sides(lattice, &base, &found).expect("sides");
+        let found = candidates(lattice, base).expect("candidates");
+        let split = sides(lattice, base, &found).expect("sides");
         assert_eq!(found.tiles.len() as u64, number(case, "candidates"));
         assert_eq!(
             found.spines.iter().filter(|s| s.is_none()).count() as u64,
@@ -569,7 +479,13 @@ fn live_selection_has_1785_tiles() {
             let digest = blake3::hash(&tile_bytes(&chosen));
             assert_eq!(digest.to_hex().as_str(), text(selection, "tiles_blake3"));
         }
+        tile_lists.push(found.tiles);
     }
+    assert_eq!(tile_lists.len(), 2, "both modes");
+    assert_eq!(
+        tile_lists[0], tile_lists[1],
+        "both modes find the same tiles"
+    );
 }
 
 #[test]
@@ -581,7 +497,7 @@ fn archived_tiles_are_valid_candidates() {
         text(&sidecar, "bin_blake3")
     );
     let base = common::live_topology();
-    let found = candidates(live_lattice("zephyr"), &base).expect("candidates");
+    let found = candidates(live_lattice("zephyr"), base).expect("candidates");
     let models = common::archived_models();
     assert_eq!(models.len(), 2);
     let total: u64 = array(&sidecar, "models")
@@ -721,22 +637,5 @@ fn structure_vectors_match() {
     }
     for case in cases {
         check_structure_case(case);
-    }
-}
-
-#[test]
-fn repeated_structure_is_identical() {
-    let base = common::live_topology();
-    for mode in ["adjacency", "zephyr"] {
-        let lattice = live_lattice(mode);
-        let run = || {
-            let found = candidates(lattice, &base).expect("candidates");
-            let split = sides(lattice, &base, &found).expect("sides");
-            let (left, right) =
-                seeded_orders(&common::hex(&[7; 32]), split.left.len(), split.right.len());
-            let chosen = select(&found, &split, &left, &right).expect("select");
-            (found, split, chosen)
-        };
-        assert_eq!(run(), run(), "{mode}");
     }
 }

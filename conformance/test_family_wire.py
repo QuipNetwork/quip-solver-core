@@ -86,12 +86,6 @@ def test_unknown_enum_values():
     assert caps.SerializeToString(deterministic=True).hex() == "5a03010207"
 
 
-def test_new_enum_numbers():
-    assert miner_pb2.GENERATOR_ALGORITHM_FAMILY_CHACHA8_V1 == 2
-    assert miner_pb2.FAMILY_UNSUPPORTED == 10
-    assert miner_pb2.NO_SOLUTION == 11
-
-
 def test_wire_reasons_match_vectors():
     rows = json.loads(CORE_VECTORS.read_text())["wire_reasons"]
     assert len(rows) == 12

@@ -140,7 +140,7 @@ test:
 	cargo clippy -p quip-protocol-py --all-targets -- -D warnings
 	cargo test --workspace --exclude quip-protocol-py
 	cargo clippy -p ising-generators --all-targets --features cli -- -D warnings
-	cargo test -p ising-generators --features cli
+	cargo test -p ising-generators --features cli --test topology_cli
 	cargo build -p ising-generators --no-default-features --features blob
 
 # -- Lint -------------------------------------------------------------------

@@ -662,180 +662,161 @@ mod tests {
         (vec![1.0, -1.0], vec![0.5], vec![0, 1], vec![1, -1])
     }
 
+    /// The raw arguments of one `quip_energy_milli` call, short of the
+    /// out-parameter.
+    struct EnergyCall {
+        h: *const f64,
+        h_len: usize,
+        j: *const f64,
+        j_len: usize,
+        edges: *const u32,
+        spins: *const i8,
+        spins_len: usize,
+    }
+
+    impl EnergyCall {
+        /// A call that passes the arrays of `problem()` and `spins` as they are.
+        fn over((h, j, edges): (&[f64], &[f64], &[u32]), spins: &[i8]) -> Self {
+            Self {
+                h: h.as_ptr(),
+                h_len: h.len(),
+                j: j.as_ptr(),
+                j_len: j.len(),
+                edges: edges.as_ptr(),
+                spins: spins.as_ptr(),
+                spins_len: spins.len(),
+            }
+        }
+
+        /// # Safety
+        ///
+        /// Each pointer must address the length beside it, or be a pointer the
+        /// guard under test rejects before any read. `out` is one writable
+        /// i64 or NULL.
+        unsafe fn run(&self, out: *mut i64) -> i32 {
+            // SAFETY: forwarded from the caller of `run`.
+            unsafe {
+                quip_energy_milli(
+                    self.h,
+                    self.h_len,
+                    self.j,
+                    self.j_len,
+                    self.edges,
+                    self.spins,
+                    self.spins_len,
+                    out,
+                )
+            }
+        }
+    }
+
     #[test]
-    fn energy_matches_the_consensus_scorer() {
+    fn quip_energy_milli_scores_valid_problems() {
         let (h, j, edges, spins) = problem();
-        let mut out = UNTOUCHED;
-        // SAFETY: every pointer addresses the length passed beside it, and
-        // `out` is one writable i64.
-        let status = unsafe {
-            quip_energy_milli(
-                h.as_ptr(),
-                h.len(),
-                j.as_ptr(),
-                j.len(),
-                edges.as_ptr(),
-                spins.as_ptr(),
-                spins.len(),
-                &raw mut out,
-            )
+        let flat_h = [0.0, 0.0];
+        let flat_j = [0.0];
+        let flat_edges = [0_u32, 1];
+        let flat_spins = [1_i8, 1];
+        let empty = EnergyCall {
+            h: ptr::null(),
+            h_len: 0,
+            j: ptr::null(),
+            j_len: 0,
+            edges: ptr::null(),
+            spins: ptr::null(),
+            spins_len: 0,
         };
-        assert_eq!(status, QUIP_ENERGY_OK);
-        let expected =
-            quip_solver_core::quip_protocol::scoring::energy_milli(&spins, &h, &j, &[(0, 1)]);
-        assert_eq!(out, expected);
-    }
-
-    /// The reason the status code exists: 0 is a legal energy.
-    #[test]
-    fn a_genuine_zero_energy_reports_ok() {
-        let h = [0.0, 0.0];
-        let j = [0.0];
-        let edges = [0_u32, 1];
-        let spins = [1_i8, 1];
-        let mut out = UNTOUCHED;
-        // SAFETY: as above.
-        let status = unsafe {
-            quip_energy_milli(
-                h.as_ptr(),
-                h.len(),
-                j.as_ptr(),
-                j.len(),
-                edges.as_ptr(),
-                spins.as_ptr(),
-                spins.len(),
-                &raw mut out,
-            )
-        };
-        assert_eq!(status, QUIP_ENERGY_OK);
-        assert_eq!(out, 0, "a flat problem really does score zero");
-    }
-
-    #[test]
-    fn a_null_field_array_is_reported_rather_than_scored() {
-        let (h, j, edges, spins) = problem();
-        let mut out = UNTOUCHED;
-        // SAFETY: `h` is NULL, which the guard rejects before any read.
-        let status = unsafe {
-            quip_energy_milli(
-                ptr::null(),
-                h.len(),
-                j.as_ptr(),
-                j.len(),
-                edges.as_ptr(),
-                spins.as_ptr(),
-                spins.len(),
-                &raw mut out,
-            )
-        };
-        assert_eq!(status, QUIP_ENERGY_NULL_POINTER);
-        assert_eq!(out, UNTOUCHED);
-    }
-
-    #[test]
-    fn a_null_spin_array_is_reported_rather_than_scored() {
-        let (h, j, edges, spins) = problem();
-        let mut out = UNTOUCHED;
-        // SAFETY: `spins` is NULL, which the guard rejects before any read.
-        let status = unsafe {
-            quip_energy_milli(
-                h.as_ptr(),
-                h.len(),
-                j.as_ptr(),
-                j.len(),
-                edges.as_ptr(),
-                ptr::null(),
-                spins.len(),
-                &raw mut out,
-            )
-        };
-        assert_eq!(status, QUIP_ENERGY_NULL_POINTER);
-        assert_eq!(out, UNTOUCHED);
-    }
-
-    #[test]
-    fn a_null_out_parameter_is_reported_rather_than_written() {
-        let (h, j, edges, spins) = problem();
-        // SAFETY: the out-parameter is NULL, which the guard rejects first.
-        let status = unsafe {
-            quip_energy_milli(
-                h.as_ptr(),
-                h.len(),
-                j.as_ptr(),
-                j.len(),
-                edges.as_ptr(),
-                spins.as_ptr(),
-                spins.len(),
-                ptr::null_mut(),
-            )
-        };
-        assert_eq!(status, QUIP_ENERGY_NULL_POINTER);
-    }
-
-    #[test]
-    fn spins_that_do_not_cover_the_nodes_are_reported() {
-        let (h, j, edges, _) = problem();
-        let spins = [1_i8, -1, 1];
-        let mut out = UNTOUCHED;
-        // SAFETY: every pointer addresses the length passed beside it; only the
-        // node/spin counts disagree.
-        let status = unsafe {
-            quip_energy_milli(
-                h.as_ptr(),
-                h.len(),
-                j.as_ptr(),
-                j.len(),
-                edges.as_ptr(),
-                spins.as_ptr(),
-                spins.len(),
-                &raw mut out,
-            )
-        };
-        assert_eq!(status, QUIP_ENERGY_LENGTH_MISMATCH);
-        assert_eq!(out, UNTOUCHED);
-    }
-
-    #[test]
-    fn an_edge_count_that_overflows_the_flat_length_is_reported() {
-        let (h, j, edges, spins) = problem();
-        let mut out = UNTOUCHED;
-        // SAFETY: `num_edges` is rejected by the checked multiply before any
-        // pointer is read, so the oversized length never reaches a slice.
-        let status = unsafe {
-            quip_energy_milli(
-                h.as_ptr(),
-                h.len(),
-                j.as_ptr(),
-                usize::MAX,
-                edges.as_ptr(),
-                spins.as_ptr(),
-                spins.len(),
-                &raw mut out,
-            )
-        };
-        assert_eq!(status, QUIP_ENERGY_LENGTH_MISMATCH);
-        assert_eq!(out, UNTOUCHED);
-    }
-
-    #[test]
-    fn an_empty_problem_scores_zero_through_null_pointers() {
-        let mut out = UNTOUCHED;
-        // SAFETY: every length is 0, so no pointer is dereferenced; `out` is
-        // one writable i64.
-        let status = unsafe {
-            quip_energy_milli(
-                ptr::null(),
+        let cases = [
+            (
+                "the consensus problem",
+                EnergyCall::over((&h, &j, &edges), &spins),
+                quip_solver_core::quip_protocol::scoring::energy_milli(&spins, &h, &j, &[(0, 1)]),
+            ),
+            // The reason the status code exists: 0 is a legal energy.
+            (
+                "a flat problem really does score zero",
+                EnergyCall::over((&flat_h, &flat_j, &flat_edges), &flat_spins),
                 0,
-                ptr::null(),
-                0,
-                ptr::null(),
-                ptr::null(),
-                0,
-                &raw mut out,
-            )
-        };
-        assert_eq!(status, QUIP_ENERGY_OK);
-        assert_eq!(out, 0);
+            ),
+            // Every length is 0, so no pointer is dereferenced.
+            ("an empty problem through null pointers", empty, 0),
+        ];
+        for (label, call, expected) in cases {
+            let mut out = UNTOUCHED;
+            // SAFETY: every pointer addresses the length passed beside it, or
+            // has length 0, and `out` is one writable i64.
+            let status = unsafe { call.run(&raw mut out) };
+            assert_eq!(status, QUIP_ENERGY_OK, "{label}");
+            assert_eq!(out, expected, "{label}");
+        }
+    }
+
+    #[test]
+    fn quip_energy_milli_reports_bad_arguments_without_writing() {
+        let (h, j, edges, spins) = problem();
+        let three_spins = [1_i8, -1, 1];
+        // (label, call, whether `out` is NULL, expected status). A NULL `out`
+        // has nothing to check for a write.
+        let cases = [
+            (
+                "a null field array",
+                EnergyCall {
+                    h: ptr::null(),
+                    ..EnergyCall::over((&h, &j, &edges), &spins)
+                },
+                false,
+                QUIP_ENERGY_NULL_POINTER,
+            ),
+            (
+                "a null spin array",
+                EnergyCall {
+                    spins: ptr::null(),
+                    ..EnergyCall::over((&h, &j, &edges), &spins)
+                },
+                false,
+                QUIP_ENERGY_NULL_POINTER,
+            ),
+            (
+                "a null out parameter",
+                EnergyCall::over((&h, &j, &edges), &spins),
+                true,
+                QUIP_ENERGY_NULL_POINTER,
+            ),
+            // Every pointer addresses the length passed beside it; only the
+            // node/spin counts disagree.
+            (
+                "spins that do not cover the nodes",
+                EnergyCall::over((&h, &j, &edges), &three_spins),
+                false,
+                QUIP_ENERGY_LENGTH_MISMATCH,
+            ),
+            // `num_edges` is rejected by the checked multiply before any pointer
+            // is read, so the oversized length never reaches a slice.
+            (
+                "an edge count that overflows the flat length",
+                EnergyCall {
+                    j_len: usize::MAX,
+                    ..EnergyCall::over((&h, &j, &edges), &spins)
+                },
+                false,
+                QUIP_ENERGY_LENGTH_MISMATCH,
+            ),
+        ];
+        for (label, call, null_out, expected) in cases {
+            let mut out = UNTOUCHED;
+            let out_ptr = if null_out {
+                ptr::null_mut()
+            } else {
+                &raw mut out
+            };
+            // SAFETY: each guard rejects its bad argument before any read; the
+            // other pointers address the length passed beside them.
+            let status = unsafe { call.run(out_ptr) };
+            assert_eq!(status, expected, "{label}");
+            if !null_out {
+                assert_eq!(out, UNTOUCHED, "{label}");
+            }
+        }
     }
 
     #[test]
@@ -899,10 +880,14 @@ mod tests {
     }
 
     #[test]
-    fn an_out_of_range_endpoint_is_rejected() {
+    fn flatten_edges_handles_edgeless_and_out_of_range_graphs() {
         let graph = IsingGraph::new(vec![0.0, 0.0], vec![0.5], vec![(0, 7)]);
         let why = CSampler::flatten_edges(&graph).expect_err("endpoint 7 has no node");
         assert!(why.contains("out of range"), "{why}");
+
+        let graph = IsingGraph::new(vec![1.0, -1.0], Vec::new(), Vec::new());
+        let flat = CSampler::flatten_edges(&graph).expect("no edges is well formed");
+        assert!(flat.is_empty());
     }
 
     /// What [`inspecting_sampler`] read back out of the FFI struct.
@@ -954,13 +939,6 @@ mod tests {
     }
 
     #[test]
-    fn an_edgeless_graph_crosses_the_boundary_as_zero_edges() {
-        let graph = IsingGraph::new(vec![1.0, -1.0], Vec::new(), Vec::new());
-        let flat = CSampler::flatten_edges(&graph).expect("no edges is well formed");
-        assert!(flat.is_empty());
-    }
-
-    #[test]
     fn a_null_identity_string_takes_the_default() {
         // SAFETY: a NULL pointer is the documented "take the default" case.
         let backend = unsafe { identity_backend(ptr::null()) }.expect("NULL is legal");
@@ -990,34 +968,38 @@ mod tests {
     }
 
     #[test]
-    fn a_features_array_that_is_null_but_counted_ends_the_run() {
-        let id = identity_with_features(ptr::null(), 3);
-        // SAFETY: `num_features` is nonzero with a NULL array, which the guard
-        // rejects before any read.
-        let err = unsafe { identity_features(&id) }.expect_err("a counted NULL array is invalid");
-        assert_eq!(err as i32, ExitCode::ConfigInvalid as i32);
-    }
-
-    #[test]
-    fn a_null_feature_entry_is_dropped_and_the_rest_survive() {
+    fn identity_features_handles_holes_and_bad_entries() {
         let good = c"fast";
-        let entries: [*const c_char; 2] = [ptr::null(), good.as_ptr()];
-        let id = identity_with_features(entries.as_ptr(), entries.len());
-        // SAFETY: `entries` holds two pointers, one NULL and one
-        // NUL-terminated, and outlives the call.
-        let features = unsafe { identity_features(&id) }.expect("a hole is survivable");
-        assert_eq!(features, vec!["fast"]);
-    }
-
-    #[test]
-    fn a_feature_entry_that_is_not_utf8_ends_the_run() {
+        let hole: [*const c_char; 2] = [ptr::null(), good.as_ptr()];
         let bad: [c_char; 2] = [-1, 0];
-        let entries: [*const c_char; 1] = [bad.as_ptr()];
-        let id = identity_with_features(entries.as_ptr(), entries.len());
-        // SAFETY: `entries` holds one NUL-terminated pointer that outlives the
-        // call.
-        let err = unsafe { identity_features(&id) }.expect_err("invalid UTF-8 is not a default");
-        assert_eq!(err as i32, ExitCode::ConfigInvalid as i32);
+        let bad_entry: [*const c_char; 1] = [bad.as_ptr()];
+        let cases = [
+            // `num_features` is nonzero with a NULL array, which the guard
+            // rejects before any read.
+            (
+                "a counted NULL array",
+                identity_with_features(ptr::null(), 3),
+                Err(ExitCode::ConfigInvalid),
+            ),
+            // `hole` holds two pointers, one NULL and one NUL-terminated.
+            (
+                "a NULL entry is dropped and the rest survive",
+                identity_with_features(hole.as_ptr(), hole.len()),
+                Ok(vec!["fast"]),
+            ),
+            // `bad_entry` holds one NUL-terminated pointer to invalid UTF-8.
+            (
+                "an entry that is not UTF-8",
+                identity_with_features(bad_entry.as_ptr(), bad_entry.len()),
+                Err(ExitCode::ConfigInvalid),
+            ),
+        ];
+        for (label, id, expected) in cases {
+            // SAFETY: each array outlives the call and holds the number of
+            // pointers its identity counts, or is NULL and rejected first.
+            let features = unsafe { identity_features(&id) };
+            assert_eq!(features, expected, "{label}");
+        }
     }
 
     /// A zeroed identity carrying only the feature array under test.
