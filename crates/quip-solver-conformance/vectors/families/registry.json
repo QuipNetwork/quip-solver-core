@@ -21,6 +21,19 @@
     },
     {
       "adapted_from": null,
+      "contract": "docs/families/quip-defects-static-1.md",
+      "evidence": [
+        "SC-16:defects-vectors-frozen"
+      ],
+      "family_id": "quip/defects-static",
+      "name": "quip/defects-static@1",
+      "revision": 1,
+      "status": "research",
+      "vectors": "crates/quip-solver-conformance/vectors/families/defects.json",
+      "vectors_blake3": "ebce2efd433f37f5dd9e2f57111c6220a190af6230fa38ed3186b8db5f1212ba"
+    },
+    {
+      "adapted_from": null,
       "contract": "docs/families/quip-ice-fields-1.md",
       "evidence": [
         "SC-11:ice-fields-vectors-frozen"

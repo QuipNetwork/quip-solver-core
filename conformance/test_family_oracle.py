@@ -1596,3 +1596,119 @@ def test_polariton_dead_cell_moves_the_window_and_the_retry_case_retries():
     by_name = {c["name"]: c for c in cases}
     assert {s["skip_code"] for s in by_name["polariton-retry"]["skipped"]} == {14}
     assert len(witnesses) == 2 * len(cases)
+
+
+# ---- quip/defects-static ----
+
+
+def _defects(m, t, side, pairs, obstacles, pins, fx, fy, nodes, edges, nonce=None):
+    from family_oracle import defects
+
+    params = build._defects_params(m, t, side, pairs, obstacles, pins, fx, fy)
+    return defects.generate(
+        b"quip/defects-static", 1, params, nodes, edges, nonce or bytes(range(32))
+    )
+
+
+def test_defects_energy_is_physical_plus_penalties_for_every_l2_state():
+    from family_oracle import defects
+
+    code, inst = _defects(2, 4, 2, 0, 0, 2, 300, -200, *ice.lattice(2, 4))
+    assert code == 0
+    weight = inst["weight"]
+    assert weight % 2 == 0
+    feasible_energies, infeasible_energies = [], []
+    for bits in range(1 << 12):
+        spins = defects.node_spins(
+            inst, [1 if bits >> e & 1 else -1 for e in range(12)]
+        )
+        seen = defects.observables(inst, spins)
+        gaps = [
+            seen["charges"][v] - q
+            for v, q in enumerate(inst["labels"])
+            if q is not None
+        ]
+        penalty = (weight // 2) * sum(g * g for g in gaps)
+        penalty += 2 * weight * seen["violated_pins"]
+        encoded = defects.encoded_energy(inst, spins)
+        assert encoded == seen["physical_energy"] + penalty
+        is_feasible = defects.feasible(inst, spins)
+        assert is_feasible == (penalty == 0)
+        (feasible_energies if is_feasible else infeasible_energies).append(encoded)
+    assert feasible_energies
+    assert max(feasible_energies) < min(infeasible_energies)
+
+
+def test_defects_table_numbers():
+    from family_oracle import defects
+
+    for side, kept, magnitude, dropped, bound in (
+        (2, 22, 9980, 1000, 904),
+        (3, 52, 23080, 2250, 3646),
+    ):
+        table = defects.table_of(side)
+        assert len(table.kept) == kept
+        assert table.kept_magnitude == magnitude
+        assert table.dropped == dropped
+        assert table.truncation_bound == bound
+    lattice = defects.Lattice(3)
+    assert defects.penalty_weight(defects.table_of(3), lattice, 1000, -1000) == 47082
+    assert defects.penalty_weight(defects.table_of(3), lattice, 0, 0) == 23082
+
+
+def test_defects_quantize_rounds_ties_away_from_zero():
+    from family_oracle import defects
+
+    # K = 4 gives K^(5/2) = 32, so x = 16 is the tie 0.5 and x = -16 is -0.5.
+    assert defects._quantize(16, 4) == 1
+    assert defects._quantize(-16, 4) == -1
+    assert defects._quantize(15, 4) == 0
+    assert defects._quantize(48, 4) == 2
+    assert defects._quantize(47, 4) == 1
+
+
+def test_defects_admission_codes():
+    from family_oracle import defects
+
+    z34 = ice.lattice(3, 4)
+
+    def code(*values, topology=z34):
+        return defects.admission_code(build._defects_params(*values), *topology)
+
+    base = (3, 4, 3, 1, 1, 2, 1000, -1000)
+    assert code(*base) is None
+    assert code(3, 4, 4, 0, 0, 0, 0, 0) == 9
+    assert code(3, 4, 3, 3, 1, 2, 0, 0) == 9
+    assert code(3, 4, 3, 2, 1, 2, 0, 0) == 12
+    assert code(3, 4, 3, 1, 1, 13, 0, 0) == 9
+    assert code(2, 4, 2, 0, 0, 9, 0, 0, topology=ice.lattice(2, 4)) == 12
+    assert code(2, 4, 3, 0, 0, 0, 0, 0, topology=ice.lattice(2, 4)) == 12
+    assert defects.admission_code(b"\x01", *z34) == 7
+    assert code(3, 1, 2, 0, 0, 0, 0, 0, topology=build._polariton_no_window()) == 12
+
+
+def test_defects_route_checks_run_in_order_and_never_touch_feasible():
+    from family_oracle import defects
+
+    doc = build.build_defects()
+    names = [r["name"].removeprefix("defects-l3-route-") for r in doc["routes"]]
+    assert names == [
+        "valid",
+        "swapped-endpoints",
+        "extra-loop",
+        "obstacle-crossing",
+        "repeated-vertex",
+    ]
+    case = next(c for c in doc["cases"] if c["name"] == "defects-l3")
+    assert len(case["instances"]) > 0
+    feasibility = {r["name"]: r["feasible"] for r in doc["routes"]}
+    assert feasibility["defects-l3-route-valid"] is True
+    assert feasibility["defects-l3-route-obstacle-crossing"] is True
+    assert feasibility["defects-l3-route-extra-loop"] is False
+    nodes, edges = ice.lattice(3, 4)
+    _, inst = _defects(3, 4, 3, 1, 1, 2, 1000, -1000, nodes, edges, bytes(range(32)))
+    spins = [1] * len(inst["node_ids"])
+    assert defects.check_route(inst, spins[1:], [[0, 1]]) == "Spins"
+    assert defects.check_route(inst, spins, [[5]]) == "Shape"
+    assert defects.check_route(inst, spins, [[5, 5]]) == "NotAdjacent"
+    assert defects.check_route(inst, spins, []) == "Endpoints"

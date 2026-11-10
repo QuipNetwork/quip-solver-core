@@ -11593,7 +11593,7 @@
       "path": "conformance/family_oracle/__main__.py"
     },
     {
-      "blake3": "32d56db06740542174d6a6d3bf7fcfce6ee0307f8af614994986f08d80de5268",
+      "blake3": "31d060761401ab128ea89d5b7efc0e9e8def1c3f83b1c003fd00b1edffcdd636",
       "path": "conformance/family_oracle/build.py"
     },
     {
@@ -11607,6 +11607,10 @@
     {
       "blake3": "807e3ed3db9ca03717672ba7fa85becd2d53f4e7895a0ba17580e1b407c96d5b",
       "path": "conformance/family_oracle/decisions.py"
+    },
+    {
+      "blake3": "103f11d8e77472a2c660d2a498c8b3c709c63c0396c950e55e8b1cfcd4824f25",
+      "path": "conformance/family_oracle/defects.py"
     },
     {
       "blake3": "fedb48e9646e86a33af1eabe12ff194267f133c7c7899066de9f3c360c33d3be",
@@ -11633,7 +11637,7 @@
       "path": "conformance/family_oracle/layered.py"
     },
     {
-      "blake3": "8dcf1440b7d36ac91ddc00df5d79d5fe67c7e0b511074e33b22b2c827e35d8d0",
+      "blake3": "1782b9733feb56f643fb6a2e06a23e0a8abc625762d34291af7f5970ace8d63c",
       "path": "conformance/family_oracle/params.py"
     },
     {
@@ -11653,7 +11657,7 @@
       "path": "conformance/family_oracle/twisted.py"
     },
     {
-      "blake3": "1ad93106ca40d3be7b86070f8b1d2c10dbcca7818ecfcd6a0d779d548b13708a",
+      "blake3": "7cb47db804c35c00eea5d64e405208f5c2204b477ea7b9b5363fde0219b4ab5d",
       "path": "docs/problem-families.md"
     }
   ],

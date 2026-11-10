@@ -7,6 +7,26 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
 
+### Added
+
+- `quip/defects-static@1`, a registered family with status `research` and class
+  `hard`. It selects a low physical energy square-ice state on the native layout
+  of `quip/polariton-static`. Each link is a dipolar island at its midpoint, and
+  the couplings come from a table with the oracle calibration. The instance keeps
+  the pairs of links that share a vertex, because only those pairs are couplers of
+  the layout. The metadata states the exact magnitude of the dropped pairs and the
+  truncation bound of the table. The request has balanced charges, obstacles that a
+  route may not enter, and pinned boundary links. A charge penalty and a pin
+  penalty with a checked weight make every infeasible state cost more than every
+  feasible state. The parameters are the Zephyr shape, `side` of 2 or 3, `pairs`,
+  `obstacles`, `pins`, `field_x`, and `field_y`. The metadata uses the kinds 4 and
+  5 of the polariton family and the new kind 8, `defects`. A route is checked as
+  combinatorial evidence and never changes `feasible`. The observables report
+  `InsufficientPhysicalEvidence`, so the family makes no claim about a device, and
+  sides 4, 6, 8, and 12 wait on a calibrated record. The contract is
+  `docs/families/quip-defects-static-1.md`, the vectors are `defects.json`, and
+  the Rust contract is `ising_generators::defects::DEFECTS_V1`.
+
 ### Changed
 
 - The test suite is smaller and faster. No public interface changed. Rust test
