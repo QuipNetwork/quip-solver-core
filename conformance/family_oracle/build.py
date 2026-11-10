@@ -748,8 +748,21 @@ def _topology_ref(nodes: list[int], edges: list[tuple[int, int]]) -> str:
     return f"../topologies/{_topology_file(name)}"
 
 
-def _index_entry(name: str, body: dict, provenance: str, about: str) -> dict:
-    expanded = topology_blob.expand(body)
+@functools.cache
+def live_topology() -> dict:
+    """The archived live topology, decoded and expanded once per process."""
+    return topology_blob.expand(topology_blob.decode(LIVE_BLOB_PATH.read_bytes()))
+
+
+def _index_entry(
+    name: str,
+    body: dict,
+    provenance: str,
+    about: str,
+    expanded: dict | None = None,
+) -> dict:
+    if expanded is None:
+        expanded = topology_blob.expand(body)
     nodes, edges = expanded["nodes"], expanded["edges"]
     return {
         "name": name,
@@ -789,6 +802,7 @@ def build_topology_index() -> dict:
         topology_blob.decode(LIVE_BLOB_PATH.read_bytes()),
         "archived-research",
         _LIVE_ABOUT,
+        live_topology(),
     )
     live["sources"] = _LIVE_SOURCES
     entries.append(live)
@@ -2054,7 +2068,7 @@ def _ice_glass_cases() -> list[dict]:
 
 
 def build_ice_structure() -> dict:
-    live = topology_blob.expand(topology_blob.decode(LIVE_BLOB_PATH.read_bytes()))
+    live = live_topology()
     nodes, edges = live["nodes"], [(a, b) for a, b in live["edges"]]
     return {
         "schema_revision": 1,
@@ -2351,7 +2365,7 @@ def _admission_cases() -> list[dict]:
 
 
 def build_twisted_dimer() -> dict:
-    live = topology_blob.expand(topology_blob.decode(LIVE_BLOB_PATH.read_bytes()))
+    live = live_topology()
     return {
         "schema_revision": 1,
         "provenance": "specified",
@@ -2571,7 +2585,7 @@ def _charge_admission_cases() -> list[dict]:
 
 
 def build_ice_charge() -> dict:
-    live = topology_blob.expand(topology_blob.decode(LIVE_BLOB_PATH.read_bytes()))
+    live = live_topology()
     cases, energies = _charge_cases_and_energies()
     return {
         "schema_revision": 1,
@@ -2910,7 +2924,7 @@ def _fields_admission_cases() -> list[dict]:
 
 
 def build_ice_fields() -> dict:
-    live = topology_blob.expand(topology_blob.decode(LIVE_BLOB_PATH.read_bytes()))
+    live = live_topology()
     cases, selection = _fields_cases_and_selection()
     return {
         "schema_revision": 1,
@@ -3182,7 +3196,7 @@ def _routing_admission_cases() -> list[dict]:
 
 
 def build_two_commodity() -> dict:
-    live = topology_blob.expand(topology_blob.decode(LIVE_BLOB_PATH.read_bytes()))
+    live = live_topology()
     cases, terminals = _routing_cases_and_terminals()
     return {
         "schema_revision": 1,
@@ -3512,7 +3526,7 @@ def _polariton_admission_cases() -> list[dict]:
 
 
 def build_polariton() -> dict:
-    live = topology_blob.expand(topology_blob.decode(LIVE_BLOB_PATH.read_bytes()))
+    live = live_topology()
     cases, witnesses = _polariton_cases_and_witnesses()
     return {
         "schema_revision": 1,

@@ -275,17 +275,22 @@ def test_file_matches_compares_payloads_not_compressed_bytes(tmp_path):
     assert not build.file_matches(path, other)
 
 
-def test_topology_blobs_match_oracle():
-    blobs = build.topology_blobs()
+@pytest.fixture(scope="module")
+def topology_blobs():
+    return build.topology_blobs()
+
+
+def test_topology_blobs_match_oracle(topology_blobs):
+    blobs = topology_blobs
     assert blobs
     for path, data in blobs.items():
         # Payloads, not compressed bytes: another zlib build gives other DEFLATE bytes.
         assert build.file_matches(path, data), path.name
 
 
-def test_topology_directory_holds_only_known_files():
+def test_topology_directory_holds_only_known_files(topology_blobs):
     on_disk = {path.name for path in build.TOPOLOGIES_DIR.iterdir()}
-    expected = {path.name for path in build.topology_blobs()}
+    expected = {path.name for path in topology_blobs}
     expected |= {build.INDEX_PATH.name, build.LIVE_BLOB_PATH.name}
     assert on_disk == expected
 

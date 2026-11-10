@@ -9,6 +9,7 @@ from pathlib import Path
 
 import blake3
 import pytest
+from family_oracle import __main__ as cli
 from family_oracle import build, decisions, ice, topology_blob
 from family_oracle.chacha8 import ChaCha8, shuffle, uniform
 from family_oracle.digests import (
@@ -880,8 +881,9 @@ def test_blob_reader_accepts_other_mtime_xfl_os():
     )
 
 
-def test_blob_oversize_payload_is_rejected():
-    limit = topology_blob.MAX_PAYLOAD
+def test_blob_oversize_payload_is_rejected(monkeypatch):
+    limit = 1024
+    monkeypatch.setattr(topology_blob, "MAX_PAYLOAD", limit)
     assert _file_error(_frame(b"\x00" * (limit + 1))) == "too-large"
     # A payload of exactly the limit passes the framing and fails on its magic.
     assert _payload_error(topology_blob.decompress(_frame(b"\x00" * limit))) == "magic"
@@ -1007,7 +1009,7 @@ def test_blob_encoder_rejects_what_the_decoder_rejects():
             topology_blob.encode(body)
 
 
-def test_blob_cli_round_trip(tmp_path):
+def test_blob_cli_round_trip(tmp_path, capsys):
     source = tmp_path / "in.json"
     blob = tmp_path / "out.bin.gz"
     body = _zephyr(2, 2, [0, 5], [])
@@ -1015,32 +1017,46 @@ def test_blob_cli_round_trip(tmp_path):
     root = Path(__file__).parent
 
     def run(*args):
-        return subprocess.run(
-            [sys.executable, "-m", "family_oracle", "topology", *args],
-            cwd=root,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        code = cli.main(["topology", *args])
+        captured = capsys.readouterr()
+        return code, captured.out, captured.err
 
-    assert run("encode", str(source), str(blob)).returncode == 0
+    assert run("encode", str(source), str(blob))[0] == 0
     assert blob.read_bytes() == topology_blob.encode(body)
-    decoded = run("decode", str(blob))
-    assert json.loads(decoded.stdout) == body
-    expanded = run("decode", "--expand", str(blob))
-    assert json.loads(expanded.stdout) == topology_blob.expand(body)
-    out = tmp_path / "back.json"
-    assert run("decode", str(blob), str(out)).returncode == 0
-    assert json.loads(out.read_text()) == body
+    code, out, _ = run("decode", str(blob))
+    assert json.loads(out) == body
+    code, out, _ = run("decode", "--expand", str(blob))
+    assert json.loads(out) == topology_blob.expand(body)
+    back = tmp_path / "back.json"
+    assert run("decode", str(blob), str(back))[0] == 0
+    assert json.loads(back.read_text()) == body
     blob.write_bytes(blob.read_bytes()[:-1])
-    failed = run("decode", str(blob))
-    assert failed.returncode == 1 and "gzip" in failed.stderr
-    assert run("topology").returncode == 2
+    code, _, err = run("decode", str(blob))
+    assert code == 1 and "gzip" in err
+    assert run("topology")[0] == 2
     for text in ("[1, 2]", "3", "null", '"x"'):
         source.write_text(text)
-        failed = run("encode", str(source), str(blob))
-        assert failed.returncode == 1, text
-        assert "shape" in failed.stderr and "Traceback" not in failed.stderr, text
+        code, _, err = run("encode", str(source), str(blob))
+        assert code == 1, text
+        assert "shape" in err, text
+    source.write_text("[1, 2]")
+    failed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "family_oracle",
+            "topology",
+            "encode",
+            str(source),
+            str(blob),
+        ],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert failed.returncode == 1
+    assert "shape" in failed.stderr and "Traceback" not in failed.stderr
 
 
 def test_glass_rejects_a_tile_pair_that_is_not_an_edge(monkeypatch):
