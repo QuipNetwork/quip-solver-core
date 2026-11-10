@@ -11,6 +11,7 @@
     clippy::many_single_char_names,
     clippy::panic,
     clippy::print_stdout,
+    clippy::too_many_lines,
     reason = "test code: a failed lookup is a test failure"
 )]
 
@@ -176,6 +177,13 @@ fn encode(meta: &Meta) -> Vec<u8> {
 
 /// `encode` with extra bytes after the kind 9 payload.
 fn encode_with(meta: &Meta, extra: &[u8]) -> Vec<u8> {
+    let [charges, incidence, mut flow] = payloads(meta);
+    flow.extend_from_slice(extra);
+    region_of(&[(4, charges), (5, incidence), (9, flow)])
+}
+
+/// The payloads of kinds 4, 5, and 9.
+fn payloads(meta: &Meta) -> [Vec<u8>; 3] {
     let mut charges = meta.side.to_le_bytes().to_vec();
     charges.extend(meta.labels.iter().map(|&l| l as u8));
     let mut incidence = meta.c0.to_le_bytes().to_vec();
@@ -188,8 +196,7 @@ fn encode_with(meta: &Meta, extra: &[u8]) -> Vec<u8> {
         flow.push(t as u8);
         flow.extend_from_slice(&c.to_le_bytes());
     }
-    flow.extend_from_slice(extra);
-    region_of(&[(4, charges), (5, incidence), (9, flow)])
+    [charges, incidence, flow]
 }
 
 /// A copy of `instance` with new fields and metadata. The protocol limits
@@ -393,6 +400,7 @@ fn every_l2_state_matches_the_direct_objective() {
     let meta = decode("l2", &instance);
     let bytes = L2.bytes();
     let admitted = admitted(&FLOW_V1, &bytes).expect("admit");
+    let lattice = SquareLattice::new(2, Boundary::Open).expect("lattice");
     assert_eq!(instance.node_ids().len(), 12);
     assert_eq!(meta.weight, expected_weight(&meta.costs));
     assert_eq!(meta.weight % 2, 0);
@@ -417,11 +425,20 @@ fn every_l2_state_matches_the_direct_objective() {
         );
         let seen = flow_observables(admitted.params(), &instance, &spins).expect("observables");
         assert_eq!(seen.objective as i64, d.objective, "state {bits}");
-        assert_eq!(
-            seen.violations == 0,
-            d.feasible(),
-            "state {bits}: violations"
-        );
+        let mut direct_charges = vec![0i8; 9];
+        for (e, link) in (0..lattice.link_count()).map(|e| (e, lattice.link(e).expect("link"))) {
+            let spin = spins[meta.positions[e as usize] as usize];
+            direct_charges[link.head as usize] += spin;
+            direct_charges[link.tail as usize] -= spin;
+        }
+        let mismatches = direct_charges
+            .iter()
+            .zip(&meta.labels)
+            .filter(|(q, l)| q != l)
+            .count();
+        assert_eq!(seen.charges, direct_charges, "state {bits}: charges");
+        assert_eq!(seen.violations as usize, mismatches, "state {bits}");
+        assert_eq!(seen.violations == 0, d.feasible(), "state {bits}");
         feasible_count += i32::from(d.feasible());
     }
     assert!(feasible_count > 0, "some state is feasible");
@@ -683,19 +700,20 @@ fn check_metadata_rejects_each_rule() {
         .find(|&v| meta.labels[v as usize] == -1)
         .expect("minus");
 
-    // A nonzero label at a corner, and in the interior.
-    for v in [0usize, 5] {
+    // Balanced pairs of invalid labels, each with a matching energy: two
+    // corners, two interior vertices, and the edge pair at 0 and at +-3.
+    for (x, y, value) in [
+        (0usize, 15usize, 1i8),
+        (5, 10, 1),
+        (plus as usize, minus as usize, 0),
+        (plus as usize, minus as usize, 3),
+    ] {
         let mut m = meta.clone();
-        m.labels[v] = 1;
-        assert!(!accepts(&with_energy(&m)), "label at {v}");
+        m.labels[x] = value;
+        m.labels[y] = -value;
+        assert!(!accepts(&with_energy(&m)), "labels {x}, {y} at {value}");
     }
-    // An edge vertex labeled 0, and labeled 3.
-    for value in [0i8, 3] {
-        let mut m = meta.clone();
-        m.labels[plus as usize] = value;
-        assert!(!accepts(&with_energy(&m)), "edge label {value}");
-    }
-    // Unequal counts of +1 and -1.
+    // Unequal counts of +1 and -1, with every value valid.
     let mut m = meta.clone();
     m.labels[minus as usize] = 1;
     assert!(!accepts(&with_energy(&m)));
@@ -729,12 +747,12 @@ fn check_metadata_rejects_each_rule() {
     let mut m = meta.clone();
     m.weight += 2;
     assert!(!accepts(&same_fields(&instance, encode(&m))));
-    // A target that is not +-1, with the energy rebuilt where it can be.
-    let mut m = meta.clone();
-    m.targets[0] = 0;
-    assert!(!accepts(&same_fields(&instance, encode(&m))));
-    m.targets[0] = 2;
-    assert!(!accepts(&same_fields(&instance, encode(&m))));
+    // A target that is not +-1, with the energy rebuilt for it.
+    for target in [0i8, 2] {
+        let mut m = meta.clone();
+        m.targets[0] = target;
+        assert!(!accepts(&with_energy(&m)), "target {target}");
+    }
     // An odd cost, and a cost above 2 * cost_half_max, with the energy
     // rebuilt (the weight follows the costs).
     let mut m = meta.clone();
@@ -769,13 +787,30 @@ fn check_metadata_rejects_each_rule() {
         instance.offset_milli() + 1,
         instance.metadata().to_vec()
     )));
-    // Truncated and extended sections.
-    let region = instance.metadata().to_vec();
+    // Extended and truncated sections, one payload at a time.
     assert!(!accepts(&same_fields(&instance, encode_with(&meta, &[0]))));
-    let mut flow = meta.weight.to_le_bytes().to_vec();
-    flow.extend_from_slice(&[1, 0, 0, 0, 0]);
-    let short = region_of(&[(4, region[8..8 + 2 + 16].to_vec()), (9, flow)]);
-    assert!(!accepts(&same_fields(&instance, short)));
+    let parts = payloads(&meta);
+    for cut in 0..3 {
+        let mut short = parts.clone();
+        let _ = short[cut].pop();
+        let region = region_of(&[
+            (4, short[0].clone()),
+            (5, short[1].clone()),
+            (9, short[2].clone()),
+        ]);
+        assert!(!accepts(&same_fields(&instance, region)), "payload {cut}");
+    }
+    // Only J differs.
+    let mut j = instance.j().to_vec();
+    j[0] += 1;
+    assert!(!accepts(&rebuilt(
+        &instance,
+        instance.edges().to_vec(),
+        instance.h().to_vec(),
+        j,
+        instance.offset_milli(),
+        instance.metadata().to_vec()
+    )));
     // A region without the three sections.
     assert!(!accepts(&same_fields(&instance, vec![0, 0])));
 }
@@ -1120,7 +1155,7 @@ fn limits_hold_at_the_largest_admitted_side() {
             w + w % 2
         };
         let nodes = links;
-        let edges = 6 * (l + 1) * (l + 1);
+        let edges = 6 * (l - 1) * (l - 1) + 12 * (l - 1) + 4;
         let coefficient = 2 * weight + u;
         let degrees = 2 * links;
         let labels = 4 * (l - 1);
@@ -1130,7 +1165,7 @@ fn limits_hold_at_the_largest_admitted_side() {
     };
     let (nodes, edges, coefficient, offset, metadata) = formulas(64, 500);
     assert_eq!(nodes, 8320);
-    assert_eq!(edges, 25_350);
+    assert_eq!(edges, 24_574);
     assert_eq!(coefficient, 8_320_504);
     assert_eq!(offset, 35_139_536_892);
     assert_eq!(metadata, 79_139);
@@ -1160,7 +1195,7 @@ fn limits_hold_at_the_largest_admitted_side() {
     let meta = decode("side 62", &instance);
     let (nodes, edges, coefficient, offset, metadata) = formulas(62, 500);
     assert_eq!(instance.node_ids().len() as u64, nodes);
-    assert!(instance.edges().len() as u64 <= edges);
+    assert_eq!(instance.edges().len() as u64, edges);
     // Pairs at a vertex: 3721 interior vertices with 6, 244 edge vertices with
     // 3, and 4 corners with 1.
     assert_eq!(instance.edges().len(), 6 * 61 * 61 + 3 * 244 + 4);

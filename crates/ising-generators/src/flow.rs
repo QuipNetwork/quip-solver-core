@@ -44,7 +44,7 @@ use crate::native::{
     charges_payload, dense_links, incidence_payload, is_zephyr_subgraph, link_spins, on_border,
     parse_incidence, place, DenseLinks, Energy, Expansion, Native, KIND_CHARGES, KIND_INCIDENCE,
 };
-use crate::rng::{shuffle, uniform};
+use crate::rng::{shuffle, uniform, ChaCha8Rng};
 use crate::routing::unsigned;
 use crate::square::{charges, check_request, Boundary, Request, SquareLattice};
 use crate::Code;
@@ -97,9 +97,11 @@ const LINK_DEGREE: u64 = 6;
 // the side, so the bound at 64 covers every admitted side.
 //
 // - nodes: `2 L (L + 1) = 8320` links.
-// - edges: `6 (L + 1)^2 = 25350`, the size bound. The exact count of pairs at
-//   a vertex is 24574: 3969 interior vertices with 6 pairs, 252 edge vertices
-//   with 3, and 4 corners with 1.
+// - edges: one coupler for each pair of links at a vertex. Two links share at
+//   most one vertex, so no pair cancels. That is `6 * 63^2 + 3 * 252 + 4 =
+//   24574`: 3969 interior vertices with 6 pairs, 252 edge vertices with 3, and
+//   4 corners with 1. The size bound `6 (L + 1)^2 = 25350` is larger. At side
+//   64 it would exceed these limits, but side 64 never builds.
 // - `R / 2 = sum u_e` is at most `8320 * 500 = 4160000`, so `U` is at most
 //   `4160001` rounded up to even, 4160002.
 // - coefficient: a link has two ends, each with label 0 or `+-1`, so the
@@ -116,7 +118,7 @@ const LINK_DEGREE: u64 = 6;
 //   `4 + 8320 * 4 = 33284` bytes, and kind 9 has `8 + 8320 * 5 = 41608`
 //   bytes. That is 79139 bytes.
 const LIMITS: InstanceLimits =
-    match InstanceLimits::new(8_320, 25_350, 8_320_504, 35_139_536_892, 79_139) {
+    match InstanceLimits::new(8_320, 24_574, 8_320_504, 35_139_536_892, 79_139) {
         Some(limits) => limits,
         None => InstanceLimits::FAM_37,
     };
@@ -292,6 +294,27 @@ struct Draw {
     links: Links,
 }
 
+/// The labels of the first passing try. Each try shuffles the edge vertices
+/// and labels them, and `accepts` decides whether the labels pass. The salt
+/// gives code 14 after [`DRAW_TRIES`] refused tries.
+fn draw_labels(
+    stream: &mut ChaCha8Rng,
+    lattice: &SquareLattice,
+    mut accepts: impl FnMut(&[i8]) -> bool,
+) -> Result<Vec<i8>, Code> {
+    let vertices = usize::try_from(lattice.vertex_count()).map_err(|_| Code::BoundsExceeded)?;
+    let edge = edge_vertices(lattice.side(), lattice.vertex_count());
+    for _ in 0..DRAW_TRIES {
+        let mut order = edge.clone();
+        shuffle(stream, &mut order)?;
+        let drawn = labels_of(&order, vertices).ok_or(Code::TopologyIncompatible)?;
+        if accepts(&drawn) {
+            return Ok(drawn);
+        }
+    }
+    Err(Code::NoInstance)
+}
+
 /// Draw the request on the `flow` stream. Each try shuffles the edge
 /// vertices, in vertex order, and labels them. A try passes when
 /// `check_request` passes for the labels. After [`DRAW_TRIES`] failed tries
@@ -306,25 +329,15 @@ struct Draw {
 /// retry path runs, and code 14 needs four refused tries in a row.
 fn draw(streams: &mut Streams<'_>, lattice: &SquareLattice, config: Config) -> Result<Draw, Code> {
     let overflow = Code::BoundsExceeded;
-    let vertices = usize::try_from(lattice.vertex_count()).map_err(|_| overflow)?;
-    let edge = edge_vertices(lattice.side(), lattice.vertex_count());
     let mut stream = streams.open(FLOW_STREAM).ok_or(Code::NoInstance)?;
-    let mut labels = None;
-    for _ in 0..DRAW_TRIES {
-        let mut order = edge.clone();
-        shuffle(&mut stream, &mut order)?;
-        let drawn = labels_of(&order, vertices).ok_or(Code::TopologyIncompatible)?;
+    let labels = draw_labels(&mut stream, lattice, |labels| {
         let request = Request {
-            charges: drawn.iter().map(|&q| Some(q)).collect(),
+            charges: labels.iter().map(|&q| Some(q)).collect(),
             fixed: Vec::new(),
             fields: Vec::new(),
         };
-        if check_request(lattice, &request).is_ok() {
-            labels = Some(drawn);
-            break;
-        }
-    }
-    let labels = labels.ok_or(Code::NoInstance)?;
+        check_request(lattice, &request).is_ok()
+    })?;
     let two = NonZeroU32::new(2).ok_or(overflow)?;
     let half_bound =
         NonZeroU32::new(u32::from(config.cost_half_max).saturating_add(1)).ok_or(overflow)?;
@@ -665,4 +678,44 @@ pub fn flow_network(params: &Params<'_>, instance: &Instance) -> Option<FlowNetw
         });
     }
     Some(FlowNetwork { supplies, arcs })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lattice() -> SquareLattice {
+        match SquareLattice::new(3, Boundary::Open) {
+            Ok(lattice) => lattice,
+            Err(_) => unreachable!("side 3 is in range"),
+        }
+    }
+
+    #[test]
+    fn four_refusals_give_code_14() {
+        let mut stream = ChaCha8Rng::from_seed([7; 32]);
+        let mut calls = 0;
+        let got = draw_labels(&mut stream, &lattice(), |_| {
+            calls += 1;
+            false
+        });
+        assert_eq!(got, Err(Code::NoInstance));
+        assert_eq!(calls, DRAW_TRIES);
+        assert_eq!(calls, 4);
+    }
+
+    #[test]
+    fn the_fourth_draw_can_pass() {
+        let mut stream = ChaCha8Rng::from_seed([7; 32]);
+        let mut calls = 0;
+        let mut seen = Vec::new();
+        let got = draw_labels(&mut stream, &lattice(), |labels| {
+            calls += 1;
+            seen.push(labels.to_vec());
+            calls == 4
+        });
+        assert_eq!(calls, 4);
+        assert_eq!(got.as_ref().ok(), seen.last());
+        assert_eq!(seen.len(), 4);
+    }
 }
