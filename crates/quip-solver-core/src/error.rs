@@ -7,7 +7,7 @@
 
 use quip_proto::v1::RejectReason;
 
-/// A device condition that stopped a job.
+/// A device or solver condition that stopped a job.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SampleError {
     /// The job exceeds a device bound: `num_reads` above the backend cap, or a
@@ -22,6 +22,10 @@ pub enum SampleError {
     /// Before this variant existed, a wedged GPU reported `Overloaded`
     /// forever and the miner kept accepting jobs it could not serve.
     DeviceFault(String),
+    /// The solver ran and declines this instance: it found no solution it can
+    /// report, for example an UNSAT verdict. Carries an operator-facing detail
+    /// for the log line. The session survives, and an identical job fails again.
+    Declined(String),
 }
 
 impl SampleError {
@@ -31,6 +35,7 @@ impl SampleError {
         match self {
             Self::Capacity => RejectReason::TooLarge,
             Self::DeviceBusy | Self::DeviceFault(_) => RejectReason::Overloaded,
+            Self::Declined(_) => RejectReason::NoSolution,
         }
     }
 
@@ -51,6 +56,7 @@ impl std::fmt::Display for SampleError {
             Self::Capacity => write!(f, "capacity"),
             Self::DeviceBusy => write!(f, "device busy"),
             Self::DeviceFault(detail) => write!(f, "device fault: {detail}"),
+            Self::Declined(detail) => write!(f, "declined: {detail}"),
         }
     }
 }
@@ -78,6 +84,13 @@ mod tests {
             SampleError::DeviceFault("nvml: GPU 0 lost".to_owned()).to_reject_reason(),
             RejectReason::Overloaded
         );
+    }
+
+    #[test]
+    fn a_declined_job_maps_to_no_solution_and_is_not_fatal() {
+        let declined = SampleError::Declined("UNSAT".to_owned());
+        assert_eq!(declined.to_reject_reason(), RejectReason::NoSolution);
+        assert!(!declined.is_fatal());
     }
 
     #[test]

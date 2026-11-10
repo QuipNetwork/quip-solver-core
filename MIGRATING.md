@@ -91,6 +91,7 @@ The command-line output keeps lowercase names through the fixed map in `quip_pro
 | `tedsb` | `Algorithm::Tedsb` |
 | `external` | `Algorithm::External` |
 | `otsuka` | `Algorithm::Otsuka` |
+| `sat` | `Algorithm::Sat` |
 
 Replace old `backend` labels `test` and `narrow` with `Backend::Mock`.
 Split `cuda-sa` into `Backend::Cuda` and `Algorithm::Sa`.
@@ -237,7 +238,8 @@ fn sample(
 ```
 
 Map a size bound to `Capacity`. Map transient load to `DeviceBusy`. Map a
-state that needs a restart to `DeviceFault`.
+state that needs a restart to `DeviceFault`. Map a solver that ran and has no
+solution to report, such as an UNSAT verdict, to `Declined`.
 
 ## Cancellation
 

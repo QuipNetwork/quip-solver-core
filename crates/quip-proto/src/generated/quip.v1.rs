@@ -516,6 +516,7 @@ pub enum Algorithm {
     Tedsb = 17,
     External = 18,
     Otsuka = 19,
+    Sat = 20,
 }
 impl Algorithm {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -544,6 +545,7 @@ impl Algorithm {
             Self::Tedsb => "ALGORITHM_TEDSB",
             Self::External => "ALGORITHM_EXTERNAL",
             Self::Otsuka => "ALGORITHM_OTSUKA",
+            Self::Sat => "ALGORITHM_SAT",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -569,6 +571,7 @@ impl Algorithm {
             "ALGORITHM_TEDSB" => Some(Self::Tedsb),
             "ALGORITHM_EXTERNAL" => Some(Self::External),
             "ALGORITHM_OTSUKA" => Some(Self::Otsuka),
+            "ALGORITHM_SAT" => Some(Self::Sat),
             _ => None,
         }
     }
@@ -694,6 +697,10 @@ pub enum RejectReason {
     TargetMissing = 9,
     /// Admission codes 5, 6, 10, and 12 map here, and explicit-job code 10 (FAM-42).
     FamilyUnsupported = 10,
+    /// The solver ran and found no solution it can report for this instance, for
+    /// example an UNSAT verdict on a strong-layer constraint. An identical job fails
+    /// again on the same solver.
+    NoSolution = 11,
 }
 impl RejectReason {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -713,6 +720,7 @@ impl RejectReason {
             Self::TopologyMissing => "TOPOLOGY_MISSING",
             Self::TargetMissing => "TARGET_MISSING",
             Self::FamilyUnsupported => "FAMILY_UNSUPPORTED",
+            Self::NoSolution => "NO_SOLUTION",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -729,6 +737,7 @@ impl RejectReason {
             "TOPOLOGY_MISSING" => Some(Self::TopologyMissing),
             "TARGET_MISSING" => Some(Self::TargetMissing),
             "FAMILY_UNSUPPORTED" => Some(Self::FamilyUnsupported),
+            "NO_SOLUTION" => Some(Self::NoSolution),
             _ => None,
         }
     }
