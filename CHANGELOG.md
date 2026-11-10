@@ -12,6 +12,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `miner.proto`: the enum value `ALGORITHM_ICE_SAT` = 20, named `ice-sat`, for the
   strong-layer SAT baseline on synthetic ice. The Rust, Python, and TypeScript
   bindings include it.
+- `miner.proto`: the reject reason `NO_SOLUTION` = 11. A solver sends it when it
+  ran and has no solution to report for the instance, such as an UNSAT verdict.
+- `SampleError::Declined(String)`, which maps to `NO_SOLUTION`. The session
+  continues after a declined job. A lease salt that ends with it produces no result.
+  A backend that matches `SampleError` exhaustively needs a new arm.
 - `quip/polariton-static@1`, a registered family with status `research` and the
   first `hard` family. An open square-link lattice of side `L` sits natively on
   Zephyr cells, where each vertex is a cell K4 and each link is one shared segment

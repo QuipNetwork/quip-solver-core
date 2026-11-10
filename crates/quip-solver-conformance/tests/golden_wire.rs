@@ -306,7 +306,8 @@ fn enum_numbers_match_the_fixture() {
             TopologyMismatch,
             TopologyMissing,
             TargetMissing,
-            FamilyUnsupported
+            FamilyUnsupported,
+            NoSolution
         ]
     );
     pin_enum!(
@@ -485,6 +486,7 @@ fn family_wire_vectors_cross_the_wire() {
         RejectReason::TopologyMissing,
         RejectReason::TargetMissing,
         RejectReason::FamilyUnsupported,
+        RejectReason::NoSolution,
     ];
     assert_eq!(rows.len(), variants.len());
 }

@@ -90,6 +90,7 @@
       "EXPIRED": 3,
       "FAMILY_UNSUPPORTED": 10,
       "MALFORMED": 6,
+      "NO_SOLUTION": 11,
       "OVERLOADED": 4,
       "REJECT_REASON_UNSPECIFIED": 0,
       "SHUTTING_DOWN": 5,

@@ -238,7 +238,8 @@ fn sample(
 ```
 
 Map a size bound to `Capacity`. Map transient load to `DeviceBusy`. Map a
-state that needs a restart to `DeviceFault`.
+state that needs a restart to `DeviceFault`. Map a solver that ran and has no
+solution to report, such as an UNSAT verdict, to `Declined`.
 
 ## Cancellation
 

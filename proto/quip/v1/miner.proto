@@ -79,6 +79,10 @@ enum RejectReason {
   TARGET_MISSING = 9;
   // Admission codes 5, 6, 10, and 12 map here, and explicit-job code 10 (FAM-42).
   FAMILY_UNSUPPORTED = 10;
+  // The solver ran and found no solution it can report for this instance, for
+  // example an UNSAT verdict on a strong-layer constraint. An identical job fails
+  // again on the same solver.
+  NO_SOLUTION = 11;
 }
 
 message MinerMsg {

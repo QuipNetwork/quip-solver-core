@@ -697,6 +697,10 @@ pub enum RejectReason {
     TargetMissing = 9,
     /// Admission codes 5, 6, 10, and 12 map here, and explicit-job code 10 (FAM-42).
     FamilyUnsupported = 10,
+    /// The solver ran and found no solution it can report for this instance, for
+    /// example an UNSAT verdict on a strong-layer constraint. An identical job fails
+    /// again on the same solver.
+    NoSolution = 11,
 }
 impl RejectReason {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -716,6 +720,7 @@ impl RejectReason {
             Self::TopologyMissing => "TOPOLOGY_MISSING",
             Self::TargetMissing => "TARGET_MISSING",
             Self::FamilyUnsupported => "FAMILY_UNSUPPORTED",
+            Self::NoSolution => "NO_SOLUTION",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -732,6 +737,7 @@ impl RejectReason {
             "TOPOLOGY_MISSING" => Some(Self::TopologyMissing),
             "TARGET_MISSING" => Some(Self::TargetMissing),
             "FAMILY_UNSUPPORTED" => Some(Self::FamilyUnsupported),
+            "NO_SOLUTION" => Some(Self::NoSolution),
             _ => None,
         }
     }
