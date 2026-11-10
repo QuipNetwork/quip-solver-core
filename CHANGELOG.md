@@ -26,6 +26,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   sides 4, 6, 8, and 12 wait on a calibrated record. The contract is
   `docs/families/quip-defects-static-1.md`, the vectors are `defects.json`, and
   the Rust contract is `ising_generators::defects::DEFECTS_V1`.
+- `miner.proto`: the enum value `ALGORITHM_GREEDY` = 21, named `greedy`, for a
+  solver that runs a zero-temperature greedy descent, such as a postprocess of
+  supplied states. The Rust, Python, and TypeScript bindings include it.
 
 ### Changed
 

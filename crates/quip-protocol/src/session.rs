@@ -174,6 +174,7 @@ const ALGORITHM_NAMES: &[(Algorithm, &str)] = &[
     (Algorithm::External, "external"),
     (Algorithm::Otsuka, "otsuka"),
     (Algorithm::Sat, "sat"),
+    (Algorithm::Greedy, "greedy"),
 ];
 /// Stable lowercase name for a wire identity.
 #[must_use]

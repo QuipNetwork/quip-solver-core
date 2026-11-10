@@ -111,6 +111,7 @@ export enum Algorithm {
   ALGORITHM_EXTERNAL = 18,
   ALGORITHM_OTSUKA = 19,
   ALGORITHM_SAT = 20,
+  ALGORITHM_GREEDY = 21,
   UNRECOGNIZED = -1,
 }
 
@@ -179,6 +180,9 @@ export function algorithmFromJSON(object: any): Algorithm {
     case 20:
     case "ALGORITHM_SAT":
       return Algorithm.ALGORITHM_SAT;
+    case 21:
+    case "ALGORITHM_GREEDY":
+      return Algorithm.ALGORITHM_GREEDY;
     case -1:
     case "UNRECOGNIZED":
     default:
@@ -230,6 +234,8 @@ export function algorithmToJSON(object: Algorithm): string {
       return "ALGORITHM_OTSUKA";
     case Algorithm.ALGORITHM_SAT:
       return "ALGORITHM_SAT";
+    case Algorithm.ALGORITHM_GREEDY:
+      return "ALGORITHM_GREEDY";
     case Algorithm.UNRECOGNIZED:
     default:
       return "UNRECOGNIZED";
