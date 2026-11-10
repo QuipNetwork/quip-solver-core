@@ -247,6 +247,23 @@ impl Session {
     async fn refund(&mut self) {
         assert!(matches!(self.recv().await, miner_msg::Msg::JobRequest(r) if r.credits == 1));
     }
+    /// `recv` whose transport failures name `label`.
+    async fn recv_for(&mut self, label: &str) -> miner_msg::Msg {
+        let received = tokio::time::timeout(Duration::from_secs(10), self.inbound.message()).await;
+        assert!(
+            matches!(&received, Ok(Ok(Some(m))) if m.msg.is_some()),
+            "{label}: no message from the miner: {received:?}"
+        );
+        received.unwrap().unwrap().unwrap().msg.unwrap()
+    }
+    /// `refund` whose failures name `label`.
+    async fn refund_for(&mut self, label: &str) {
+        let msg = self.recv_for(label).await;
+        assert!(
+            matches!(&msg, miner_msg::Msg::JobRequest(r) if r.credits == 1),
+            "{label}: expected a one-credit refund, got {msg:?}"
+        );
+    }
     async fn finish(mut self) {
         self.send(coord_msg::Msg::Shutdown(wire::Shutdown { grace_ms: 2000 }))
             .await;
@@ -624,24 +641,28 @@ fn index_of(j: &wire::Job, r: &wire::Result) -> u64 {
         .unwrap()
 }
 /// Read every reply up to the lease summary. Returns the Results and the summary.
-#[expect(clippy::panic, reason = "an unexpected message is a test failure")]
 async fn drain_lease(s: &mut Session) -> (Vec<wire::Result>, wire::LeaseDone) {
+    drain_lease_for(s, "lease").await
+}
+/// `drain_lease` whose failures name `what`.
+#[expect(clippy::panic, reason = "an unexpected message is a test failure")]
+async fn drain_lease_for(s: &mut Session, what: &str) -> (Vec<wire::Result>, wire::LeaseDone) {
     let mut results = Vec::new();
     loop {
-        match s.recv().await {
+        match s.recv_for(what).await {
             miner_msg::Msg::Result(r) => results.push(r),
             miner_msg::Msg::LeaseDone(d) => return (results, d),
-            other => panic!("unexpected {other:?}"),
+            other => panic!("{what}: unexpected {other:?}"),
         }
     }
 }
 #[expect(clippy::panic, reason = "a missing reject is a test failure")]
 async fn expect_reject(s: &mut Session, reason: i32, what: &str) {
-    match s.recv().await {
+    match s.recv_for(what).await {
         miner_msg::Msg::Reject(r) => assert_eq!(r.reason, reason, "{what}"),
         other => panic!("{what}: expected a reject, got {other:?}"),
     }
-    s.refund().await;
+    s.refund_for(what).await;
 }
 
 #[tokio::test]
@@ -745,7 +766,7 @@ async fn family_leases_use_the_vector_salts_and_nonces() {
                 )
             })
             .collect::<Vec<_>>();
-        let (results, done) = drain_lease(&mut s).await;
+        let (results, done) = drain_lease_for(&mut s, name).await;
         for r in &results {
             assert!(
                 pairs.contains(&(r.salt.clone(), r.nonce.clone())),
@@ -792,6 +813,12 @@ async fn default_family_leases_report_every_unskipped_salt() {
     assert_eq!(reported, expected);
     assert_eq!(default_done.salts_done, 64);
     assert_eq!(default_done.best_energy_milli, best);
+    // The minimum over the 64 lease-derived nonces, computed without the miner.
+    let expected_best = (0..64)
+        .filter_map(|i| regenerate(&UNIFORM_V1, &P_SPEC, &topology(), spec.nonce(i).unwrap()).ok())
+        .map(|instance| all_up_energy(&instance))
+        .min();
+    assert_eq!(Some(best), expected_best);
 
     // The local generator reports the same salts, nonces, and solutions.
     let (local, local_done) = run_64("local").await;
@@ -1241,7 +1268,7 @@ fn plain_energy(instance: &Instance, spin: i8) -> i64 {
     reason = "a missing Result is a test failure"
 )]
 async fn expect_solved(s: &mut Session, what: &str) -> wire::Solution {
-    let solution = match s.recv().await {
+    let solution = match s.recv_for(what).await {
         miner_msg::Msg::Result(r) => {
             assert_eq!(r.job_id, b"explicit", "{what}");
             assert_eq!(r.solutions.len(), 1, "{what}");
@@ -1249,7 +1276,7 @@ async fn expect_solved(s: &mut Session, what: &str) -> wire::Solution {
         }
         other => panic!("{what}: expected a Result, got {other:?}"),
     };
-    s.refund().await;
+    s.refund_for(what).await;
     solution
 }
 
@@ -1474,14 +1501,14 @@ async fn field_length_vectors_hold_in_the_session() {
                 binding(&mut j).node_ids.resize(length, 99);
                 (j, false)
             }
-            _ => continue,
+            other => panic!("{name}: no field_lengths case for {other}"),
         };
         s.send(coord_msg::Msg::Job(j)).await;
         match (case["expected_code"].is_null(), is_lease) {
             (true, true) => {
-                let (_, done) = drain_lease(&mut s).await;
+                let (_, done) = drain_lease_for(&mut s, name).await;
                 assert_eq!(done.salts_done, 1, "{name}");
-                s.refund().await;
+                s.refund_for(name).await;
                 admitted += 1;
             }
             (true, false) => {

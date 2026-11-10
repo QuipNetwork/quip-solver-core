@@ -44,10 +44,16 @@ pub(crate) fn profile_name(profile_dir: &Path) -> String {
 )]
 pub(crate) fn example_bin(name: &str) -> PathBuf {
     static CACHE: OnceLock<Mutex<HashMap<String, PathBuf>>> = OnceLock::new();
-    let mut cache = CACHE
-        .get_or_init(Mutex::default)
-        .lock()
-        .expect("example cache lock");
+    assert!(
+        std::env::current_exe().is_ok(),
+        "example {name}: the test exe path is unavailable"
+    );
+    let lock = CACHE.get_or_init(Mutex::default).lock();
+    assert!(
+        lock.is_ok(),
+        "example {name}: the example cache lock is poisoned"
+    );
+    let mut cache = lock.expect("example cache lock");
     if let Some(path) = cache.get(name) {
         return path.clone();
     }
@@ -57,8 +63,12 @@ pub(crate) fn example_bin(name: &str) -> PathBuf {
         let status = Command::new(env!("CARGO"))
             .args(["build", "--example", name, "-p", "quip-solver-core"])
             .args(["--profile", &profile_name(&profile)])
-            .status()
-            .expect("cargo build --example");
+            .status();
+        assert!(
+            status.is_ok(),
+            "example {name}: cargo build --example did not start: {status:?}"
+        );
+        let status = status.expect("cargo build --example");
         assert!(status.success(), "failed to build example {name}");
         assert!(
             path.is_file(),

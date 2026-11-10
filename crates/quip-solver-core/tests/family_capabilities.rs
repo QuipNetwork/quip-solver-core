@@ -555,6 +555,35 @@ fn capabilities_follow_the_declaration() -> Result<(), String> {
     }
 }
 
+/// The `--capabilities` JSON of `example`, without the backend identity.
+fn capabilities_without_backend(example: &str) -> Result<Value, String> {
+    let out = Command::new(example_bin(example))
+        .arg("--capabilities")
+        .output()
+        .map_err(|e| format!("{example}: {e}"))?;
+    if !out.status.success() {
+        return Err(format!("{example}: --capabilities failed"));
+    }
+    let mut value: Value =
+        serde_json::from_slice(&out.stdout).map_err(|e| format!("{example}: {e}"))?;
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| format!("{example}: capabilities are not an object"))?;
+    let _ = object.remove("backend");
+    let _ = object.remove("algorithm");
+    Ok(value)
+}
+
+#[test]
+fn both_lease_binaries_advertise_the_same_capabilities() -> Result<(), String> {
+    let local = capabilities_without_backend("mock_sampler_lease_local")?;
+    let default = capabilities_without_backend("mock_sampler_lease")?;
+    if local != default {
+        return Err(format!("local {local} differs from default {default}"));
+    }
+    Ok(())
+}
+
 fn cli_json() -> Result<Value, String> {
     let out = Command::new(example_bin("mock_sampler_families"))
         .arg("--capabilities")

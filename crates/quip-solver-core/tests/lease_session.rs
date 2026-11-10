@@ -274,6 +274,23 @@ impl Session {
     async fn refund(&mut self) {
         assert!(matches!(self.recv().await, miner_msg::Msg::JobRequest(r) if r.credits == 1));
     }
+    /// `recv` whose transport failures name `label`.
+    async fn recv_for(&mut self, label: &str) -> miner_msg::Msg {
+        let received = tokio::time::timeout(Duration::from_secs(10), self.inbound.message()).await;
+        assert!(
+            matches!(&received, Ok(Ok(Some(m))) if m.msg.is_some()),
+            "{label}: no message from the miner: {received:?}"
+        );
+        received.unwrap().unwrap().unwrap().msg.unwrap()
+    }
+    /// `refund` whose failures name `label`.
+    async fn refund_for(&mut self, label: &str) {
+        let msg = self.recv_for(label).await;
+        assert!(
+            matches!(&msg, miner_msg::Msg::JobRequest(r) if r.credits == 1),
+            "{label}: expected a one-credit refund, got {msg:?}"
+        );
+    }
     async fn finish(mut self) {
         self.send(coord_msg::Msg::Shutdown(wire::Shutdown { grace_ms: 2000 }))
             .await;
@@ -910,7 +927,8 @@ async fn drain_cancelled_lease(s: &mut Session, generation: u64, strict: bool) {
     // The local monitor can send completion before the writer sends Status.
     // Consume the Cancel reply before sending a Ping with its own Status reply.
     while !(acknowledged && done && refunded) {
-        match s.recv().await {
+        let label = format!("generation {generation}");
+        match s.recv_for(&label).await {
             miner_msg::Msg::Result(r) => {
                 assert!(
                     !acknowledged && (!strict || !done),
@@ -943,7 +961,7 @@ async fn drain_cancelled_lease(s: &mut Session, generation: u64, strict: bool) {
                     done && (!strict || !refunded),
                     "generation {generation}: refund must follow one completion"
                 );
-                assert_eq!(request.credits, 1);
+                assert_eq!(request.credits, 1, "generation {generation}");
                 refunded = true;
             }
             other => panic!("generation {generation}: unexpected message: {other:?}"),
@@ -1191,12 +1209,12 @@ async fn malformed_and_unsupported_leases_are_rejected_before_drawing() {
     .enumerate()
     {
         s.send(coord_msg::Msg::Job(job(5))).await;
-        let msg = s.recv().await;
+        let msg = s.recv_for(label).await;
         assert!(
             matches!(&msg, miner_msg::Msg::Reject(r) if r.reason == reason as i32),
             "{label}: expected {reason:?}, got {msg:?}"
         );
-        s.refund().await;
+        s.refund_for(label).await;
         if index == 0 {
             s.send(coord_msg::Msg::Topology(topology())).await;
         }
@@ -1211,12 +1229,12 @@ async fn malformed_and_unsupported_leases_are_rejected_before_drawing() {
         let mut j = job(5);
         mutate(j.generator.as_mut().unwrap());
         s.send(coord_msg::Msg::Job(j)).await;
-        let msg = s.recv().await;
+        let msg = s.recv_for(label).await;
         assert!(
             matches!(&msg, miner_msg::Msg::Reject(r) if r.reason == reason as i32),
             "{label}: expected {reason:?}, got {msg:?}"
         );
-        s.refund().await;
+        s.refund_for(label).await;
     }
     s.finish().await;
 }
