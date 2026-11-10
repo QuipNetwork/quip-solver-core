@@ -1593,6 +1593,20 @@ async fn finish_stderr_capture(
     stderr
 }
 
+/// Yield the listener's connections unchanged, setting `accepted` as each one
+/// is accepted and before the server dispatches it to a session handler.
+fn track_accepts(
+    incoming: UnixListenerStream,
+    accepted: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> impl tokio_stream::Stream<Item = std::io::Result<tokio::net::UnixStream>> {
+    tokio_stream::StreamExt::map(incoming, move |connection| {
+        if connection.is_ok() {
+            accepted.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        connection
+    })
+}
+
 /// Bind the socket, serve `MockCoordinator` with `script`, spawn
 /// `bin_path --quip-coordinator <socket> --miner-id mock-0 <extra_args...>`,
 /// and wait up to `child_timeout`, then up to `stderr_drain` for its stderr
@@ -1615,7 +1629,11 @@ pub(crate) async fn run_miner(
         reason = "test harness panics on bind failure rather than restructuring error flow"
     )]
     let uds = UnixListener::bind(&path).expect("bind unix socket");
-    let incoming = UnixListenerStream::new(uds);
+    let accepted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let incoming = track_accepts(
+        UnixListenerStream::new(uds),
+        std::sync::Arc::clone(&accepted),
+    );
 
     let (otx, orx) = oneshot::channel::<SessionOutcome>();
     let connected = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1682,10 +1700,10 @@ pub(crate) async fn run_miner(
     };
     let stderr = finish_stderr_capture(stderr_reader, captured_stderr, stderr_drain).await;
     // The session handler sends the outcome as the miner closes its stream on
-    // exit. A miner that exited without ever connecting has no session, so
-    // there is no outcome to wait for.
-    let connected = connected.load(std::sync::atomic::Ordering::SeqCst);
-    let mut outcome = if connected {
+    // exit; the timeout guards a miner that dies before its session starts. A
+    // miner whose connection was never accepted has no session, so there is no
+    // outcome to wait for.
+    let mut outcome = if accepted.load(std::sync::atomic::Ordering::SeqCst) {
         tokio::time::timeout(OUTCOME_TIMEOUT, orx)
             .await
             .ok()
@@ -1694,7 +1712,7 @@ pub(crate) async fn run_miner(
     } else {
         SessionOutcome::default()
     };
-    outcome.connected = connected;
+    outcome.connected = connected.load(std::sync::atomic::Ordering::SeqCst);
     server.abort();
     let _ = std::fs::remove_file(&path);
 
@@ -2201,6 +2219,31 @@ mod tests {
         assert!(!outcome.statuses.is_empty());
     }
 
+    /// A unique path under `/tmp`, short enough for a Unix socket.
+    fn scratch_path(tag: &str) -> String {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        format!("/tmp/quip-conformance-{tag}-{}-{nanos}", std::process::id())
+    }
+
+    /// Owns the stderr wrapper's directory. On drop, including after a failed
+    /// assertion, it kills the wrapper's background sleeper and removes the
+    /// directory.
+    struct WrapperFixture(std::path::PathBuf);
+    impl Drop for WrapperFixture {
+        fn drop(&mut self) {
+            if let Ok(pid) = std::fs::read_to_string(self.0.join("miner-wrapper.pid")) {
+                let _ = std::process::Command::new("kill")
+                    .arg("-9")
+                    .arg(pid.trim())
+                    .status();
+            }
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     /// Spawn the freshly written wrapper until one exec succeeds. A sibling
     /// test that forks while the wrapper is open for writing holds the write
     /// descriptor until its own exec, and exec meanwhile fails with
@@ -2226,20 +2269,14 @@ mod tests {
     async fn stderr_capture_preserves_partial_output_when_a_descendant_holds_the_pipe_open() {
         use std::os::unix::fs::PermissionsExt as _;
 
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let base = format!(
-            "/tmp/quip-conformance-stderr-{}-{nanos}",
-            std::process::id()
-        );
+        let base = scratch_path("stderr");
         let dir = std::path::PathBuf::from(format!("{base}-wrapper"));
         std::fs::create_dir_all(&dir).expect("create wrapper directory");
-        let wrapper = dir.join("miner-wrapper");
+        let fixture = WrapperFixture(dir);
+        let wrapper = fixture.0.join("miner-wrapper");
         // The background sleep inherits stderr and holds the pipe open after
-        // the wrapper exits.
-        let script = "#!/bin/sh\n[ \"$1\" = --probe ] && exit 0\nsleep 30 &\nprintf '%s\\n' 'known wrapper diagnostic' >&2\n";
+        // the wrapper exits. Its pid lets the fixture kill it afterwards.
+        let script = "#!/bin/sh\n[ \"$1\" = --probe ] && exit 0\nsleep 30 &\necho $! > \"$0.pid\"\nprintf '%s\\n' 'known wrapper diagnostic' >&2\n";
         std::fs::write(&wrapper, script).expect("write miner wrapper");
         let mut permissions = std::fs::metadata(&wrapper)
             .expect("read wrapper metadata")
@@ -2265,7 +2302,51 @@ mod tests {
             ),
             "{stderr}"
         );
-        std::fs::remove_dir_all(dir).expect("remove wrapper directory");
+    }
+
+    #[tokio::test]
+    async fn a_miner_that_exits_without_connecting_gets_the_default_outcome_at_once() {
+        let socket = format!("unix://{}.sock", scratch_path("never-connects"));
+        let start = std::time::Instant::now();
+        let (outcome, exit_code, _) = run_miner(
+            "/bin/true",
+            &[],
+            &socket,
+            ScriptKind::Full,
+            PHASE_TIMEOUT,
+            Duration::from_millis(300),
+        )
+        .await;
+        assert!(
+            start.elapsed() < OUTCOME_TIMEOUT / 2,
+            "{:?}",
+            start.elapsed()
+        );
+        assert_eq!(exit_code, 0);
+        assert!(!outcome.connected);
+        assert!(!outcome.handshake_ok);
+        assert!(outcome.hello.is_none());
+        assert_eq!(outcome.terminal, Terminal::default());
+    }
+
+    #[tokio::test]
+    async fn a_connection_counts_as_accepted_before_any_session_handler_runs() {
+        let path = format!("{}.sock", scratch_path("accepted"));
+        let accepted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut incoming = track_accepts(
+            UnixListenerStream::new(UnixListener::bind(&path).unwrap()),
+            std::sync::Arc::clone(&accepted),
+        );
+        // A client that connects and leaves before sending any request: no
+        // server, and so no session handler, ever sees it.
+        drop(tokio::net::UnixStream::connect(&path).await.unwrap());
+        assert!(!accepted.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(tokio_stream::StreamExt::next(&mut incoming)
+            .await
+            .unwrap()
+            .is_ok());
+        assert!(accepted.load(std::sync::atomic::Ordering::SeqCst));
+        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]
