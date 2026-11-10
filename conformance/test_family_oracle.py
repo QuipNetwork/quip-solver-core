@@ -116,6 +116,9 @@ def test_uniform_redraws_at_limit():
     rng = _StubRng([2**32 - 1, 7])
     assert uniform(rng, 2**31 + 1) == 7
     assert rng.words_used == 2
+    one = ChaCha8(bytes(32))
+    assert uniform(one, 1) == 0
+    assert one.words_used == 1
 
 
 def test_uniform_rejects_out_of_range():
@@ -410,6 +413,7 @@ def test_canonical_bytes_layout():
     assert len(data) == 1 + 96 + 4 + 20 + 4 + 40 + 20 + 20 + 8 + len(SPARSE_METADATA)
     with pytest.raises(ValueError):
         _sparse_canonical(b"\x03" * 31)
+    assert _sparse_canonical(b"") == _sparse_canonical(bytes(32))
 
 
 def test_default_node_order():
@@ -675,6 +679,13 @@ def test_ice_lattice_counts(m, t):
     assert all(a < b for a, b in edges)
 
 
+def test_ice_coordinates_invert_the_linear_id():
+    m, t = 2, 3
+    for q in range(ice.node_count(m, t)):
+        assert ice.linear_id(m, t, *ice.zephyr_coordinates(m, t, q)) == q
+    assert ice.zephyr_coordinates(m, t, ice.node_count(m, t)) is None
+
+
 def test_ice_live_blob_gives_the_pinned_counts_and_digest():
     live_cases = json.loads(build.ICE_STRUCTURE_PATH.read_text())["live"]
     paths = {(build.FAMILIES_DIR / case["topology"]).resolve() for case in live_cases}
@@ -824,6 +835,13 @@ def test_blob_round_trips():
     data = topology_blob.encode(body)
     assert data[:10] == BLOB_FILE_HEAD
     assert topology_blob.decode(data) == body
+    nodes, edges = ice.lattice(2, 2)
+    zephyr = _zephyr(2, 2, [0, 5], [list(edges[40])])
+    first = topology_blob.encode(zephyr)
+    assert first == topology_blob.encode(zephyr)
+    assert first == topology_blob.encode(json.loads(json.dumps(zephyr)))
+    explicit = _explicit(nodes, [list(e) for e in edges])
+    assert topology_blob.encode(explicit) == topology_blob.encode(explicit)
     assert topology_blob.decode(topology_blob.encode(_explicit([], []))) == _explicit(
         [], []
     )

@@ -35,6 +35,20 @@ def _sentinel_args(c):
 # the binding calls the identical Rust entry point, so the two cannot drift. The
 # sentinel section yields the shared 1 << 62 sentinel for non-finite coefficients; the
 # fixture spells inf/-inf/nan as strings because JSON has no literal for them.
+# The golden `truncation` section pins truncation toward zero cross-language; cases
+# are chosen so int() != round(). Python's int(e*1000) must match the committed
+# (truncated) energy_milli.
+@pytest.mark.parametrize(
+    "case",
+    [
+        pytest.param(c, id=f"{c['energy']}->{c['energy_milli']}")
+        for c in GOLDEN["truncation"]
+    ],
+)
+def test_truncation_matches_golden(case):
+    assert int(case["energy"] * 1000) == case["energy_milli"]
+
+
 @pytest.mark.parametrize(
     ("section", "args"),
     [

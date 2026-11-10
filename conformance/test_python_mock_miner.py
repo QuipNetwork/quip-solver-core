@@ -177,7 +177,7 @@ async def test_generation_zero_is_never_cancelled():
 
 
 @pytest.mark.asyncio
-async def test_bad_welcome_sends_fatal_then_exits_64():
+async def test_welcome_and_query_replies():
     call = FakeCall()
     state = mock_miner.Session("mock-0", call)
     msg = miner_pb2.CoordMsg(welcome=miner_pb2.Welcome(protocol_version=1))
@@ -186,10 +186,6 @@ async def test_bad_welcome_sends_fatal_then_exits_64():
     assert call.written[0].WhichOneof("msg") == "fatal"
     assert call.written[0].fatal.exit_code == 64
     assert call.written[-1] == "done_writing"
-
-
-@pytest.mark.asyncio
-async def test_get_capabilities_and_ping_are_answered():
     call = FakeCall()
     state = mock_miner.Session("mock-0", call)
     await state.handle(miner_pb2.CoordMsg(get_capabilities=miner_pb2.GetCapabilities()))
