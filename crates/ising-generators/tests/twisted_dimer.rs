@@ -10,13 +10,11 @@
 
 use std::collections::BTreeSet;
 
-use ising_generators::descriptor::{
-    admit, params_digest, Admitted, AdvertisedLimits, Contract, SizeBounds, Value,
-};
-use ising_generators::family::{admit_topology, generate_instance, BaseTopology, SaltFault};
+use ising_generators::descriptor::{admit, params_digest, Contract, Value};
+use ising_generators::family::{generate_instance, BaseTopology, SaltFault};
 use ising_generators::ice::{
-    candidates, gauge_obstructions, local_gauges, select, sides, zephyr_lattice, Lattice,
-    Obstructions, StructureError, PAIR_MILLI, RECIPES, STRONG_MILLI, TWISTED_DIMER_V1,
+    candidates, gauge_obstructions, local_gauges, select, sides, Lattice, Obstructions,
+    StructureError, PAIR_MILLI, RECIPES, STRONG_MILLI, TWISTED_DIMER_V1,
 };
 use ising_generators::instance::{Instance, InstanceLimits, InstanceParts};
 use ising_generators::Code;
@@ -24,132 +22,129 @@ use ising_generators::Code;
 #[expect(dead_code, reason = "this test uses only the live topology loader")]
 mod common;
 
+#[path = "common/family.rs"]
+mod family;
+
+use family::{admitted, bounds, lattice_topology, nonce_of};
+
 /// Three tiles of four positions in a ring. Tiles 0 and 1 share position 3,
 /// tiles 1 and 2 share position 6, and tiles 2 and 0 share position 0.
 const RING: [[u32; 4]; 3] = [[0, 1, 2, 3], [3, 4, 5, 6], [6, 7, 8, 0]];
 const RING_NODES: usize = 9;
 
-#[test]
-fn obstructions_of_no_tiles_are_zero() {
-    let result = gauge_obstructions(&[], &[], 0);
-    assert_eq!(
-        result,
-        Ok(Obstructions {
-            components: 0,
-            cycle_rank: 0,
-            frustrated_cycles: 0,
-            gauge_equivalent: true,
-        })
-    );
-}
+/// One `gauge_obstructions` case: label, tiles, gauges, node bound, result.
+type ObstructionRow<'a> = (
+    &'a str,
+    &'a [[u32; 4]],
+    &'a [[i8; 4]],
+    usize,
+    Result<Obstructions, StructureError>,
+);
 
 #[test]
-fn a_consistent_ring_is_gauge_equivalent() {
-    let gauges = [[1_i8; 4]; 3];
-    let result = gauge_obstructions(&RING, &gauges, RING_NODES);
-    assert_eq!(
-        result,
-        Ok(Obstructions {
-            components: 1,
-            cycle_rank: 1,
-            frustrated_cycles: 0,
-            gauge_equivalent: true,
-        })
-    );
-}
-
-#[test]
-fn a_flipped_ring_has_one_frustrated_cycle() {
-    let mut gauges = [[1_i8; 4]; 3];
+fn gauge_obstruction_vectors() {
+    let ones3 = [[1_i8; 4]; 3];
+    let ones2 = [[1_i8; 4]; 2];
     // Flip tile 0 at position 3 only, which flips one link relation.
-    gauges[0][3] = -1;
-    let result = gauge_obstructions(&RING, &gauges, RING_NODES);
-    assert_eq!(
-        result,
-        Ok(Obstructions {
-            components: 1,
-            cycle_rank: 1,
-            frustrated_cycles: 1,
-            gauge_equivalent: false,
-        })
-    );
-}
-
-#[test]
-fn a_node_in_three_tiles_is_an_error() {
-    let tiles = [[0, 1, 2, 3], [3, 4, 5, 6], [3, 7, 8, 9]];
-    let gauges = [[1_i8; 4]; 3];
-    assert_eq!(
-        gauge_obstructions(&tiles, &gauges, 10),
-        Err(StructureError::MembershipAboveTwo(3))
-    );
-}
-
-#[test]
-fn bad_gauge_inputs_are_errors() {
-    let gauges = [[1_i8; 4]; 3];
-    assert_eq!(
-        gauge_obstructions(&RING, &gauges[..2], RING_NODES),
-        Err(StructureError::Overflow)
-    );
-    let mut zero = gauges;
+    let mut flipped = ones3;
+    flipped[0][3] = -1;
+    let mut zero = ones3;
     zero[1][0] = 0;
-    assert_eq!(
-        gauge_obstructions(&RING, &zero, RING_NODES),
-        Err(StructureError::Overflow)
-    );
-    assert_eq!(
-        gauge_obstructions(&RING, &gauges, RING_NODES - 1),
-        Err(StructureError::Overflow)
-    );
-}
-
-#[test]
-fn parallel_links_with_different_relations_frustrate_one_cycle() {
+    let three_tiles = [[0, 1, 2, 3], [3, 4, 5, 6], [3, 7, 8, 9]];
     // Tiles 0 and 1 share positions 0 and 3. The relation at position 0 is
     // -1 and the relation at position 3 is +1.
-    let tiles = [[0, 1, 2, 3], [0, 3, 4, 5]];
-    let gauges = [[-1_i8, 1, 1, 1], [1, 1, 1, 1]];
-    let result = gauge_obstructions(&tiles, &gauges, 6);
-    assert_eq!(
-        result,
+    let parallel_tiles = [[0, 1, 2, 3], [0, 3, 4, 5]];
+    let parallel_gauges = [[-1_i8, 1, 1, 1], [1, 1, 1, 1]];
+    let separate_tiles = [[0, 1, 2, 3], [4, 5, 6, 7]];
+    let overfull_tiles = [[0, 1, 2, 3], [3, 1, 4, 5], [1, 3, 6, 7]];
+    let ok = |components, cycle_rank, frustrated_cycles, gauge_equivalent| {
         Ok(Obstructions {
-            components: 1,
-            cycle_rank: 1,
-            frustrated_cycles: 1,
-            gauge_equivalent: false,
+            components,
+            cycle_rank,
+            frustrated_cycles,
+            gauge_equivalent,
         })
-    );
-}
-
-#[test]
-fn separate_tiles_count_as_components() {
-    let tiles = [[0, 1, 2, 3], [4, 5, 6, 7]];
-    let gauges = [[1_i8; 4]; 2];
-    assert_eq!(
-        gauge_obstructions(&tiles, &gauges, 8),
-        Ok(Obstructions {
-            components: 2,
-            cycle_rank: 0,
-            frustrated_cycles: 0,
-            gauge_equivalent: true,
-        })
-    );
-}
-
-#[test]
-fn the_lowest_overfull_position_is_reported() {
-    let tiles = [[0, 1, 2, 3], [3, 1, 4, 5], [1, 3, 6, 7]];
-    let gauges = [[1_i8; 4]; 3];
-    assert_eq!(
-        gauge_obstructions(&tiles, &gauges, 8),
-        Err(StructureError::MembershipAboveTwo(1))
-    );
-}
-
-#[test]
-fn a_huge_node_bound_does_not_allocate() {
-    assert!(gauge_obstructions(&[], &[], usize::MAX).is_ok());
+    };
+    let rows: [ObstructionRow<'_>; 11] = [
+        ("no tiles", &[], &[], 0, ok(0, 0, 0, true)),
+        (
+            "a consistent ring",
+            &RING,
+            &ones3,
+            RING_NODES,
+            ok(1, 1, 0, true),
+        ),
+        (
+            "a flipped ring",
+            &RING,
+            &flipped,
+            RING_NODES,
+            ok(1, 1, 1, false),
+        ),
+        (
+            "a node in three tiles",
+            &three_tiles,
+            &ones3,
+            10,
+            Err(StructureError::MembershipAboveTwo(3)),
+        ),
+        (
+            "short gauges",
+            &RING,
+            &ones3[..2],
+            RING_NODES,
+            Err(StructureError::Overflow),
+        ),
+        (
+            "a zero gauge",
+            &RING,
+            &zero,
+            RING_NODES,
+            Err(StructureError::Overflow),
+        ),
+        (
+            "a short node count",
+            &RING,
+            &ones3,
+            RING_NODES - 1,
+            Err(StructureError::Overflow),
+        ),
+        (
+            "parallel links with different relations",
+            &parallel_tiles,
+            &parallel_gauges,
+            6,
+            ok(1, 1, 1, false),
+        ),
+        (
+            "separate tiles",
+            &separate_tiles,
+            &ones2,
+            8,
+            ok(2, 0, 0, true),
+        ),
+        (
+            "the lowest overfull position",
+            &overfull_tiles,
+            &ones3,
+            8,
+            Err(StructureError::MembershipAboveTwo(1)),
+        ),
+        (
+            "a huge node bound with no tiles",
+            &[],
+            &[],
+            usize::MAX,
+            ok(0, 0, 0, true),
+        ),
+    ];
+    for (label, tiles, gauges, nodes, expected) in rows {
+        assert_eq!(
+            gauge_obstructions(tiles, gauges, nodes),
+            expected,
+            "{label}"
+        );
+    }
 }
 
 // ---- quip/twisted-ice-dimer@1 ----
@@ -169,40 +164,12 @@ fn params(m: u16, t: u8, weak: u16, pairs: u32) -> Vec<u8> {
     bytes
 }
 
-fn admitted(bytes: &[u8]) -> Result<Admitted<'_>, Code> {
-    admit(
-        CONTRACTS,
-        b"quip/twisted-ice-dimer",
-        1,
-        bytes,
-        &params_digest(bytes),
-    )
-}
-
-fn bounds(admitted: &Admitted<'_>, topology: &BaseTopology) -> Result<SizeBounds, Code> {
-    admit_topology(
-        admitted,
-        topology,
-        topology.order_digest(),
-        &AdvertisedLimits::default(),
-    )
-}
-
-fn lattice_topology(m: u16, t: u8) -> BaseTopology {
-    let (nodes, edges) = zephyr_lattice(m, t).expect("lattice");
-    BaseTopology::new(nodes, &edges).expect("topology")
-}
-
-fn nonce_of(i: u8) -> [u8; 32] {
-    [i; 32]
-}
-
 fn try_build(
     bytes: &[u8],
     topology: &BaseTopology,
     nonce: [u8; 32],
 ) -> Result<Instance, SaltFault> {
-    let admitted = admitted(bytes).expect("admit");
+    let admitted = admitted(&TWISTED_DIMER_V1, bytes).expect("admit");
     let bounds = bounds(&admitted, topology).expect("admit topology");
     generate_instance(&admitted, topology, &bounds, nonce)
 }
@@ -214,7 +181,7 @@ fn build(bytes: &[u8], topology: &BaseTopology, nonce: [u8; 32]) -> Instance {
 }
 
 fn check(bytes: &[u8], instance: &Instance) -> bool {
-    let admitted = admitted(bytes).expect("admit");
+    let admitted = admitted(&TWISTED_DIMER_V1, bytes).expect("admit");
     let construction = TWISTED_DIMER_V1.construction.expect("construction");
     (construction.check_metadata)(admitted.params(), instance)
 }
@@ -351,19 +318,6 @@ fn zero_pairs_gives_an_empty_pair_section() {
 }
 
 #[test]
-fn the_pair_bound_is_floor_half_the_nodes() {
-    let topology = lattice_topology(2, 2);
-    let half = u32::try_from(topology.node_ids().len() / 2).expect("fits");
-    let at_bound = params(2, 2, 62, half);
-    assert!(bounds(&admitted(&at_bound).expect("admit"), &topology).is_ok());
-    let above = params(2, 2, 62, half + 1);
-    assert_eq!(
-        bounds(&admitted(&above).expect("admit"), &topology),
-        Err(Code::TopologyIncompatible)
-    );
-}
-
-#[test]
 fn a_shortfall_skips_the_salt() {
     let topology = lattice_topology(2, 2);
     let half = u32::try_from(topology.node_ids().len() / 2).expect("fits");
@@ -389,9 +343,9 @@ fn a_boundary_build_reaches_a_perfect_pair_count() {
 }
 
 #[test]
-fn each_tile_edge_uses_its_own_tile_gauges() {
+fn tile_and_pair_structure() {
     let topology = lattice_topology(2, 2);
-    let bytes = params(2, 2, 62, 8);
+    let bytes = params(2, 2, 62, 12);
     let mut shared_nodes = 0;
     for i in 0..4u8 {
         let instance = build(&bytes, &topology, nonce_of(i));
@@ -403,7 +357,11 @@ fn each_tile_edge_uses_its_own_tile_gauges() {
             };
             for (a, b) in tile_pairs(*tile) {
                 let j = instance.j()[edge_position(&instance, (a, b))];
-                assert_eq!(j, STRONG_MILLI * local(a) * local(b), "tile edge {a}-{b}");
+                assert_eq!(
+                    j,
+                    STRONG_MILLI * local(a) * local(b),
+                    "nonce {i}: tile edge {a}-{b}"
+                );
             }
         }
         let mut seen = BTreeSet::new();
@@ -414,25 +372,26 @@ fn each_tile_edge_uses_its_own_tile_gauges() {
                 }
             }
         }
-    }
-    assert!(shared_nodes > 0, "z(2,2) has nodes in two tiles");
-}
 
-#[test]
-fn pairs_are_never_tile_edges_and_are_disjoint() {
-    let topology = lattice_topology(2, 2);
-    let bytes = params(2, 2, 62, 12);
-    for i in 0..4u8 {
-        let instance = build(&bytes, &topology, nonce_of(i));
         let tile_edges = tile_edge_set(&instance);
         let pairs = pairs_of(&instance);
-        assert_eq!(pairs.len(), 12);
+        assert_eq!(pairs.len(), 12, "nonce {i}");
         let mut nodes = BTreeSet::new();
         for &(a, b) in &pairs {
-            assert!(a < b);
-            assert!(!tile_edges.contains(&(a, b)), "pair {a}-{b} is a tile edge");
-            assert_eq!(instance.j()[edge_position(&instance, (a, b))], PAIR_MILLI);
-            assert!(nodes.insert(a) && nodes.insert(b), "pairs share a node");
+            assert!(a < b, "nonce {i}: pair {a}-{b} is ordered");
+            assert!(
+                !tile_edges.contains(&(a, b)),
+                "nonce {i}: pair {a}-{b} is a tile edge"
+            );
+            assert_eq!(
+                instance.j()[edge_position(&instance, (a, b))],
+                PAIR_MILLI,
+                "nonce {i}: pair {a}-{b} coupling"
+            );
+            assert!(
+                nodes.insert(a) && nodes.insert(b),
+                "nonce {i}: pairs share a node"
+            );
         }
         let paired = instance
             .edges()
@@ -440,35 +399,75 @@ fn pairs_are_never_tile_edges_and_are_disjoint() {
             .zip(instance.j())
             .filter(|(edge, &j)| !tile_edges.contains(edge) && j == PAIR_MILLI)
             .count();
-        assert_eq!(paired, pairs.len());
+        assert_eq!(paired, pairs.len(), "nonce {i}");
     }
+    assert!(shared_nodes > 0, "z(2,2) has nodes in two tiles");
 }
 
+/// One admission case: label, parameter bytes, topology, outcome. A row whose
+/// parameters fail admission reports that code and never reaches the topology.
+type AdmissionRow<'a> = (&'a str, &'a [u8], &'a BaseTopology, Result<(), Code>);
+
 #[test]
-fn admission_codes_follow_fam_47() {
+fn admission_codes() {
     let topology = lattice_topology(2, 2);
+    let half = u32::try_from(topology.node_ids().len() / 2).expect("fits");
+    let at_bound = params(2, 2, 62, half);
+    let above = params(2, 2, 62, half + 1);
     let mixed = params(2, 0, 62, 8);
-    assert_eq!(
-        bounds(&admitted(&mixed).expect("admit"), &topology),
-        Err(Code::TopologyIncompatible)
-    );
     let cycle =
         BaseTopology::new(vec![0, 1, 2, 3], &[(0, 1), (1, 2), (2, 3), (3, 0)]).expect("cycle");
     let adjacency = params(0, 0, 62, 0);
-    assert_eq!(
-        bounds(&admitted(&adjacency).expect("admit"), &cycle),
-        Err(Code::TopologyIncompatible)
-    );
     let too_strong = params(2, 2, 1000, 8);
-    assert_eq!(admitted(&too_strong).err(), Some(Code::ParamsOutOfBounds));
     let too_many = params(2, 2, 62, 65_537);
-    assert_eq!(admitted(&too_many).err(), Some(Code::ParamsOutOfBounds));
     let star_edges: Vec<(u32, u32)> = (1..=33).map(|leaf| (0, leaf)).collect();
     let star = BaseTopology::new((0..34).collect(), &star_edges).expect("star");
-    assert_eq!(
-        bounds(&admitted(&adjacency).expect("admit"), &star),
-        Err(Code::BoundsExceeded)
-    );
+    let incompatible = Err(Code::TopologyIncompatible);
+    let rows: [AdmissionRow<'_>; 7] = [
+        (
+            "pairs at the floor-half bound",
+            &at_bound,
+            &topology,
+            Ok(()),
+        ),
+        (
+            "pairs above the floor-half bound",
+            &above,
+            &topology,
+            incompatible,
+        ),
+        ("mixed shape", &mixed, &topology, incompatible),
+        (
+            "adjacency mode on a cycle",
+            &adjacency,
+            &cycle,
+            incompatible,
+        ),
+        (
+            "weak coupling too strong",
+            &too_strong,
+            &topology,
+            Err(Code::ParamsOutOfBounds),
+        ),
+        (
+            "too many pairs",
+            &too_many,
+            &topology,
+            Err(Code::ParamsOutOfBounds),
+        ),
+        (
+            "a 33-leaf star",
+            &adjacency,
+            &star,
+            Err(Code::BoundsExceeded),
+        ),
+    ];
+    for (label, bytes, topology, expected) in rows {
+        let outcome = admitted(&TWISTED_DIMER_V1, bytes)
+            .and_then(|admitted| bounds(&admitted, topology))
+            .map(|_| ());
+        assert_eq!(outcome, expected, "{label}");
+    }
 }
 
 /// A valid z(2,2) instance with 8 pairs: its parameter bytes and the instance.
@@ -505,6 +504,25 @@ fn j_without_pairs(instance: &Instance, weak: i32) -> Vec<i32> {
 fn with_listed_pairs(instance: &Instance, j: Vec<i32>, pairs: &[(u32, u32)]) -> Instance {
     let [tiles, gauges, _] = split(instance);
     rebuilt(instance, j, join(&[tiles, gauges, pair_payload(pairs)]))
+}
+
+/// A copy of `instance` with a new offset. A looser offset limit lets the
+/// instance be built.
+fn with_offset(instance: &Instance, offset_milli: i64) -> Instance {
+    let parts = InstanceParts {
+        descriptor_digest: *instance.descriptor_digest(),
+        topology_order_digest: *instance.topology_order_digest(),
+        nonce: instance.nonce().copied(),
+        node_ids: instance.node_ids().to_vec(),
+        edges: instance.edges().to_vec(),
+        h: instance.h().to_vec(),
+        j: instance.j().to_vec(),
+        offset_milli,
+        metadata: instance.metadata().to_vec(),
+    };
+    let limits = InstanceLimits::new(131_072, 2_097_152, 1_000, 1, 8_388_608).expect("limits");
+    Instance::new(parts, &limits, TWISTED_DIMER_V1.metadata_kinds, None)
+        .expect("well formed under a looser offset limit")
 }
 
 #[test]
@@ -622,31 +640,11 @@ fn check_metadata_rejects_each_rule() {
     h[0] = 1;
     let bad = rebuilt_with(&instance, h, instance.j().to_vec(), metadata);
     assert!(!check(&bytes, &bad), "nonzero h");
-}
 
-#[test]
-fn check_metadata_rejects_a_nonzero_offset() {
-    let (bytes, instance) = valid_z22(12);
-    let parts = InstanceParts {
-        descriptor_digest: *instance.descriptor_digest(),
-        topology_order_digest: *instance.topology_order_digest(),
-        nonce: instance.nonce().copied(),
-        node_ids: instance.node_ids().to_vec(),
-        edges: instance.edges().to_vec(),
-        h: instance.h().to_vec(),
-        j: instance.j().to_vec(),
-        offset_milli: 1,
-        metadata: instance.metadata().to_vec(),
-    };
-    let limits = InstanceLimits::new(131_072, 2_097_152, 1_000, 1, 8_388_608).expect("limits");
-    let shifted = Instance::new(parts, &limits, TWISTED_DIMER_V1.metadata_kinds, None)
-        .expect("well formed under a looser offset limit");
-    assert!(!check(&bytes, &shifted));
-}
+    // Breaks one rule: the offset is nonzero.
+    assert!(!check(&bytes, &with_offset(&instance, 1)), "nonzero offset");
 
-#[test]
-fn oversized_counts_are_rejected_without_allocation() {
-    let (bytes, instance) = valid_z22(11);
+    // Breaks one rule: a section count is u32::MAX.
     for which in [0usize, 1, 2] {
         let mut payloads = split(&instance);
         payloads[which][..4].copy_from_slice(&u32::MAX.to_le_bytes());
@@ -702,7 +700,7 @@ fn reach_pair_counts(nonces: core::ops::Range<u8>) {
     let n = topology.node_ids().len();
     for recipe in &RECIPES {
         let want = {
-            let admitted = admitted(recipe.params).expect("admit");
+            let admitted = admitted(&TWISTED_DIMER_V1, recipe.params).expect("admit");
             match admitted.params().get(4) {
                 Some(Value::Unsigned(pairs)) => usize::try_from(pairs).expect("fits"),
                 other => panic!("pairs parameter: {other:?}"),

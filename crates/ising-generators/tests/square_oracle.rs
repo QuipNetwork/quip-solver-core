@@ -53,46 +53,21 @@ fn arrow_charges(lattice: &SquareLattice, spins: &[i8]) -> Vec<i8> {
 }
 
 #[test]
-fn periodic_l2_has_parallel_links() {
-    let lat = lattice(2, Boundary::Periodic);
-    assert_eq!(lat.vertex_count(), 4);
-    assert_eq!(lat.link_count(), 8);
-    let a = lat.link(0).expect("link 0");
-    let b = lat.link(2).expect("link 2");
-    assert_eq!((a.tail, a.head, a.axis), (0, 1, Axis::X));
-    assert_eq!((b.tail, b.head, b.axis), (1, 0, Axis::X));
-    assert_eq!(lat.link(1).expect("link 1").head, 2);
-    assert!(lat.link(8).is_none());
-    for v in 0..4 {
-        assert_eq!(lat.degree(v), Some(4));
-    }
-    assert_eq!(lat.degree(4), None);
-    assert_eq!(lat.incident(0), &[(0, -1), (1, -1), (2, 1), (5, 1)][..]);
-    assert!(lat.incident(4).is_empty());
-}
-
-#[test]
-fn open_l2_has_12_links_and_boundary_degrees() {
-    let lat = lattice(2, Boundary::Open);
-    assert_eq!(lat.vertex_count(), 9);
-    assert_eq!(lat.link_count(), 12);
-    let degrees: Vec<u8> = (0..9).map(|v| lat.degree(v).expect("vertex")).collect();
-    assert_eq!(degrees, [2, 3, 2, 3, 4, 3, 2, 3, 2]);
-    // Vertex 2 is (2, 0): it owns only a +y link. Link order is by tail.
-    let first = lat.link(0).expect("link 0");
-    assert_eq!((first.tail, first.head, first.axis), (0, 1, Axis::X));
-    let second = lat.link(1).expect("link 1");
-    assert_eq!((second.tail, second.head, second.axis), (0, 3, Axis::Y));
-    let third = lat.link(3).expect("link 3");
-    assert_eq!((third.tail, third.head, third.axis), (1, 4, Axis::Y));
-    let last = lat.link(11).expect("link 11");
-    assert_eq!((last.tail, last.head, last.axis), (7, 8, Axis::X));
-}
-
-#[test]
-fn every_link_has_the_pinned_endpoints_and_axis() {
+fn l2_lattices_are_pinned() {
     use Axis::{X, Y};
     let periodic = lattice(2, Boundary::Periodic);
+    assert_eq!(periodic.vertex_count(), 4);
+    assert_eq!(periodic.link_count(), 8);
+    assert!(periodic.link(8).is_none());
+    for v in 0..4 {
+        assert_eq!(periodic.degree(v), Some(4));
+    }
+    assert_eq!(periodic.degree(4), None);
+    assert_eq!(
+        periodic.incident(0),
+        &[(0, -1), (1, -1), (2, 1), (5, 1)][..]
+    );
+    assert!(periodic.incident(4).is_empty());
     let got: Vec<_> = (0..8)
         .map(|e| {
             let l = periodic.link(e).expect("link");
@@ -113,6 +88,10 @@ fn every_link_has_the_pinned_endpoints_and_axis() {
         ]
     );
     let open = lattice(2, Boundary::Open);
+    assert_eq!(open.vertex_count(), 9);
+    assert_eq!(open.link_count(), 12);
+    let degrees: Vec<u8> = (0..9).map(|v| open.degree(v).expect("vertex")).collect();
+    assert_eq!(degrees, [2, 3, 2, 3, 4, 3, 2, 3, 2]);
     let got: Vec<_> = (0..12)
         .map(|e| {
             let l = open.link(e).expect("link");
@@ -160,31 +139,41 @@ fn lattice_bounds() {
     assert_eq!(lattice(2, Boundary::Periodic).vertex_count(), 4);
 }
 
-fn check_all_states(lat: &SquareLattice) {
+fn check_all_states(lat: &SquareLattice, boundary: Boundary) {
     let links = lat.link_count();
     for state in 0..(1u32 << links) {
         let spins = spins_of(state, links);
-        let q = charges(lat, &spins).expect("valid spins");
-        assert_eq!(q, arrow_charges(lat, &spins), "state {state}");
-        assert_eq!(q.iter().map(|&c| i32::from(c)).sum::<i32>(), 0);
+        let q = charges(lat, &spins);
+        assert!(q.is_some(), "{boundary:?} state {state}: valid spins");
+        let q = q.expect("valid spins");
+        assert_eq!(q, arrow_charges(lat, &spins), "{boundary:?} state {state}");
+        assert_eq!(
+            q.iter().map(|&c| i32::from(c)).sum::<i32>(),
+            0,
+            "{boundary:?} state {state}: charges sum to zero"
+        );
         for (v, &c) in q.iter().enumerate() {
             let deg = lat
                 .degree(u32::try_from(v).expect("small"))
                 .expect("vertex");
-            assert_eq!((i32::from(c) - i32::from(deg)) % 2, 0, "parity");
-            assert!(c.unsigned_abs() <= deg, "degree bound");
+            assert_eq!(
+                (i32::from(c) - i32::from(deg)) % 2,
+                0,
+                "{boundary:?} state {state}: parity"
+            );
+            assert!(
+                c.unsigned_abs() <= deg,
+                "{boundary:?} state {state}: degree bound"
+            );
         }
     }
 }
 
 #[test]
-fn every_periodic_l2_state_has_reproducible_charges() {
-    check_all_states(&lattice(2, Boundary::Periodic));
-}
-
-#[test]
-fn every_open_l2_state_has_reproducible_charges() {
-    check_all_states(&lattice(2, Boundary::Open));
+fn every_l2_state_has_reproducible_charges() {
+    for boundary in [Boundary::Periodic, Boundary::Open] {
+        check_all_states(&lattice(2, boundary), boundary);
+    }
 }
 
 #[test]
@@ -522,7 +511,7 @@ fn packing_round_trips_and_rejects_malformed() {
 }
 
 #[test]
-fn witness_reports_labeled_violations() {
+fn check_witness_reports_failed_labels() {
     let lat = lattice(2, Boundary::Periodic);
     let mut req = empty_request(&lat);
     req.charges[0] = Some(4);
@@ -545,23 +534,23 @@ fn witness_reports_labeled_violations() {
     assert_eq!(check_witness(&lat, &req, &into_zero), Ok(vec![0]));
     req.fixed = vec![(0, -1)];
     assert_eq!(check_witness(&lat, &req, &all_up), Ok(vec![0, 1]));
-}
-
-#[test]
-fn a_valid_witness_has_no_violation() {
-    let lat = lattice(2, Boundary::Periodic);
-    let mut req = empty_request(&lat);
-    req.charges[0] = Some(4);
-    req.fixed = vec![(0, -1)];
-    let witness = packed_state(0b0010_0100, 8);
-    assert_eq!(check_witness(&lat, &req, &witness), Ok(Vec::new()));
+    // A witness that meets the fixed spin and the charge has no violation.
     assert_eq!(
-        check_witness(&lat, &empty_request(&lat), &witness),
-        Ok(Vec::new())
+        check_witness(&lat, &req, &into_zero),
+        Ok(Vec::new()),
+        "a valid witness"
     );
-    assert!(constraints(&lat, &empty_request(&lat))
-        .expect("shape")
-        .is_empty());
+    assert_eq!(
+        check_witness(&lat, &empty_request(&lat), &into_zero),
+        Ok(Vec::new()),
+        "a valid witness with no constraint"
+    );
+    assert!(
+        constraints(&lat, &empty_request(&lat))
+            .expect("shape")
+            .is_empty(),
+        "an empty request has no constraint"
+    );
 }
 
 #[test]

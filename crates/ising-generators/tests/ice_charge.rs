@@ -9,20 +9,19 @@
 
 use std::collections::BTreeSet;
 
-use ising_generators::descriptor::{
-    admit, params_digest, Admitted, AdvertisedLimits, Contract, SizeBounds, Value,
-};
-use ising_generators::family::{admit_topology, generate_instance, BaseTopology};
-use ising_generators::ice::{
-    charge_defects, zephyr_lattice, CHARGED_ICE_V1, CHARGE_UNIT, ICE_CHARGE_RECIPE,
-};
+use ising_generators::descriptor::Value;
+use ising_generators::family::{generate_instance, BaseTopology};
+use ising_generators::ice::{charge_defects, CHARGED_ICE_V1, CHARGE_UNIT, ICE_CHARGE_RECIPE};
 use ising_generators::instance::{Instance, InstanceParts};
 use ising_generators::Code;
 
 #[expect(dead_code, reason = "this test uses only the live topology loader")]
 mod common;
 
-const CONTRACTS: &[Contract] = &[CHARGED_ICE_V1];
+#[path = "common/family.rs"]
+mod family;
+
+use family::{admitted, bounds, lattice_topology, nonce_of};
 
 /// Canonical parameter bytes: format, then `(tag, len, payload)` per field.
 fn params(m: u16, t: u8, scale: u16, background: u16, charged: u16) -> Vec<u8> {
@@ -37,42 +36,14 @@ fn params(m: u16, t: u8, scale: u16, background: u16, charged: u16) -> Vec<u8> {
     bytes
 }
 
-fn admitted(bytes: &[u8]) -> Result<Admitted<'_>, Code> {
-    admit(
-        CONTRACTS,
-        b"quip/charged-ice",
-        1,
-        bytes,
-        &params_digest(bytes),
-    )
-}
-
-fn bounds(admitted: &Admitted<'_>, topology: &BaseTopology) -> Result<SizeBounds, Code> {
-    admit_topology(
-        admitted,
-        topology,
-        topology.order_digest(),
-        &AdvertisedLimits::default(),
-    )
-}
-
-fn lattice_topology(m: u16, t: u8) -> BaseTopology {
-    let (nodes, edges) = zephyr_lattice(m, t).expect("lattice");
-    BaseTopology::new(nodes, &edges).expect("topology")
-}
-
 /// K4: four nodes, six edges, one tile in adjacency mode.
 fn k4() -> BaseTopology {
     let edges = [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)];
     BaseTopology::new(vec![0, 1, 2, 3], &edges).expect("k4")
 }
 
-fn nonce_of(i: u8) -> [u8; 32] {
-    [i; 32]
-}
-
 fn build(bytes: &[u8], topology: &BaseTopology, nonce: [u8; 32]) -> Instance {
-    let admitted = admitted(bytes).expect("admit");
+    let admitted = admitted(&CHARGED_ICE_V1, bytes).expect("admit");
     let bounds = bounds(&admitted, topology).expect("admit topology");
     generate_instance(&admitted, topology, &bounds, nonce)
         .map_err(|fault| format!("{fault:?}"))
@@ -80,7 +51,7 @@ fn build(bytes: &[u8], topology: &BaseTopology, nonce: [u8; 32]) -> Instance {
 }
 
 fn check(bytes: &[u8], instance: &Instance) -> bool {
-    let admitted = admitted(bytes).expect("admit");
+    let admitted = admitted(&CHARGED_ICE_V1, bytes).expect("admit");
     let construction = CHARGED_ICE_V1.construction.expect("construction");
     (construction.check_metadata)(admitted.params(), instance)
 }
@@ -352,6 +323,16 @@ fn a_node_in_two_charged_tiles_sums_its_fields() {
             }
         }
         shared_nodes += slots.iter().filter(|&&s| s == 2).count();
+        assert!(
+            charges.iter().all(|&q| q.abs() == 2),
+            "nonce {nonce}: every charge is 2 or -2"
+        );
+        let count = i64::try_from(tiles.len()).expect("fits");
+        assert_eq!(
+            instance.offset_milli(),
+            count * 250 * 8 / 2,
+            "nonce {nonce}: offset"
+        );
         for (at, (&h, &w)) in instance.h().iter().zip(&want).enumerate() {
             assert_eq!(i64::from(h), w, "node {at}");
             assert!(h.abs() <= 1000, "node {at}");
@@ -362,7 +343,7 @@ fn a_node_in_two_charged_tiles_sums_its_fields() {
 }
 
 #[test]
-fn charged_per_256_bounds_give_all_or_no_charges() {
+fn a_charged_of_zero_gives_no_charges() {
     let topology = lattice_topology(2, 2);
     for nonce in 0..4u8 {
         let none = params(2, 2, 250, 31, 0);
@@ -373,60 +354,7 @@ fn charged_per_256_bounds_give_all_or_no_charges() {
         let count = i64::try_from(tiles.len()).expect("fits");
         assert_eq!(instance.offset_milli(), count * 250 * 4 / 2);
         assert!(check(&none, &instance));
-
-        let all = params(2, 2, 250, 31, 256);
-        let instance = build(&all, &topology, nonce_of(nonce));
-        let (_, _, charges) = decoded(&instance);
-        assert!(charges.iter().all(|&q| q.abs() == 2));
-        assert_eq!(instance.offset_milli(), count * 250 * 8 / 2);
-        assert!(check(&all, &instance));
     }
-}
-
-#[test]
-fn admission_codes_follow_fam_47() {
-    let topology = lattice_topology(2, 2);
-    let mixed = params(2, 0, 250, 31, 128);
-    assert_eq!(
-        bounds(&admitted(&mixed).expect("admit"), &topology),
-        Err(Code::TopologyIncompatible)
-    );
-    let cycle =
-        BaseTopology::new(vec![0, 1, 2, 3], &[(0, 1), (1, 2), (2, 3), (3, 0)]).expect("cycle");
-    let adjacency = params(0, 0, 250, 31, 128);
-    assert_eq!(
-        bounds(&admitted(&adjacency).expect("admit"), &cycle),
-        Err(Code::TopologyIncompatible)
-    );
-    let too_strong = params(2, 2, 251, 31, 128);
-    assert_eq!(admitted(&too_strong).err(), Some(Code::ParamsOutOfBounds));
-    let too_charged = params(2, 2, 250, 31, 257);
-    assert_eq!(admitted(&too_charged).err(), Some(Code::ParamsOutOfBounds));
-    let star_edges: Vec<(u32, u32)> = (1..=33).map(|leaf| (0, leaf)).collect();
-    let star = BaseTopology::new((0..34).collect(), &star_edges).expect("star");
-    assert_eq!(
-        bounds(&admitted(&adjacency).expect("admit"), &star),
-        Err(Code::BoundsExceeded)
-    );
-}
-
-/// A 33-leaf star plus a self-loop: admission checks the self-loop before the
-/// degree, so the request gets code 12 and never reaches the size bounds.
-#[test]
-fn a_self_loop_wins_over_a_degree_fault() {
-    let mut edges: Vec<(u32, u32)> = (1..=33).map(|leaf| (0, leaf)).collect();
-    edges.push((0, 0));
-    let star = BaseTopology::new((0..34).collect(), &edges).expect("star with a loop");
-    let adjacency = params(0, 0, 250, 31, 128);
-    assert_eq!(
-        bounds(&admitted(&adjacency).expect("admit"), &star),
-        Err(Code::TopologyIncompatible)
-    );
-    let loop_only = BaseTopology::new(vec![0, 1, 2, 3], &[(0, 1), (0, 0)]).expect("loop");
-    assert_eq!(
-        bounds(&admitted(&adjacency).expect("admit"), &loop_only),
-        Err(Code::TopologyIncompatible)
-    );
 }
 
 /// K4 plus isolated nodes, `nodes` nodes in all.
@@ -435,15 +363,79 @@ fn k4_with_isolated(nodes: u32) -> BaseTopology {
     BaseTopology::new((0..nodes).collect(), &edges).expect("k4 and isolated nodes")
 }
 
+/// One admission case: label, parameter bytes, topology, outcome. A row whose
+/// parameters fail admission reports that code and never reaches the topology.
+type AdmissionRow<'a> = (&'a str, &'a [u8], &'a BaseTopology, Result<(), Code>);
+
 #[test]
-fn the_node_limit_gives_code_13() {
+fn admission_codes() {
+    let lattice = lattice_topology(2, 2);
+    let cycle =
+        BaseTopology::new(vec![0, 1, 2, 3], &[(0, 1), (1, 2), (2, 3), (3, 0)]).expect("cycle");
+    let star_edges: Vec<(u32, u32)> = (1..=33).map(|leaf| (0, leaf)).collect();
+    let star = BaseTopology::new((0..34).collect(), &star_edges).expect("star");
+    // A 33-leaf star plus a self-loop: admission checks the self-loop before
+    // the degree, so the request gets code 12 and never reaches the size
+    // bounds.
+    let mut looped_edges = star_edges;
+    looped_edges.push((0, 0));
+    let looped_star =
+        BaseTopology::new((0..34).collect(), &looped_edges).expect("star with a loop");
+    let loop_only = BaseTopology::new(vec![0, 1, 2, 3], &[(0, 1), (0, 0)]).expect("loop");
+    let at_node_limit = k4_with_isolated(131_072);
+    let over_node_limit = k4_with_isolated(131_073);
+    let mixed = params(2, 0, 250, 31, 128);
     let adjacency = params(0, 0, 250, 31, 128);
-    let admitted = admitted(&adjacency).expect("admit");
-    assert!(bounds(&admitted, &k4_with_isolated(131_072)).is_ok());
-    assert_eq!(
-        bounds(&admitted, &k4_with_isolated(131_073)),
-        Err(Code::BoundsExceeded)
-    );
+    let too_strong = params(2, 2, 251, 31, 128);
+    let too_charged = params(2, 2, 250, 31, 257);
+    let incompatible = Err(Code::TopologyIncompatible);
+    let rows: [AdmissionRow<'_>; 9] = [
+        ("mixed shape", &mixed, &lattice, incompatible),
+        (
+            "adjacency mode on a cycle",
+            &adjacency,
+            &cycle,
+            incompatible,
+        ),
+        (
+            "scale too strong",
+            &too_strong,
+            &lattice,
+            Err(Code::ParamsOutOfBounds),
+        ),
+        (
+            "charged above 256",
+            &too_charged,
+            &lattice,
+            Err(Code::ParamsOutOfBounds),
+        ),
+        (
+            "a 33-leaf star",
+            &adjacency,
+            &star,
+            Err(Code::BoundsExceeded),
+        ),
+        (
+            "a self-loop wins over a degree fault",
+            &adjacency,
+            &looped_star,
+            incompatible,
+        ),
+        ("a self-loop alone", &adjacency, &loop_only, incompatible),
+        ("131072 nodes", &adjacency, &at_node_limit, Ok(())),
+        (
+            "131073 nodes",
+            &adjacency,
+            &over_node_limit,
+            Err(Code::BoundsExceeded),
+        ),
+    ];
+    for (label, bytes, topology, expected) in rows {
+        let outcome = admitted(&CHARGED_ICE_V1, bytes)
+            .and_then(|admitted| bounds(&admitted, topology))
+            .map(|_| ());
+        assert_eq!(outcome, expected, "{label}");
+    }
 }
 
 /// A valid z(2,2) instance: its parameter bytes and the instance.
@@ -496,6 +488,39 @@ fn check_metadata_rejects_each_rule() {
     let mut bad = base;
     bad.metadata = join(&[(1, &tile_payload), (2, &gauge_payload)]);
     assert!(!check(&bytes, &rebuilt(&instance, bad)), "kind list");
+
+    // Breaks one rule: one registered kind among the three sections is wrong.
+    // The kinds stay strictly ascending, so the first section has no other
+    // kind to take. The outer kind list is permissive, so only the family
+    // comparison can reject.
+    let [tiles, gauges, charges] = split(&instance);
+    let valid = admitted(&CHARGED_ICE_V1, &bytes).expect("admit");
+    let construction = CHARGED_ICE_V1.construction.expect("construction");
+    for wrong in [[1, 3, 6], [1, 2, 3]] {
+        let mut fields = fields(&instance);
+        fields.metadata = join(&[
+            (wrong[0], &tiles),
+            (wrong[1], &gauges),
+            (wrong[2], &charges),
+        ]);
+        let built = rebuilt_with_kinds(&instance, fields, &[1, 2, 3, 6]);
+        assert!(
+            !(construction.check_metadata)(valid.params(), &built),
+            "kinds {wrong:?}"
+        );
+    }
+
+    // Breaks one rule: a section count is u32::MAX.
+    for which in [0usize, 1, 2] {
+        let mut payloads = split(&instance);
+        payloads[which][..4].copy_from_slice(&u32::MAX.to_le_bytes());
+        let mut bad = fields(&instance);
+        bad.metadata = join(&[(1, &payloads[0]), (2, &payloads[1]), (6, &payloads[2])]);
+        assert!(
+            !check(&bytes, &rebuilt(&instance, bad)),
+            "section {which} count"
+        );
+    }
 }
 
 /// The fields a verifier expects for these tiles, gauges, and charges, with the
@@ -652,51 +677,12 @@ fn each_parser_rule_rejects_on_its_own() {
     );
 }
 
-/// One wrong registered kind among three sections. The kinds stay strictly
-/// ascending, so the first section has no other kind to take. The outer kind
-/// list is permissive, so only the family comparison can reject.
-#[test]
-fn a_wrong_section_kind_is_rejected_on_its_own() {
-    let (bytes, instance) = valid_z22(10);
-    let [tiles, gauges, charges] = split(&instance);
-    let admitted = admitted(&bytes).expect("admit");
-    let construction = CHARGED_ICE_V1.construction.expect("construction");
-    for wrong in [[1, 3, 6], [1, 2, 3]] {
-        let mut fields = fields(&instance);
-        fields.metadata = join(&[
-            (wrong[0], &tiles),
-            (wrong[1], &gauges),
-            (wrong[2], &charges),
-        ]);
-        let built = rebuilt_with_kinds(&instance, fields, &[1, 2, 3, 6]);
-        assert!(
-            !(construction.check_metadata)(admitted.params(), &built),
-            "kinds {wrong:?}"
-        );
-    }
-}
-
-#[test]
-fn oversized_counts_are_rejected_without_allocation() {
-    let (bytes, instance) = valid_z22(11);
-    for which in [0usize, 1, 2] {
-        let mut payloads = split(&instance);
-        payloads[which][..4].copy_from_slice(&u32::MAX.to_le_bytes());
-        let mut bad = fields(&instance);
-        bad.metadata = join(&[(1, &payloads[0]), (2, &payloads[1]), (6, &payloads[2])]);
-        assert!(
-            !check(&bytes, &rebuilt(&instance, bad)),
-            "section {which} count"
-        );
-    }
-}
-
 #[test]
 fn charge_defects_count_mismatched_tiles() {
     for want in [0, i64::from(CHARGE_UNIT), -i64::from(CHARGE_UNIT)] {
         let (bytes, instance) =
             k4_with_gauge(|charged| params(0, 0, 250, 31, charged), want, false);
-        let admitted = admitted(&bytes).expect("admit");
+        let admitted = admitted(&CHARGED_ICE_V1, &bytes).expect("admit");
         let params = admitted.params();
         let (_, gauges, _) = decoded(&instance);
         let ground: Vec<i8> = (0..16u32)
@@ -732,7 +718,7 @@ fn charge_defects_count_mismatched_tiles() {
     // An instance that fails the family validation gives no count, though
     // every section decodes: a wrong offset, field, or tile coupling.
     let (bytes, instance) = valid_z22(12);
-    let valid = admitted(&bytes).expect("admit");
+    let valid = admitted(&CHARGED_ICE_V1, &bytes).expect("admit");
     let spins = vec![1i8; instance.node_ids().len()];
     let (tiles, _, _) = decoded(&instance);
     let tile_edge = tile_pairs(tiles[0])[0];
@@ -754,7 +740,7 @@ fn charge_defects_count_mismatched_tiles() {
     let mut bad = fields(&instance);
     bad.metadata = join(&[(1, &tiles), (2, &gauges)]);
     let bad = rebuilt(&instance, bad);
-    let admitted = admitted(&bytes).expect("admit");
+    let admitted = admitted(&CHARGED_ICE_V1, &bytes).expect("admit");
     let spins = vec![1i8; bad.node_ids().len()];
     assert_eq!(charge_defects(admitted.params(), &bad, &spins), None);
     assert!(charge_defects(admitted.params(), &instance, &spins).is_some());
@@ -765,7 +751,8 @@ fn recipe_params_are_canonical() {
     assert_eq!(ICE_CHARGE_RECIPE.alias, "ice-charge");
     assert_eq!(ICE_CHARGE_RECIPE.cell, "ice-charge");
     assert_eq!(ICE_CHARGE_RECIPE.params, params(12, 4, 250, 31, 128));
-    let admitted = admitted(ICE_CHARGE_RECIPE.params).expect("the recipe is admitted");
+    let admitted =
+        admitted(&CHARGED_ICE_V1, ICE_CHARGE_RECIPE.params).expect("the recipe is admitted");
     assert_eq!(admitted.params().get(3), Some(Value::Unsigned(250)));
     assert_eq!(admitted.params().get(4), Some(Value::Unsigned(31)));
     assert_eq!(admitted.params().get(5), Some(Value::Unsigned(128)));

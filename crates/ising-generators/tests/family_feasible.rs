@@ -99,47 +99,32 @@ fn instance_of(admitted: &Admitted<'_>) -> Result<Instance, String> {
     generate_instance(admitted, &topology, &bounds, [3; 32]).map_err(|e| format!("{e:?}"))
 }
 
-#[test]
-fn a_soft_family_accepts_any_witness_of_the_right_length() -> Result<(), String> {
-    let contracts = [contract(Some(&SOFT))];
-    let admitted = admitted(&contracts)?;
-    let instance = instance_of(&admitted)?;
-    for spins in [[1i8, 1], [1, -1], [-1, 1], [-1, -1]] {
-        assert!(feasible(&admitted, &instance, &spins));
-    }
-    Ok(())
-}
+/// One `feasible` case: label, contracts, witness, expected answer.
+type FeasibleRow<'a> = (&'a str, &'a [Contract], &'a [i8], bool);
 
 #[test]
-fn a_soft_family_rejects_a_witness_that_is_not_one_spin_per_node() -> Result<(), String> {
-    let contracts = [contract(Some(&SOFT))];
-    let admitted = admitted(&contracts)?;
-    let instance = instance_of(&admitted)?;
-    assert!(!feasible(&admitted, &instance, &[1]));
-    assert!(!feasible(&admitted, &instance, &[1, 1, 1]));
-    assert!(!feasible(&admitted, &instance, &[1, 0]));
-    assert!(!feasible(&admitted, &instance, &[2, 1]));
-    Ok(())
-}
-
-#[test]
-fn a_hard_family_returns_the_hook_result() -> Result<(), String> {
-    let contracts = [contract(Some(&HARD))];
-    let admitted = admitted(&contracts)?;
-    let instance = instance_of(&admitted)?;
-    assert!(feasible(&admitted, &instance, &[1, 1]));
-    assert!(feasible(&admitted, &instance, &[-1, -1]));
-    assert!(!feasible(&admitted, &instance, &[1, -1]));
-    Ok(())
-}
-
-#[test]
-fn a_contract_without_a_construction_is_never_feasible() -> Result<(), String> {
-    let built = [contract(Some(&SOFT))];
-    let built = admitted(&built)?;
-    let instance = instance_of(&built)?;
+fn feasible_follows_the_construction() -> Result<(), String> {
+    let soft = [contract(Some(&SOFT))];
+    let hard = [contract(Some(&HARD))];
     let none = [contract(None)];
-    let none = admitted(&none)?;
-    assert!(!feasible(&none, &instance, &[1, 1]));
+    let instance = instance_of(&admitted(&soft)?)?;
+    let rows: [FeasibleRow<'_>; 12] = [
+        ("soft: [1, 1]", &soft, &[1, 1], true),
+        ("soft: [1, -1]", &soft, &[1, -1], true),
+        ("soft: [-1, 1]", &soft, &[-1, 1], true),
+        ("soft: [-1, -1]", &soft, &[-1, -1], true),
+        ("soft: one spin", &soft, &[1], false),
+        ("soft: three spins", &soft, &[1, 1, 1], false),
+        ("soft: a zero spin", &soft, &[1, 0], false),
+        ("soft: a spin of 2", &soft, &[2, 1], false),
+        ("hard: [1, 1]", &hard, &[1, 1], true),
+        ("hard: [-1, -1]", &hard, &[-1, -1], true),
+        ("hard: [1, -1]", &hard, &[1, -1], false),
+        ("no construction: [1, 1]", &none, &[1, 1], false),
+    ];
+    for (label, contracts, spins, want) in rows {
+        let admitted = admitted(contracts).map_err(|e| format!("{label}: {e}"))?;
+        assert_eq!(feasible(&admitted, &instance, spins), want, "{label}");
+    }
     Ok(())
 }

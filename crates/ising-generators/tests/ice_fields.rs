@@ -11,13 +11,9 @@
 use std::collections::BTreeSet;
 use std::num::NonZeroU32;
 
-use ising_generators::descriptor::{admit, params_digest, Admitted, AdvertisedLimits, SizeBounds};
-use ising_generators::family::{
-    admit_topology, generate_instance, BaseTopology, SaltFault, Streams,
-};
-use ising_generators::ice::{
-    zephyr_lattice, ICE_FIELDS, ICE_FIELDS_RECIPES, ICE_FIELDS_V1, STRONG_MILLI,
-};
+use ising_generators::descriptor::params_digest;
+use ising_generators::family::{generate_instance, BaseTopology, SaltFault, Streams};
+use ising_generators::ice::{ICE_FIELDS, ICE_FIELDS_RECIPES, ICE_FIELDS_V1, STRONG_MILLI};
 use ising_generators::instance::{Instance, InstanceParts};
 use ising_generators::rng::{shuffle, uniform};
 use ising_generators::Code;
@@ -25,7 +21,10 @@ use ising_generators::Code;
 #[expect(dead_code, reason = "this test uses only the live topology loader")]
 mod common;
 
-const CONTRACTS: &[ising_generators::descriptor::Contract] = &[ICE_FIELDS_V1];
+#[path = "common/family.rs"]
+mod family;
+
+use family::{admitted, bounds, lattice_topology, nonce_of};
 
 /// Canonical parameter bytes: format, then `(tag, len, payload)` per field.
 fn params(m: u16, t: u8, glass: u16, field: u16, divisor: u16) -> Vec<u8> {
@@ -40,36 +39,8 @@ fn params(m: u16, t: u8, glass: u16, field: u16, divisor: u16) -> Vec<u8> {
     bytes
 }
 
-fn admitted(bytes: &[u8]) -> Result<Admitted<'_>, Code> {
-    admit(
-        CONTRACTS,
-        b"quip/ice-fields",
-        1,
-        bytes,
-        &params_digest(bytes),
-    )
-}
-
-fn bounds(admitted: &Admitted<'_>, topology: &BaseTopology) -> Result<SizeBounds, Code> {
-    admit_topology(
-        admitted,
-        topology,
-        topology.order_digest(),
-        &AdvertisedLimits::default(),
-    )
-}
-
-fn lattice_topology(m: u16, t: u8) -> BaseTopology {
-    let (nodes, edges) = zephyr_lattice(m, t).expect("lattice");
-    BaseTopology::new(nodes, &edges).expect("topology")
-}
-
 fn small_topology(nodes: Vec<u32>, edges: &[(u32, u32)]) -> BaseTopology {
     BaseTopology::new(nodes, edges).expect("test topology is valid")
-}
-
-fn nonce_of(i: u8) -> [u8; 32] {
-    [i; 32]
 }
 
 fn try_build(
@@ -77,7 +48,7 @@ fn try_build(
     topology: &BaseTopology,
     nonce: [u8; 32],
 ) -> Result<Instance, SaltFault> {
-    let admitted = admitted(bytes).expect("admit");
+    let admitted = admitted(&ICE_FIELDS_V1, bytes).expect("admit");
     let bounds = bounds(&admitted, topology).expect("admit topology");
     generate_instance(&admitted, topology, &bounds, nonce)
 }
@@ -153,7 +124,7 @@ fn rebuilt(instance: &Instance, h: Vec<i32>, metadata: Vec<u8>) -> Instance {
 }
 
 fn check(bytes: &[u8], instance: &Instance) -> bool {
-    let admitted = admitted(bytes).expect("admit");
+    let admitted = admitted(&ICE_FIELDS_V1, bytes).expect("admit");
     let construction = ICE_FIELDS_V1.construction.expect("construction");
     (construction.check_metadata)(admitted.params(), instance)
 }
@@ -161,7 +132,7 @@ fn check(bytes: &[u8], instance: &Instance) -> bool {
 /// Run the generator directly with a fixed descriptor digest, so that two
 /// parameter sets share every stream.
 fn raw(bytes: &[u8], topology: &BaseTopology, nonce: [u8; 32]) -> Result<Instance, Code> {
-    let admitted = admitted(bytes).expect("admit");
+    let admitted = admitted(&ICE_FIELDS_V1, bytes).expect("admit");
     let mut streams = Streams::new(nonce, [7; 32], *topology.order_digest(), ICE_FIELDS.labels);
     let body = (ICE_FIELDS.generate)(admitted.params(), topology, &mut streams)?;
     let parts = InstanceParts {
@@ -214,23 +185,6 @@ fn field_streams_do_not_change_the_glass() {
 }
 
 #[test]
-fn tile_edges_follow_the_global_gauge() {
-    let topology = lattice_topology(2, 2);
-    let bytes = params(2, 2, 125, 500, 16);
-    let instance = build(&bytes, &topology, nonce_of(4));
-    let (tiles, gauge) = decode(&instance);
-    assert!(!tiles.is_empty());
-    for tile in tiles {
-        for pair in tile_pairs(tile) {
-            let at = instance.edges().binary_search(&pair).expect("tile edge");
-            let hidden =
-                i64::from(instance.j()[at]) * gauge[pair.0 as usize] * gauge[pair.1 as usize];
-            assert_eq!(hidden, i64::from(STRONG_MILLI));
-        }
-    }
-}
-
-#[test]
 fn fields_sit_on_shared_spins_only() {
     let topology = lattice_topology(2, 2);
     let n = topology.node_ids().len();
@@ -238,7 +192,23 @@ fn fields_sit_on_shared_spins_only() {
         let bytes = params(m, t, 125, 500, 16);
         for i in 0..4 {
             let instance = build(&bytes, &topology, nonce_of(i));
-            let (tiles, _) = decode(&instance);
+            let (tiles, gauge) = decode(&instance);
+            if (m, t) == (2, 2) {
+                assert!(!tiles.is_empty(), "nonce {i}: tiles");
+                for &tile in &tiles {
+                    for pair in tile_pairs(tile) {
+                        let at = instance.edges().binary_search(&pair).expect("tile edge");
+                        let hidden = i64::from(instance.j()[at])
+                            * gauge[pair.0 as usize]
+                            * gauge[pair.1 as usize];
+                        assert_eq!(
+                            hidden,
+                            i64::from(STRONG_MILLI),
+                            "nonce {i}: tile edge {pair:?}"
+                        );
+                    }
+                }
+            }
             let seen = memberships(&tiles, n);
             let fields: Vec<usize> = (0..n).filter(|&k| instance.h()[k] != 0).collect();
             assert_eq!(fields.len(), n / 16, "mode ({m}, {t}) nonce {i}");
@@ -335,7 +305,7 @@ fn admission_codes() {
     let topology = lattice_topology(2, 2);
     assert_eq!(
         bounds(
-            &admitted(&params(2, 0, 125, 500, 16)).expect("admit"),
+            &admitted(&ICE_FIELDS_V1, &params(2, 0, 125, 500, 16)).expect("admit"),
             &topology
         ),
         Err(Code::TopologyIncompatible),
@@ -344,7 +314,7 @@ fn admission_codes() {
     let competing = competing_tiles();
     let admit_competing = |divisor| {
         bounds(
-            &admitted(&params(0, 0, 125, 500, divisor)).expect("admit"),
+            &admitted(&ICE_FIELDS_V1, &params(0, 0, 125, 500, divisor)).expect("admit"),
             &competing,
         )
     };
@@ -364,22 +334,22 @@ fn admission_codes() {
     );
     assert!(admit_competing(10).is_ok(), "count 0 is valid");
     assert_eq!(
-        admitted(&params(2, 2, 125, 1001, 16)).err(),
+        admitted(&ICE_FIELDS_V1, &params(2, 2, 125, 1001, 16)).err(),
         Some(Code::ParamsOutOfBounds)
     );
     assert_eq!(
-        admitted(&params(2, 2, 1000, 500, 16)).err(),
+        admitted(&ICE_FIELDS_V1, &params(2, 2, 1000, 500, 16)).err(),
         Some(Code::ParamsOutOfBounds)
     );
     assert_eq!(
-        admitted(&params(2, 2, 125, 500, 0)).err(),
+        admitted(&ICE_FIELDS_V1, &params(2, 2, 125, 500, 0)).err(),
         Some(Code::ParamsOutOfBounds)
     );
     let star_edges: Vec<(u32, u32)> = (1..=33).map(|leaf| (0, leaf)).collect();
     let star = small_topology((0..34).collect(), &star_edges);
     assert_eq!(
         bounds(
-            &admitted(&params(0, 0, 125, 500, 16)).expect("admit"),
+            &admitted(&ICE_FIELDS_V1, &params(0, 0, 125, 500, 16)).expect("admit"),
             &star
         ),
         Err(Code::BoundsExceeded),
@@ -450,14 +420,8 @@ fn check_metadata_rejects_each_rule() {
     assert!(!check(&bytes, &few), "one field too few");
     let flipped = with(&|h| h[held[0]] = -h[held[0]]);
     assert!(check(&bytes, &flipped), "the sign is not checked");
-}
 
-#[test]
-fn oversized_counts_are_rejected_without_allocation() {
-    let topology = lattice_topology(2, 2);
-    let bytes = params(2, 2, 125, 500, 16);
-    let instance = build(&bytes, &topology, nonce_of(11));
-    assert!(check(&bytes, &instance));
+    // Breaks one rule: a count is u32::MAX.
     let region = instance.metadata().to_vec();
     let tile_len = u32::from_le_bytes(region[4..8].try_into().expect("four bytes")) as usize;
     let gauge_count_at = 8 + tile_len + 6;
@@ -480,7 +444,7 @@ fn recipes_are_canonical() {
         assert_eq!(recipe.alias, alias);
         assert_eq!(recipe.cell, cell);
         assert_eq!(recipe.params, params(12, 4, 125, field, 16));
-        assert!(admitted(recipe.params).is_ok());
+        assert!(admitted(&ICE_FIELDS_V1, recipe.params).is_ok());
         assert!(digests.insert(params_digest(recipe.params)));
     }
 }

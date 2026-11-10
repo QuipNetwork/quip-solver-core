@@ -10,18 +10,18 @@
 
 use std::collections::BTreeSet;
 
-use ising_generators::descriptor::{admit, params_digest, Admitted, AdvertisedLimits, SizeBounds};
-use ising_generators::family::{admit_topology, generate_instance, BaseTopology};
-use ising_generators::ice::{
-    candidates, select, sides, zephyr_lattice, Lattice, ICE_GLASS_V1, STRONG_MILLI,
-};
+use ising_generators::family::{generate_instance, BaseTopology};
+use ising_generators::ice::{candidates, select, sides, Lattice, ICE_GLASS_V1, STRONG_MILLI};
 use ising_generators::instance::{Instance, InstanceLimits, InstanceParts};
 use ising_generators::Code;
 
 #[expect(dead_code, reason = "this test uses only the live topology loader")]
 mod common;
 
-const CONTRACTS: &[ising_generators::descriptor::Contract] = &[ICE_GLASS_V1];
+#[path = "common/family.rs"]
+mod family;
+
+use family::{admitted, bounds, lattice_topology, nonce_of};
 
 /// Canonical parameter bytes: format, then `(tag, len, payload)` per field.
 fn params(m: u16, t: u8, glass: u16) -> Vec<u8> {
@@ -34,36 +34,8 @@ fn params(m: u16, t: u8, glass: u16) -> Vec<u8> {
     bytes
 }
 
-fn admitted(bytes: &[u8]) -> Result<Admitted<'_>, Code> {
-    admit(
-        CONTRACTS,
-        b"quip/ice-glass",
-        1,
-        bytes,
-        &params_digest(bytes),
-    )
-}
-
-fn bounds(admitted: &Admitted<'_>, topology: &BaseTopology) -> Result<SizeBounds, Code> {
-    admit_topology(
-        admitted,
-        topology,
-        topology.order_digest(),
-        &AdvertisedLimits::default(),
-    )
-}
-
-fn lattice_topology(m: u16, t: u8) -> BaseTopology {
-    let (nodes, edges) = zephyr_lattice(m, t).expect("lattice");
-    BaseTopology::new(nodes, &edges).expect("topology")
-}
-
-fn nonce_of(i: u8) -> [u8; 32] {
-    [i; 32]
-}
-
 fn build(bytes: &[u8], topology: &BaseTopology, nonce: [u8; 32]) -> Instance {
-    let admitted = admitted(bytes).expect("admit");
+    let admitted = admitted(&ICE_GLASS_V1, bytes).expect("admit");
     let bounds = bounds(&admitted, topology).expect("admit topology");
     generate_instance(&admitted, topology, &bounds, nonce).expect("generate")
 }
@@ -123,7 +95,7 @@ fn rebuilt(instance: &Instance, j: Vec<i32>, metadata: Vec<u8>) -> Instance {
 }
 
 fn check(bytes: &[u8], instance: &Instance) -> bool {
-    let admitted = admitted(bytes).expect("admit");
+    let admitted = admitted(&ICE_GLASS_V1, bytes).expect("admit");
     let construction = ICE_GLASS_V1.construction.expect("construction");
     (construction.check_metadata)(admitted.params(), instance)
 }
@@ -176,31 +148,6 @@ fn both_modes_build_valid_instances() {
     }
 }
 
-#[test]
-fn admission_codes_follow_fam_47() {
-    let topology = lattice_topology(2, 2);
-    let mixed = params(2, 0, 125);
-    assert_eq!(
-        bounds(&admitted(&mixed).expect("admit"), &topology),
-        Err(Code::TopologyIncompatible)
-    );
-    let cycle =
-        BaseTopology::new(vec![0, 1, 2, 3], &[(0, 1), (1, 2), (2, 3), (3, 0)]).expect("cycle");
-    let adjacency = params(0, 0, 125);
-    assert_eq!(
-        bounds(&admitted(&adjacency).expect("admit"), &cycle),
-        Err(Code::TopologyIncompatible)
-    );
-    let too_strong = params(2, 2, 1000);
-    assert_eq!(admitted(&too_strong).err(), Some(Code::ParamsOutOfBounds));
-    let star_edges: Vec<(u32, u32)> = (1..=33).map(|leaf| (0, leaf)).collect();
-    let star = BaseTopology::new((0..34).collect(), &star_edges).expect("star");
-    assert_eq!(
-        bounds(&admitted(&adjacency).expect("admit"), &star),
-        Err(Code::BoundsExceeded)
-    );
-}
-
 fn small_topology(nodes: Vec<u32>, edges: &[(u32, u32)]) -> BaseTopology {
     BaseTopology::new(nodes, edges).expect("test topology is valid")
 }
@@ -229,8 +176,17 @@ fn adjacency_graph(edges: &[(u32, u32)]) -> BaseTopology {
     small_topology((0..n).collect(), edges)
 }
 
+/// One admission case: label, parameter bytes, topology, outcome. A row whose
+/// parameters fail admission reports that code and never reaches the topology.
+type AdmissionRow<'a> = (&'a str, &'a [u8], &'a BaseTopology, Result<(), Code>);
+
 #[test]
-fn every_structure_fault_is_code_12_and_a_wide_node_wins_with_13() {
+fn admission_codes() {
+    let lattice = lattice_topology(2, 2);
+    let cycle =
+        BaseTopology::new(vec![0, 1, 2, 3], &[(0, 1), (1, 2), (2, 3), (3, 0)]).expect("cycle");
+    let star_edges: Vec<(u32, u32)> = (1..=33).map(|leaf| (0, leaf)).collect();
+    let star = BaseTopology::new((0..34).collect(), &star_edges).expect("star");
     // A node on three spine edges.
     let mut around = Vec::new();
     let mut next = 4;
@@ -253,46 +209,60 @@ fn every_structure_fault_is_code_12_and_a_wide_node_wins_with_13() {
             clique([2 * i, 2 * i + 1, 2 * next, 2 * next + 1])
         })
         .collect();
+    let duplicate = adjacency_graph(&[(0, 1), (1, 0)]);
+    let not_node = small_topology(vec![0, 12], &[(0, 12)]);
+    let not_coupler = small_topology(vec![0, 3], &[(3, 0)]);
+    let spine_conflict = adjacency_graph(&conflict);
+    let above_two = adjacency_graph(&union(&around));
+    let not_bipartite = adjacency_graph(&union(&ring));
+    // A wide node, with a duplicate edge that code 12 would also report.
+    let mut wide_edges: Vec<(u32, u32)> = (1..=33).map(|leaf| (0, leaf)).collect();
+    wide_edges.push((1, 0));
+    let wide = adjacency_graph(&wide_edges);
+    let mixed = params(2, 0, 125);
     let adjacency = params(0, 0, 125);
     let zephyr = params(1, 1, 125);
-    let faults: Vec<(&str, &[u8], BaseTopology)> = vec![
+    let too_strong = params(2, 2, 1000);
+    let incompatible = Err(Code::TopologyIncompatible);
+    let rows: [AdmissionRow<'_>; 11] = [
+        ("mixed shape", &mixed, &lattice, incompatible),
         (
-            "duplicate-edge",
+            "adjacency mode on a cycle",
             &adjacency,
-            adjacency_graph(&[(0, 1), (1, 0)]),
+            &cycle,
+            incompatible,
         ),
         (
-            "not-zephyr-node",
-            &zephyr,
-            small_topology(vec![0, 12], &[(0, 12)]),
+            "glass too strong",
+            &too_strong,
+            &lattice,
+            Err(Code::ParamsOutOfBounds),
         ),
         (
-            "not-zephyr-coupler",
-            &zephyr,
-            small_topology(vec![0, 3], &[(3, 0)]),
-        ),
-        ("spine-conflict", &adjacency, adjacency_graph(&conflict)),
-        (
-            "membership-above-two",
+            "a 33-leaf star",
             &adjacency,
-            adjacency_graph(&union(&around)),
+            &star,
+            Err(Code::BoundsExceeded),
         ),
-        ("not-bipartite", &adjacency, adjacency_graph(&union(&ring))),
+        ("duplicate-edge", &adjacency, &duplicate, incompatible),
+        ("not-zephyr-node", &zephyr, &not_node, incompatible),
+        ("not-zephyr-coupler", &zephyr, &not_coupler, incompatible),
+        ("spine-conflict", &adjacency, &spine_conflict, incompatible),
+        ("membership-above-two", &adjacency, &above_two, incompatible),
+        ("not-bipartite", &adjacency, &not_bipartite, incompatible),
+        (
+            "a wide node wins with 13",
+            &adjacency,
+            &wide,
+            Err(Code::BoundsExceeded),
+        ),
     ];
-    for (name, bytes, topology) in &faults {
-        assert_eq!(
-            bounds(&admitted(bytes).expect("admit"), topology),
-            Err(Code::TopologyIncompatible),
-            "{name}"
-        );
+    for (label, bytes, topology, expected) in rows {
+        let outcome = admitted(&ICE_GLASS_V1, bytes)
+            .and_then(|admitted| bounds(&admitted, topology))
+            .map(|_| ());
+        assert_eq!(outcome, expected, "{label}");
     }
-    let mut wide: Vec<(u32, u32)> = (1..=33).map(|leaf| (0, leaf)).collect();
-    wide.push((1, 0));
-    let star = adjacency_graph(&wide);
-    assert_eq!(
-        bounds(&admitted(&adjacency).expect("admit"), &star),
-        Err(Code::BoundsExceeded)
-    );
 }
 
 #[test]
@@ -310,69 +280,6 @@ fn gauge_hides_and_metadata_recovers_the_ice() {
             assert_eq!(hidden, i64::from(STRONG_MILLI));
         }
     }
-}
-
-#[test]
-fn check_metadata_rejects_a_flipped_tile_coupler() {
-    let topology = lattice_topology(2, 2);
-    let bytes = params(2, 2, 125);
-    let instance = build(&bytes, &topology, nonce_of(5));
-    let (tiles, _) = decode(&instance);
-    let pair = tile_pairs(*tiles.first().expect("a tile"))[0];
-    let at = instance.edges().binary_search(&pair).expect("tile edge");
-    let mut j = instance.j().to_vec();
-    j[at] = -j[at];
-    let flipped = rebuilt(&instance, j, instance.metadata().to_vec());
-    assert!(!check(&bytes, &flipped));
-}
-
-#[test]
-fn check_metadata_rejects_a_tile_off_the_instance() {
-    let topology = lattice_topology(2, 2);
-    let bytes = params(2, 2, 125);
-    let instance = build(&bytes, &topology, nonce_of(6));
-    let edges: BTreeSet<(u32, u32)> = instance.edges().iter().copied().collect();
-    let n = u32::try_from(instance.node_ids().len()).expect("fits");
-    let off = [0, 1, n - 2, n - 1];
-    assert!(
-        tile_pairs(off).iter().any(|pair| !edges.contains(pair)),
-        "the quad is not a clique"
-    );
-    let mut region = instance.metadata().to_vec();
-    for (k, pos) in off.iter().enumerate() {
-        let at = 12 + 4 * k;
-        region[at..at + 4].copy_from_slice(&pos.to_le_bytes());
-    }
-    let moved = rebuilt(&instance, instance.j().to_vec(), region);
-    assert!(!check(&bytes, &moved));
-}
-
-#[test]
-fn check_metadata_rejects_a_nonzero_field() {
-    let topology = lattice_topology(2, 2);
-    let bytes = params(2, 2, 125);
-    let instance = build(&bytes, &topology, nonce_of(7));
-    let mut h = instance.h().to_vec();
-    h[0] = 1;
-    let parts = InstanceParts {
-        descriptor_digest: *instance.descriptor_digest(),
-        topology_order_digest: *instance.topology_order_digest(),
-        nonce: instance.nonce().copied(),
-        node_ids: instance.node_ids().to_vec(),
-        edges: instance.edges().to_vec(),
-        h,
-        j: instance.j().to_vec(),
-        offset_milli: 0,
-        metadata: instance.metadata().to_vec(),
-    };
-    let tilted = Instance::new(
-        parts,
-        &ICE_GLASS_V1.limits,
-        ICE_GLASS_V1.metadata_kinds,
-        None,
-    )
-    .expect("well formed");
-    assert!(!check(&bytes, &tilted));
 }
 
 #[test]
@@ -460,91 +367,15 @@ fn valid_z22(nonce: u8) -> (Vec<u8>, Instance, Vec<[u32; 4]>, Vec<u8>) {
     (bytes, instance, tiles, gauge)
 }
 
-#[test]
-fn check_metadata_rejects_a_gauge_byte_above_one() {
-    let (bytes, instance, tiles, mut gauge) = valid_z22(10);
-    gauge[0] = 2;
-    let bad = rebuilt(&instance, instance.j().to_vec(), region_of(&tiles, &gauge));
-    assert!(!check(&bytes, &bad));
+/// Whether the family check rejects `instance` with its metadata replaced by
+/// `region`.
+fn rejects_region(bytes: &[u8], instance: &Instance, region: Vec<u8>) -> bool {
+    !check(bytes, &rebuilt(instance, instance.j().to_vec(), region))
 }
 
-#[test]
-fn check_metadata_rejects_a_gauge_count_that_differs_from_the_node_count() {
-    let (bytes, instance, tiles, gauge) = valid_z22(11);
-    let mut region = region_of(&tiles, &gauge);
-    let count_at = region.len() - gauge.len() - 4;
-    let short = u32::try_from(gauge.len() - 1).expect("fits");
-    region[count_at..count_at + 4].copy_from_slice(&short.to_le_bytes());
-    let bad = rebuilt(&instance, instance.j().to_vec(), region);
-    assert!(!check(&bytes, &bad));
-}
-
-#[test]
-fn check_metadata_rejects_tiles_that_share_an_edge() {
-    let (bytes, instance, tiles, gauge) = valid_z22(12);
-    let n = u32::try_from(instance.node_ids().len()).expect("fits");
-    let first = *tiles.first().expect("a tile");
-    let overlap = [first[0], first[1], n - 2, n - 1];
-    assert!(
-        first < overlap,
-        "the overlapping tile sorts after the first"
-    );
-    let bad = rebuilt(
-        &instance,
-        instance.j().to_vec(),
-        region_of(&[first, overlap], &gauge),
-    );
-    assert!(!check(&bytes, &bad));
-}
-
-#[test]
-fn check_metadata_rejects_a_node_in_three_tiles() {
-    let (bytes, instance, tiles, gauge) = valid_z22(13);
-    let n = u32::try_from(instance.node_ids().len()).expect("fits");
-    let shared = tiles
-        .iter()
-        .enumerate()
-        .flat_map(|(i, a)| tiles.iter().skip(i + 1).map(move |b| (*a, *b)))
-        .find_map(|(a, b)| a.iter().find(|pos| b.contains(pos)).map(|&pos| (a, b, pos)));
-    let (a, b, node) = shared.expect("two selected tiles share a node");
-    let mut third = [node, n - 3, n - 2, n - 1];
-    third.sort_unstable();
-    assert!(b < third, "the third tile sorts last");
-    let bad = rebuilt(
-        &instance,
-        instance.j().to_vec(),
-        region_of(&[a, b, third], &gauge),
-    );
-    assert!(!check(&bytes, &bad));
-}
-
-#[test]
-fn check_metadata_rejects_a_tile_count_the_payload_cannot_hold() {
-    let (bytes, instance, tiles, gauge) = valid_z22(14);
-    let mut region = region_of(&tiles, &gauge);
-    region[8..12].copy_from_slice(&u32::MAX.to_le_bytes());
-    let bad = rebuilt(&instance, instance.j().to_vec(), region);
-    assert!(!check(&bytes, &bad));
-}
-
-#[test]
-fn check_metadata_rejects_a_glass_edge_of_the_wrong_magnitude() {
-    let (bytes, instance, tiles, _) = valid_z22(15);
-    let strong: BTreeSet<(u32, u32)> = tiles.iter().flat_map(|t| tile_pairs(*t)).collect();
-    let at = instance
-        .edges()
-        .iter()
-        .position(|edge| !strong.contains(edge))
-        .expect("a glass edge");
-    let mut j = instance.j().to_vec();
-    j[at] = 1;
-    let bad = rebuilt(&instance, j, instance.metadata().to_vec());
-    assert!(!check(&bytes, &bad));
-}
-
-#[test]
-fn check_metadata_rejects_a_nonzero_offset() {
-    let (bytes, instance, _, _) = valid_z22(16);
+/// A copy of `instance` with a new offset. A looser offset limit lets the
+/// instance be built.
+fn with_offset(instance: &Instance, offset_milli: i64) -> Instance {
     let parts = InstanceParts {
         descriptor_digest: *instance.descriptor_digest(),
         topology_order_digest: *instance.topology_order_digest(),
@@ -553,44 +384,162 @@ fn check_metadata_rejects_a_nonzero_offset() {
         edges: instance.edges().to_vec(),
         h: instance.h().to_vec(),
         j: instance.j().to_vec(),
-        offset_milli: 1,
+        offset_milli,
         metadata: instance.metadata().to_vec(),
     };
     let limits = InstanceLimits::new(131_072, 2_097_152, 1_000, 1, 8_388_608).expect("limits");
-    let shifted = Instance::new(parts, &limits, ICE_GLASS_V1.metadata_kinds, None)
-        .expect("well formed under a looser offset limit");
-    assert!(!check(&bytes, &shifted));
+    Instance::new(parts, &limits, ICE_GLASS_V1.metadata_kinds, None)
+        .expect("well formed under a looser offset limit")
+}
+
+/// The rules on couplings, tiles, and fields: each mutation of `instance`
+/// breaks one rule.
+fn rejects_coupling_tile_and_field_faults(bytes: &[u8], instance: &Instance, tiles: &[[u32; 4]]) {
+    let count = u32::try_from(instance.node_ids().len()).expect("fits");
+
+    // Breaks one rule: a tile coupler is flipped.
+    let pair = tile_pairs(*tiles.first().expect("a tile"))[0];
+    let at = instance.edges().binary_search(&pair).expect("tile edge");
+    let mut couplings = instance.j().to_vec();
+    couplings[at] = -couplings[at];
+    let flipped = rebuilt(instance, couplings, instance.metadata().to_vec());
+    assert!(!check(bytes, &flipped), "flipped tile coupler");
+
+    // Breaks one rule: a tile is not a clique of the instance.
+    let edges: BTreeSet<(u32, u32)> = instance.edges().iter().copied().collect();
+    let off = [0, 1, count - 2, count - 1];
+    assert!(
+        tile_pairs(off).iter().any(|pair| !edges.contains(pair)),
+        "the quad is not a clique"
+    );
+    let mut region = instance.metadata().to_vec();
+    for (k, pos) in off.iter().enumerate() {
+        let at = 12 + 4 * k;
+        region[at..at + 4].copy_from_slice(&pos.to_le_bytes());
+    }
+    let moved = rebuilt(instance, instance.j().to_vec(), region);
+    assert!(!check(bytes, &moved), "tile off the instance");
+
+    // Breaks one rule: a field is nonzero.
+    let mut fields = instance.h().to_vec();
+    fields[0] = 1;
+    let parts = InstanceParts {
+        descriptor_digest: *instance.descriptor_digest(),
+        topology_order_digest: *instance.topology_order_digest(),
+        nonce: instance.nonce().copied(),
+        node_ids: instance.node_ids().to_vec(),
+        edges: instance.edges().to_vec(),
+        h: fields,
+        j: instance.j().to_vec(),
+        offset_milli: 0,
+        metadata: instance.metadata().to_vec(),
+    };
+    let tilted = Instance::new(
+        parts,
+        &ICE_GLASS_V1.limits,
+        ICE_GLASS_V1.metadata_kinds,
+        None,
+    )
+    .expect("well formed");
+    assert!(!check(bytes, &tilted), "nonzero field");
 }
 
 #[test]
-fn check_metadata_rejects_tiles_that_are_not_ascending() {
-    let (bytes, instance, tiles, gauge) = valid_z22(17);
+fn check_metadata_rejects_each_rule() {
+    let (bytes, instance, tiles, gauge) = valid_z22(10);
+    let count = u32::try_from(instance.node_ids().len()).expect("fits");
+
+    rejects_coupling_tile_and_field_faults(&bytes, &instance, &tiles);
+
+    // Breaks one rule: a gauge byte is above one.
+    let mut bad_gauge = gauge.clone();
+    bad_gauge[0] = 2;
+    assert!(
+        rejects_region(&bytes, &instance, region_of(&tiles, &bad_gauge)),
+        "gauge byte above one"
+    );
+
+    // Breaks one rule: the gauge count differs from the node count.
+    let mut region = region_of(&tiles, &gauge);
+    let count_at = region.len() - gauge.len() - 4;
+    let short = u32::try_from(gauge.len() - 1).expect("fits");
+    region[count_at..count_at + 4].copy_from_slice(&short.to_le_bytes());
+    assert!(
+        rejects_region(&bytes, &instance, region),
+        "gauge count differs from node count"
+    );
+
+    // Breaks one rule: two tiles share an edge.
+    let first = *tiles.first().expect("a tile");
+    let overlap = [first[0], first[1], count - 2, count - 1];
+    assert!(
+        first < overlap,
+        "the overlapping tile sorts after the first"
+    );
+    assert!(
+        rejects_region(&bytes, &instance, region_of(&[first, overlap], &gauge)),
+        "tiles share an edge"
+    );
+
+    // Breaks one rule: a node is in three tiles.
+    let shared = tiles
+        .iter()
+        .enumerate()
+        .flat_map(|(i, a)| tiles.iter().skip(i + 1).map(move |b| (*a, *b)))
+        .find_map(|(a, b)| a.iter().find(|pos| b.contains(pos)).map(|&pos| (a, b, pos)));
+    let (first_tile, second_tile, node) = shared.expect("two selected tiles share a node");
+    let mut third = [node, count - 3, count - 2, count - 1];
+    third.sort_unstable();
+    assert!(second_tile < third, "the third tile sorts last");
+    assert!(
+        rejects_region(
+            &bytes,
+            &instance,
+            region_of(&[first_tile, second_tile, third], &gauge)
+        ),
+        "node in three tiles"
+    );
+
+    // Breaks one rule: the tile count is more than the payload can hold.
+    let mut region = region_of(&tiles, &gauge);
+    region[8..12].copy_from_slice(&u32::MAX.to_le_bytes());
+    assert!(
+        rejects_region(&bytes, &instance, region),
+        "tile count the payload cannot hold"
+    );
+
+    // Breaks one rule: a glass edge has the wrong magnitude.
+    let strong: BTreeSet<(u32, u32)> = tiles.iter().flat_map(|t| tile_pairs(*t)).collect();
+    let at = instance
+        .edges()
+        .iter()
+        .position(|edge| !strong.contains(edge))
+        .expect("a glass edge");
+    let mut couplings = instance.j().to_vec();
+    couplings[at] = 1;
+    let bad = rebuilt(&instance, couplings, instance.metadata().to_vec());
+    assert!(!check(&bytes, &bad), "glass edge of the wrong magnitude");
+
+    // Breaks one rule: the offset is nonzero.
+    assert!(!check(&bytes, &with_offset(&instance, 1)), "nonzero offset");
+
+    // Breaks one rule: tiles are not ascending.
     let mut swapped = tiles.clone();
     swapped[0].swap(0, 1);
-    let bad = rebuilt(
-        &instance,
-        instance.j().to_vec(),
-        region_of(&swapped, &gauge),
+    assert!(
+        rejects_region(&bytes, &instance, region_of(&swapped, &gauge)),
+        "positions out of order inside a tile"
     );
-    assert!(!check(&bytes, &bad), "positions out of order inside a tile");
     let mut reordered = tiles;
     reordered.swap(0, 1);
-    let bad = rebuilt(
-        &instance,
-        instance.j().to_vec(),
-        region_of(&reordered, &gauge),
+    assert!(
+        rejects_region(&bytes, &instance, region_of(&reordered, &gauge)),
+        "tiles out of order"
     );
-    assert!(!check(&bytes, &bad), "tiles out of order");
-}
 
-#[test]
-fn check_metadata_rejects_tiles_that_are_not_distinct() {
-    let (bytes, instance, tiles, gauge) = valid_z22(18);
-    let first = *tiles.first().expect("a tile");
-    let bad = rebuilt(
-        &instance,
-        instance.j().to_vec(),
-        region_of(&[first, first], &gauge),
+    // Breaks one rule: tiles are not distinct.
+    assert!(
+        rejects_region(&bytes, &instance, region_of(&[first, first], &gauge)),
+        "tiles not distinct"
     );
-    assert!(!check(&bytes, &bad));
 }
