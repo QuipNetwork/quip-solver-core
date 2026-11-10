@@ -471,8 +471,10 @@ mod tests {
             // An exact integer problem keeps the sampler's own energy.
             ("[-1,0,1]", 777),
         ] {
-            let output = solve(&WrongLossy, &id(), &input_with_biases(biases))?;
-            let results: serde_json::Value = serde_json::from_slice(&output)?;
+            let output = solve(&WrongLossy, &id(), &input_with_biases(biases))
+                .map_err(|e| format!("{biases}: solve failed: {e:?}"))?;
+            let results: serde_json::Value = serde_json::from_slice(&output)
+                .map_err(|e| format!("{biases}: output is not JSON: {e}"))?;
             assert_eq!(
                 results
                     .pointer("/0/energy_milli")

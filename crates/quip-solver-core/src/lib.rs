@@ -655,11 +655,12 @@ mod stream_tests {
     /// Drive one job with watermark `Some(5)` through a sampler that cancels
     /// generation 9 while sampling, and report the outcome.
     fn outcome_after_cancel_during_sample(
+        label: &str,
         result: Result<Vec<SamplerResult>, SampleError>,
     ) -> StreamOutcome {
         let rt = tokio::runtime::Builder::new_current_thread()
             .build()
-            .expect("rt");
+            .unwrap_or_else(|e| panic!("{label}: runtime: {e}"));
         let (job_tx, job_rx) = tokio::sync::mpsc::channel::<StreamJob>(4);
         let (res_tx, mut res_rx) = tokio::sync::mpsc::channel::<StreamResult>(4);
         let cancel = CancelToken::default();
@@ -678,13 +679,21 @@ mod stream_tests {
                     watermark: Some(5),
                 })
                 .await
-                .expect("send");
+                .unwrap_or_else(|e| panic!("{label}: send: {e}"));
             drop(job_tx);
-            let r = res_rx.recv().await.expect("one result");
-            assert!(res_rx.recv().await.is_none(), "exactly one result per job");
+            let r = res_rx
+                .recv()
+                .await
+                .unwrap_or_else(|| panic!("{label}: no result"));
+            assert!(
+                res_rx.recv().await.is_none(),
+                "{label}: exactly one result per job"
+            );
             r.outcome
         });
-        worker.join().expect("worker join");
+        worker
+            .join()
+            .unwrap_or_else(|_| panic!("{label}: worker panicked"));
         outcome
     }
 
@@ -727,7 +736,7 @@ mod stream_tests {
             ),
         ];
         for (label, result, check) in rows {
-            let outcome = outcome_after_cancel_during_sample(result);
+            let outcome = outcome_after_cancel_during_sample(label, result);
             assert!(check(&outcome), "{label}");
         }
     }
@@ -846,12 +855,13 @@ mod stream_tests {
 
     /// Run `sampler` over warm-stream jobs and return the first energy by job id.
     fn run_warm_stream<S: Sampler>(
+        label: &str,
         sampler: S,
         jobs: Vec<(u8, Option<WarmStart>, Option<families::FamilyContext>)>,
     ) -> std::collections::HashMap<Vec<u8>, i64> {
         let rt = tokio::runtime::Builder::new_current_thread()
             .build()
-            .expect("rt");
+            .unwrap_or_else(|e| panic!("{label}: runtime: {e}"));
         let (job_tx, job_rx) = tokio::sync::mpsc::channel::<WarmStreamJob>(4);
         let (res_tx, mut res_rx) = tokio::sync::mpsc::channel::<StreamResult>(4);
         let worker = std::thread::spawn(move || {
@@ -871,20 +881,26 @@ mod stream_tests {
                         family,
                     })
                     .await
-                    .expect("send");
+                    .unwrap_or_else(|e| panic!("{label}: send job {id}: {e}"));
             }
             drop(job_tx);
             let mut energies = std::collections::HashMap::new();
             while let Some(r) = res_rx.recv().await {
+                let job_id = r.job_id.clone();
                 let StreamOutcome::Completed(Ok(reads)) = r.outcome else {
-                    panic!("every job completes");
+                    panic!("{label}: job {job_id:?} must complete");
                 };
-                let energy = reads.first().map(|x| x.energy_milli).expect("one read");
+                let energy = reads.first().map_or_else(
+                    || panic!("{label}: job {job_id:?} returned no read"),
+                    |x| x.energy_milli,
+                );
                 let _ = energies.insert(r.job_id, energy);
             }
             energies
         });
-        worker.join().expect("worker join");
+        worker
+            .join()
+            .unwrap_or_else(|_| panic!("{label}: worker panicked"));
         energies
     }
 
@@ -928,6 +944,7 @@ mod stream_tests {
     #[test]
     fn the_default_warm_stream_routes_each_job() {
         let energies = run_warm_stream(
+            "warm echo",
             WarmEcho,
             vec![(1, Some(warm_start()), None), (2, None, None)],
         );
@@ -939,6 +956,7 @@ mod stream_tests {
         assert_eq!(energies.get(&vec![2u8]), Some(&0), "warm echo: sample");
 
         let energies = run_warm_stream(
+            "default sample_family",
             DefaultFamilyRoute,
             vec![
                 (1, Some(warm_start()), Some(family_context())),
@@ -958,6 +976,7 @@ mod stream_tests {
 
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let energies = run_warm_stream(
+            "family counter",
             FamilyCounter(Arc::clone(&calls)),
             vec![(1, None, Some(family_context())), (2, None, None)],
         );

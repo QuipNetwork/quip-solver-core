@@ -104,8 +104,8 @@ mod tests {
     }
 
     /// A misspelled level must not degrade into a target filter that silences
-    /// the miner. `EnvFilter` accepts any bare word as a target, so the first
-    /// two rows only fail because [`resolve_directives`] checks the level
+    /// the miner. `EnvFilter` accepts any bare word as a target, so the
+    /// misspelled-level rows only fail because [`resolve_directives`] checks the level
     /// itself. `RUST_LOG` does not excuse a bad level: the operator still typed
     /// it wrong, and reporting it is cheaper than a silent surprise on the next
     /// run without `RUST_LOG` set.

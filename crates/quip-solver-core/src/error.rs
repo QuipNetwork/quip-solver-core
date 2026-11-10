@@ -81,6 +81,12 @@ mod tests {
                 RejectReason::Overloaded,
                 true,
             ),
+            (
+                "fault with an empty message",
+                SampleError::DeviceFault(String::new()),
+                RejectReason::Overloaded,
+                true,
+            ),
         ];
         for (label, error, reason, fatal) in rows {
             assert_eq!(error.to_reject_reason(), reason, "{label}: reason");

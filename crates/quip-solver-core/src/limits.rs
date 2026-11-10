@@ -130,134 +130,154 @@ mod tests {
         }
     }
 
-    /// One `ModelLimits::check` call and its expected outcome: `None` passes,
-    /// `Some(needle)` fails with a message containing the needle.
-    struct Row {
-        name: &'static str,
-        limits: ModelLimits,
-        h: Vec<f64>,
-        j: Vec<f64>,
-        edges: Vec<(usize, usize)>,
-        exact: bool,
-        expected: Option<&'static str>,
+    /// `(label, limits, h, j, edges, exact, expected)`. `expected` is `None`
+    /// when the check passes and `Some(needle)` when it fails with a message
+    /// containing the needle.
+    type Case<'a> = (
+        &'a str,
+        ModelLimits,
+        &'a [f64],
+        &'a [f64],
+        &'a [(usize, usize)],
+        bool,
+        Option<&'a str>,
+    );
+
+    fn limit_cases() -> [Case<'static>; 7] {
+        let zeros: &[f64] = &[0.0; 4];
+        let ones: &[f64] = &[1000.0; 3];
+        // Node 0: |h| 500 + three couplings of 1000 = 3500.
+        let field_h: &[f64] = &[-500.0, 0.0, 0.0, 0.0];
+        let field_j: &[f64] = &[1000.0, -1000.0, 1000.0];
+        let pair: &[(usize, usize)] = &[(0, 1)];
+        [
+            (
+                "unstated limits accept anything",
+                ModelLimits::UNSTATED,
+                &[1e12, -0.5],
+                &[3.0],
+                pair,
+                true,
+                None,
+            ),
+            (
+                "zero degree and field are unbounded",
+                limits(0, 0, 1),
+                zeros,
+                &[1e9, 1e9, 1e9],
+                &STAR,
+                true,
+                None,
+            ),
+            (
+                "a node at the degree limit passes",
+                limits(3, 0, 1),
+                zeros,
+                ones,
+                &STAR,
+                false,
+                None,
+            ),
+            (
+                "one above the degree limit fails",
+                limits(2, 0, 1),
+                zeros,
+                ones,
+                &STAR,
+                false,
+                Some("degree 3"),
+            ),
+            (
+                "a field at the limit passes",
+                limits(0, 3500, 1),
+                field_h,
+                field_j,
+                &STAR,
+                false,
+                None,
+            ),
+            (
+                "a field one above the limit fails",
+                limits(0, 3499, 1),
+                field_h,
+                field_j,
+                &STAR,
+                false,
+                Some("local field 3500"),
+            ),
+            (
+                "duplicate edges count twice",
+                limits(1, 0, 1),
+                &[0.0, 0.0],
+                &[1000.0, 1000.0],
+                &[(0, 1), (0, 1)],
+                false,
+                Some(""),
+            ),
+        ]
     }
 
-    fn row(
-        name: &'static str,
-        limits: ModelLimits,
-        (h, j, edges): (Vec<f64>, Vec<f64>, Vec<(usize, usize)>),
-        exact: bool,
-        expected: Option<&'static str>,
-    ) -> Row {
-        Row {
-            name,
-            limits,
-            h,
-            j,
-            edges,
-            exact,
-            expected,
-        }
+    fn step_cases() -> [Case<'static>; 5] {
+        let off_step_h: &[f64] = &[1500.0, 0.0];
+        let pair: &[(usize, usize)] = &[(0, 1)];
+        [
+            (
+                "an off-step coefficient passes for a non-exact binary",
+                limits(0, 0, 1000),
+                off_step_h,
+                &[1000.0],
+                pair,
+                false,
+                None,
+            ),
+            (
+                "an off-step coefficient fails for an exact binary",
+                limits(0, 0, 1000),
+                off_step_h,
+                &[1000.0],
+                pair,
+                true,
+                Some("1500"),
+            ),
+            (
+                "a finer step accepts the same coefficient",
+                limits(0, 0, 500),
+                off_step_h,
+                &[1000.0],
+                pair,
+                true,
+                None,
+            ),
+            (
+                "sub-milli is off any step",
+                limits(0, 0, 1),
+                &[0.5],
+                &[],
+                &[],
+                true,
+                Some(""),
+            ),
+            (
+                "a zero step makes no claim",
+                limits(0, 0, 0),
+                &[0.5],
+                &[],
+                &[],
+                true,
+                None,
+            ),
+        ]
     }
 
     #[test]
     fn model_limits_check_follows_the_table() {
-        let star = |h: Vec<f64>, j: Vec<f64>| (h, j, STAR.to_vec());
-        let rows = [
-            row(
-                "unstated limits accept anything",
-                ModelLimits::UNSTATED,
-                (vec![1e12, -0.5], vec![3.0], vec![(0, 1)]),
-                true,
-                None,
-            ),
-            row(
-                "zero degree and field are unbounded",
-                limits(0, 0, 1),
-                star(vec![0.0; 4], vec![1e9, 1e9, 1e9]),
-                true,
-                None,
-            ),
-            row(
-                "a node at the degree limit passes",
-                limits(3, 0, 1),
-                star(vec![0.0; 4], vec![1000.0; 3]),
-                false,
-                None,
-            ),
-            row(
-                "one above the degree limit fails",
-                limits(2, 0, 1),
-                star(vec![0.0; 4], vec![1000.0; 3]),
-                false,
-                Some("degree 3"),
-            ),
-            // Node 0: |h| 500 + three couplings of 1000 = 3500.
-            row(
-                "a field at the limit passes",
-                limits(0, 3500, 1),
-                star(vec![-500.0, 0.0, 0.0, 0.0], vec![1000.0, -1000.0, 1000.0]),
-                false,
-                None,
-            ),
-            row(
-                "a field one above the limit fails",
-                limits(0, 3499, 1),
-                star(vec![-500.0, 0.0, 0.0, 0.0], vec![1000.0, -1000.0, 1000.0]),
-                false,
-                Some("local field 3500"),
-            ),
-            row(
-                "duplicate edges count twice",
-                limits(1, 0, 1),
-                (vec![0.0, 0.0], vec![1000.0, 1000.0], vec![(0, 1), (0, 1)]),
-                false,
-                Some(""),
-            ),
-            row(
-                "an off-step coefficient passes for a non-exact binary",
-                limits(0, 0, 1000),
-                (vec![1500.0, 0.0], vec![1000.0], vec![(0, 1)]),
-                false,
-                None,
-            ),
-            row(
-                "an off-step coefficient fails for an exact binary",
-                limits(0, 0, 1000),
-                (vec![1500.0, 0.0], vec![1000.0], vec![(0, 1)]),
-                true,
-                Some("1500"),
-            ),
-            row(
-                "a finer step accepts the same coefficient",
-                limits(0, 0, 500),
-                (vec![1500.0, 0.0], vec![1000.0], vec![(0, 1)]),
-                true,
-                None,
-            ),
-            row(
-                "sub-milli is off any step",
-                limits(0, 0, 1),
-                (vec![0.5], vec![], vec![]),
-                true,
-                Some(""),
-            ),
-            row(
-                "a zero step makes no claim",
-                limits(0, 0, 0),
-                (vec![0.5], vec![], vec![]),
-                true,
-                None,
-            ),
-        ];
-        for r in rows {
-            let got = r.limits.check(&r.h, &r.j, &r.edges, r.exact);
-            match (got, r.expected) {
+        for (label, limits, h, j, edges, exact, expected) in
+            limit_cases().into_iter().chain(step_cases())
+        {
+            match (limits.check(h, j, edges, exact), expected) {
                 (Ok(()), None) => {}
-                (Err(err), Some(needle)) => {
-                    assert!(err.contains(needle), "{}: {err}", r.name);
-                }
-                (got, expected) => panic!("{}: got {got:?}, expected {expected:?}", r.name),
+                (Err(err), Some(needle)) => assert!(err.contains(needle), "{label}: {err}"),
+                (got, expected) => panic!("{label}: got {got:?}, expected {expected:?}"),
             }
         }
     }

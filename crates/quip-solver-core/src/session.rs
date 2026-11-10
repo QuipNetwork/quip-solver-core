@@ -2947,15 +2947,23 @@ mod tests {
             } = spawn_writer(16);
 
             {
-                let mut p = pending.lock().expect("fresh mutex");
+                let mut p = pending
+                    .lock()
+                    .unwrap_or_else(|e| panic!("{label}: pending mutex: {e}"));
                 let _ = p.insert(pending_id(&[7], None), pending_job(Some(4)));
             }
             if let Some(point) = cancel_through {
                 cancel.cancel_through(point);
             }
-            res_tx.send(completed_result(7)).await.expect("send result");
+            res_tx
+                .send(completed_result(7))
+                .await
+                .unwrap_or_else(|e| panic!("{label}: send result: {e}"));
 
-            let first = out_rx.recv().await.expect("writer replies");
+            let first = out_rx
+                .recv()
+                .await
+                .unwrap_or_else(|| panic!("{label}: writer sent no reply"));
             if dropped {
                 assert!(
                     matches!(first.msg, Some(miner_msg::Msg::JobRequest(jr)) if jr.credits == 1),
@@ -3016,7 +3024,7 @@ mod tests {
     /// fails here rather than silently turning a token failure into exit 70.
     #[test]
     fn boxed_session_errors_map_to_their_exit_codes() {
-        let rows: Vec<(&str, Box<dyn std::error::Error>, ExitCode)> = vec![
+        let rows: [(&str, Box<dyn std::error::Error>, ExitCode); 9] = [
             (
                 "missing token",
                 Box::new(SessionError::MissingToken),

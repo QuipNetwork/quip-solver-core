@@ -862,11 +862,12 @@ mod tests {
     /// The reject reason `prepare_job` answers `job` with, or `None` when it
     /// accepts the job.
     fn reject_reason_for<C: Coefficient, S: Sampler<C>>(
+        label: &str,
         job: Job,
         sampler: &S,
         id: &BackendIdentity,
     ) -> Option<i32> {
-        reject_reason_for_with(job, sampler, id, &generic())
+        reject_reason_labelled(label, job, sampler, id, &generic())
     }
 
     /// `reject_reason_for` with the family table of the solver.
@@ -876,10 +877,21 @@ mod tests {
         id: &BackendIdentity,
         families: &FamilyTable,
     ) -> Option<i32> {
+        reject_reason_labelled("", job, sampler, id, families)
+    }
+
+    /// `reject_reason_for_with`, naming the table row in a malformed reply.
+    fn reject_reason_labelled<C: Coefficient, S: Sampler<C>>(
+        label: &str,
+        job: Job,
+        sampler: &S,
+        id: &BackendIdentity,
+        families: &FamilyTable,
+    ) -> Option<i32> {
         match prepare_job::<S, C>(job, sampler, id, families, 64, None, None, None) {
             Prepared::Reject(message) => match message.msg {
                 Some(miner_msg::Msg::Reject(reject)) => Some(reject.reason),
-                _ => panic!("expected a Reject message"),
+                _ => panic!("{label}: expected a Reject message"),
             },
             Prepared::Sample { .. } => None,
         }
@@ -993,7 +1005,7 @@ mod tests {
         ];
         for (label, job, id, expected) in plain_rows {
             assert_eq!(
-                reject_reason_for(job, &StubSampler, &id),
+                reject_reason_for(label, job, &StubSampler, &id),
                 expected,
                 "{label}"
             );
@@ -1039,7 +1051,7 @@ mod tests {
         ];
         for (label, job, id, expected) in narrow_rows {
             assert_eq!(
-                reject_reason_for(job, &NarrowStub, &id),
+                reject_reason_for(label, job, &NarrowStub, &id),
                 expected,
                 "{label}"
             );
@@ -1221,8 +1233,9 @@ mod tests {
     /// Every row is a `Malformed` rejection of an inline problem.
     #[test]
     fn malformed_inline_models_are_rejected() {
+        let base = edges_job(1).ising.expect("edges_job carries a problem");
         let encoding_and_scale = |encoding, scale| {
-            let mut ising = edges_job(1).ising.unwrap();
+            let mut ising = base.clone();
             ising.encoding = encoding;
             ising.scale = scale;
             ising
@@ -1613,7 +1626,7 @@ mod tests {
                 None,
                 None,
             ) else {
-                panic!("expected Sample");
+                panic!("generation {generation}: expected Sample");
             };
             assert_eq!(
                 job.watermark, expected,
@@ -1720,7 +1733,7 @@ mod tests {
             }))
         };
         // (label, states, num_reads, start point, samplers, expected)
-        let rows = vec![
+        let rows = [
             // Node 0 is bit 0: 0b01 = [+1, -1], 0b10 = [-1, +1],
             // 0b11 = [+1, +1].
             (

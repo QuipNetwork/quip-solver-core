@@ -135,30 +135,27 @@ mod tests {
     #[test]
     fn invalid_arguments_report_the_right_clap_error() {
         use clap::error::ErrorKind;
-        let mut rows: Vec<(Vec<String>, ErrorKind)> = Vec::new();
-        for (i, a) in MODE_FLAGS.iter().enumerate() {
-            for b in MODE_FLAGS.iter().skip(i + 1) {
-                rows.push((
-                    vec![format!("--{a}"), format!("--{b}")],
-                    ErrorKind::ArgumentConflict,
-                ));
-            }
-        }
-        rows.push((
-            vec!["--log-level".to_owned(), "infoo".to_owned()],
-            ErrorKind::InvalidValue,
-        ));
-        rows.push((
-            vec!["--sweeps-per-beta".to_owned(), "0".to_owned()],
-            ErrorKind::ValueValidation,
-        ));
-        for (args, kind) in rows {
-            let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let check = |args: &[&str], kind: ErrorKind| {
             let label = args.join(" ");
-            let Err(err) = parse(&refs) else {
+            let Err(err) = parse(args) else {
                 panic!("{label} must be rejected");
             };
             assert_eq!(err.kind(), kind, "{label}");
+        };
+        for (i, a) in MODE_FLAGS.iter().enumerate() {
+            for b in MODE_FLAGS.iter().skip(i + 1) {
+                check(
+                    &[&format!("--{a}"), &format!("--{b}")],
+                    ErrorKind::ArgumentConflict,
+                );
+            }
+        }
+        let rows = [
+            (&["--log-level", "infoo"], ErrorKind::InvalidValue),
+            (&["--sweeps-per-beta", "0"], ErrorKind::ValueValidation),
+        ];
+        for (args, kind) in rows {
+            check(args, kind);
         }
     }
 }
