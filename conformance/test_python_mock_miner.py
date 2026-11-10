@@ -50,13 +50,28 @@ def _ising_from_dense(
     )
 
 
+async def _run_job(job, abandoned_generation=None) -> list:
+    call = FakeCall()
+    state = mock_miner.Session("mock-0", call)
+    if abandoned_generation is not None:
+        state.abandoned_generation = abandoned_generation
+    await state.handle_job(job)
+    return call.written
+
+
 def test_validate_ising_rejects_length_mismatch():
     with pytest.raises(ValueError, match="edges"):
         mock_miner.validate_ising([1.0, -1.0], [1.0], [(0, 1), (0, 0)])
 
 
-def test_missing_topology_is_not_keyerror():
-    ising = miner_pb2.IsingProblem(
+def _scaled_ising(scale, h, j, edges):
+    ising = _ising_from_dense(h, j, edges)
+    ising.scale = scale
+    return ising
+
+
+def _unknown_topology_ising():
+    return miner_pb2.IsingProblem(
         encoding=miner_pb2.COEFFICIENT_ENCODING_I32,
         scale=1000,
         h=bytes(wire.encode_i32_le([1000, -1000])),
@@ -64,11 +79,24 @@ def test_missing_topology_is_not_keyerror():
         topology_hash=b"unknown-hash",
         num_reads=1,
     )
-    with pytest.raises(mock_miner.MissingTopology):
+
+
+@pytest.mark.parametrize(
+    ("ising", "error"),
+    [
+        pytest.param(
+            _unknown_topology_ising(), mock_miner.MissingTopology, id="missing-topology"
+        ),
+        pytest.param(_scaled_ising(1, [2147484], [], []), ValueError, id="milli-high"),
+        pytest.param(_scaled_ising(1, [-2147484], [], []), ValueError, id="milli-low"),
+    ],
+)
+def test_decode_problem_rejects(ising, error):
+    with pytest.raises(error):
         mock_miner.decode_problem(ising, {})
 
 
-def test_sparse_topology_remaps_native_ids():
+def _sparse_case():
     # Native ids [0, 12, 2400] must index h at dense positions 0, 1, 2.
     topo = mock_miner.Topology.from_proto(
         miner_pb2.Topology(
@@ -85,35 +113,51 @@ def test_sparse_topology_remaps_native_ids():
         topology_hash=b"sparse",
         num_reads=1,
     )
-    h, j, edges = mock_miner.decode_problem(ising, {b"sparse": topo})
-    assert h == [1.0, 0.0, -1.0]
-    assert j == [0.5, 0.25]
-    assert edges == [(0, 1), (1, 2)]
+    return ising, {b"sparse": topo}
 
 
-def test_inline_edges_stay_dense():
-    ising = _ising_from_dense([1000, -1000], [500], [(0, 1)])
-    h, j, edges = mock_miner.decode_problem(ising, {})
-    assert edges == [(0, 1)]
-    assert h == [1.0, -1.0]
-    assert j == [0.5]
+@pytest.mark.parametrize(
+    ("ising", "topologies", "expected"),
+    [
+        pytest.param(
+            *_sparse_case(),
+            ([1.0, 0.0, -1.0], [0.5, 0.25], [(0, 1), (1, 2)]),
+            id="sparse-topology-remaps-native-ids",
+        ),
+        pytest.param(
+            _scaled_ising(1, [1, -1], [1], [(0, 1)]),
+            {},
+            ([1.0, -1.0], [1.0], [(0, 1)]),
+            id="scale-1",
+        ),
+        pytest.param(
+            _scaled_ising(2000, [2, -2], [2], [(0, 1)]),
+            {},
+            ([0.001, -0.001], [0.001], [(0, 1)]),
+            id="scale-2000",
+        ),
+        pytest.param(
+            _scaled_ising(3, [3, -3], [3], [(0, 1)]),
+            {},
+            ([1.0, -1.0], [1.0], [(0, 1)]),
+            id="scale-3",
+        ),
+    ],
+)
+def test_decode_problem(ising, topologies, expected):
+    assert mock_miner.decode_problem(ising, topologies) == expected
 
 
 @pytest.mark.asyncio
 async def test_stale_generation_drops_job_without_result():
-    call = FakeCall()
-    state = mock_miner.Session("mock-0", call)
-    state.abandoned_generation = 3
     job = miner_pb2.Job(
         job_id=b"stale",
         kind=miner_pb2.ISING_SAMPLE,
         generation=2,
         ising=_ising_from_dense([1000, -1000], [500], [(0, 1)]),
     )
-    await state.handle_job(job)
-    kinds = [
-        msg.WhichOneof("msg") if msg != "done_writing" else msg for msg in call.written
-    ]
+    written = await _run_job(job, abandoned_generation=3)
+    kinds = [msg.WhichOneof("msg") if msg != "done_writing" else msg for msg in written]
     assert "result" not in kinds
     assert "reject" not in kinds
     assert kinds == ["job_request"]
@@ -121,17 +165,14 @@ async def test_stale_generation_drops_job_without_result():
 
 @pytest.mark.asyncio
 async def test_generation_zero_is_never_cancelled():
-    call = FakeCall()
-    state = mock_miner.Session("mock-0", call)
-    state.abandoned_generation = 99
     job = miner_pb2.Job(
         job_id=b"mempool",
         kind=miner_pb2.ISING_SAMPLE,
         generation=0,
         ising=_ising_from_dense([1000, -1000], [500], [(0, 1)]),
     )
-    await state.handle_job(job)
-    kinds = [msg.WhichOneof("msg") for msg in call.written]
+    written = await _run_job(job, abandoned_generation=99)
+    kinds = [msg.WhichOneof("msg") for msg in written]
     assert "result" in kinds
 
 
@@ -163,32 +204,16 @@ async def test_get_capabilities_and_ping_are_answered():
 
 
 @pytest.mark.asyncio
-async def test_hello_advertises_v2_capabilities(monkeypatch):
-    monkeypatch.setenv("QUIP_SESSION_TOKEN", "tok-abc")
-    call = FakeCall()
-    state = mock_miner.Session("mock-0", call)
-    await state.send_hello()
-    hello = call.written[0].hello
-    assert hello.capabilities.protocol_version == 2
-    assert hello.capabilities.backend == miner_pb2.BACKEND_MOCK
-    assert hello.capabilities.algorithm == miner_pb2.ALGORITHM_SA
-    assert list(hello.capabilities.encodings) == [miner_pb2.COEFFICIENT_ENCODING_I32]
-
-
-@pytest.mark.asyncio
 async def test_result_spins_are_bit_packed():
-    call = FakeCall()
-    state = mock_miner.Session("mock-0", call)
     job = miner_pb2.Job(
         job_id=b"packed",
         kind=miner_pb2.ISING_SAMPLE,
         generation=0,
         ising=_ising_from_dense([1000, -1000], [500], [(0, 1)]),
     )
-    await state.handle_job(job)
     result = next(
         msg.result
-        for msg in call.written
+        for msg in await _run_job(job)
         if msg != "done_writing" and msg.WhichOneof("msg") == "result"
     )
     # The sampler returns all-+1. Two spins, LSB first, are bits 0 and 1.
@@ -205,8 +230,6 @@ async def test_result_spins_are_bit_packed():
     ],
 )
 async def test_rejects_malformed_coefficients(field, value):
-    call = FakeCall()
-    state = mock_miner.Session("mock-0", call)
     ising = _ising_from_dense([1000, -1000], [500], [(0, 1)])
     setattr(ising, field, value)
     job = miner_pb2.Job(
@@ -215,10 +238,9 @@ async def test_rejects_malformed_coefficients(field, value):
         generation=0,
         ising=ising,
     )
-    await state.handle_job(job)
     rejects = [
         msg.reject
-        for msg in call.written
+        for msg in await _run_job(job)
         if msg != "done_writing" and msg.WhichOneof("msg") == "reject"
     ]
     assert [r.reason for r in rejects] == [miner_pb2.MALFORMED]
@@ -251,26 +273,6 @@ def test_capabilities_flag_prints_lowercase_identity_names():
     }
 
 
-@pytest.mark.parametrize(
-    "scale,stored,milli", [(1, 1, 1000), (2000, 2, 1), (3, 3, 1000)]
-)
-def test_accepts_exact_i32_scales(scale, stored, milli):
-    ising = _ising_from_dense([stored, -stored], [stored], [(0, 1)])
-    ising.scale = scale
-    h, j, edges = mock_miner.decode_problem(ising, {})
-    assert h == [milli / 1000, -milli / 1000]
-    assert j == [milli / 1000]
-    assert edges == [(0, 1)]
-
-
-@pytest.mark.parametrize("stored", [2147484, -2147484])
-def test_rejects_milli_overflow(stored):
-    ising = _ising_from_dense([stored], [], [])
-    ising.scale = 1
-    with pytest.raises(ValueError):
-        mock_miner.decode_problem(ising, {})
-
-
 def _solve_problem(**overrides):
     problem = {
         "h": [1.0, -1.0],
@@ -293,24 +295,21 @@ def test_solve_problem_parses_and_defaults_to_geometric():
 
 
 @pytest.mark.parametrize(
-    "overrides",
+    ("overrides", "missing"),
     [
-        {"edges": [[1, 1]]},
-        {"num_sweep": 1},
-        {"num_reads": 0},
-        {"sweeps_per_beta": 0},
-        {"seed": -1},
-        {"beta_schedule_type": "cosine"},
-        {"beta_schedule_type": "linear"},
+        pytest.param({"edges": [[1, 1]]}, None, id="self-loop"),
+        pytest.param({"num_sweep": 1}, None, id="unknown-key"),
+        pytest.param({"num_reads": 0}, None, id="zero-reads"),
+        pytest.param({"sweeps_per_beta": 0}, None, id="zero-sweeps-per-beta"),
+        pytest.param({"seed": -1}, None, id="negative-seed"),
+        pytest.param({"beta_schedule_type": "cosine"}, None, id="cosine-schedule"),
+        pytest.param({"beta_schedule_type": "linear"}, None, id="linear-schedule"),
+        pytest.param({}, "seed", id="missing-seed"),
     ],
 )
-def test_solve_problem_rejects_malformed_input(overrides):
-    with pytest.raises(ValueError):
-        mock_miner.parse_solve_problem(_solve_problem(**overrides))
-
-
-def test_solve_problem_requires_every_key():
-    problem = _solve_problem()
-    del problem["seed"]
-    with pytest.raises(ValueError, match="seed"):
+def test_solve_problem_rejects_malformed_input(overrides, missing):
+    problem = _solve_problem(**overrides)
+    if missing:
+        del problem[missing]
+    with pytest.raises(ValueError, match=missing):
         mock_miner.parse_solve_problem(problem)

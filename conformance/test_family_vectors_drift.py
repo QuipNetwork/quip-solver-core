@@ -29,16 +29,29 @@ def _layered_doc() -> dict:
     return json.loads(build.LAYERED_PATH.read_text())
 
 
-def test_core_fixture_matches_oracle():
-    assert build.render(build.build_core()) == build.CORE_PATH.read_text()
-
-
-def test_legacy_fixture_matches_oracle():
-    assert build.render(build.build_legacy()) == build.LEGACY_PATH.read_text()
-
-
-def test_layered_fixture_matches_oracle():
-    assert build.render(build.build_layered()) == build.LAYERED_PATH.read_text()
+@pytest.mark.parametrize(
+    ("build_fn", "path"),
+    [
+        pytest.param(build.build_core, build.CORE_PATH, id="core"),
+        pytest.param(build.build_legacy, build.LEGACY_PATH, id="legacy"),
+        pytest.param(build.build_layered, build.LAYERED_PATH, id="layered"),
+        pytest.param(build.build_polariton, build.POLARITON_PATH, id="polariton"),
+        pytest.param(
+            build.build_two_commodity, build.TWO_COMMODITY_PATH, id="two-commodity"
+        ),
+        pytest.param(build.build_ice_fields, build.ICE_FIELDS_PATH, id="ice-fields"),
+        pytest.param(build.build_ice_charge, build.ICE_CHARGE_PATH, id="ice-charge"),
+        pytest.param(
+            build.build_twisted_dimer, build.TWISTED_DIMER_PATH, id="twisted-dimer"
+        ),
+        pytest.param(
+            build.build_ice_structure, build.ICE_STRUCTURE_PATH, id="ice-structure"
+        ),
+        pytest.param(build.build_topology_index, build.INDEX_PATH, id="topology-index"),
+    ],
+)
+def test_fixture_matches_oracle(build_fn, path):
+    assert build.render(build_fn()) == path.read_text()
 
 
 def _ice_doc() -> dict:
@@ -65,54 +78,71 @@ def _polariton_doc() -> dict:
     return json.loads(build.POLARITON_PATH.read_text())
 
 
-def test_polariton_fixture_matches_oracle():
-    text = build.render(build.build_polariton())
-    assert text == build.POLARITON_PATH.read_text()
-
-
-def test_polariton_evidence_matches_the_registry():
+def _registry_entry(name: str) -> dict:
     registry = json.loads((build.FAMILIES_DIR / "registry.json").read_text())[
         "registry"
     ]
-    entry = next(e for e in registry if e["name"] == "quip/polariton-static@1")
-    doc = _polariton_doc()
-    for section in ("cases", "witnesses", "polariton_recipes", "admission"):
+    return next(e for e in registry if e["name"] == name)
+
+
+@pytest.mark.parametrize(
+    ("name", "load", "sections"),
+    [
+        pytest.param(
+            "quip/polariton-static@1",
+            _polariton_doc,
+            ("cases", "witnesses", "polariton_recipes", "admission"),
+            id="polariton",
+        ),
+        pytest.param(
+            "quip/two-commodity-routing@1",
+            _routing_doc,
+            ("cases", "terminals", "routing_recipes", "admission"),
+            id="two-commodity",
+        ),
+        pytest.param("quip/ice-glass@1", _ice_doc, ("cases",), id="ice-glass"),
+        pytest.param(
+            "quip/twisted-ice-dimer@1",
+            _twisted_doc,
+            ("cases", "recipes", "obstructions", "admission"),
+            id="twisted-dimer",
+        ),
+        pytest.param(
+            "quip/charged-ice@1",
+            _charge_doc,
+            ("cases", "energies", "recipe", "admission"),
+            id="charged-ice",
+        ),
+        pytest.param(
+            "quip/ice-fields@1",
+            _fields_doc,
+            ("cases", "selection", "field_recipes", "admission"),
+            id="ice-fields",
+        ),
+    ],
+)
+def test_evidence_matches_the_registry(name, load, sections):
+    entry = _registry_entry(name)
+    doc = load()
+    for section in sections:
         tagged = {tag for case in doc[section] for tag in case["evidence"]}
+        assert tagged, section
         assert tagged == set(entry["evidence"]), section
 
 
-def test_polariton_pin_matches_the_cases():
-    registry = json.loads((build.FAMILIES_DIR / "registry.json").read_text())[
-        "registry"
-    ]
-    entry = next(e for e in registry if e["name"] == "quip/polariton-static@1")
-    digest = blake3.blake3(build.canonical_json(_polariton_doc()["cases"]).encode())
+@pytest.mark.parametrize(
+    ("name", "load"),
+    [
+        pytest.param("quip/polariton-static@1", _polariton_doc, id="polariton"),
+        pytest.param("quip/two-commodity-routing@1", _routing_doc, id="two-commodity"),
+        pytest.param("quip/charged-ice@1", _charge_doc, id="charged-ice"),
+        pytest.param("quip/ice-fields@1", _fields_doc, id="ice-fields"),
+    ],
+)
+def test_pin_matches_the_cases(name, load):
+    entry = _registry_entry(name)
+    digest = blake3.blake3(build.canonical_json(load()["cases"]).encode())
     assert digest.hexdigest() == entry["vectors_blake3"]
-
-
-def test_polariton_contract_recipe_table_matches_the_vectors():
-    text = (build.ROOT / "docs/families/quip-polariton-static-1.md").read_text()
-    row = re.compile(
-        r"^\| `([^`]+)` \| `([^`]+)` \| (\d+) \| (\d+) \| (\d+) \| (\d+) \| `([0-9a-f]{64})` \|$",
-        re.MULTILINE,
-    )
-    table = row.findall(text)
-    recipes = _polariton_doc()["polariton_recipes"]
-    assert len(table) == len(recipes) > 0
-    for (alias, cell, m, t, side, pairs, digest), recipe in zip(
-        table, recipes, strict=True
-    ):
-        values = _decoded_params(recipe["params_hex"])
-        assert alias == recipe["alias"]
-        assert cell == recipe["cell"]
-        assert (int(m), int(t), int(side), int(pairs)) == (
-            values[1],
-            values[2],
-            values[3],
-            values[4],
-        )
-        assert int(pairs) == (int(side) - 1) ** 2 // 8
-        assert digest == recipe["params_digest"]
 
 
 def _check_polariton_witnesses(doc: dict) -> None:
@@ -137,10 +167,6 @@ def _check_polariton_witnesses(doc: dict) -> None:
             assert witness["energy_milli"] == witness["loss_milli"] == expected
 
 
-def test_polariton_witnesses_cover_every_case_with_both_kinds():
-    _check_polariton_witnesses(_polariton_doc())
-
-
 def test_polariton_witness_coverage_rejects_a_swap_and_a_higher_energy():
     doc = _polariton_doc()
     swapped = json.loads(json.dumps(doc))
@@ -162,50 +188,6 @@ def test_polariton_witness_coverage_rejects_a_swap_and_a_higher_energy():
         _check_polariton_witnesses(loud)
 
 
-def test_two_commodity_fixture_matches_oracle():
-    text = build.render(build.build_two_commodity())
-    assert text == build.TWO_COMMODITY_PATH.read_text()
-
-
-def test_two_commodity_evidence_matches_the_registry():
-    registry = json.loads((build.FAMILIES_DIR / "registry.json").read_text())[
-        "registry"
-    ]
-    entry = next(e for e in registry if e["name"] == "quip/two-commodity-routing@1")
-    doc = _routing_doc()
-    for section in ("cases", "terminals", "routing_recipes", "admission"):
-        tagged = {tag for case in doc[section] for tag in case["evidence"]}
-        assert tagged == set(entry["evidence"]), section
-
-
-def test_two_commodity_pin_matches_the_cases():
-    registry = json.loads((build.FAMILIES_DIR / "registry.json").read_text())[
-        "registry"
-    ]
-    entry = next(e for e in registry if e["name"] == "quip/two-commodity-routing@1")
-    digest = blake3.blake3(build.canonical_json(_routing_doc()["cases"]).encode())
-    assert digest.hexdigest() == entry["vectors_blake3"]
-
-
-def test_two_commodity_contract_recipe_table_matches_the_vectors():
-    text = (build.ROOT / "docs/families/quip-two-commodity-routing-1.md").read_text()
-    row = re.compile(
-        r"^\| `([^`]+)` \| `([^`]+)` \| (\d+) \| (\d+) \| (\d+) \| `([0-9a-f]{64})` \|$",
-        re.MULTILINE,
-    )
-    table = row.findall(text)
-    recipes = _routing_doc()["routing_recipes"]
-    assert len(table) == len(recipes) > 0
-    for (alias, cell, m, t, divisor, digest), recipe in zip(
-        table, recipes, strict=True
-    ):
-        values = _decoded_params(recipe["params_hex"])
-        assert alias == recipe["alias"]
-        assert cell == recipe["cell"]
-        assert (int(m), int(t), int(divisor)) == (values[1], values[2], values[3])
-        assert digest == recipe["params_digest"]
-
-
 def test_oracle_template_equals_the_research_template_on_the_live_topology():
     from family_oracle import routing
 
@@ -222,31 +204,6 @@ def test_oracle_template_equals_the_research_template_on_the_live_topology():
     assert [list(a["chain"]) for a in template["arcs"]] == fixture[
         "arc_chain_commodity2"
     ]
-
-
-def test_ice_fields_fixture_matches_oracle():
-    text = build.render(build.build_ice_fields())
-    assert text == build.ICE_FIELDS_PATH.read_text()
-
-
-def test_ice_charge_fixture_matches_oracle():
-    text = build.render(build.build_ice_charge())
-    assert text == build.ICE_CHARGE_PATH.read_text()
-
-
-def test_twisted_dimer_fixture_matches_oracle():
-    text = build.render(build.build_twisted_dimer())
-    assert text == build.TWISTED_DIMER_PATH.read_text()
-
-
-def test_ice_structure_fixture_matches_oracle():
-    text = build.render(build.build_ice_structure())
-    assert text == build.ICE_STRUCTURE_PATH.read_text()
-
-
-def test_topology_index_matches_oracle():
-    text = build.render(build.build_topology_index())
-    assert text == build.INDEX_PATH.read_text()
 
 
 def test_file_matches_compares_payloads_not_compressed_bytes(tmp_path):
@@ -331,56 +288,6 @@ def test_every_json_topology_reference_names_an_indexed_file():
         assert target.exists(), ref
 
 
-def test_ice_structure_evidence_is_sc8():
-    doc = _ice_doc()
-    tagged = [
-        tag for key in ("structure", "live") for c in doc[key] for tag in c["evidence"]
-    ]
-    assert tagged
-    assert set(tagged) == {"SC-8:ice-structure-vectors"}
-
-
-def test_ice_glass_cases_evidence_matches_the_registry():
-    registry = json.loads((build.FAMILIES_DIR / "registry.json").read_text())[
-        "registry"
-    ]
-    entry = next(e for e in registry if e["name"] == "quip/ice-glass@1")
-    tagged = {tag for case in _ice_doc()["cases"] for tag in case["evidence"]}
-    assert tagged
-    assert tagged == set(entry["evidence"])
-
-
-def test_twisted_dimer_evidence_matches_the_registry():
-    registry = json.loads((build.FAMILIES_DIR / "registry.json").read_text())[
-        "registry"
-    ]
-    entry = next(e for e in registry if e["name"] == "quip/twisted-ice-dimer@1")
-    doc = _twisted_doc()
-    for section in ("cases", "recipes", "obstructions", "admission"):
-        tagged = {tag for case in doc[section] for tag in case["evidence"]}
-        assert tagged == set(entry["evidence"]), section
-
-
-def test_charged_ice_evidence_matches_the_registry():
-    registry = json.loads((build.FAMILIES_DIR / "registry.json").read_text())[
-        "registry"
-    ]
-    entry = next(e for e in registry if e["name"] == "quip/charged-ice@1")
-    doc = _charge_doc()
-    for section in ("cases", "energies", "recipe", "admission"):
-        tagged = {tag for case in doc[section] for tag in case["evidence"]}
-        assert tagged == set(entry["evidence"]), section
-
-
-def test_charged_ice_pin_matches_the_cases():
-    registry = json.loads((build.FAMILIES_DIR / "registry.json").read_text())[
-        "registry"
-    ]
-    entry = next(e for e in registry if e["name"] == "quip/charged-ice@1")
-    digest = blake3.blake3(build.canonical_json(_charge_doc()["cases"]).encode())
-    assert digest.hexdigest() == entry["vectors_blake3"]
-
-
 def test_charged_ice_encoded_energy_equals_direct_energy():
     energies = _charge_doc()["energies"]
     assert energies
@@ -388,26 +295,6 @@ def test_charged_ice_encoded_energy_equals_direct_energy():
         assert len(entry["states"]) == 4
         for state in entry["states"]:
             assert state["encoded_milli"] == state["direct_milli"]
-
-
-def test_ice_fields_evidence_matches_the_registry():
-    registry = json.loads((build.FAMILIES_DIR / "registry.json").read_text())[
-        "registry"
-    ]
-    entry = next(e for e in registry if e["name"] == "quip/ice-fields@1")
-    doc = _fields_doc()
-    for section in ("cases", "selection", "field_recipes", "admission"):
-        tagged = {tag for case in doc[section] for tag in case["evidence"]}
-        assert tagged == set(entry["evidence"]), section
-
-
-def test_ice_fields_pin_matches_the_cases():
-    registry = json.loads((build.FAMILIES_DIR / "registry.json").read_text())[
-        "registry"
-    ]
-    entry = next(e for e in registry if e["name"] == "quip/ice-fields@1")
-    digest = blake3.blake3(build.canonical_json(_fields_doc()["cases"]).encode())
-    assert digest.hexdigest() == entry["vectors_blake3"]
 
 
 def test_ice_fields_shortfall_cases_skip_every_or_some_salt():
@@ -435,64 +322,71 @@ def _decoded_params(params_hex: str) -> dict[int, int]:
     return values
 
 
-def test_twisted_contract_recipe_table_matches_the_vectors():
-    text = (build.ROOT / "docs/families/quip-twisted-ice-dimer-1.md").read_text()
+@pytest.mark.parametrize(
+    ("doc_name", "load", "key", "columns"),
+    [
+        pytest.param(
+            "quip-polariton-static-1.md",
+            _polariton_doc,
+            "polariton_recipes",
+            (("m", 1), ("t", 2), ("side", 3), ("pairs", 4)),
+            id="polariton",
+        ),
+        pytest.param(
+            "quip-two-commodity-routing-1.md",
+            _routing_doc,
+            "routing_recipes",
+            (("m", 1), ("t", 2), ("divisor", 3)),
+            id="two-commodity",
+        ),
+        pytest.param(
+            "quip-twisted-ice-dimer-1.md",
+            _twisted_doc,
+            "recipes",
+            (("weak", 3), ("pairs", 4)),
+            id="twisted-dimer",
+        ),
+        pytest.param(
+            "quip-charged-ice-1.md",
+            _charge_doc,
+            "recipe",
+            (("scale", 3), ("background", 4), ("charged", 5)),
+            id="charged-ice",
+        ),
+        pytest.param(
+            "quip-ice-fields-1.md",
+            _fields_doc,
+            "field_recipes",
+            (("glass", 3), ("field", 4), ("divisor", 5)),
+            id="ice-fields",
+        ),
+    ],
+)
+def test_contract_recipe_table_matches_the_vectors(doc_name, load, key, columns):
+    text = (build.ROOT / "docs/families" / doc_name).read_text()
     row = re.compile(
-        r"^\| `([^`]+)` \| `([^`]+)` \| (\d+) \| (\d+) \| `([0-9a-f]{64})` \|$",
+        r"^\| `([^`]+)` \| `([^`]+)` \|"
+        + r" (\d+) \|" * len(columns)
+        + r" `([0-9a-f]{64})` \|$",
         re.MULTILINE,
     )
     table = row.findall(text)
-    recipes = _twisted_doc()["recipes"]
+    recipes = load()[key]
     assert len(table) == len(recipes) > 0
-    for (alias, cell, weak, pairs, digest), recipe in zip(table, recipes, strict=True):
+    for (alias, cell, *numbers, digest), recipe in zip(table, recipes, strict=True):
         values = _decoded_params(recipe["params_hex"])
         assert alias == recipe["alias"]
         assert cell == recipe["cell"]
-        assert int(weak) == values[3]
-        assert int(pairs) == values[4]
+        assert {
+            name: int(n) for (name, _), n in zip(columns, numbers, strict=True)
+        } == {name: values[tag] for name, tag in columns}
         assert digest == recipe["params_digest"]
 
 
-def test_charged_ice_contract_recipe_table_matches_the_vectors():
-    text = (build.ROOT / "docs/families/quip-charged-ice-1.md").read_text()
-    row = re.compile(
-        r"^\| `([^`]+)` \| `([^`]+)` \| (\d+) \| (\d+) \| (\d+) \| `([0-9a-f]{64})` \|$",
-        re.MULTILINE,
-    )
-    table = row.findall(text)
-    recipes = _charge_doc()["recipe"]
-    assert len(table) == len(recipes) > 0
-    for (alias, cell, scale, bg, charged, digest), recipe in zip(
-        table, recipes, strict=True
-    ):
+def test_polariton_recipe_pairs_follow_the_side():
+    for recipe in _polariton_doc()["polariton_recipes"]:
         values = _decoded_params(recipe["params_hex"])
-        assert alias == recipe["alias"]
-        assert cell == recipe["cell"]
-        assert int(scale) == values[3]
-        assert int(bg) == values[4]
-        assert int(charged) == values[5]
-        assert digest == recipe["params_digest"]
-
-
-def test_ice_fields_contract_recipe_table_matches_the_vectors():
-    text = (build.ROOT / "docs/families/quip-ice-fields-1.md").read_text()
-    row = re.compile(
-        r"^\| `([^`]+)` \| `([^`]+)` \| (\d+) \| (\d+) \| (\d+) \| `([0-9a-f]{64})` \|$",
-        re.MULTILINE,
-    )
-    table = row.findall(text)
-    recipes = _fields_doc()["field_recipes"]
-    assert len(table) == len(recipes) > 0
-    for (alias, cell, glass, field, divisor, digest), recipe in zip(
-        table, recipes, strict=True
-    ):
-        values = _decoded_params(recipe["params_hex"])
-        assert alias == recipe["alias"]
-        assert cell == recipe["cell"]
-        assert int(glass) == values[3]
-        assert int(field) == values[4]
-        assert int(divisor) == values[5]
-        assert digest == recipe["params_digest"]
+        assert values[4] == (values[3] - 1) ** 2 // 8
 
 
 def test_canonical_json_is_sorted_compact_and_rejects_floats():

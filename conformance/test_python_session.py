@@ -16,35 +16,50 @@ def _sample_capabilities() -> miner_pb2.Capabilities:
 
 
 def test_hello_requires_token(monkeypatch):
-    caps = _sample_capabilities()
     monkeypatch.delenv("QUIP_SESSION_TOKEN", raising=False)
     with pytest.raises(session.MissingToken):
-        session.build_hello("qpu-0", caps)
+        session.build_hello("qpu-0", _sample_capabilities())
+
+
+@pytest.mark.parametrize(
+    ("caps", "scalars", "features", "native_hash"),
+    [
+        pytest.param(
+            _sample_capabilities(),
+            {"max_nodes": 100, "max_edges": 200},
+            [],
+            None,
+            id="sample",
+        ),
+        pytest.param(
+            miner_pb2.Capabilities(
+                backend=miner_pb2.BACKEND_CPU,
+                algorithm=miner_pb2.ALGORITHM_SA,
+                supported_kinds=[miner_pb2.ISING_SAMPLE],
+                features=["streaming"],
+                protocol_version=2,
+                native_topology_hash=b"\x01\x02",
+            ),
+            {},
+            ["streaming"],
+            b"\x01\x02",
+            id="features-and-topology-hash",
+        ),
+    ],
+)
+def test_build_hello(monkeypatch, caps, scalars, features, native_hash):
     monkeypatch.setenv("QUIP_SESSION_TOKEN", "tok-abc")
     h = session.build_hello("qpu-0", caps)
     assert h.miner_id == "qpu-0"
     assert h.session_token == "tok-abc"
     assert h.capabilities.protocol_version == 2
-    assert h.capabilities.max_nodes == 100
-    assert h.capabilities.max_edges == 200
-    assert list(h.capabilities.features) == []
-    assert not h.capabilities.HasField("native_topology_hash")
-
-
-def test_hello_optional_features_and_topology_hash(monkeypatch):
-    monkeypatch.setenv("QUIP_SESSION_TOKEN", "tok-abc")
-    caps = miner_pb2.Capabilities(
-        backend=miner_pb2.BACKEND_CPU,
-        algorithm=miner_pb2.ALGORITHM_SA,
-        supported_kinds=[miner_pb2.ISING_SAMPLE],
-        features=["streaming"],
-        protocol_version=2,
-        native_topology_hash=b"\x01\x02",
-    )
-    h = session.build_hello("qpu-0", caps)
-    assert list(h.capabilities.features) == ["streaming"]
-    assert h.capabilities.native_topology_hash == b"\x01\x02"
-    assert h.capabilities.protocol_version == 2
+    for field, value in scalars.items():
+        assert getattr(h.capabilities, field) == value, field
+    assert list(h.capabilities.features) == features
+    if native_hash is None:
+        assert not h.capabilities.HasField("native_topology_hash")
+    else:
+        assert h.capabilities.native_topology_hash == native_hash
 
 
 def test_configure_defaults():
@@ -61,10 +76,6 @@ def test_configure_defaults():
         15,
         60,
     )
-    assert session.DEFAULT_QUEUE_DEPTH == 3
-    assert session.DEFAULT_IDLE_TIMEOUT_S == 300
-    assert session.DEFAULT_HEARTBEAT_S == 15
-    assert session.DEFAULT_RECONNECT_WINDOW_S == 60
 
 
 def test_welcome_rejects_other_protocol_version():
