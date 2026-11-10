@@ -3,7 +3,7 @@
 
 mod common;
 
-use common::example_bin;
+use common::{example_bin, profile_dir, profile_name};
 use quip_solver_conformance::families::{drive_miner_family, FamilyReport};
 use quip_solver_conformance::solve::CaseOutcome;
 use std::process::Command;
@@ -19,21 +19,10 @@ const LISTS_FAMILIES: &str = "the binary lists generated families";
 /// for a pass.
 type Expected = (&'static str, Option<&'static str>, Option<&'static str>);
 
-/// The `target/<profile>` directory of the running test executable.
-fn target_profile_dir() -> std::path::PathBuf {
-    #[expect(
-        clippy::expect_used,
-        reason = "test helper: current_exe is always available under cargo test"
-    )]
-    let mut p = std::env::current_exe().expect("test exe path");
-    let _ = p.pop(); // deps/
-    let _ = p.pop(); // <profile>/
-    p
-}
-
 /// The gate binary, built first when it is missing.
 fn drive_bin() -> std::path::PathBuf {
-    let path = target_profile_dir().join("quip-solver-drive");
+    let profile = profile_dir();
+    let path = profile.join("quip-solver-drive");
     if !path.is_file() {
         #[expect(
             clippy::expect_used,
@@ -46,10 +35,17 @@ fn drive_bin() -> std::path::PathBuf {
                 "quip-solver-conformance",
                 "--bin",
                 "quip-solver-drive",
+                "--profile",
+                &profile_name(&profile),
             ])
             .status()
             .expect("cargo build --bin");
         assert!(status.success(), "failed to build quip-solver-drive");
+        assert!(
+            path.is_file(),
+            "quip-solver-drive not found at {}",
+            path.display()
+        );
     }
     path
 }
