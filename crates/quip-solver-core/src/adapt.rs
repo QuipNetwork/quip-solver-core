@@ -242,41 +242,37 @@ mod tests {
     }
 
     #[test]
-    fn adapt_params_fixed_reads_bounds_when_no_solution_factor() {
-        // CUDA-style bounds: no solution factor -> fixed reads bounds.
-        let cuda = AdaptBounds {
-            min_sweeps: 256,
-            max_sweeps: 2048,
-            min_reads: 64,
-            max_reads: 256,
-            reads_solution_min_factor: 0,
-            reads_solution_max_factor: 0,
-            reads_solution_floor_factor: 0,
-        };
-        // Easiest target -> difficulty 0 -> floors: sweeps=256, reads=64.
-        let p = adapt_params(0, 5, 4577, 41515, &[-1000, 0, 1000], &cuda);
-        assert_eq!(p.num_sweeps, 256);
-        assert_eq!(p.num_reads, 64);
-    }
-
-    #[test]
-    fn adapt_params_floor_factor_raises_num_reads() {
-        // Same CUDA-style envelope as the test above, but with a positive
-        // reads_solution_floor_factor. Existing golden cases leave that factor
-        // at 0, so num_reads.max(floor) is never load-bearing there.
-        let bounds = AdaptBounds {
-            min_sweeps: 256,
-            max_sweeps: 2048,
-            min_reads: 64,
-            max_reads: 256,
-            reads_solution_min_factor: 0,
-            reads_solution_max_factor: 0,
-            reads_solution_floor_factor: 10,
-        };
-        // Difficulty 0 -> interpolated reads = min_reads = 64.
-        // floor = min_solutions * 10 = 100, which must raise num_reads.
-        let p = adapt_params(0, 10, 4577, 41515, &[-1000, 0, 1000], &bounds);
-        assert_eq!(p.num_reads, 100);
+    fn adapt_params_reads_follow_the_cuda_style_bounds() {
+        // (reads_solution_floor_factor, min_solutions, expected sweeps, expected reads)
+        let rows = [
+            // No solution factor -> fixed reads bounds. Easiest target ->
+            // difficulty 0 -> floors: sweeps=256, reads=64.
+            (0, 5, 256, 64),
+            // A positive reads_solution_floor_factor with the same envelope.
+            // Existing golden cases leave that factor at 0, so
+            // num_reads.max(floor) is never load-bearing there. Difficulty 0
+            // -> interpolated reads = min_reads = 64; floor = min_solutions *
+            // 10 = 100, which must raise num_reads.
+            (10, 10, 256, 100),
+        ];
+        for (floor_factor, min_solutions, sweeps, reads) in rows {
+            // CUDA-style bounds: no solution min/max factor.
+            let bounds = AdaptBounds {
+                min_sweeps: 256,
+                max_sweeps: 2048,
+                min_reads: 64,
+                max_reads: 256,
+                reads_solution_min_factor: 0,
+                reads_solution_max_factor: 0,
+                reads_solution_floor_factor: floor_factor,
+            };
+            let p = adapt_params(0, min_solutions, 4577, 41515, &[-1000, 0, 1000], &bounds);
+            assert_eq!(
+                (p.num_sweeps, p.num_reads),
+                (sweeps, reads),
+                "floor factor {floor_factor}, min solutions {min_solutions}"
+            );
+        }
     }
 
     #[test]

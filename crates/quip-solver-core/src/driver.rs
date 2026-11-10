@@ -468,6 +468,8 @@ mod tests {
             ("[1e300]", i64::MAX),
             ("[-1e300]", i64::MIN),
             ("[1e300,-1e300]", -1),
+            // An exact integer problem keeps the sampler's own energy.
+            ("[-1,0,1]", 777),
         ] {
             let output = solve(&WrongLossy, &id(), &input_with_biases(biases))?;
             let results: serde_json::Value = serde_json::from_slice(&output)?;
@@ -511,18 +513,6 @@ mod tests {
             Some(777)
         );
         Ok(())
-    }
-
-    #[test]
-    fn exact_fixed_problem_preserves_sampler_energy() {
-        let output = solve(&WrongLossy, &id(), &input_with_biases("[-1,0,1]")).unwrap();
-        let results: serde_json::Value = serde_json::from_slice(&output).unwrap();
-        assert_eq!(
-            results
-                .pointer("/0/energy_milli")
-                .and_then(serde_json::Value::as_i64),
-            Some(777)
-        );
     }
 
     #[test]

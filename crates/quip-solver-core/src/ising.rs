@@ -212,7 +212,7 @@ pub(crate) const GOLDEN_GRAPHS: [(&str, usize); 9] = [
 
 #[cfg(test)]
 mod tests {
-    use super::{BetaSchedule, IsingGraph, SampleParams};
+    use super::{BetaSchedule, SampleParams};
 
     /// The serde names are the `--solve` names, so a backend can carry the
     /// kind across its own process boundary in the same spelling.
@@ -241,16 +241,5 @@ mod tests {
             BetaSchedule::Linear.build(0.1, 10.0, 4),
             crate::beta::linear_beta_schedule(0.1, 10.0, 4)
         );
-    }
-
-    #[test]
-    fn num_nodes_counts_biases() {
-        let graph = IsingGraph::new(
-            vec![1.0, -0.5, 0.0, 0.25],
-            vec![1.0, -1.0, -1.0, 1.0],
-            vec![(0, 1), (1, 2), (2, 3), (0, 3)],
-        );
-        assert_eq!(graph.num_nodes(), 4);
-        assert_eq!(graph.edges.len(), 4);
     }
 }

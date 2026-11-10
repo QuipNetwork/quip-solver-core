@@ -700,15 +700,16 @@ mod context_tests {
     }
 
     #[test]
-    fn section_returns_the_payload_of_a_present_kind() {
+    fn section_returns_present_kinds_and_none_for_absent() {
         let c = context();
-        assert_eq!(c.section(1), Some(&[7u8, 8, 9][..]));
-        assert_eq!(c.section(3), Some(&[5u8][..]));
-    }
-
-    #[test]
-    fn section_of_an_absent_kind_is_none() {
-        assert_eq!(context().section(2), None);
+        let rows = [
+            (1, Some(&[7u8, 8, 9][..])),
+            (3, Some(&[5u8][..])),
+            (2, None),
+        ];
+        for (kind, expected) in rows {
+            assert_eq!(c.section(kind), expected, "kind {kind}");
+        }
     }
 
     #[test]

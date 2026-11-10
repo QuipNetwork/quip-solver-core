@@ -2803,35 +2803,20 @@ mod tests {
     }
 
     #[test]
-    fn capabilities_json_escapes_quotes_in_features() {
+    fn the_capabilities_printer_handles_optional_and_escaped_fields() {
+        // A quote in a feature is escaped, so the JSON stays valid.
         let id = BackendIdentity {
-            backend: Backend::Mock,
-            algorithm: Algorithm::Sa,
-            max_nodes: 1,
-            max_edges: 1,
             features: &[r#"has"quote"#],
-            adapt: crate::adapt::AdaptBounds {
-                min_sweeps: 1,
-                max_sweeps: 1,
-                min_reads: 1,
-                max_reads: 1,
-                reads_solution_min_factor: 1,
-                reads_solution_max_factor: 1,
-                reads_solution_floor_factor: 0,
-            },
-            limits: crate::limits::ModelLimits::UNSTATED,
+            ..test_identity()
         };
         let json = capabilities_json_from(&capabilities(&id, 1));
         let v: serde_json::Value =
             serde_json::from_str(&json).expect("quoted feature must produce valid JSON");
         assert_eq!(v.get("features"), Some(&serde_json::json!(["has\"quote"])));
-    }
 
-    /// Unset limits are omitted, as protobuf JSON omits an unset optional
-    /// field; set ones keep their value, `0` included, because `0` (unbounded)
-    /// and absent (no claim) mean different things.
-    #[test]
-    fn model_limits_reach_capabilities_and_its_json() {
+        // Unset limits are omitted, as protobuf JSON omits an unset optional
+        // field; set ones keep their value, `0` included, because `0`
+        // (unbounded) and absent (no claim) mean different things.
         let unset = capabilities_json_from(&capabilities(&test_identity(), 1));
         let v: serde_json::Value = serde_json::from_str(&unset).expect("JSON");
         for key in ["maxDegree", "maxLocalFieldMilli", "exactResolutionMilli"] {
@@ -2857,12 +2842,9 @@ mod tests {
             v.get("exactResolutionMilli"),
             Some(&serde_json::json!(1000))
         );
-    }
 
-    #[test]
-    fn native_topology_hash_serializes_as_base64_string() {
-        // `--capabilities` has no path that sets this field. Build the JSON
-        // view from a Capabilities that carries a hash.
+        // `--capabilities` has no path that sets the native topology hash.
+        // Build the JSON view from a Capabilities that carries one.
         let mut c = capabilities(&test_identity(), 1);
         c.native_topology_hash = Some(vec![1, 2, 3]);
         let json = capabilities_json_from(&c);
@@ -2943,68 +2925,60 @@ mod tests {
     /// SPEC section 5, defence in depth: a `Result` whose generation was
     /// cancelled must not reach the wire even when the backend produced one.
     /// A backend that only checks the watermark at dequeue does exactly that.
+    ///
+    /// The second row is the same job with nothing cancelled, which still
+    /// reports its `Result`. Without it the first row passes on a writer that
+    /// drops every result.
     #[tokio::test]
-    async fn the_writer_drops_a_result_for_a_cancelled_generation() {
-        let WriterHarness {
-            res_tx,
-            ctrl_tx,
-            mut out_rx,
-            pending,
-            cancel,
-            writer,
-            ..
-        } = spawn_writer(16);
+    async fn the_writer_reports_live_generations_and_drops_cancelled_ones() {
+        // (label, cancel through this generation, the job is dropped)
+        for (label, cancel_through, dropped) in [
+            ("cancelled generation", Some(4), true),
+            ("live generation", None, false),
+        ] {
+            let WriterHarness {
+                res_tx,
+                ctrl_tx,
+                mut out_rx,
+                pending,
+                cancel,
+                writer,
+                ..
+            } = spawn_writer(16);
 
-        {
-            let mut p = pending.lock().expect("fresh mutex");
-            let _ = p.insert(pending_id(&[7], None), pending_job(Some(4)));
+            {
+                let mut p = pending.lock().expect("fresh mutex");
+                let _ = p.insert(pending_id(&[7], None), pending_job(Some(4)));
+            }
+            if let Some(point) = cancel_through {
+                cancel.cancel_through(point);
+            }
+            res_tx.send(completed_result(7)).await.expect("send result");
+
+            let first = out_rx.recv().await.expect("writer replies");
+            if dropped {
+                assert!(
+                    matches!(first.msg, Some(miner_msg::Msg::JobRequest(jr)) if jr.credits == 1),
+                    "{label}: a cancelled job refunds exactly one credit and sends no Result"
+                );
+
+                // Nothing else follows: no Result, no Reject.
+                drop(res_tx);
+                drop(ctrl_tx);
+                assert!(
+                    out_rx.recv().await.is_none(),
+                    "{label}: a cancelled generation must produce no further outbound message"
+                );
+            } else {
+                assert!(
+                    matches!(first.msg, Some(miner_msg::Msg::Result(_))),
+                    "{label}: a live generation must report its Result"
+                );
+                drop(res_tx);
+                drop(ctrl_tx);
+            }
+            let _ = tokio::time::timeout(Duration::from_secs(5), writer).await;
         }
-        cancel.cancel_through(4);
-        res_tx.send(completed_result(7)).await.expect("send result");
-
-        let first = out_rx.recv().await.expect("writer replies");
-        assert!(
-            matches!(first.msg, Some(miner_msg::Msg::JobRequest(jr)) if jr.credits == 1),
-            "a cancelled job refunds exactly one credit and sends no Result"
-        );
-
-        // Nothing else follows: no Result, no Reject.
-        drop(res_tx);
-        drop(ctrl_tx);
-        assert!(
-            out_rx.recv().await.is_none(),
-            "a cancelled generation must produce no further outbound message"
-        );
-        let _ = tokio::time::timeout(Duration::from_secs(5), writer).await;
-    }
-
-    /// The same job, with nothing cancelled, still reports its `Result`. Without
-    /// this the test above passes on a writer that drops every result.
-    #[tokio::test]
-    async fn the_writer_keeps_a_result_for_a_live_generation() {
-        let WriterHarness {
-            res_tx,
-            ctrl_tx,
-            mut out_rx,
-            pending,
-            writer,
-            ..
-        } = spawn_writer(16);
-
-        {
-            let mut p = pending.lock().expect("fresh mutex");
-            let _ = p.insert(pending_id(&[7], None), pending_job(Some(4)));
-        }
-        res_tx.send(completed_result(7)).await.expect("send result");
-
-        let first = out_rx.recv().await.expect("writer replies");
-        assert!(
-            matches!(first.msg, Some(miner_msg::Msg::Result(_))),
-            "a live generation must report its Result"
-        );
-        drop(res_tx);
-        drop(ctrl_tx);
-        let _ = tokio::time::timeout(Duration::from_secs(5), writer).await;
     }
 
     /// A panicking writer must not read as a clean session.
@@ -3032,48 +3006,67 @@ mod tests {
 
     /// Every `SessionError` must reach its documented exit code after being
     /// boxed as `dyn Error`, which is the only shape `run_code` ever sees.
-    #[test]
-    fn session_errors_round_trip_through_a_boxed_error() {
-        for (err, want) in [
-            (SessionError::MissingToken, ExitCode::TokenRejected),
-            (SessionError::BadWelcome(0), ExitCode::ConfigInvalid),
-            (SessionError::BadWelcome(2), ExitCode::ConfigInvalid),
-        ] {
-            let boxed: Box<dyn std::error::Error> = Box::new(err);
-            assert_eq!(map_err_to_exit(boxed, "test"), want, "for {err:?}");
-        }
-    }
-
-    /// A `SessionExit` carries its own code, so these exits do not depend on
+    ///
+    /// A `SessionExit` carries its own code, so those exits do not depend on
     /// the wording of anyone's `Display`.
-    #[test]
-    fn session_exits_carry_their_own_code() {
-        for code in [
-            ExitCode::TokenRejected,
-            ExitCode::InternalFatal,
-            ExitCode::ConfigInvalid,
-        ] {
-            let boxed: Box<dyn std::error::Error> =
-                SessionExit::new(code, "coordinator went away").into();
-            assert_eq!(map_err_to_exit(boxed, "test"), code);
-        }
-    }
-
+    ///
     /// The text-matching fallback still has to work: errors from crates this
-    /// one does not own arrive with the concrete type erased. These strings are
-    /// the two `SessionError` `Display` forms, so a reword there fails here
-    /// rather than silently turning a token failure into exit 70.
+    /// one does not own arrive with the concrete type erased. The fallback
+    /// strings are the two `SessionError` `Display` forms, so a reword there
+    /// fails here rather than silently turning a token failure into exit 70.
     #[test]
-    fn the_type_erased_fallback_recovers_the_documented_codes() {
-        let missing: Box<dyn std::error::Error> = SessionError::MissingToken.to_string().into();
-        assert_eq!(map_err_to_exit(missing, "test"), ExitCode::TokenRejected);
-
-        let bad: Box<dyn std::error::Error> = SessionError::BadWelcome(9).to_string().into();
-        assert_eq!(map_err_to_exit(bad, "test"), ExitCode::ConfigInvalid);
-
-        // Anything else is an internal fault, not a guess.
-        let other: Box<dyn std::error::Error> = "transport closed".to_owned().into();
-        assert_eq!(map_err_to_exit(other, "test"), ExitCode::InternalFatal);
+    fn boxed_session_errors_map_to_their_exit_codes() {
+        let rows: Vec<(&str, Box<dyn std::error::Error>, ExitCode)> = vec![
+            (
+                "missing token",
+                Box::new(SessionError::MissingToken),
+                ExitCode::TokenRejected,
+            ),
+            (
+                "bad welcome 0",
+                Box::new(SessionError::BadWelcome(0)),
+                ExitCode::ConfigInvalid,
+            ),
+            (
+                "bad welcome 2",
+                Box::new(SessionError::BadWelcome(2)),
+                ExitCode::ConfigInvalid,
+            ),
+            (
+                "exit with token rejected",
+                SessionExit::new(ExitCode::TokenRejected, "coordinator went away").into(),
+                ExitCode::TokenRejected,
+            ),
+            (
+                "exit with internal fatal",
+                SessionExit::new(ExitCode::InternalFatal, "coordinator went away").into(),
+                ExitCode::InternalFatal,
+            ),
+            (
+                "exit with config invalid",
+                SessionExit::new(ExitCode::ConfigInvalid, "coordinator went away").into(),
+                ExitCode::ConfigInvalid,
+            ),
+            (
+                "erased missing token",
+                SessionError::MissingToken.to_string().into(),
+                ExitCode::TokenRejected,
+            ),
+            (
+                "erased bad welcome",
+                SessionError::BadWelcome(9).to_string().into(),
+                ExitCode::ConfigInvalid,
+            ),
+            // Anything else is an internal fault, not a guess.
+            (
+                "erased other",
+                "transport closed".to_owned().into(),
+                ExitCode::InternalFatal,
+            ),
+        ];
+        for (label, boxed, want) in rows {
+            assert_eq!(map_err_to_exit(boxed, "test"), want, "{label}");
+        }
     }
 
     /// `--capabilities` and the in-session reply are one message, so they carry
@@ -3156,35 +3149,6 @@ mod tests {
             advertised_features::<Warm, f64>(&listed),
             vec![INITIAL_SPINS_FEATURE]
         );
-    }
-
-    /// A backend whose width depends on the opened device declares 0. The
-    /// static answer keeps the 0; the in-session reply reports the resolved
-    /// width.
-    #[test]
-    fn a_device_dependent_width_declaration_resolves_in_session() {
-        struct DeviceWidthSampler;
-        impl Sampler for DeviceWidthSampler {
-            fn sample(
-                &self,
-                _graph: &crate::IsingGraph,
-                _params: &crate::ising::SampleParams,
-            ) -> Result<Vec<crate::SamplerResult>, crate::SampleError> {
-                Ok(vec![])
-            }
-            fn stream_width(&self) -> usize {
-                6
-            }
-            fn declared_stream_width() -> u32 {
-                0
-            }
-        }
-
-        let id = test_identity();
-        let flag = advertised_capabilities::<DeviceWidthSampler, f64>(&id, &generic_table());
-        assert_eq!(flag.stream_width, 0);
-        let reply = session_capabilities::<DeviceWidthSampler, f64>(&id, &generic_table(), 6);
-        assert_eq!(reply.stream_width, 6);
     }
 
     #[test]

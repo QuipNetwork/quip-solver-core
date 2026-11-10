@@ -120,48 +120,61 @@ mod tests {
     use super::*;
 
     #[test]
-    fn csr_symmetric_two_node() {
-        let g = CsrGraph::from_base(&IsingGraph::new(vec![1.0, -1.0], vec![0.5], vec![(0, 1)]));
-        assert_eq!(g.row_ptr, vec![0, 1, 2]);
-        assert_eq!(g.col_ind, vec![1, 0]);
-        assert_eq!(g.j_csr, vec![0.5, 0.5]);
-        assert_eq!(g.nnz(), 2);
+    fn csr_layout_follows_the_table() {
+        let rows = [
+            (
+                "symmetric two-node",
+                IsingGraph::new(vec![1.0, -1.0], vec![0.5], vec![(0, 1)]),
+                vec![0, 1, 2],
+                vec![1, 0],
+                vec![0.5, 0.5],
+                2,
+            ),
+            (
+                "empty graph",
+                IsingGraph::new(vec![], vec![], vec![]),
+                vec![0],
+                vec![],
+                vec![],
+                0,
+            ),
+            // A self-loop `(u, u)` must not appear in the CSR adjacency: it
+            // should contribute no entry to `col_ind`/`j_csr` and not inflate
+            // `row_ptr`, matching `CpuGraph::from_base` and
+            // `SbGraph::from_base` in quip-solver-cpu, which both skip
+            // `u == v` outright.
+            (
+                "self-loops are dropped",
+                IsingGraph::new(
+                    vec![0.5, -0.25, 0.0],
+                    vec![2.0, -1.0, 0.75],
+                    vec![(0, 0), (0, 1), (1, 2)],
+                ),
+                vec![0, 1, 3, 4],
+                vec![1, 0, 2, 1],
+                vec![-1.0, -1.0, 0.75, 0.75],
+                4,
+            ),
+            // A pure self-loop on a single node produces an empty adjacency
+            // row, not a row containing the node itself.
+            (
+                "a pure self-loop yields an empty row",
+                IsingGraph::new(vec![0.0], vec![3.0], vec![(0, 0)]),
+                vec![0, 0],
+                vec![],
+                vec![],
+                0,
+            ),
+        ];
+        for (label, base, row_ptr, col_ind, j_csr, nnz) in rows {
+            let g = CsrGraph::from_base(&base);
+            assert_eq!(g.row_ptr, row_ptr, "{label}: row_ptr");
+            assert_eq!(g.col_ind, col_ind, "{label}: col_ind");
+            assert_eq!(g.j_csr, j_csr, "{label}: j_csr");
+            assert_eq!(g.nnz(), nnz, "{label}: nnz");
+        }
     }
 
-    #[test]
-    fn empty_graph() {
-        let g = CsrGraph::from_base(&IsingGraph::new(vec![], vec![], vec![]));
-        assert_eq!(g.row_ptr, vec![0]);
-        assert_eq!(g.nnz(), 0);
-    }
-
-    /// A self-loop `(u, u)` must not appear in the CSR adjacency: it should
-    /// contribute no entry to `col_ind`/`j_csr` and not inflate `row_ptr`,
-    /// matching `CpuGraph::from_base` and `SbGraph::from_base` in
-    /// quip-solver-cpu, which both skip `u == v` outright.
-    #[test]
-    fn csr_drops_self_loops() {
-        let g = CsrGraph::from_base(&IsingGraph::new(
-            vec![0.5, -0.25, 0.0],
-            vec![2.0, -1.0, 0.75],
-            vec![(0, 0), (0, 1), (1, 2)],
-        ));
-        assert_eq!(g.row_ptr, vec![0, 1, 3, 4]);
-        assert_eq!(g.col_ind, vec![1, 0, 2, 1]);
-        assert_eq!(g.j_csr, vec![-1.0, -1.0, 0.75, 0.75]);
-        assert_eq!(g.nnz(), 4);
-    }
-
-    /// A pure self-loop on a single node produces an empty adjacency row, not
-    /// a row containing the node itself.
-    #[test]
-    fn csr_pure_self_loop_yields_empty_row() {
-        let g = CsrGraph::from_base(&IsingGraph::new(vec![0.0], vec![3.0], vec![(0, 0)]));
-        assert_eq!(g.row_ptr, vec![0, 0]);
-        assert!(g.col_ind.is_empty());
-        assert!(g.j_csr.is_empty());
-        assert_eq!(g.nnz(), 0);
-    }
     /// FNV-1a over `j_csr` then `h_f32`, each `f32` widened to a `u64` of
     /// its bits and hashed little-endian.
     fn upload_digest(g: &CsrGraph) -> u64 {

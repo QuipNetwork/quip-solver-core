@@ -130,74 +130,135 @@ mod tests {
         }
     }
 
-    #[test]
-    fn unstated_limits_accept_anything() {
-        let h = [1e12, -0.5];
-        assert!(ModelLimits::UNSTATED
-            .check(&h, &[3.0], &[(0, 1)], true)
-            .is_ok());
+    /// One `ModelLimits::check` call and its expected outcome: `None` passes,
+    /// `Some(needle)` fails with a message containing the needle.
+    struct Row {
+        name: &'static str,
+        limits: ModelLimits,
+        h: Vec<f64>,
+        j: Vec<f64>,
+        edges: Vec<(usize, usize)>,
+        exact: bool,
+        expected: Option<&'static str>,
+    }
+
+    fn row(
+        name: &'static str,
+        limits: ModelLimits,
+        (h, j, edges): (Vec<f64>, Vec<f64>, Vec<(usize, usize)>),
+        exact: bool,
+        expected: Option<&'static str>,
+    ) -> Row {
+        Row {
+            name,
+            limits,
+            h,
+            j,
+            edges,
+            exact,
+            expected,
+        }
     }
 
     #[test]
-    fn zero_degree_and_field_are_unbounded() {
-        let h = [0.0; 4];
-        assert!(limits(0, 0, 1)
-            .check(&h, &[1e9, 1e9, 1e9], &STAR, true)
-            .is_ok());
-    }
-
-    #[test]
-    fn a_node_at_the_degree_limit_passes_and_one_above_fails() {
-        let h = [0.0; 4];
-        let j = [1000.0; 3];
-        assert!(limits(3, 0, 1).check(&h, &j, &STAR, false).is_ok());
-        let err = limits(2, 0, 1)
-            .check(&h, &j, &STAR, false)
-            .expect_err("degree 3 exceeds 2");
-        assert!(err.contains("degree 3"), "{err}");
-    }
-
-    #[test]
-    fn the_field_sums_bias_and_incident_couplings() {
-        // Node 0: |h| 500 + three couplings of 1000 = 3500.
-        let h = [-500.0, 0.0, 0.0, 0.0];
-        let j = [1000.0, -1000.0, 1000.0];
-        assert!(limits(0, 3500, 1).check(&h, &j, &STAR, false).is_ok());
-        let err = limits(0, 3499, 1)
-            .check(&h, &j, &STAR, false)
-            .expect_err("field 3500 exceeds 3499");
-        assert!(err.contains("local field 3500"), "{err}");
-    }
-
-    #[test]
-    fn duplicate_edges_count_twice() {
-        let h = [0.0, 0.0];
-        let edges = [(0, 1), (0, 1)];
-        assert!(limits(1, 0, 1)
-            .check(&h, &[1000.0, 1000.0], &edges, false)
-            .is_err());
-    }
-
-    #[test]
-    fn off_step_coefficients_fail_only_for_an_exact_binary() {
-        let h = [1500.0, 0.0];
-        let j = [1000.0];
-        let edges = [(0, 1)];
-        assert!(limits(0, 0, 1000).check(&h, &j, &edges, false).is_ok());
-        let err = limits(0, 0, 1000)
-            .check(&h, &j, &edges, true)
-            .expect_err("1500 is off a 1000 step");
-        assert!(err.contains("1500"), "{err}");
-        assert!(limits(0, 0, 500).check(&h, &j, &edges, true).is_ok());
-    }
-
-    #[test]
-    fn sub_milli_is_off_any_step() {
-        assert!(limits(0, 0, 1).check(&[0.5], &[], &[], true).is_err());
-    }
-
-    #[test]
-    fn a_zero_step_makes_no_claim() {
-        assert!(limits(0, 0, 0).check(&[0.5], &[], &[], true).is_ok());
+    fn model_limits_check_follows_the_table() {
+        let star = |h: Vec<f64>, j: Vec<f64>| (h, j, STAR.to_vec());
+        let rows = [
+            row(
+                "unstated limits accept anything",
+                ModelLimits::UNSTATED,
+                (vec![1e12, -0.5], vec![3.0], vec![(0, 1)]),
+                true,
+                None,
+            ),
+            row(
+                "zero degree and field are unbounded",
+                limits(0, 0, 1),
+                star(vec![0.0; 4], vec![1e9, 1e9, 1e9]),
+                true,
+                None,
+            ),
+            row(
+                "a node at the degree limit passes",
+                limits(3, 0, 1),
+                star(vec![0.0; 4], vec![1000.0; 3]),
+                false,
+                None,
+            ),
+            row(
+                "one above the degree limit fails",
+                limits(2, 0, 1),
+                star(vec![0.0; 4], vec![1000.0; 3]),
+                false,
+                Some("degree 3"),
+            ),
+            // Node 0: |h| 500 + three couplings of 1000 = 3500.
+            row(
+                "a field at the limit passes",
+                limits(0, 3500, 1),
+                star(vec![-500.0, 0.0, 0.0, 0.0], vec![1000.0, -1000.0, 1000.0]),
+                false,
+                None,
+            ),
+            row(
+                "a field one above the limit fails",
+                limits(0, 3499, 1),
+                star(vec![-500.0, 0.0, 0.0, 0.0], vec![1000.0, -1000.0, 1000.0]),
+                false,
+                Some("local field 3500"),
+            ),
+            row(
+                "duplicate edges count twice",
+                limits(1, 0, 1),
+                (vec![0.0, 0.0], vec![1000.0, 1000.0], vec![(0, 1), (0, 1)]),
+                false,
+                Some(""),
+            ),
+            row(
+                "an off-step coefficient passes for a non-exact binary",
+                limits(0, 0, 1000),
+                (vec![1500.0, 0.0], vec![1000.0], vec![(0, 1)]),
+                false,
+                None,
+            ),
+            row(
+                "an off-step coefficient fails for an exact binary",
+                limits(0, 0, 1000),
+                (vec![1500.0, 0.0], vec![1000.0], vec![(0, 1)]),
+                true,
+                Some("1500"),
+            ),
+            row(
+                "a finer step accepts the same coefficient",
+                limits(0, 0, 500),
+                (vec![1500.0, 0.0], vec![1000.0], vec![(0, 1)]),
+                true,
+                None,
+            ),
+            row(
+                "sub-milli is off any step",
+                limits(0, 0, 1),
+                (vec![0.5], vec![], vec![]),
+                true,
+                Some(""),
+            ),
+            row(
+                "a zero step makes no claim",
+                limits(0, 0, 0),
+                (vec![0.5], vec![], vec![]),
+                true,
+                None,
+            ),
+        ];
+        for r in rows {
+            let got = r.limits.check(&r.h, &r.j, &r.edges, r.exact);
+            match (got, r.expected) {
+                (Ok(()), None) => {}
+                (Err(err), Some(needle)) => {
+                    assert!(err.contains(needle), "{}: {err}", r.name);
+                }
+                (got, expected) => panic!("{}: got {got:?}, expected {expected:?}", r.name),
+            }
+        }
     }
 }
