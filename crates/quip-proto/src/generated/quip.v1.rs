@@ -517,6 +517,7 @@ pub enum Algorithm {
     External = 18,
     Otsuka = 19,
     Sat = 20,
+    Greedy = 21,
 }
 impl Algorithm {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -546,6 +547,7 @@ impl Algorithm {
             Self::External => "ALGORITHM_EXTERNAL",
             Self::Otsuka => "ALGORITHM_OTSUKA",
             Self::Sat => "ALGORITHM_SAT",
+            Self::Greedy => "ALGORITHM_GREEDY",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -572,6 +574,7 @@ impl Algorithm {
             "ALGORITHM_EXTERNAL" => Some(Self::External),
             "ALGORITHM_OTSUKA" => Some(Self::Otsuka),
             "ALGORITHM_SAT" => Some(Self::Sat),
+            "ALGORITHM_GREEDY" => Some(Self::Greedy),
             _ => None,
         }
     }

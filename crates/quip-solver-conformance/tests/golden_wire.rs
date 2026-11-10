@@ -337,7 +337,8 @@ fn enum_numbers_match_the_fixture() {
             Tedsb,
             External,
             Otsuka,
-            Sat
+            Sat,
+            Greedy
         ]
     );
     pin_enum!(

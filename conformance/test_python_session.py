@@ -119,6 +119,7 @@ def test_identity_names_match_the_rust_map():
         miner_pb2.ALGORITHM_EXTERNAL: "external",
         miner_pb2.ALGORITHM_OTSUKA: "otsuka",
         miner_pb2.ALGORITHM_SAT: "sat",
+        miner_pb2.ALGORITHM_GREEDY: "greedy",
     }
 
 

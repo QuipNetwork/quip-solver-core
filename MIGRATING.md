@@ -92,6 +92,7 @@ The command-line output keeps lowercase names through the fixed map in `quip_pro
 | `external` | `Algorithm::External` |
 | `otsuka` | `Algorithm::Otsuka` |
 | `sat` | `Algorithm::Sat` |
+| `greedy` | `Algorithm::Greedy` |
 
 Replace old `backend` labels `test` and `narrow` with `Backend::Mock`.
 Split `cuda-sa` into `Backend::Cuda` and `Algorithm::Sa`.
