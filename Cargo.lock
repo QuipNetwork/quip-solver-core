@@ -606,7 +606,7 @@ checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
 
 [[package]]
 name = "ising-generators"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "blake3",
  "miniz_oxide",
@@ -958,7 +958,7 @@ dependencies = [
 
 [[package]]
 name = "quip-proto"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "prost",
  "tonic",
@@ -967,7 +967,7 @@ dependencies = [
 
 [[package]]
 name = "quip-protocol"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "blake3",
  "ising-generators",
@@ -978,7 +978,7 @@ dependencies = [
 
 [[package]]
 name = "quip-protocol-py"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "pyo3",
  "quip-protocol",
@@ -986,7 +986,7 @@ dependencies = [
 
 [[package]]
 name = "quip-protocol-wasm"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "quip-protocol",
  "wasm-bindgen",
@@ -995,7 +995,7 @@ dependencies = [
 
 [[package]]
 name = "quip-solver-c"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "cbindgen",
  "clap",
@@ -1005,7 +1005,7 @@ dependencies = [
 
 [[package]]
 name = "quip-solver-conformance"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "blake3",
  "hyper-util",
@@ -1023,7 +1023,7 @@ dependencies = [
 
 [[package]]
 name = "quip-solver-core"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "base64",
  "clap",

@@ -5,7 +5,13 @@ This file documents changes to the Quip solver contract.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## 0.0.7
+
+The SAT algorithm value, a way to decline a job, and the polariton family.
+`miner.proto` adds `ALGORITHM_SAT` and the reject reason `NO_SOLUTION`, and
+`SampleError` adds the `Declined` variant. `ising-generators` adds
+`quip/polariton-static` revision 1 and the dipolar coefficient tables.
+`protocol_version` stays 2, and the default features do not change.
 
 ### Added
 
