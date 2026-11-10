@@ -694,7 +694,7 @@ def check_route(inst: dict, spins: list[int], route: list[list[int]]) -> str | N
         return "Metadata"
     if not valid_spins(inst, spins):
         return "Spins"
-    lattice = Lattice(inst["side"])
+    lattice = Lattice(view["side"])
     vertices = len(lattice.incident)
     if any(len(path) < 2 or any(not 0 <= v < vertices for v in path) for path in route):
         return "Shape"
@@ -719,7 +719,7 @@ def check_route(inst: dict, spins: list[int], route: list[list[int]]) -> str | N
         return "Endpoints"
     if sum(1 for q in labels if q in (2, -2)) != 2 * len(route):
         return "Endpoints"
-    flipped = {e for e, s in enumerate(link_spins_of(inst, spins)) if s == -1}
+    flipped = {e for e, p in enumerate(view["positions"]) if spins[p] == -1}
     if flipped != set(used):
         return "Difference"
     return None

@@ -1742,7 +1742,7 @@ def test_defects_metadata_is_checked_before_a_route_a_state_or_the_observables()
         2 + 6 + 18 + 6 + 4,
         2 + 24 + 106 + 6,
         2 + 24 + 106 + 14,
-        2 + 24 + 106 + 20,
+        2 + 24 + 106 + 6 + 16 + 4,
         len(inst["metadata"]) - 1,
         len(inst["metadata"]) - 9,
     ):
@@ -1793,3 +1793,62 @@ def test_defects_route_with_two_faults_reports_the_first_in_the_contract_order()
     # Each later fault alone gives its own error.
     assert defects.check_route(inst, reference, [[5, 6]]) == "Endpoints"
     assert defects.check_route(inst, reference, []) == "Endpoints"
+
+
+def test_defects_route_is_judged_against_the_parsed_positions():
+    from family_oracle import defects
+
+    inst = _defects_l3_instance()
+    lattice = defects.Lattice(3)
+    plus, minus = inst["labels"].index(2), inst["labels"].index(-2)
+    obstacle = inst["obstacles"][0]
+    route = defects.simple_paths(lattice, plus, minus, {obstacle})[0]
+    links = defects.route_links(inst, [route])
+    positions = list(inst["positions"])
+    a = links[0]
+    b = next(e for e in range(len(positions)) if e not in links)
+    positions[a], positions[b] = positions[b], positions[a]
+    table = defects.table_of(3)
+    fields = inst["fields"]
+    h, edges, j, offset = defects.energy(
+        lattice,
+        inst["labels"],
+        inst["pins"],
+        table,
+        positions,
+        len(positions),
+        fields,
+        inst["weight"],
+    )
+    meta = defects.metadata(
+        3,
+        inst["labels"],
+        inst["window"],
+        positions,
+        inst["weight"],
+        table,
+        inst["obstacles"],
+        inst["pins"],
+    )
+    # A valid reindexing: the metadata and the energy agree, the cache is stale.
+    moved = {
+        **inst,
+        "h": h,
+        "edges": edges,
+        "j": j,
+        "offset_milli": offset,
+        "metadata": meta,
+    }
+    assert defects.parse_metadata(moved)["positions"] == positions
+    flat = [1] * len(positions)
+    for e in links:
+        flat[e] = -1
+    by_parsed = [0] * len(positions)
+    for e, p in enumerate(positions):
+        by_parsed[p] = flat[e]
+    by_cache = [0] * len(positions)
+    for e, p in enumerate(inst["positions"]):
+        by_cache[p] = flat[e]
+    assert defects.check_route(moved, by_parsed, [route]) is None
+    assert by_cache != by_parsed
+    assert defects.check_route(moved, by_cache, [route]) == "Difference"
