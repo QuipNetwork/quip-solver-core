@@ -37,6 +37,7 @@ def _layered_doc() -> dict:
         pytest.param(build.build_layered, build.LAYERED_PATH, id="layered"),
         pytest.param(build.build_polariton, build.POLARITON_PATH, id="polariton"),
         pytest.param(build.build_defects, build.DEFECTS_PATH, id="defects"),
+        pytest.param(build.build_flow, build.FLOW_PATH, id="flow"),
         pytest.param(
             build.build_two_commodity, build.TWO_COMMODITY_PATH, id="two-commodity"
         ),
@@ -83,6 +84,10 @@ def _defects_doc() -> dict:
     return json.loads(build.DEFECTS_PATH.read_text())
 
 
+def _flow_doc() -> dict:
+    return json.loads(build.FLOW_PATH.read_text())
+
+
 def _registry_entry(name: str) -> dict:
     registry = json.loads((build.FAMILIES_DIR / "registry.json").read_text())[
         "registry"
@@ -104,6 +109,12 @@ def _registry_entry(name: str) -> dict:
             _defects_doc,
             ("cases", "defect_witnesses", "routes", "table", "admission"),
             id="defects",
+        ),
+        pytest.param(
+            "quip/flow-static@1",
+            _flow_doc,
+            ("cases", "flow_witnesses", "networks", "flow_recipes", "admission"),
+            id="flow",
         ),
         pytest.param(
             "quip/two-commodity-routing@1",
@@ -146,6 +157,7 @@ def test_evidence_matches_the_registry(name, load, sections):
     [
         pytest.param("quip/polariton-static@1", _polariton_doc, id="polariton"),
         pytest.param("quip/defects-static@1", _defects_doc, id="defects"),
+        pytest.param("quip/flow-static@1", _flow_doc, id="flow"),
         pytest.param("quip/two-commodity-routing@1", _routing_doc, id="two-commodity"),
         pytest.param("quip/charged-ice@1", _charge_doc, id="charged-ice"),
         pytest.param("quip/ice-fields@1", _fields_doc, id="ice-fields"),
@@ -288,6 +300,7 @@ def test_every_json_topology_reference_names_an_indexed_file():
         _routing_doc,
         _polariton_doc,
         _defects_doc,
+        _flow_doc,
     ):
         walk(load())
     assert refs
@@ -451,6 +464,7 @@ def test_every_provided_id_has_a_case():
         _routing_doc,
         _polariton_doc,
         _defects_doc,
+        _flow_doc,
     ],
 )
 def test_sources_hash_spec_and_oracle(load):
@@ -534,3 +548,102 @@ def test_defects_table_entries_match_the_oracle_table():
         assert row["dropped"] == table.dropped
         assert row["truncation_bound"] == str(table.truncation_bound)
         assert row["commitment"] == table.commitment().hex()
+
+
+# ---- quip/flow-static ----
+
+_FLOW_FIELD_SECTIONS = ("flow_witnesses", "networks", "flow_recipes")
+
+
+@pytest.fixture(scope="module")
+def flow_oracle() -> dict:
+    return build.build_flow()
+
+
+def _leaves(value, pointer=""):
+    """Every leaf of a JSON value with its pointer."""
+    if isinstance(value, dict):
+        for key, inner in value.items():
+            yield from _leaves(inner, f"{pointer}/{key}")
+    elif isinstance(value, list):
+        for at, inner in enumerate(value):
+            yield from _leaves(inner, f"{pointer}/{at}")
+    else:
+        yield pointer, value
+
+
+def _changed(value):
+    if isinstance(value, bool):
+        return not value
+    if isinstance(value, int):
+        return value + 1
+    if value is None:
+        return 12
+    return value + "x"
+
+
+def _set(doc: dict, pointer: str, value) -> dict:
+    copy = json.loads(json.dumps(doc))
+    node = copy
+    *path, last = pointer.strip("/").split("/")
+    for part in path:
+        node = node[int(part)] if isinstance(node, list) else node[part]
+    if isinstance(node, list):
+        node[int(last)] = value
+    else:
+        node[last] = value
+    return copy
+
+
+def _differences(doc: dict, oracle: dict) -> set[str]:
+    """The pointers at which the fixture differs from the oracle output."""
+    mine, theirs = dict(_leaves(doc)), dict(_leaves(oracle))
+    return {p for p in mine.keys() | theirs.keys() if mine.get(p) != theirs.get(p)}
+
+
+def test_every_leaf_of_a_flow_section_is_compared_with_the_oracle(flow_oracle):
+    doc = _flow_doc()
+    assert _differences(doc, flow_oracle) == set()
+    count = 0
+    for section in _FLOW_FIELD_SECTIONS:
+        for pointer, value in _leaves(doc[section], f"/{section}"):
+            changed = _set(doc, pointer, _changed(value))
+            assert _differences(changed, flow_oracle) == {pointer}
+            count += 1
+    assert count > 500
+
+
+def test_flow_witnesses_cover_every_case_with_a_lower_objective_infeasible_state():
+    doc = _flow_doc()
+    cases = [case["name"] for case in doc["cases"]]
+    assert cases == ["flow-l2", "flow-l3", "flow-l3-permuted", "flow-dead-cell"]
+    by_name = {w["name"]: w for w in doc["flow_witnesses"]}
+    assert len(by_name) == 2 * len(cases)
+    for name in cases:
+        good, bad = by_name[f"{name}-feasible"], by_name[f"{name}-infeasible"]
+        assert good["feasible"] is True
+        assert good["violations"] == 0
+        assert good["energy_milli"] == good["objective"]
+        assert bad["feasible"] is False
+        assert bad["violations"] > 0
+        assert bad["objective"] < good["objective"]
+        assert bad["energy_milli"] > good["energy_milli"]
+    assert [n["case"] for n in doc["networks"]] == cases
+    for net in doc["networks"]:
+        assert sum(net["supplies"]) == 0
+
+
+def test_flow_recipes_record_code_12_for_l12_only():
+    doc = _flow_doc()
+    codes = {r["alias"]: r["admission_code"] for r in doc["flow_recipes"]}
+    assert codes == {"l4": None, "l6": None, "l8": None, "l12": 12}
+    for recipe in doc["flow_recipes"]:
+        assert len(recipe["salts"]) == (0 if recipe["admission_code"] else 2)
+
+
+def test_flow_contract_states_the_numbers_of_the_vectors():
+    text = (build.ROOT / "docs/families/quip-flow-static-1.md").read_text()
+    for number in ("8320504", "35139536892", "24574", "79139", "4160002", "12870"):
+        assert number in text
+    assert "`l12` needs a window without dead qubits" in text
+    assert "passes `check_metadata`" in text

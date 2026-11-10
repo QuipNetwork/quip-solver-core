@@ -34,6 +34,19 @@
     },
     {
       "adapted_from": null,
+      "contract": "docs/families/quip-flow-static-1.md",
+      "evidence": [
+        "SC-17:flow-vectors-frozen"
+      ],
+      "family_id": "quip/flow-static",
+      "name": "quip/flow-static@1",
+      "revision": 1,
+      "status": "research",
+      "vectors": "crates/quip-solver-conformance/vectors/families/flow.json",
+      "vectors_blake3": "fd38e689865e0e5055d18cbc82a0781a361b59cb1b94b29c5619156c35ac401c"
+    },
+    {
+      "adapted_from": null,
       "contract": "docs/families/quip-ice-fields-1.md",
       "evidence": [
         "SC-11:ice-fields-vectors-frozen"

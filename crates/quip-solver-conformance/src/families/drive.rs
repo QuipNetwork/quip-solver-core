@@ -30,6 +30,7 @@ use tonic::{Status, Streaming};
 use super::charge::{P_CHARGED_A251, P_CHARGED_ADJ_A100_B45_C256, P_CHARGED_Z22_A250_B31_C128};
 use super::defects::{P_DEFECTS_SIDE4, P_DEFECTS_Z24_L2, P_DEFECTS_Z34_L3};
 use super::fields::{P_FIELDS_ADJ_G45_F1000_D16, P_FIELDS_F1001, P_FIELDS_Z22_G125_F500_D16};
+use super::flow::{P_FLOW_SIDE1, P_FLOW_Z24_L2, P_FLOW_Z34_L3};
 use super::ice::{P_ICE_ADJ_125, P_ICE_GLASS_1000, P_ICE_Z12_200};
 use super::layered::P_L2_F0;
 use super::layered::{P_F5000, P_L3_F0, P_SPEC};
@@ -988,6 +989,9 @@ fn params_name(params: &[u8]) -> String {
         ("P_DEFECTS_Z24_L2", &P_DEFECTS_Z24_L2[..]),
         ("P_DEFECTS_Z34_L3", &P_DEFECTS_Z34_L3[..]),
         ("P_DEFECTS_SIDE4", &P_DEFECTS_SIDE4[..]),
+        ("P_FLOW_Z24_L2", &P_FLOW_Z24_L2[..]),
+        ("P_FLOW_Z34_L3", &P_FLOW_Z34_L3[..]),
+        ("P_FLOW_SIDE1", &P_FLOW_SIDE1[..]),
     ] {
         if params == known {
             return name.to_owned();

@@ -10,6 +10,8 @@ mod codec;
 mod decisions;
 #[path = "family_vectors/digests.rs"]
 mod digests;
+#[path = "family_vectors/flow.rs"]
+mod flow;
 #[path = "family_vectors/instance.rs"]
 mod instance;
 #[path = "family_vectors/legacy.rs"]
@@ -2333,6 +2335,7 @@ fn check_layered_against_rust(case: &Value) -> Result<(), String> {
     use ising_generators::defects::DEFECTS_V1;
     use ising_generators::descriptor::{admit, params_digest};
     use ising_generators::family::{admit_topology, generate_instance, BaseTopology, SaltFault};
+    use ising_generators::flow::FLOW_V1;
     use ising_generators::ice::{CHARGED_ICE_V1, ICE_FIELDS_V1, ICE_GLASS_V1, TWISTED_DIMER_V1};
     use ising_generators::polariton::POLARITON_V1;
     use ising_generators::routing::ROUTING_V1;
@@ -2348,6 +2351,7 @@ fn check_layered_against_rust(case: &Value) -> Result<(), String> {
         "quip/two-commodity-routing" => ROUTING_V1,
         "quip/polariton-static" => POLARITON_V1,
         "quip/defects-static" => DEFECTS_V1,
+        "quip/flow-static" => FLOW_V1,
         other => return Err(format!("{}: unknown family {other}", case_name(case))),
     };
     let params = codec::hex_decode(str_field(case, "params_hex")?)?;

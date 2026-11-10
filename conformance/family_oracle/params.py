@@ -134,6 +134,17 @@ DEFECTS = Schema(
     ),
 )
 
+FLOW = Schema(
+    "quip/flow-static",
+    1,
+    (
+        Field(1, "zephyr_m", "u16", 1, 1, 32),
+        Field(2, "zephyr_t", "u8", 1, 1, 8),
+        Field(3, "side", "u16", 1, 2, 64),
+        Field(4, "cost_half_max", "u16", 1, 0, 500),
+    ),
+)
+
 ALL_TYPES = Schema(
     "example/all-types",
     1,

@@ -1852,3 +1852,421 @@ def test_defects_route_is_judged_against_the_parsed_positions():
     assert defects.check_route(moved, by_parsed, [route]) is None
     assert by_cache != by_parsed
     assert defects.check_route(moved, by_cache, [route]) == "Difference"
+
+
+# ---- quip/flow-static ----
+
+
+def _flow(m, t, side, half, nodes, edges, nonce=None):
+    from family_oracle import flow
+
+    params = build._flow_params(m, t, side, half)
+    return flow.generate(
+        b"quip/flow-static", 1, params, nodes, edges, nonce or bytes(range(32))
+    )
+
+
+def _flow_instance(half=8, nonce=None):
+    code, inst = _flow(3, 4, 3, half, *ice.lattice(3, 4), nonce)
+    assert code == 0
+    return inst
+
+
+def test_flow_energy_is_objective_plus_penalty_for_every_l2_state():
+    from family_oracle import flow
+
+    code, inst = _flow(2, 4, 2, 30, *ice.lattice(2, 4))
+    assert code == 0
+    weight = inst["weight"]
+    assert weight % 2 == 0
+    lattice = flow.Lattice(2)
+    feasible_energies, infeasible_energies = [], []
+    for bits in range(1 << 12):
+        links = [1 if bits >> e & 1 else -1 for e in range(12)]
+        spins = flow.node_spins(inst, links)
+        got = lattice.charges(links)
+        penalty = (weight // 2) * sum(
+            (g - q) ** 2 for g, q in zip(got, inst["labels"], strict=True)
+        )
+        objective = sum(
+            c
+            for s, t, c in zip(links, inst["targets"], inst["costs"], strict=True)
+            if s != t
+        )
+        encoded = flow.encoded_energy(inst, spins)
+        assert encoded == objective + penalty
+        seen = flow.observables(inst, spins)
+        assert seen["objective"] == objective
+        assert flow.feasible(inst, spins) == (penalty == 0)
+        (feasible_energies if penalty == 0 else infeasible_energies).append(encoded)
+    assert feasible_energies
+    assert max(feasible_energies) < min(infeasible_energies)
+
+
+def test_flow_limits_follow_the_arithmetic_at_side_64():
+    from family_oracle import flow
+
+    assert flow.limits(64, 500) == (
+        flow.MAX_NODES,
+        flow.MAX_EDGES,
+        flow.MAX_COEFFICIENT,
+        flow.MAX_OFFSET,
+        flow.MAX_METADATA,
+    )
+    # The built instances stay inside the bounds of their own side.
+    inst = _flow_instance()
+    nodes, edges, coefficient, offset, size = flow.limits(3, 8)
+    assert len(inst["node_ids"]) == nodes
+    assert len(inst["edges"]) <= edges
+    assert max(abs(x) for x in (*inst["h"], *inst["j"])) <= coefficient
+    assert abs(inst["offset_milli"]) <= offset
+    assert len(inst["metadata"]) == size
+
+
+def test_flow_admission_codes():
+    from family_oracle import flow
+
+    z34, z24 = ice.lattice(3, 4), ice.lattice(2, 4)
+
+    def code(m, t, side, half, topology):
+        return flow.admission_code(build._flow_params(m, t, side, half), *topology)
+
+    assert code(3, 4, 3, 8, z34) is None
+    assert code(3, 4, 3, 0, z34) is None
+    assert code(3, 4, 3, 500, z34) is None
+    assert code(2, 4, 1, 30, z24) == 9
+    assert code(3, 4, 65, 8, z34) == 9
+    assert code(3, 4, 3, 501, z34) == 9
+    assert code(2, 4, 3, 8, z24) == 12
+    assert code(2, 4, 2, 30, z34) == 12
+    assert code(3, 1, 2, 5, build._polariton_no_window()) == 12
+    assert code(3, 1, 3, 5, build._polariton_dead_cell()) is None
+    assert flow.admission_code(b"\x01", *z34) == 7
+    live = build.live_topology()
+    nodes, edges = live["nodes"], [tuple(e) for e in live["edges"]]
+    assert code(12, 4, 8, 500, (nodes, edges)) is None
+    assert code(12, 4, 12, 500, (nodes, edges)) == 12
+
+
+def test_flow_draw_retries_then_gives_code_14(monkeypatch):
+    from family_oracle import flow
+    from family_oracle.chacha8 import ChaCha8
+
+    lattice = flow.Lattice(3)
+    real = flow.check_request
+    refusals = {"left": 3}
+
+    def refuse_three(lat, labels):
+        if refusals["left"]:
+            refusals["left"] -= 1
+            return None
+        return real(lat, labels)
+
+    monkeypatch.setattr(flow, "check_request", refuse_three)
+    drawn = flow.draw_labels(ChaCha8(bytes(32)), lattice)
+    assert drawn is not None
+    assert drawn[0] == 4
+    monkeypatch.setattr(flow, "check_request", lambda lat, labels: None)
+    assert flow.draw_labels(ChaCha8(bytes(32)), lattice) is None
+    code, inst = _flow(3, 4, 3, 8, *ice.lattice(3, 4))
+    assert (code, inst) == (14, None)
+
+
+def test_flow_requests_are_balanced_with_the_labels_in_the_contract():
+    from family_oracle import flow
+
+    inst = _flow_instance()
+    lattice = flow.Lattice(3)
+    assert sum(inst["labels"]) == 0
+    assert inst["labels"].count(1) == inst["labels"].count(-1) == 4
+    for v, q in enumerate(inst["labels"]):
+        edge = flow._on_border(lattice, v) and not flow._is_corner(lattice, v)
+        assert (q != 0) == edge
+    assert lattice.charges(inst["orientation"]) == inst["labels"]
+
+
+def _flow_layout(side):
+    """Offsets of the fields of the metadata region, from the contract layout."""
+    links = 2 * side * (side + 1)
+    vertices = (side + 1) ** 2
+    charges = 2 + 6
+    incidence = charges + 2 + vertices + 6
+    flow = incidence + 4 + 4 * links + 6
+    return {
+        "count": 0,
+        "kind4": 2,
+        "side": charges,
+        "label0": charges + 2,
+        "kind5": charges + 2 + vertices,
+        "c0": incidence,
+        "position0": incidence + 4,
+        "kind9": incidence + 4 + 4 * links,
+        "weight": flow,
+        "target0": flow + 8,
+        "cost0": flow + 9,
+        "end": flow + 8 + 5 * links,
+    }
+
+
+def test_flow_layout_offsets_match_the_built_bytes():
+    inst = _flow_instance()
+    at = _flow_layout(3)
+    data = inst["metadata"]
+    assert len(data) == at["end"]
+    assert data[at["count"]] == 3
+    assert data[at["kind4"]] == 4
+    assert data[at["kind5"]] == 5
+    assert data[at["kind9"]] == 9
+    assert data[at["side"]] == 3
+    assert data[at["c0"]] == 1
+    assert data[at["weight"] : at["weight"] + 8] == inst["weight"].to_bytes(8, "little")
+    assert data[at["position0"]] == inst["positions"][0]
+    assert data[at["target0"]] == inst["targets"][0] & 0xFF
+    assert data[at["cost0"]] == inst["costs"][0]
+
+
+def test_flow_metadata_is_checked_before_a_state_the_observables_or_the_network():
+    from family_oracle import flow
+
+    inst = _flow_instance()
+    at = _flow_layout(3)
+    good = flow.witnesses(inst, False)["feasible"]
+    assert flow.feasible(inst, good)
+    assert flow.observables(inst, good) is not None
+    assert flow.network(inst) is not None
+    side_labels = [i for i, q in enumerate(inst["labels"]) if q == 1]
+    interior = next(
+        i
+        for i, q in enumerate(inst["labels"])
+        if q == 0 and i not in (0, 3, 12, 15) and 4 < i < 11
+    )
+    flips = {
+        "count": at["count"],
+        "kind4": at["kind4"],
+        "kind5": at["kind5"],
+        "kind9": at["kind9"],
+        "side": at["side"],
+        "a-sink-label": at["label0"] + side_labels[0],
+        "an-interior-label": at["label0"] + interior,
+        "window-c0": at["c0"],
+        "a-position": at["position0"],
+        "the-weight": at["weight"],
+        "a-target": at["target0"],
+        "an-odd-cost": at["cost0"],
+        "the-last-byte": at["end"] - 1,
+    }
+    for name, offset in flips.items():
+        mutated = bytearray(inst["metadata"])
+        mutated[offset] ^= 1
+        bad = {**inst, "metadata": bytes(mutated)}
+        assert flow.parse_metadata(bad) is None, name
+        assert not flow.feasible(bad, good), name
+        assert flow.observables(bad, good) is None, name
+        assert flow.network(bad) is None, name
+    too_large = bytearray(inst["metadata"])
+    too_large[at["cost0"] + 2] = 1
+    for metadata in (
+        b"",
+        inst["metadata"][:-1],
+        inst["metadata"] + b"\x00",
+        bytes(too_large),
+    ):
+        assert flow.parse_metadata({**inst, "metadata": metadata}) is None
+    # A changed energy is also a metadata fault.
+    bad = {**inst, "h": [inst["h"][0] + 2, *inst["h"][1:]]}
+    assert flow.parse_metadata(bad) is None
+    bad = {**inst, "offset_milli": inst["offset_milli"] + 2}
+    assert flow.parse_metadata(bad) is None
+
+
+def test_flow_unequal_label_counts_and_a_cost_above_the_bound_fail():
+    from family_oracle import flow
+
+    inst = _flow_instance()
+    lattice = flow.Lattice(3)
+    labels = list(inst["labels"])
+    sinks = [v for v, q in enumerate(labels) if q == 1]
+    labels[sinks[0]] = -1
+    h, edges, j, offset = flow.energy(
+        lattice,
+        labels,
+        inst["targets"],
+        inst["costs"],
+        inst["positions"],
+        len(inst["positions"]),
+        inst["weight"],
+    )
+    meta = flow.metadata(
+        3,
+        labels,
+        inst["window"],
+        inst["positions"],
+        inst["weight"],
+        inst["targets"],
+        inst["costs"],
+    )
+    unbalanced = {
+        **inst,
+        "h": h,
+        "edges": edges,
+        "j": j,
+        "offset_milli": offset,
+        "metadata": meta,
+    }
+    assert flow.parse_metadata(unbalanced) is None
+    costs = list(inst["costs"])
+    costs[0] = 2 * 8 + 2
+    weight = flow.penalty_weight(costs)
+    h, edges, j, offset = flow.energy(
+        lattice,
+        inst["labels"],
+        inst["targets"],
+        costs,
+        inst["positions"],
+        len(inst["positions"]),
+        weight,
+    )
+    meta = flow.metadata(
+        3,
+        inst["labels"],
+        inst["window"],
+        inst["positions"],
+        weight,
+        inst["targets"],
+        costs,
+    )
+    loud = {
+        **inst,
+        "h": h,
+        "edges": edges,
+        "j": j,
+        "offset_milli": offset,
+        "metadata": meta,
+    }
+    assert flow.parse_metadata(loud) is None
+
+
+def test_flow_target_of_a_cost_zero_link_is_invisible_to_the_energy():
+    from family_oracle import flow
+
+    for seed in range(40):
+        inst = _flow_instance(half=3, nonce=bytes([seed]) * 32)
+        if 0 in inst["costs"]:
+            break
+    else:
+        pytest.fail("no instance has a cost 0 link")
+    at = _flow_layout(3)
+    zero = inst["costs"].index(0)
+    for e, expect_valid in (
+        (zero, True),
+        (next(e for e, c in enumerate(inst["costs"]) if c), False),
+    ):
+        mutated = bytearray(inst["metadata"])
+        mutated[at["target0"] + 5 * e] = (-inst["targets"][e]) & 0xFF
+        view = flow.parse_metadata({**inst, "metadata": bytes(mutated)})
+        assert (view is not None) == expect_valid
+        if expect_valid:
+            assert view["targets"][e] == -inst["targets"][e]
+
+
+def test_flow_spins_must_be_one_plus_or_minus_one_per_node():
+    from family_oracle import flow
+
+    inst = _flow_instance()
+    good = flow.witnesses(inst, False)["feasible"]
+    zero = [0, *good[1:]]
+    for spins in (good[1:], [*good, 1], zero):
+        assert not flow.feasible(inst, spins)
+        assert flow.observables(inst, spins) is None
+    assert flow.feasible({**inst, "metadata": b""}, good) is False
+
+
+def test_flow_state_is_read_through_the_parsed_positions():
+    from family_oracle import flow
+
+    inst = _flow_instance()
+    lattice = flow.Lattice(3)
+    positions = list(inst["positions"])
+    positions[0], positions[5] = positions[5], positions[0]
+    h, edges, j, offset = flow.energy(
+        lattice,
+        inst["labels"],
+        inst["targets"],
+        inst["costs"],
+        positions,
+        len(positions),
+        inst["weight"],
+    )
+    meta = flow.metadata(
+        3,
+        inst["labels"],
+        inst["window"],
+        positions,
+        inst["weight"],
+        inst["targets"],
+        inst["costs"],
+    )
+    moved = {
+        **inst,
+        "h": h,
+        "edges": edges,
+        "j": j,
+        "offset_milli": offset,
+        "metadata": meta,
+    }
+    assert flow.parse_metadata(moved)["positions"] == positions
+    link_states = list(inst["orientation"])
+    by_parsed = [0] * len(positions)
+    for e, p in enumerate(positions):
+        by_parsed[p] = link_states[e]
+    by_cache = [0] * len(positions)
+    for e, p in enumerate(inst["positions"]):
+        by_cache[p] = link_states[e]
+    assert by_parsed != by_cache
+    assert flow.feasible(moved, by_parsed)
+    assert not flow.feasible(moved, by_cache)
+
+
+def test_flow_network_matches_the_lattice():
+    from family_oracle import flow
+
+    inst = _flow_instance()
+    net = flow.network(inst)
+    lattice = flow.Lattice(3)
+    assert net["supplies"] == [-q for q in inst["labels"]]
+    assert sum(net["supplies"]) == 0
+    assert net["tails"] == [t for t, _, _ in lattice.links]
+    assert net["heads"] == [h for _, h, _ in lattice.links]
+    assert net["targets"] == inst["targets"]
+    assert net["costs"] == inst["costs"]
+    # A flow along every arc in its spin direction conserves the supplies.
+    orientation = inst["orientation"]
+    out = [0] * len(net["supplies"])
+    for e, spin in enumerate(orientation):
+        tail, head = (net["tails"][e], net["heads"][e])
+        if spin == -1:
+            tail, head = head, tail
+        out[tail] += 1
+        out[head] -= 1
+    assert out == net["supplies"]
+
+
+def test_flow_dead_cell_moves_the_window():
+    dead = build._polariton_dead_cell()
+    code, inst = _flow(3, 1, 3, 5, *dead)
+    assert code == 0
+    assert inst["window"] == (1, 2)
+
+
+def test_flow_witness_states_have_a_lower_objective_and_a_higher_energy():
+    from family_oracle import flow
+
+    _, inst = _flow(2, 4, 2, 30, *ice.lattice(2, 4))
+    states = flow.witnesses(inst, True)
+    good = flow.observables(inst, states["feasible"])
+    bad = flow.observables(inst, states["infeasible"])
+    assert good["violations"] == 0 and bad["violations"] > 0
+    assert bad["objective"] < good["objective"]
+    assert flow.encoded_energy(inst, states["infeasible"]) > flow.encoded_energy(
+        inst, states["feasible"]
+    )

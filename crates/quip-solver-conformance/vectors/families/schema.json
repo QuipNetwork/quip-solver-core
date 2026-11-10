@@ -879,6 +879,233 @@
       ],
       "type": "object"
     },
+    "flow_network": {
+      "additionalProperties": false,
+      "properties": {
+        "case": {
+          "type": "string"
+        },
+        "costs": {
+          "items": {
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "evidence": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "heads": {
+          "items": {
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "index": {
+          "$ref": "#/$defs/u64s"
+        },
+        "name": {
+          "type": "string"
+        },
+        "supplies": {
+          "items": {
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "tails": {
+          "items": {
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "targets": {
+          "items": {
+            "enum": [
+              -1,
+              1
+            ]
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "name",
+        "evidence",
+        "case",
+        "index",
+        "supplies",
+        "tails",
+        "heads",
+        "targets",
+        "costs"
+      ],
+      "type": "object"
+    },
+    "flow_recipe": {
+      "additionalProperties": false,
+      "properties": {
+        "admission_code": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "alias": {
+          "type": "string"
+        },
+        "cell": {
+          "type": "string"
+        },
+        "evidence": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "family_id": {
+          "type": "string"
+        },
+        "lease": {
+          "$ref": "#/$defs/case_lease"
+        },
+        "name": {
+          "type": "string"
+        },
+        "params_digest": {
+          "$ref": "#/$defs/hex32"
+        },
+        "params_hex": {
+          "$ref": "#/$defs/hex"
+        },
+        "revision": {
+          "type": "integer"
+        },
+        "salts": {
+          "items": {
+            "$ref": "#/$defs/flow_salt"
+          },
+          "type": "array"
+        },
+        "topology": {
+          "$ref": "#/$defs/blob_topology"
+        }
+      },
+      "required": [
+        "name",
+        "evidence",
+        "alias",
+        "cell",
+        "family_id",
+        "revision",
+        "params_hex",
+        "params_digest",
+        "topology",
+        "lease",
+        "admission_code",
+        "salts"
+      ],
+      "type": "object"
+    },
+    "flow_salt": {
+      "additionalProperties": false,
+      "properties": {
+        "canonical_blake3": {
+          "$ref": "#/$defs/hex32"
+        },
+        "index": {
+          "$ref": "#/$defs/u64s"
+        },
+        "nonce": {
+          "$ref": "#/$defs/hex32"
+        },
+        "try": {
+          "type": "integer"
+        },
+        "window": {
+          "items": {
+            "type": "integer"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "type": "array"
+        }
+      },
+      "required": [
+        "index",
+        "nonce",
+        "canonical_blake3",
+        "window",
+        "try"
+      ],
+      "type": "object"
+    },
+    "flow_witness": {
+      "additionalProperties": false,
+      "properties": {
+        "case": {
+          "type": "string"
+        },
+        "charges": {
+          "items": {
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "energy_milli": {
+          "type": "integer"
+        },
+        "evidence": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "feasible": {
+          "type": "boolean"
+        },
+        "index": {
+          "$ref": "#/$defs/u64s"
+        },
+        "name": {
+          "type": "string"
+        },
+        "objective": {
+          "type": "integer"
+        },
+        "reversed": {
+          "type": "integer"
+        },
+        "spins": {
+          "items": {
+            "enum": [
+              -1,
+              1
+            ]
+          },
+          "type": "array"
+        },
+        "violations": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name",
+        "evidence",
+        "case",
+        "index",
+        "spins",
+        "feasible",
+        "objective",
+        "charges",
+        "violations",
+        "reversed",
+        "energy_milli"
+      ],
+      "type": "object"
+    },
     "hex": {
       "contentEncoding": "base16",
       "type": "string"
@@ -3033,6 +3260,18 @@
       },
       "type": "array"
     },
+    "flow_recipes": {
+      "items": {
+        "$ref": "#/$defs/flow_recipe"
+      },
+      "type": "array"
+    },
+    "flow_witnesses": {
+      "items": {
+        "$ref": "#/$defs/flow_witness"
+      },
+      "type": "array"
+    },
     "instance_bounds": {
       "items": {
         "$ref": "#/$defs/instance_bound_case"
@@ -3096,6 +3335,12 @@
     "metadata": {
       "items": {
         "$ref": "#/$defs/metadata_case"
+      },
+      "type": "array"
+    },
+    "networks": {
+      "items": {
+        "$ref": "#/$defs/flow_network"
       },
       "type": "array"
     },

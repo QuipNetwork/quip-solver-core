@@ -33,6 +33,23 @@ faster. `protocol_version` stays 2, and the default features do not change.
 - `miner.proto`: the enum value `ALGORITHM_GREEDY` = 21, named `greedy`, for a
   solver that runs a zero-temperature greedy descent, such as a postprocess of
   supplied states. The Rust, Python, and TypeScript bindings include it.
+- `quip/flow-static@1`, a registered family with status `research` and class
+  `hard`. It is the adapted active-flow task on the native layout of
+  `quip/polariton-static`. One unit of flow runs along every link, each vertex has
+  a label, and the objective is the cost of the links that point against their
+  requested direction. The `4 (L - 1)` boundary vertices of degree 3 get the
+  labels `+1` and `-1` in equal numbers from a shuffle, with 4 tries before code
+  14. A charge penalty with a checked weight makes every infeasible state cost
+  more than every feasible state. The parameters are the Zephyr shape, `side`
+  from 2 to 64, and `cost_half_max`. The metadata uses the kinds 4 and 5 of the
+  polariton family and the new kind 9, `flow`. The function `flow_network` returns
+  the supplies, the arcs, the targets, and the costs for a min-cost circulation
+  baseline, and the family has no solver. The registered recipes are `l4`, `l6`,
+  `l8`, and `l12` on the live z(12, 4) topology. The recipe `l12` gives code 12,
+  because the live topology has no fully alive window above side 9. The contract
+  is `docs/families/quip-flow-static-1.md`, the vectors are `flow.json` with the
+  sections `cases`, `flow_witnesses`, `networks`, `flow_recipes`, and
+  `admission`, and the Rust contract is `ising_generators::flow::FLOW_V1`.
 
 ### Changed
 
