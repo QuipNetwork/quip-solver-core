@@ -5,7 +5,11 @@ This file documents changes to the Quip solver contract.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## 0.0.8
+
+The greedy algorithm value. `miner.proto` adds `ALGORITHM_GREEDY`, named
+`greedy`, for a greedy-descent postprocess solver. The test suite is smaller and
+faster. `protocol_version` stays 2, and the default features do not change.
 
 ### Added
 
