@@ -6,7 +6,7 @@
 //! A wrong Python argument type stays a `TypeError`.
 
 use ising_generators::descriptor::{self, AdvertisedLimits};
-use ising_generators::family::{self, BaseTopology, SaltFault};
+use ising_generators::family::{self, BaseTopology, Defect, SaltFault};
 use ising_generators::instance::{self, InstanceLimits, InstanceParts};
 use ising_generators::registry::CONTRACTS;
 use ising_generators::Code;
@@ -16,31 +16,31 @@ use pyo3::types::PyBytes;
 use pyo3::{create_exception, wrap_pyfunction, PyTypeInfo};
 
 create_exception!(
-    _core,
+    quip_solver_core,
     FamilyError,
     PyValueError,
     "A family fault. `code` is the FAM-42 code and `name` its stable name."
 );
 create_exception!(
-    _core,
+    quip_solver_core,
     AdmissionError,
     FamilyError,
     "The descriptor, parameters, or topology fail admission (codes 3 to 13)."
 );
 create_exception!(
-    _core,
+    quip_solver_core,
     SaltSkipped,
     FamilyError,
     "The salt gives no instance (code 13 or 14). Skip it and continue."
 );
 create_exception!(
-    _core,
+    quip_solver_core,
     InstanceInvalid,
     FamilyError,
     "An explicit instance is invalid (codes 13, 15, and 16)."
 );
 create_exception!(
-    _core,
+    quip_solver_core,
     GeneratorDefect,
     FamilyError,
     "The construction broke its contract. `code` is 0 and `name` is the defect."
@@ -61,6 +61,19 @@ fn fault<E: PyTypeInfo>(py: Python<'_>, code: u8, name: &str, message: &str) -> 
 
 fn coded<E: PyTypeInfo>(py: Python<'_>, code: Code, message: &str) -> PyErr {
     fault::<E>(py, code.value(), &code.to_string(), message)
+}
+
+/// The stable name of a defect.
+const fn defect_name(defect: Defect) -> &'static str {
+    match defect {
+        Defect::UnlistedLabel => "unlisted_label",
+        Defect::ConstructionCode(_) => "construction_code",
+        Defect::InstanceInvalid(_) => "instance_invalid",
+        Defect::SizeBound => "size_bound",
+        Defect::MetadataRejected => "metadata_rejected",
+        Defect::NoConstruction => "no_construction",
+        _ => "unknown",
+    }
 }
 
 fn digest_bytes<'py>(py: Python<'py>, digest: &[u8; 32]) -> Bound<'py, PyBytes> {
@@ -225,8 +238,6 @@ fn generate(
     max_edges: u64,
     max_degree: u64,
 ) -> PyResult<Instance> {
-    let nonce =
-        array32(nonce).ok_or_else(|| PyValueError::new_err("nonce must be exactly 32 bytes"))?;
     let admitted = admit(py, family_id, revision, params, params_digest)?;
     let topology = BaseTopology::new(nodes, &edges).map_err(|fault| {
         coded::<AdmissionError>(py, Code::TopologyIncompatible, &format!("{fault:?}"))
@@ -239,17 +250,21 @@ fn generate(
     let order_digest = *topology.order_digest();
     let bounds = family::admit_topology(&admitted, &topology, &order_digest, &advertised)
         .map_err(|code| coded::<AdmissionError>(py, code, "topology admission failed"))?;
+    let nonce =
+        array32(nonce).ok_or_else(|| PyValueError::new_err("nonce must be exactly 32 bytes"))?;
     family::generate_instance(&admitted, &topology, &bounds, nonce)
         .map(|inner| Instance { inner })
         .map_err(|err| match err {
             SaltFault::Skip(code) => coded::<SaltSkipped>(py, code, "the salt gives no instance"),
             SaltFault::Defect(defect) => {
-                fault::<GeneratorDefect>(py, 0, &format!("{defect:?}"), "construction defect")
+                fault::<GeneratorDefect>(py, 0, defect_name(defect), "construction defect")
             }
         })
 }
 
 /// Rebuild and check an explicit instance in the FAM-65 order.
+///
+/// `nonce` is `None` or `b""` for an archived instance, as on the wire.
 ///
 /// # Errors
 ///
@@ -283,21 +298,17 @@ fn validate_instance(
     let mismatch =
         |message: &str| coded::<InstanceInvalid>(py, Code::InstanceDigestMismatch, message);
     let own = admitted.descriptor().digest();
-    if array32(descriptor_digest) != Some(own) {
-        return Err(mismatch("descriptor_digest differs from the descriptor"));
-    }
-    let order = array32(topology_order_digest)
-        .ok_or_else(|| mismatch("topology_order_digest must be 32 bytes"))?;
-    let nonce = match nonce {
-        Some(bytes) => Some(array32(bytes).ok_or_else(|| mismatch("nonce must be 32 bytes"))?),
-        None => None,
-    };
-    let sent =
-        array32(instance_digest).ok_or_else(|| mismatch("instance_digest must be 32 bytes"))?;
+    // An empty nonce is an archived instance, as on the wire.
+    let nonce = nonce.filter(|bytes| !bytes.is_empty());
+    let sent_nonce = nonce.map(array32);
+    let order = array32(topology_order_digest);
+    let sent = array32(instance_digest);
+    // The FAM-37 bounds come first. A field of the wrong length reads as zeros
+    // here and fails with code 15 below (FAM-65 step 2 before step 3).
     let parts = InstanceParts {
         descriptor_digest: own,
-        topology_order_digest: order,
-        nonce,
+        topology_order_digest: order.unwrap_or([0; 32]),
+        nonce: sent_nonce.map(|n| n.unwrap_or([0; 32])),
         node_ids,
         edges,
         h,
@@ -305,6 +316,19 @@ fn validate_instance(
         offset_milli,
         metadata,
     };
+    parts
+        .check_bounds(&InstanceLimits::FAM_37)
+        .map_err(|code| coded::<InstanceInvalid>(py, code, "the instance is beyond the bounds"))?;
+    if array32(descriptor_digest) != Some(own) {
+        return Err(mismatch("descriptor_digest differs from the descriptor"));
+    }
+    if order.is_none() {
+        return Err(mismatch("topology_order_digest must be 32 bytes"));
+    }
+    if sent_nonce == Some(None) {
+        return Err(mismatch("nonce must be empty or 32 bytes"));
+    }
+    let sent = sent.ok_or_else(|| mismatch("instance_digest must be 32 bytes"))?;
     let contract = admitted.contract();
     let inner = instance::Instance::new(
         parts,
@@ -330,7 +354,8 @@ fn validate_instance(
 ///
 /// # Errors
 ///
-/// `AdmissionError` (3 to 9) from the descriptor.
+/// `AdmissionError` (3 to 9) from the descriptor, and `InstanceInvalid` 15 when
+/// the instance was built for another descriptor.
 #[pyfunction]
 #[expect(
     clippy::needless_pass_by_value,
@@ -346,6 +371,13 @@ fn feasible(
     spins: Vec<i8>,
 ) -> PyResult<bool> {
     let admitted = admit(py, family_id, revision, params, params_digest)?;
+    if instance.inner.descriptor_digest() != &admitted.descriptor().digest() {
+        return Err(coded::<InstanceInvalid>(
+            py,
+            Code::InstanceDigestMismatch,
+            "the instance belongs to another descriptor",
+        ));
+    }
     Ok(family::feasible(&admitted, &instance.inner, &spins))
 }
 
@@ -361,7 +393,10 @@ pub(crate) fn register(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> 
     families.add_class::<Instance>()?;
     m.add_submodule(&families)?;
 
-    m.add("FamilyError", py.get_type::<FamilyError>())?;
+    let base = py.get_type::<FamilyError>();
+    base.setattr("code", 0u8)?;
+    base.setattr("name", "")?;
+    m.add("FamilyError", base)?;
     m.add("AdmissionError", py.get_type::<AdmissionError>())?;
     m.add("SaltSkipped", py.get_type::<SaltSkipped>())?;
     m.add("InstanceInvalid", py.get_type::<InstanceInvalid>())?;

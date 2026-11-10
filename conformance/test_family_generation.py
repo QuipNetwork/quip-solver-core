@@ -6,6 +6,7 @@ topology blob decoder is the oracle's. The wheel has no decoder of its own.
 """
 
 import json
+import pickle
 import subprocess
 import sys
 import textwrap
@@ -46,6 +47,9 @@ HARD = {"quip/defects-static", "quip/flow-static", "quip/polariton-static"}
 
 def _load(name: str) -> dict:
     return json.loads((VECTORS / f"{name}.json").read_text())
+
+
+CODE_NAMES = {row["code"]: row["name"] for row in _load("core")["codes"]}
 
 
 def _topology(ref: dict) -> tuple[list[int], list[tuple[int, int]]]:
@@ -178,7 +182,7 @@ def test_admission_codes_match_the_vectors(row):
         _generate(case, bytes(range(32)))
     except AdmissionError as error:
         assert expected == error.code
-        assert error.name
+        assert error.name == CODE_NAMES[expected]
     except SaltSkipped:
         assert expected is None
     else:
@@ -332,26 +336,64 @@ def test_feasible_for_a_soft_family_checks_the_spin_shape(case):
     assert families.feasible(*args, [0] * n) is False
 
 
-def test_import_is_offline():
-    code = textwrap.dedent(
-        """
-        import sys
-        opened = []
-        sys.addaudithook(lambda e, a: opened.append(e) if e in ("open", "socket.connect") else None)
-        import quip_solver_core
-        quip_solver_core.families.supported()
-        # Only the interpreter's own import machinery may open files.
-        print(sorted(set(opened) - {"open"}))
-        """
-    )
+OFFLINE_PROBE = textwrap.dedent(
+    """
+    import importlib.machinery
+    import os
+    import sys
+
+    events = []
+    watched = {"socket.getaddrinfo", "socket.__new__", "socket.bind", "socket.connect"}
+
+
+    def hook(event, args):
+        if event == "open":
+            events.append((event, args[0]))
+        elif event in watched:
+            events.append((event, None))
+
+
+    sys.addaudithook(hook)
+    import quip_solver_core
+
+    quip_solver_core.families.supported()
+    #EXTRA
+    suffixes = tuple(importlib.machinery.all_suffixes()) + (".pyc",)
+    unexpected = []
+    for event, path in events:
+        if event != "open":
+            unexpected.append(event)
+        elif isinstance(path, (bytes, os.PathLike)):
+            unexpected.append(f"open {path!r}")
+        elif isinstance(path, str) and not (
+            path.endswith(suffixes) or os.path.isdir(path)
+        ):
+            unexpected.append(f"open {path}")
+    print(unexpected)
+    """
+)
+
+
+def _run_probe(extra: str = "") -> str:
     result = subprocess.run(
-        [sys.executable, "-I", "-c", code],
+        [sys.executable, "-I", "-c", OFFLINE_PROBE.replace("#EXTRA", extra)],
         env={},
         capture_output=True,
         text=True,
         check=True,
     )
-    assert result.stdout.strip() == "[]"
+    return result.stdout.strip()
+
+
+def test_import_is_offline():
+    # Only the import system may open files: modules, extension modules, and
+    # directories. Any other open or any socket use fails the test.
+    assert _run_probe() == "[]"
+
+
+def test_the_offline_probe_sees_a_stray_open():
+    assert sys.executable in _run_probe("open(sys.executable, 'rb').close()")
+    assert "socket.__new__" in _run_probe("import socket; socket.socket().close()")
 
 
 def test_errors_carry_code_and_name():
@@ -364,6 +406,12 @@ def test_errors_carry_code_and_name():
     assert isinstance(caught.value.code, int)
     assert isinstance(caught.value.name, str)
     assert (caught.value.code, caught.value.name) == (5, "FamilyUnsupported")
+    restored = pickle.loads(pickle.dumps(caught.value))
+    assert type(restored) is AdmissionError
+    assert (restored.code, restored.name) == (5, "FamilyUnsupported")
+    assert AdmissionError.__module__ == "quip_solver_core"
+    # A class built by user code still has the attributes.
+    assert (AdmissionError("x").code, AdmissionError("x").name) == (0, "")
 
 
 def test_wrong_argument_types_stay_type_errors():
@@ -393,3 +441,68 @@ def test_a_topology_with_an_unknown_node_is_code_12():
             bytes(32),
         )
     assert caught.value.code == 12
+
+
+def test_bounds_come_before_the_length_checks():
+    case = _load("ice_charge")["cases"][0]
+    inst = case["instances"][0]
+    h = [2**31 - 1] + inst["h"][1:]
+    for override in (
+        {"nonce": bytes(31)},
+        {"topology_order_digest": bytes(31)},
+        {"instance_digest": bytes(31)},
+        {"descriptor_digest": bytes(32)},
+    ):
+        with pytest.raises(InstanceInvalid) as caught:
+            families.validate_instance(**_validate_args(case, inst, h=h, **override))
+        assert (caught.value.code, caught.value.name) == (13, "BoundsExceeded")
+    with pytest.raises(InstanceInvalid) as caught:
+        families.validate_instance(**_validate_args(case, inst, nonce=bytes(31)))
+    assert caught.value.code == 15
+
+
+def test_an_empty_nonce_is_an_archived_instance():
+    case = _load("ice_charge")["cases"][0]
+    inst = case["instances"][0]
+    raw = canonical_bytes(
+        bytes.fromhex(case["descriptor_digest"]),
+        bytes.fromhex(case["topology"]["order_digest"]),
+        b"",
+        inst["node_ids"],
+        [tuple(e) for e in inst["edges"]],
+        inst["h"],
+        inst["j"],
+        int(inst["offset_milli"]),
+        bytes.fromhex(inst["metadata_hex"]),
+    )
+    digest = instance_digest(raw)
+    for nonce in (None, b""):
+        archived = families.validate_instance(
+            **_validate_args(case, inst, nonce=nonce, instance_digest=digest)
+        )
+        assert archived.nonce is None
+        assert archived.canonical_bytes() == raw
+
+
+def test_feasible_rejects_an_instance_of_another_descriptor():
+    case = _load("polariton")["cases"][0]
+    other = _load("flow")["cases"][0]
+    instance = _generate(case, bytes.fromhex(case["instances"][0]["nonce"]))
+    with pytest.raises(InstanceInvalid) as caught:
+        families.feasible(
+            other["family_id"],
+            other["revision"],
+            bytes.fromhex(other["params_hex"]),
+            bytes.fromhex(other["params_digest"]),
+            instance,
+            [1] * len(instance.node_ids),
+        )
+    assert (caught.value.code, caught.value.name) == (15, "InstanceDigestMismatch")
+
+
+def test_admission_comes_before_the_nonce_length():
+    with pytest.raises(AdmissionError) as caught:
+        families.generate(
+            "quip/unknown", 1, b"", families.params_digest(b""), [], [], b"short"
+        )
+    assert caught.value.code == 5

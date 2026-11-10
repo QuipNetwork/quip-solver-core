@@ -11,8 +11,33 @@ use std::path::Path;
 
 use ising_generators::registry::CONTRACTS;
 
-/// The names of the `pub const NAME_V1: Contract` items in the crate sources,
-/// found by scanning `src` independently of the registry.
+/// The names of the `pub const NAME_V<n>: Contract` items in `text`.
+fn contract_names(text: &str) -> Vec<String> {
+    // Whitespace and newlines may separate the parts of a declaration.
+    let words: Vec<&str> = text
+        .split(|c: char| c.is_whitespace() || c == ':')
+        .filter(|w| !w.is_empty())
+        .collect();
+    let mut names = Vec::new();
+    for window in words.windows(4) {
+        if let [first, second, name, "Contract"] = *window {
+            if first == "pub" && second == "const" && is_revision_name(name) {
+                names.push(name.to_owned());
+            }
+        }
+    }
+    names
+}
+
+/// Whether `name` ends in `_V` and digits.
+fn is_revision_name(name: &str) -> bool {
+    name.rsplit_once("_V").is_some_and(|(stem, rev)| {
+        !stem.is_empty() && !rev.is_empty() && rev.bytes().all(|b| b.is_ascii_digit())
+    })
+}
+
+/// The contract constants of the crate sources, found by scanning `src`
+/// independently of the registry.
 fn contract_constants() -> Vec<String> {
     fn walk(dir: &Path, found: &mut Vec<String>) {
         for entry in fs::read_dir(dir).expect("read src directory") {
@@ -21,17 +46,7 @@ fn contract_constants() -> Vec<String> {
                 walk(&path, found);
             } else if path.extension().is_some_and(|ext| ext == "rs") {
                 let text = fs::read_to_string(&path).expect("read source file");
-                for line in text.lines() {
-                    let Some(rest) = line.trim().strip_prefix("pub const ") else {
-                        continue;
-                    };
-                    let Some((name, ty)) = rest.split_once(':') else {
-                        continue;
-                    };
-                    if name.ends_with("_V1") && ty.trim_start().starts_with("Contract") {
-                        found.push(name.to_owned());
-                    }
-                }
+                found.extend(contract_names(&text));
             }
         }
     }
@@ -80,4 +95,11 @@ fn registry_is_sorted_and_complete() {
         "a `*_V1` contract in src is not in the expected list, or the reverse"
     );
     assert!(CONTRACTS.iter().all(|c| c.construction.is_some()));
+}
+
+#[test]
+fn the_scan_finds_split_declarations_and_later_revisions() {
+    let text = "pub const A_V1: Contract = X;\npub const\n  B_V12:\n    Contract = Y;\n\
+                pub const C: Contract = Z;\npub const D_V1: u8 = 0;";
+    assert_eq!(contract_names(text), ["A_V1", "B_V12"]);
 }
