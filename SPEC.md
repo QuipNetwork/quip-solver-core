@@ -558,13 +558,14 @@ C solvers use the default lease path and have no local-generation callback.
 
 ### Sampling errors
 
-`SampleError` has three variants. Plain jobs use these wire responses:
+`SampleError` has four variants. Plain jobs use these wire responses:
 
 | Variant | Meaning | Plain-job response |
 |---|---|---|
 | `Capacity` | The job exceeds a device bound. An identical job fails again. | `RejectReason::TooLarge` |
 | `DeviceBusy` | The device is busy now. An identical job may succeed later. | `RejectReason::Overloaded` |
 | `DeviceFault(String)` | The device does not recover without a restart. | `RejectReason::Overloaded`, then `Fatal` |
+| `Declined(String)` | The solver ran and has no solution to report for this instance. An identical job fails again. | `RejectReason::NoSolution` |
 
 For a plain job, `DeviceFault` sends a reject and `Fatal` with `exit_code = 70`.
 For a lease, a device fault ends the session with `Fatal` without a per-salt reject.

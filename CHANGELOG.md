@@ -9,6 +9,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `miner.proto`: the enum value `ALGORITHM_SAT` = 20, named `sat`, for a solver
+  that encodes the problem as Boolean satisfiability and runs a SAT solver. The
+  first is the strong-layer baseline on synthetic ice. The Rust, Python, and
+  TypeScript bindings include it.
+- `miner.proto`: the reject reason `NO_SOLUTION` = 11. A solver sends it when it
+  ran and has no solution to report for the instance, such as an UNSAT verdict.
+- `SampleError::Declined(String)`, which maps to `NO_SOLUTION`. The session
+  continues after a declined job. A lease salt that ends with it produces no result.
+  A backend that matches `SampleError` exhaustively needs a new arm.
 - `quip/polariton-static@1`, a registered family with status `research` and the
   first `hard` family. An open square-link lattice of side `L` sits natively on
   Zephyr cells, where each vertex is a cell K4 and each link is one shared segment
@@ -25,6 +34,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   hook `family::feasible` and the `feasible` field of `Construction` let a `hard`
   family state its feasibility constraint. The coordinator does not call the hook
   yet. The `--family` gate sends the revision the `routing-small` topology.
+- `ising_generators::dipolar`: exact integer coefficient tables for axis-aligned
+  square ice. A validator checks each entry with integers. The module also has the
+  truncation bound, BLAKE3 digests, and `physical_status`. No result of
+  `physical_status` is a physical-validation success. `docs/dipolar-numerics.md`
+  has the formula and the `u128` bound.
 
 ## 0.0.6
 

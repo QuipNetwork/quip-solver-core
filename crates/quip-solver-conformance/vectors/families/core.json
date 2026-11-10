@@ -3955,6 +3955,10 @@
     {
       "reason": "FAMILY_UNSUPPORTED",
       "value": 10
+    },
+    {
+      "reason": "NO_SOLUTION",
+      "value": 11
     }
   ]
 }

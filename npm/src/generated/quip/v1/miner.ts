@@ -110,6 +110,7 @@ export enum Algorithm {
   ALGORITHM_TEDSB = 17,
   ALGORITHM_EXTERNAL = 18,
   ALGORITHM_OTSUKA = 19,
+  ALGORITHM_SAT = 20,
   UNRECOGNIZED = -1,
 }
 
@@ -175,6 +176,9 @@ export function algorithmFromJSON(object: any): Algorithm {
     case 19:
     case "ALGORITHM_OTSUKA":
       return Algorithm.ALGORITHM_OTSUKA;
+    case 20:
+    case "ALGORITHM_SAT":
+      return Algorithm.ALGORITHM_SAT;
     case -1:
     case "UNRECOGNIZED":
     default:
@@ -224,6 +228,8 @@ export function algorithmToJSON(object: Algorithm): string {
       return "ALGORITHM_EXTERNAL";
     case Algorithm.ALGORITHM_OTSUKA:
       return "ALGORITHM_OTSUKA";
+    case Algorithm.ALGORITHM_SAT:
+      return "ALGORITHM_SAT";
     case Algorithm.UNRECOGNIZED:
     default:
       return "UNRECOGNIZED";
@@ -396,6 +402,12 @@ export enum RejectReason {
   TARGET_MISSING = 9,
   /** FAMILY_UNSUPPORTED - Admission codes 5, 6, 10, and 12 map here, and explicit-job code 10 (FAM-42). */
   FAMILY_UNSUPPORTED = 10,
+  /**
+   * NO_SOLUTION - The solver ran and found no solution it can report for this instance, for
+   * example an UNSAT verdict on a strong-layer constraint. An identical job fails
+   * again on the same solver.
+   */
+  NO_SOLUTION = 11,
   UNRECOGNIZED = -1,
 }
 
@@ -434,6 +446,9 @@ export function rejectReasonFromJSON(object: any): RejectReason {
     case 10:
     case "FAMILY_UNSUPPORTED":
       return RejectReason.FAMILY_UNSUPPORTED;
+    case 11:
+    case "NO_SOLUTION":
+      return RejectReason.NO_SOLUTION;
     case -1:
     case "UNRECOGNIZED":
     default:
@@ -465,6 +480,8 @@ export function rejectReasonToJSON(object: RejectReason): string {
       return "TARGET_MISSING";
     case RejectReason.FAMILY_UNSUPPORTED:
       return "FAMILY_UNSUPPORTED";
+    case RejectReason.NO_SOLUTION:
+      return "NO_SOLUTION";
     case RejectReason.UNRECOGNIZED:
     default:
       return "UNRECOGNIZED";

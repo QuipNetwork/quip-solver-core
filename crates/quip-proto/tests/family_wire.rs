@@ -302,8 +302,8 @@ fn unknown_enum_values_survive_decode_and_encode() {
     assert_eq!(caps.generators, vec![1, 2, 7]);
     assert_eq!(again, caps_bytes);
 
-    let (reject, again) = roundtrip::<Reject>(&[0x10, 0x0b]);
-    assert_eq!(reject.reason, 11);
-    assert!(RejectReason::try_from(11).is_err());
-    assert_eq!(again, vec![0x10, 0x0b]);
+    let (reject, again) = roundtrip::<Reject>(&[0x10, 0x0c]);
+    assert_eq!(reject.reason, 12);
+    assert!(RejectReason::try_from(12).is_err());
+    assert_eq!(again, vec![0x10, 0x0c]);
 }
