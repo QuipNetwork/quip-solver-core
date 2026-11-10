@@ -126,7 +126,7 @@ type Got = (String, Option<String>, Option<String>);
 
 /// Assert the report holds exactly `expected`, in order, with the pinned
 /// skip reasons. A failed case shows as `FAILED: why`.
-fn assert_cases(report: &FamilyReport, expected: &[Expected]) {
+fn assert_cases(label: &str, report: &FamilyReport, expected: &[Expected]) {
     let got: Vec<Got> = report
         .cases
         .iter()
@@ -149,41 +149,31 @@ fn assert_cases(report: &FamilyReport, expected: &[Expected]) {
             )
         })
         .collect();
-    assert_eq!(got, want, "{}", report.summary());
+    assert_eq!(got, want, "{label}: {}", report.summary());
 }
 
-#[tokio::test]
-async fn the_default_path_passes_the_family_gate() {
+/// Grade one mode of the family binary on its own session.
+async fn family_mode_report(mode: &str) -> FamilyReport {
     let bin = example_bin("mock_sampler_family_lease")
         .to_string_lossy()
         .into_owned();
-    let socket = unique_socket("fam-default");
-    let report =
-        drive_miner_family(&bin, &["--mode", "default"], &format!("unix://{socket}")).await;
-    assert!(report.is_conformant(), "{}", report.summary());
-    assert_cases(&report, &family_binary_cases());
+    let socket = unique_socket(&format!("fam-{mode}"));
+    drive_miner_family(&bin, &["--mode", mode], &format!("unix://{socket}")).await
 }
 
+/// The three modes run their sessions at the same time; each is graded on its
+/// own report.
 #[tokio::test]
-async fn the_local_path_passes_the_family_gate() {
-    let bin = example_bin("mock_sampler_family_lease")
-        .to_string_lossy()
-        .into_owned();
-    let socket = unique_socket("fam-local");
-    let report = drive_miner_family(&bin, &["--mode", "local"], &format!("unix://{socket}")).await;
-    assert!(report.is_conformant(), "{}", report.summary());
-    assert_cases(&report, &family_binary_cases());
-}
-
-#[tokio::test]
-async fn the_aware_path_passes_the_family_gate() {
-    let bin = example_bin("mock_sampler_family_lease")
-        .to_string_lossy()
-        .into_owned();
-    let socket = unique_socket("fam-aware");
-    let report = drive_miner_family(&bin, &["--mode", "aware"], &format!("unix://{socket}")).await;
-    assert!(report.is_conformant(), "{}", report.summary());
-    assert_cases(&report, &family_binary_cases());
+async fn every_mode_passes_the_family_gate() {
+    let (default, local, aware) = tokio::join!(
+        family_mode_report("default"),
+        family_mode_report("local"),
+        family_mode_report("aware")
+    );
+    for (mode, report) in [("default", default), ("local", local), ("aware", aware)] {
+        assert!(report.is_conformant(), "{mode}: {}", report.summary());
+        assert_cases(mode, &report, &family_binary_cases());
+    }
 }
 
 /// An ice binary lists `quip/ice-glass@1` (z12) and `quip/twisted-ice-dimer@1`
@@ -222,7 +212,7 @@ async fn a_generic_binary_is_not_asked_to_generate() {
     let socket = unique_socket("fam-generic");
     let report = drive_miner_family(&bin, &[], &format!("unix://{socket}")).await;
     assert!(report.is_conformant(), "{}", report.summary());
-    assert_cases(&report, &generic_binary_cases());
+    assert_cases("generic binary", &report, &generic_binary_cases());
 }
 
 #[test]

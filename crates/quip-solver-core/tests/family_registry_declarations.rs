@@ -119,7 +119,7 @@ fn all_declared() -> Result<(Vec<RegistryEntry>, Vec<Declared>), String> {
 }
 
 #[test]
-fn every_advertised_quip_family_is_registered() -> Result<(), String> {
+fn example_declarations_agree_with_the_registry() -> Result<(), String> {
     let (registry, all) = all_declared()?;
     let mut problems = Vec::new();
     for d in &all {
@@ -127,19 +127,6 @@ fn every_advertised_quip_family_is_registered() -> Result<(), String> {
         if !missing.is_empty() {
             problems.push(format!("{}: unregistered {missing:?}", d.example));
         }
-    }
-    if problems.is_empty() {
-        Ok(())
-    } else {
-        Err(problems.join("; "))
-    }
-}
-
-#[test]
-fn no_example_generates_an_archived_revision() -> Result<(), String> {
-    let (registry, all) = all_declared()?;
-    let mut problems = Vec::new();
-    for d in &all {
         let archived = archived_among(&registry, &d.generated);
         if !archived.is_empty() {
             problems.push(format!("{}: archived {archived:?}", d.example));

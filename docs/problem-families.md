@@ -682,7 +682,7 @@ First, it rejects any generator value other than 1 with `MALFORMED` before any d
 `LeaseSpec::from_proto` returns `LeaseError::UnknownGenerator` for any algorithm other than 1 (`LeaseSpec::from_proto` in `crates/quip-protocol/src/lease.rs`).
 The session maps that error to `MALFORMED` (`prepare` in `crates/quip-solver-core/src/lease.rs`).
 The test `proto_result_verifies_and_rejects_malformed_fields` in `crates/quip-protocol/tests/proto_lease.rs` checks the rejection.
-The session test `malformed_leases_are_rejected_before_drawing` in `crates/quip-solver-core/tests/lease_session.rs` sends a lease with `algorithm = 0`, and three leases with bad salt fields.
+The session test `malformed_and_unsupported_leases_are_rejected_before_drawing` in `crates/quip-solver-core/tests/lease_session.rs` sends a lease with `algorithm = 0`, and three leases with bad salt fields.
 It checks that the first reply to each lease is a `MALFORMED` reject.
 
 Second, a coordinator never sends a family lease to a session that did not ask for it in `generated_families` (FAM-72).

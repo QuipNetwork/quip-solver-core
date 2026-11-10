@@ -98,7 +98,8 @@ const VALID: &[u8] = br#"{"h":[1.0,-1.0],"j":[1.0],"edges":[[0,1]],
 
 /// Solve `input`, require that it was rejected as malformed without reaching
 /// the sampler, and hand back the detail message for the caller to assert on.
-fn reject_reason(input: &[u8]) -> String {
+/// `label` names the case in every failure.
+fn reject_reason(label: &str, input: &[u8]) -> String {
     let sampler = RecordingSampler::default();
     let outcome = match solve(&sampler, &identity(), input) {
         Ok(_) => "accepted".to_owned(),
@@ -107,85 +108,91 @@ fn reject_reason(input: &[u8]) -> String {
     };
     assert!(
         outcome.starts_with("malformed: "),
-        "expected a malformed rejection, got: {outcome}"
+        "{label}: expected a malformed rejection, got: {outcome}"
     );
     assert!(
         sampler.seen().is_none(),
-        "a rejected problem must never reach the sampler"
+        "{label}: a rejected problem must never reach the sampler"
     );
     outcome
 }
 
-#[test]
-fn the_reference_problem_solves() {
-    let sampler = RecordingSampler::default();
-    let out = solve(&sampler, &identity(), VALID).expect("the reference problem must solve");
-    assert!(!out.is_empty());
-    assert!(
-        sampler.seen().is_some(),
-        "the sampler must have been called"
-    );
-}
+/// One row per malformed problem: a label for the failure message, the body,
+/// and the needles the detail must carry.
+type MalformedRow = (&'static str, &'static [u8], &'static [&'static str]);
 
-/// quip-solver-core-l12 / -3eb: driver mode accepted a `j`/`edges` pair that
-/// cannot describe a graph. Reaching a C-ABI sampler with these two disagreeing
-/// is an out-of-bounds read, so it must be rejected before `IsingGraph` is even
-/// built.
-#[test]
-fn couplings_that_do_not_pair_with_edges_are_rejected() {
-    let detail = reject_reason(
+const MALFORMED_PROBLEMS: &[MalformedRow] = &[
+    // quip-solver-core-l12 / -3eb: driver mode accepted a `j`/`edges` pair that
+    // cannot describe a graph. Reaching a C-ABI sampler with these two
+    // disagreeing is an out-of-bounds read, so it is rejected before
+    // `IsingGraph` is even built.
+    (
+        "couplings that do not pair with edges",
         br#"{"h":[1.0],"j":[1.0,2.0],"edges":[],
              "num_reads":1,"num_sweeps":1,"sweeps_per_beta":1,"beta_range":null,"seed":1}"#,
-    );
-    assert!(
-        detail.contains("2 couplings") && detail.contains("0 edges"),
-        "the error should name both counts: {detail}"
-    );
-}
-
-#[test]
-fn an_edge_endpoint_outside_h_is_rejected() {
-    let detail = reject_reason(
+        &["2 couplings", "0 edges"],
+    ),
+    (
+        "an edge endpoint outside h",
         br#"{"h":[1.0,-1.0],"j":[1.0],"edges":[[0,2]],
              "num_reads":1,"num_sweeps":1,"sweeps_per_beta":1,"beta_range":null,"seed":1}"#,
-    );
-    assert!(
-        detail.contains("outside h"),
-        "the error should name the bound: {detail}"
-    );
-
-    // The last in-range index is still accepted, so the check is not off by one.
-    let sampler = RecordingSampler::default();
-    assert!(solve(
-        &sampler,
-        &identity(),
-        br#"{"h":[1.0,-1.0],"j":[1.0],"edges":[[0,1]],
-             "num_reads":1,"num_sweeps":1,"sweeps_per_beta":1,"beta_range":null,"seed":1}"#,
-    )
-    .is_ok());
-}
-
-/// quip-solver-core-l12: `ProblemJson` had no `deny_unknown_fields`, so a
-/// misspelled key was dropped and its field silently took a default.
-#[test]
-fn an_unknown_key_is_rejected_rather_than_ignored() {
-    let detail = reject_reason(
+        &["outside h"],
+    ),
+    // quip-solver-core-l12: `ProblemJson` had no `deny_unknown_fields`, so a
+    // misspelled key was dropped and its field silently took a default.
+    (
+        "an unknown key",
         br#"{"h":[1.0,-1.0],"j":[1.0],"edges":[[0,1]],"num_reads":1,"num_sweeps":1,
              "sweeps_per_beta":1,"beta_range":null,"seed":1,"num_sweep":99}"#,
-    );
-    assert!(
-        detail.contains("num_sweep"),
-        "the error should name the offending key: {detail}"
-    );
-}
-
-#[test]
-fn num_reads_must_be_at_least_one() {
-    let detail = reject_reason(
+        &["num_sweep"],
+    ),
+    (
+        "num_reads of zero",
         br#"{"h":[1.0,-1.0],"j":[1.0],"edges":[[0,1]],
              "num_reads":0,"num_sweeps":1,"sweeps_per_beta":1,"beta_range":null,"seed":1}"#,
-    );
-    assert!(detail.contains("num_reads"), "{detail}");
+        &["num_reads"],
+    ),
+    // `--sweeps-per-beta` enforces `>= 1`; the JSON door onto the same field
+    // must agree, since backends divide the sweep budget by it.
+    (
+        "sweeps_per_beta of zero",
+        br#"{"h":[1.0,-1.0],"j":[1.0],"edges":[[0,1]],
+             "num_reads":1,"num_sweeps":1,"sweeps_per_beta":0,"beta_range":null,"seed":1}"#,
+        &["sweeps_per_beta"],
+    ),
+    (
+        "a self-loop",
+        br#"{"h":[1.0,-1.0],"j":[1.0],"edges":[[1,1]],
+             "num_reads":1,"num_sweeps":1,"sweeps_per_beta":1,"beta_range":null,"seed":1}"#,
+        &["self-loop"],
+    ),
+    // A solver that does not list `linear-schedule` would run geometric and say
+    // nothing; the request is refused instead, as an older SDK refuses the key.
+    (
+        "a linear schedule without the feature",
+        br#"{"h":[1.0,-1.0],"j":[1.0],"edges":[[0,1]],"num_reads":1,"num_sweeps":4,
+             "sweeps_per_beta":1,"beta_range":null,"beta_schedule_type":"linear","seed":1}"#,
+        &[LINEAR_SCHEDULE_FEATURE],
+    ),
+    (
+        "an unknown schedule name",
+        br#"{"h":[1.0,-1.0],"j":[1.0],"edges":[[0,1]],"num_reads":1,"num_sweeps":4,
+             "sweeps_per_beta":1,"beta_range":null,"beta_schedule_type":"cosine","seed":1}"#,
+        &["cosine"],
+    ),
+];
+
+#[test]
+fn malformed_problems_are_rejected_and_named() {
+    for &(label, input, needles) in MALFORMED_PROBLEMS {
+        let detail = reject_reason(label, input);
+        for needle in needles {
+            assert!(
+                detail.contains(needle),
+                "{label}: the error should name {needle:?}: {detail}"
+            );
+        }
+    }
 }
 
 /// The session path caps `num_reads` at the backend's own bound in
@@ -216,17 +223,6 @@ fn num_reads_beyond_the_backend_maximum_is_rejected() {
     .is_ok());
 }
 
-/// `--sweeps-per-beta` enforces `>= 1`; the JSON door onto the same field must
-/// agree, since backends divide the sweep budget by it.
-#[test]
-fn sweeps_per_beta_must_be_at_least_one() {
-    let detail = reject_reason(
-        br#"{"h":[1.0,-1.0],"j":[1.0],"edges":[[0,1]],
-             "num_reads":1,"num_sweeps":1,"sweeps_per_beta":0,"beta_range":null,"seed":1}"#,
-    );
-    assert!(detail.contains("sweeps_per_beta"), "{detail}");
-}
-
 /// `beta_range` threads from the JSON into `SampleParams` untouched. It had no
 /// coverage at all: a `solve` that dropped it would still return plausible
 /// solutions, just annealed on the wrong ladder.
@@ -250,58 +246,27 @@ fn beta_range_reaches_the_sampler_unchanged() {
     assert_eq!(seen.seed, 42);
 }
 
-/// `null` is the documented "auto from biases" value and must stay distinct
-/// from a pinned range.
-#[test]
-fn a_null_beta_range_reaches_the_sampler_as_none() {
-    let sampler = RecordingSampler::default();
-    let _ = solve(&sampler, &identity(), VALID).expect("the reference problem must solve");
-    assert_eq!(
-        sampler.seen().expect("sampler called").beta_range,
-        None,
-        "null must mean auto, not a pinned range"
-    );
-}
-
-#[test]
-fn a_self_loop_is_rejected() {
-    let detail = reject_reason(
-        br#"{"h":[1.0,-1.0],"j":[1.0],"edges":[[1,1]],
-             "num_reads":1,"num_sweeps":1,"sweeps_per_beta":1,"beta_range":null,"seed":1}"#,
-    );
-    assert!(detail.contains("self-loop"), "{detail}");
-}
-
 /// Solve `input` against `id`, require a capacity refusal that never reached
-/// the sampler, and hand back its detail.
-fn capacity_reason(id: &BackendIdentity, input: &[u8]) -> String {
+/// the sampler, and hand back its detail. `label` names the case in every
+/// failure.
+fn capacity_reason(label: &str, id: &BackendIdentity, input: &[u8]) -> String {
     let sampler = RecordingSampler::default();
     let outcome = solve(&sampler, id, input);
     assert!(
         sampler.seen().is_none(),
-        "a refused model must not be sampled"
+        "{label}: a refused model must not be sampled"
     );
     assert!(
         matches!(outcome, Err(SolveError::Capacity(_))),
-        "expected a capacity refusal, got {outcome:?}"
+        "{label}: expected a capacity refusal, got {outcome:?}"
     );
     match outcome {
         Err(e @ SolveError::Capacity(_)) => {
-            assert_eq!(e.exit_code(), ExitCode::Capacity);
+            assert_eq!(e.exit_code(), ExitCode::Capacity, "{label}");
             e.to_string()
         }
         _ => String::new(),
     }
-}
-
-#[test]
-fn the_schedule_defaults_to_geometric() {
-    let sampler = RecordingSampler::default();
-    let _ = solve(&sampler, &identity(), VALID).expect("the reference problem must solve");
-    assert_eq!(
-        sampler.seen().expect("sampler called").schedule,
-        BetaSchedule::Geometric
-    );
 }
 
 #[test]
@@ -329,30 +294,22 @@ fn a_linear_schedule_reaches_a_solver_that_lists_the_feature() {
     );
 }
 
-/// A solver that does not list `linear-schedule` would run geometric and say
-/// nothing; the request is refused instead, as an older SDK refuses the key.
+/// The reference problem solves, reaches the sampler with the documented
+/// defaults, and every solution carries timing and the sampler block. Its last
+/// edge touches the last index of `h`, so it also shows that index is accepted.
 #[test]
-fn a_linear_schedule_is_refused_without_the_feature() {
-    let detail = reject_reason(
-        br#"{"h":[1.0,-1.0],"j":[1.0],"edges":[[0,1]],"num_reads":1,"num_sweeps":4,
-             "sweeps_per_beta":1,"beta_range":null,"beta_schedule_type":"linear","seed":1}"#,
-    );
-    assert!(detail.contains(LINEAR_SCHEDULE_FEATURE), "{detail}");
-}
-
-#[test]
-fn an_unknown_schedule_name_is_malformed() {
-    let detail = reject_reason(
-        br#"{"h":[1.0,-1.0],"j":[1.0],"edges":[[0,1]],"num_reads":1,"num_sweeps":4,
-             "sweeps_per_beta":1,"beta_range":null,"beta_schedule_type":"cosine","seed":1}"#,
-    );
-    assert!(detail.contains("cosine"), "{detail}");
-}
-
-#[test]
-fn every_solution_carries_timing_and_sampler_metadata() {
+fn the_reference_problem_reaches_the_sampler_with_its_defaults() {
     let sampler = RecordingSampler::default();
     let out = solve(&sampler, &identity(), VALID).expect("the reference problem must solve");
+    assert!(!out.is_empty());
+    let seen = sampler.seen().expect("the sampler must have been called");
+    // `null` is the documented "auto from biases" value and must stay distinct
+    // from a pinned range.
+    assert_eq!(
+        seen.beta_range, None,
+        "null must mean auto, not a pinned range"
+    );
+    assert_eq!(seen.schedule, BetaSchedule::Geometric);
     let v: serde_json::Value = serde_json::from_slice(&out).expect("JSON");
     let reads = v.as_array().expect("an array of solutions");
     assert_eq!(reads.len(), 2);
@@ -377,22 +334,6 @@ fn every_solution_carries_timing_and_sampler_metadata() {
     }
 }
 
-#[test]
-fn node_and_edge_caps_are_capacity() {
-    let nodes = BackendIdentity {
-        max_nodes: 1,
-        ..identity()
-    };
-    assert!(capacity_reason(&nodes, VALID).contains("nodes"));
-    let edges = BackendIdentity {
-        max_edges: 1,
-        ..identity()
-    };
-    let two_edges = br#"{"h":[1.0,-1.0,0.0],"j":[1.0,1.0],"edges":[[0,1],[1,2]],
-        "num_reads":1,"num_sweeps":1,"sweeps_per_beta":1,"beta_range":null,"seed":1}"#;
-    assert!(capacity_reason(&edges, two_edges).contains("edges"));
-}
-
 /// A star with centre 0 and three leaves, couplings of one unit.
 const STAR: &[u8] = br#"{"h":[0.5,0.0,0.0,0.0],"j":[1.0,-1.0,1.0],"edges":[[0,1],[0,2],[0,3]],
     "num_reads":1,"num_sweeps":1,"sweeps_per_beta":1,"beta_range":null,"seed":1}"#;
@@ -404,47 +345,106 @@ fn limited(limits: ModelLimits) -> BackendIdentity {
     }
 }
 
-#[test]
-fn a_model_at_the_degree_limit_solves_and_one_above_is_capacity() {
-    let at = limited(ModelLimits {
-        max_degree: Some(3),
-        ..ModelLimits::UNSTATED
-    });
-    assert!(solve(&RecordingSampler::default(), &at, STAR).is_ok());
-    let below = limited(ModelLimits {
-        max_degree: Some(2),
-        ..ModelLimits::UNSTATED
-    });
-    assert!(capacity_reason(&below, STAR).contains("degree 3"));
-}
+/// Two edges over three nodes, for the edge cap.
+const TWO_EDGES: &[u8] = br#"{"h":[1.0,-1.0,0.0],"j":[1.0,1.0],"edges":[[0,1],[1,2]],
+    "num_reads":1,"num_sweeps":1,"sweeps_per_beta":1,"beta_range":null,"seed":1}"#;
+
+/// One row per identity and problem: a label for the failure message, the
+/// identity, the body, and `None` when it solves or the needle of the capacity
+/// refusal.
+type CapacityRow = (
+    &'static str,
+    BackendIdentity,
+    &'static [u8],
+    Option<&'static str>,
+);
 
 #[test]
-fn a_model_at_the_field_limit_solves_and_one_above_is_capacity() {
-    // Centre: |0.5| + 3 × 1.0 = 3.5 units.
-    let at = limited(ModelLimits {
-        max_local_field_milli: Some(3500),
-        ..ModelLimits::UNSTATED
-    });
-    assert!(solve(&RecordingSampler::default(), &at, STAR).is_ok());
-    let below = limited(ModelLimits {
-        max_local_field_milli: Some(3499),
-        ..ModelLimits::UNSTATED
-    });
-    assert!(capacity_reason(&below, STAR).contains("local field 3500"));
-}
-
-/// The resolution is information until the solver lists
-/// `exact-coefficients`; then an off-step coefficient is refused.
-#[test]
-fn an_off_step_coefficient_is_capacity_only_for_an_exact_solver() {
+fn model_limits_and_caps_are_capacity() {
+    // The star's centre carries |0.5| + 3 x 1.0 = 3.5 units of local field.
+    let degree = |max_degree| {
+        limited(ModelLimits {
+            max_degree: Some(max_degree),
+            ..ModelLimits::UNSTATED
+        })
+    };
+    let field = |max_local_field_milli| {
+        limited(ModelLimits {
+            max_local_field_milli: Some(max_local_field_milli),
+            ..ModelLimits::UNSTATED
+        })
+    };
+    // The resolution is information until the solver lists
+    // `exact-coefficients`; then an off-step coefficient is refused.
     let step = ModelLimits {
         exact_resolution_milli: Some(1000),
         ..ModelLimits::UNSTATED
     };
-    assert!(solve(&RecordingSampler::default(), &limited(step), STAR).is_ok());
-    let exact = BackendIdentity {
-        features: &[EXACT_COEFFICIENTS_FEATURE],
-        ..limited(step)
-    };
-    assert!(capacity_reason(&exact, STAR).contains("500"));
+    let rows: [CapacityRow; 8] = [
+        (
+            "node cap",
+            BackendIdentity {
+                max_nodes: 1,
+                ..identity()
+            },
+            VALID,
+            Some("nodes"),
+        ),
+        (
+            "edge cap",
+            BackendIdentity {
+                max_edges: 1,
+                ..identity()
+            },
+            TWO_EDGES,
+            Some("edges"),
+        ),
+        ("degree at the limit", degree(3), STAR, None),
+        (
+            "degree one above the limit",
+            degree(2),
+            STAR,
+            Some("degree 3"),
+        ),
+        ("field at the limit", field(3500), STAR, None),
+        (
+            "field one above the limit",
+            field(3499),
+            STAR,
+            Some("local field 3500"),
+        ),
+        (
+            "off-step coefficient, solver not exact",
+            limited(step),
+            STAR,
+            None,
+        ),
+        (
+            "off-step coefficient, exact solver",
+            BackendIdentity {
+                features: &[EXACT_COEFFICIENTS_FEATURE],
+                ..limited(step)
+            },
+            STAR,
+            Some("500"),
+        ),
+    ];
+    for (label, id, input, expected) in &rows {
+        match expected {
+            None => {
+                let outcome = solve(&RecordingSampler::default(), id, input);
+                assert!(
+                    outcome.is_ok(),
+                    "{label}: expected a solution, got {outcome:?}"
+                );
+            }
+            Some(needle) => {
+                let detail = capacity_reason(label, id, input);
+                assert!(
+                    detail.contains(needle),
+                    "{label}: the refusal should name {needle:?}: {detail}"
+                );
+            }
+        }
+    }
 }

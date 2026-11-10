@@ -134,8 +134,17 @@ async fn capped_sampler_rejects_too_large() {
     assert_eq!(report.exit_code, 0, "clean shutdown expected");
 }
 
+/// The other half of the bad-Welcome contract: the miner must say *why* it is
+/// leaving before it leaves.
+///
+/// From the coordinator's side, a bare exit 64 is indistinguishable from a
+/// crash during startup — the operator sees a disconnect and no reason.
+/// `drive_miner_bad_welcome`'s documentation has always claimed a conformant
+/// miner sends `Fatal` first, the driver grades it
+/// (`DriverReport::bad_welcome_conformant`), and the session loop now sends
+/// `Fatal { exit_code: 64 }` before returning `SessionError::BadWelcome`.
 #[tokio::test]
-async fn a_bad_welcome_ends_the_session_with_config_invalid() {
+async fn a_bad_welcome_is_explained_then_exits_config_invalid() {
     let bin = example_bin("mock_sampler_miner")
         .to_string_lossy()
         .into_owned();
@@ -152,25 +161,6 @@ async fn a_bad_welcome_ends_the_session_with_config_invalid() {
         "a miner that rejected the Welcome must not have run jobs: {:?}",
         report.result_job_ids()
     );
-}
-
-/// The other half of the bad-Welcome contract: the miner must say *why* it is
-/// leaving before it leaves.
-///
-/// From the coordinator's side, a bare exit 64 is indistinguishable from a
-/// crash during startup — the operator sees a disconnect and no reason.
-/// `drive_miner_bad_welcome`'s documentation has always claimed a conformant
-/// miner sends `Fatal` first, the driver grades it
-/// (`DriverReport::bad_welcome_conformant`), and the session loop now sends
-/// `Fatal { exit_code: 64 }` before returning `SessionError::BadWelcome`.
-#[tokio::test]
-async fn a_bad_welcome_is_explained_before_the_exit() {
-    let bin = example_bin("mock_sampler_miner")
-        .to_string_lossy()
-        .into_owned();
-    let socket = unique_socket("bad-welcome-fatal");
-    let report = drive_miner_bad_welcome(&bin, &format!("unix://{socket}")).await;
-
     assert!(
         report.fatal.is_some(),
         "a conformant miner sends Fatal before exiting ConfigInvalid: {report:?}"

@@ -225,116 +225,188 @@ fn solver_ids_follow_the_vectors() -> Result<(), String> {
     Ok(())
 }
 
-#[test]
-fn a_claim_with_no_revision_is_refused() {
-    const GENERATED: &[FamilyClaim] = &[claim(&[], &[])];
-    assert_eq!(
-        declaration(GENERATED, &[]).validate(),
-        Err(DeclarationError::NoRevision {
-            list: FamilyList::Generated,
-            index: 0
-        })
-    );
+/// One row per invalid declaration: a label for the failure message, the
+/// generated and accepted claims, and the error `validate` must return.
+type InvalidRow = (
+    &'static str,
+    &'static [FamilyClaim],
+    &'static [FamilyClaim],
+    DeclarationError,
+);
+
+const NO_CONSTRUCTION: &[Contract] = &[without_construction(UNIFORM_V1)];
+const EMPTY_LABELS: &[Contract] = &[with_construction(UNIFORM_V1, &EMPTY_LABEL)];
+const LONG_LABELS: &[Contract] = &[with_construction(UNIFORM_V1, &LONG_LABEL)];
+const NON_ASCII_LABELS: &[Contract] = &[with_construction(UNIFORM_V1, &NON_ASCII_LABEL)];
+const REPEATED_LABELS: &[Contract] = &[with_construction(UNIFORM_V1, &REPEATED_LABEL)];
+
+const fn invalid_label(list: FamilyList) -> DeclarationError {
+    DeclarationError::InvalidLabel {
+        list,
+        index: 0,
+        revision: 1,
+    }
 }
 
-#[test]
-fn a_claim_that_mixes_families_is_refused() {
-    const ACCEPTED: &[FamilyClaim] = &[claim(&[UNIFORM_V1, OTHER_V1], &[])];
-    assert_eq!(
-        declaration(&[], ACCEPTED).validate(),
-        Err(DeclarationError::MixedFamilies {
+const fn example_namespace(list: FamilyList) -> DeclarationError {
+    DeclarationError::InvalidEntry {
+        list,
+        index: 0,
+        family_id: "example/uniform-field",
+    }
+}
+
+const fn no_construction(list: FamilyList) -> DeclarationError {
+    DeclarationError::NoConstruction {
+        list,
+        index: 0,
+        revision: 1,
+    }
+}
+
+const INVALID_DECLARATIONS: &[InvalidRow] = &[
+    (
+        "a claim with no revision",
+        &[claim(&[], &[])],
+        &[],
+        DeclarationError::NoRevision {
+            list: FamilyList::Generated,
+            index: 0,
+        },
+    ),
+    (
+        "a claim that mixes families",
+        &[],
+        &[claim(&[UNIFORM_V1, OTHER_V1], &[])],
+        DeclarationError::MixedFamilies {
             list: FamilyList::Accepted,
-            index: 0
-        })
-    );
-}
-
-#[test]
-fn a_repeated_revision_is_refused() {
-    const GENERATED: &[FamilyClaim] = &[claim(&[UNIFORM_V1, UNIFORM_V1], &[])];
-    assert_eq!(
-        declaration(GENERATED, &[]).validate(),
-        Err(DeclarationError::RepeatedRevision {
+            index: 0,
+        },
+    ),
+    (
+        "a repeated revision",
+        &[claim(&[UNIFORM_V1, UNIFORM_V1], &[])],
+        &[],
+        DeclarationError::RepeatedRevision {
             list: FamilyList::Generated,
             index: 0,
-            revision: 1
-        })
-    );
-}
-
-#[test]
-fn two_claims_for_one_family_are_refused() {
-    const GENERATED: &[FamilyClaim] = &[claim(&[UNIFORM_V1], &[]), claim(&[ZERO_FIELD_V2], &[])];
-    assert_eq!(
-        declaration(GENERATED, &[]).validate(),
-        Err(DeclarationError::InvalidEntry {
+            revision: 1,
+        },
+    ),
+    (
+        "two claims for one family",
+        &[claim(&[UNIFORM_V1], &[]), claim(&[ZERO_FIELD_V2], &[])],
+        &[],
+        DeclarationError::InvalidEntry {
             list: FamilyList::Generated,
             index: 0,
-            family_id: "vectors/uniform-field"
-        })
-    );
-}
-
-#[test]
-fn the_example_namespace_is_refused() {
-    const CLAIMS: &[FamilyClaim] = &[claim(&[EXAMPLE_V1], &[])];
-    let invalid = |list| {
-        Err(DeclarationError::InvalidEntry {
-            list,
-            index: 0,
-            family_id: "example/uniform-field",
-        })
-    };
-    assert_eq!(
-        declaration(CLAIMS, &[]).validate(),
-        invalid(FamilyList::Generated)
-    );
-    assert_eq!(
-        declaration(&[], CLAIMS).validate(),
-        invalid(FamilyList::Accepted)
-    );
-}
-
-#[test]
-fn a_declared_parameter_set_outside_the_schema_is_refused() {
-    const OUT_OF_BOUNDS: &[FamilyClaim] = &[claim(&[UNIFORM_V1], &[&FIELD_5000_PARAMS])];
-    const MALFORMED: &[FamilyClaim] = &[claim(&[UNIFORM_V1], &[&MALFORMED_PARAMS])];
-    assert_eq!(
-        declaration(OUT_OF_BOUNDS, &[]).validate(),
-        Err(DeclarationError::ParamsRejected {
+            family_id: "vectors/uniform-field",
+        },
+    ),
+    (
+        "the example namespace in the generated list",
+        &[claim(&[EXAMPLE_V1], &[])],
+        &[],
+        example_namespace(FamilyList::Generated),
+    ),
+    (
+        "the example namespace in the accepted list",
+        &[],
+        &[claim(&[EXAMPLE_V1], &[])],
+        example_namespace(FamilyList::Accepted),
+    ),
+    (
+        "a parameter set out of bounds",
+        &[claim(&[UNIFORM_V1], &[&FIELD_5000_PARAMS])],
+        &[],
+        DeclarationError::ParamsRejected {
             list: FamilyList::Generated,
             index: 0,
             param: 0,
             revision: 1,
-            code: Code::ParamsOutOfBounds
-        })
-    );
-    assert_eq!(
-        declaration(&[], MALFORMED).validate(),
-        Err(DeclarationError::ParamsRejected {
+            code: Code::ParamsOutOfBounds,
+        },
+    ),
+    (
+        "a malformed parameter set",
+        &[],
+        &[claim(&[UNIFORM_V1], &[&MALFORMED_PARAMS])],
+        DeclarationError::ParamsRejected {
             list: FamilyList::Accepted,
             index: 0,
             param: 0,
             revision: 1,
-            code: Code::ParamsMalformed
-        })
-    );
-}
-
-#[test]
-fn a_parameter_set_must_fit_every_listed_revision() {
-    const TOO_WIDE: &[FamilyClaim] = &[claim(&[UNIFORM_V1, ZERO_FIELD_V2], &[&FIELD_1000_PARAMS])];
-    const ZERO: &[FamilyClaim] = &[claim(&[UNIFORM_V1, ZERO_FIELD_V2], &[&ZERO_FIELD_PARAMS])];
-    assert_eq!(
-        declaration(TOO_WIDE, &[]).validate(),
-        Err(DeclarationError::ParamsRejected {
+            code: Code::ParamsMalformed,
+        },
+    ),
+    (
+        "a parameter set too wide for the second revision",
+        &[claim(&[UNIFORM_V1, ZERO_FIELD_V2], &[&FIELD_1000_PARAMS])],
+        &[],
+        DeclarationError::ParamsRejected {
             list: FamilyList::Generated,
             index: 0,
             param: 0,
             revision: 2,
-            code: Code::ParamsOutOfBounds
-        })
-    );
+            code: Code::ParamsOutOfBounds,
+        },
+    ),
+    (
+        "a generated contract with no construction",
+        &[claim(NO_CONSTRUCTION, &[])],
+        &[],
+        no_construction(FamilyList::Generated),
+    ),
+    (
+        "an accepted contract with no construction",
+        &[],
+        &[claim(NO_CONSTRUCTION, &[])],
+        no_construction(FamilyList::Accepted),
+    ),
+    (
+        "an empty construction label",
+        &[claim(EMPTY_LABELS, &[])],
+        &[],
+        invalid_label(FamilyList::Generated),
+    ),
+    (
+        "a construction label that is too long",
+        &[claim(LONG_LABELS, &[])],
+        &[],
+        invalid_label(FamilyList::Generated),
+    ),
+    (
+        "a non-ASCII construction label",
+        &[claim(NON_ASCII_LABELS, &[])],
+        &[],
+        invalid_label(FamilyList::Generated),
+    ),
+    (
+        "a repeated construction label",
+        &[claim(REPEATED_LABELS, &[])],
+        &[],
+        invalid_label(FamilyList::Generated),
+    ),
+];
+
+#[test]
+fn invalid_declarations_are_refused() {
+    for (label, generated, accepted, expected) in INVALID_DECLARATIONS {
+        assert_eq!(
+            declaration(generated, accepted).validate().as_ref(),
+            Err(expected),
+            "{label}"
+        );
+    }
+}
+
+/// The success halves of the parameter-fit and label checks: a restriction
+/// that fits every listed revision, and a label at the length limit.
+#[test]
+fn valid_declarations_are_accepted() {
+    const ZERO: &[FamilyClaim] = &[claim(&[UNIFORM_V1, ZERO_FIELD_V2], &[&ZERO_FIELD_PARAMS])];
+    const LONGEST: &[Contract] = &[with_construction(UNIFORM_V1, &LONGEST_LABEL)];
+    const GOOD: &[FamilyClaim] = &[claim(LONGEST, &[])];
     let table = declaration(ZERO, &[])
         .validate()
         .expect("zero-field restriction fits both revisions");
@@ -346,6 +418,7 @@ fn a_parameter_set_must_fit_every_listed_revision() {
             &[params_digest(&ZERO_FIELD_PARAMS)]
         )]
     );
+    assert!(declaration(GOOD, &[]).validate().is_ok());
 }
 
 #[test]
@@ -445,50 +518,38 @@ const LEGACY: i32 = GeneratorAlgorithm::Blake3Chacha8V1 as i32;
 const FAMILY: i32 = GeneratorAlgorithm::FamilyChacha8V1 as i32;
 
 #[test]
-fn generic_sampler_advertises_no_family() -> Result<(), String> {
-    let caps = capabilities_for::<Generic, f64>(&identity()).map_err(|e| e.to_string())?;
-    if !caps.solver_id.is_empty()
-        || !caps.generated_families.is_empty()
-        || !caps.accepted_families.is_empty()
-        || caps.generators != [LEGACY]
-    {
-        return Err(format!("generic advertises families: {caps:?}"));
-    }
-    Ok(())
-}
-
-#[test]
-fn restricted_family_sampler_advertises_its_declaration() -> Result<(), String> {
-    let table = table_of(&Restricted::declaration())?;
-    let caps = capabilities_for::<Restricted, f64>(&identity()).map_err(|e| e.to_string())?;
-    if caps.solver_id != table.solver_id()
-        || caps.generated_families != table.generated()
-        || caps.accepted_families != table.accepted()
-        || caps.generators != [LEGACY, FAMILY]
-    {
-        return Err(format!("capabilities differ from the table: {caps:?}"));
-    }
-    Ok(())
-}
-
-#[test]
-fn local_and_default_generators_advertise_the_same_families() -> Result<(), String> {
+fn capabilities_follow_the_declaration() -> Result<(), String> {
     let id = identity();
-    let local = capabilities_for::<Local, f64>(&id).map_err(|e| e.to_string())?;
-    let default = capabilities_for::<Restricted, f64>(&id).map_err(|e| e.to_string())?;
-    if local.solver_id != default.solver_id
-        || local.generators != default.generators
-        || local.generated_families != default.generated_families
-        || local.accepted_families != default.accepted_families
+    let generic = capabilities_for::<Generic, f64>(&id).map_err(|e| e.to_string())?;
+    if !generic.solver_id.is_empty()
+        || !generic.generated_families.is_empty()
+        || !generic.accepted_families.is_empty()
+        || generic.generators != [LEGACY]
     {
-        return Err(format!("local {local:?} differs from default {default:?}"));
+        return Err(format!("generic advertises families: {generic:?}"));
     }
-    Ok(())
-}
-
-#[test]
-fn an_invalid_declaration_has_no_capabilities() -> Result<(), String> {
-    match capabilities_for::<BadId, f64>(&identity()) {
+    let table = table_of(&Restricted::declaration())?;
+    let restricted = capabilities_for::<Restricted, f64>(&id).map_err(|e| e.to_string())?;
+    if restricted.solver_id != table.solver_id()
+        || restricted.generated_families != table.generated()
+        || restricted.accepted_families != table.accepted()
+        || restricted.generators != [LEGACY, FAMILY]
+    {
+        return Err(format!(
+            "capabilities differ from the table: {restricted:?}"
+        ));
+    }
+    let local = capabilities_for::<Local, f64>(&id).map_err(|e| e.to_string())?;
+    if local.solver_id != restricted.solver_id
+        || local.generators != restricted.generators
+        || local.generated_families != restricted.generated_families
+        || local.accepted_families != restricted.accepted_families
+    {
+        return Err(format!(
+            "local {local:?} differs from default {restricted:?}"
+        ));
+    }
+    match capabilities_for::<BadId, f64>(&id) {
         Err(DeclarationError::InvalidSolverId("Bad")) => Ok(()),
         other => Err(format!("expected InvalidSolverId, got {other:?}")),
     }
@@ -503,31 +564,6 @@ fn cli_json() -> Result<Value, String> {
         return Err("--capabilities failed".to_owned());
     }
     serde_json::from_slice(&out.stdout).map_err(|e| e.to_string())
-}
-
-#[test]
-fn cli_prints_the_family_fields() -> Result<(), String> {
-    let v = cli_json()?;
-    let digest = STANDARD.encode(params_digest(&ZERO_FIELD_PARAMS));
-    let expected = serde_json::json!({
-        "generators": [
-            "GENERATOR_ALGORITHM_BLAKE3_CHACHA8_V1",
-            "GENERATOR_ALGORITHM_FAMILY_CHACHA8_V1"
-        ],
-        "solverId": "quip-mock/families",
-        "generatedFamilies": [{
-            "familyId": "vectors/uniform-field",
-            "revisions": [1],
-            "paramsDigests": [digest]
-        }],
-        "acceptedFamilies": [{"familyId": "vectors/uniform-field", "revisions": [1]}]
-    });
-    for (key, want) in expected.as_object().ok_or("expected is not an object")? {
-        if v.get(key) != Some(want) {
-            return Err(format!("{key}: got {:?}, want {want}", v.get(key)));
-        }
-    }
-    Ok(())
 }
 
 fn support_json(entries: &[FamilySupport]) -> Value {
@@ -555,7 +591,7 @@ fn support_json(entries: &[FamilySupport]) -> Value {
 }
 
 #[tokio::test]
-async fn cli_and_session_answers_agree() -> Result<(), String> {
+async fn cli_and_session_capabilities_agree() -> Result<(), String> {
     let bin = example_bin("mock_sampler_families")
         .to_string_lossy()
         .into_owned();
@@ -581,6 +617,25 @@ async fn cli_and_session_answers_agree() -> Result<(), String> {
         return Err(format!("Hello {hello:?} differs from reply {reply:?}"));
     }
     let v = cli_json()?;
+    let digest = STANDARD.encode(params_digest(&ZERO_FIELD_PARAMS));
+    let expected = serde_json::json!({
+        "generators": [
+            "GENERATOR_ALGORITHM_BLAKE3_CHACHA8_V1",
+            "GENERATOR_ALGORITHM_FAMILY_CHACHA8_V1"
+        ],
+        "solverId": "quip-mock/families",
+        "generatedFamilies": [{
+            "familyId": "vectors/uniform-field",
+            "revisions": [1],
+            "paramsDigests": [digest]
+        }],
+        "acceptedFamilies": [{"familyId": "vectors/uniform-field", "revisions": [1]}]
+    });
+    for (key, want) in expected.as_object().ok_or("expected is not an object")? {
+        if v.get(key) != Some(want) {
+            return Err(format!("{key}: got {:?}, want {want}", v.get(key)));
+        }
+    }
     if v.get("solverId") != Some(&Value::from(reply.solver_id.clone()))
         || v.get("generatedFamilies") != Some(&support_json(&reply.generated_families))
         || v.get("acceptedFamilies") != Some(&support_json(&reply.accepted_families))
@@ -590,61 +645,6 @@ async fn cli_and_session_answers_agree() -> Result<(), String> {
         ));
     }
     Ok(())
-}
-
-#[test]
-fn a_generated_contract_needs_a_construction() {
-    const BARE: &[Contract] = &[without_construction(UNIFORM_V1)];
-    const GENERATED: &[FamilyClaim] = &[claim(BARE, &[])];
-    assert_eq!(
-        declaration(GENERATED, &[]).validate(),
-        Err(DeclarationError::NoConstruction {
-            list: FamilyList::Generated,
-            index: 0,
-            revision: 1
-        })
-    );
-}
-
-#[test]
-fn an_accepted_contract_needs_a_construction() {
-    const BARE: &[Contract] = &[without_construction(UNIFORM_V1)];
-    const ACCEPTED: &[FamilyClaim] = &[claim(BARE, &[])];
-    assert_eq!(
-        declaration(&[], ACCEPTED).validate(),
-        Err(DeclarationError::NoConstruction {
-            list: FamilyList::Accepted,
-            index: 0,
-            revision: 1
-        })
-    );
-}
-
-#[test]
-fn construction_labels_must_be_valid() {
-    const EMPTY: &[Contract] = &[with_construction(UNIFORM_V1, &EMPTY_LABEL)];
-    const LONG: &[Contract] = &[with_construction(UNIFORM_V1, &LONG_LABEL)];
-    const NON_ASCII: &[Contract] = &[with_construction(UNIFORM_V1, &NON_ASCII_LABEL)];
-    const REPEATED: &[Contract] = &[with_construction(UNIFORM_V1, &REPEATED_LABEL)];
-    const LONGEST: &[Contract] = &[with_construction(UNIFORM_V1, &LONGEST_LABEL)];
-    const BAD: [&[FamilyClaim]; 4] = [
-        &[claim(EMPTY, &[])],
-        &[claim(LONG, &[])],
-        &[claim(NON_ASCII, &[])],
-        &[claim(REPEATED, &[])],
-    ];
-    const GOOD: &[FamilyClaim] = &[claim(LONGEST, &[])];
-    for claims in BAD {
-        assert_eq!(
-            declaration(claims, &[]).validate(),
-            Err(DeclarationError::InvalidLabel {
-                list: FamilyList::Generated,
-                index: 0,
-                revision: 1
-            })
-        );
-    }
-    assert!(declaration(GOOD, &[]).validate().is_ok());
 }
 
 #[test]
@@ -667,16 +667,6 @@ fn the_table_finds_each_declared_contract() -> Result<(), String> {
             .is_some()
     {
         return Err(format!("contract lookups differ: {table:?}"));
-    }
-    Ok(())
-}
-
-#[test]
-fn tables_compare_by_wire_form() -> Result<(), String> {
-    const GENERATED: &[FamilyClaim] = &[claim(&[UNIFORM_V1], &[&ZERO_FIELD_PARAMS])];
-    let decl = declaration(GENERATED, &[]);
-    if table_of(&decl)? != table_of(&decl)? {
-        return Err("two validations of one declaration differ".to_owned());
     }
     Ok(())
 }

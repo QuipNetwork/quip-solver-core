@@ -221,8 +221,8 @@ The tests in step 4 are in `crates/quip-solver-core/tests/family_registry_declar
    It also checks that the schema rows, the substream labels, and the metadata kinds of the contract equal the reference contract.
    The gate cannot drive a revision that a solver lists without a reference, so its `supported-revision` case fails (FAM-57).
 4. Declare the registered family in each solver example that advertises or generates it.
-   `every_advertised_quip_family_is_registered` checks that the registry lists every `quip/*` id that an example advertises.
-   `no_example_generates_an_archived_revision` checks that no example generates an archived revision.
+   `example_declarations_agree_with_the_registry` checks that the registry lists every `quip/*` id that an example advertises.
+   The same test checks that no example generates an archived revision.
    No test requires an example to declare any one family.
 5. Run `make family-vectors` and commit the regenerated vectors with the reason for each changed value.
 
@@ -238,8 +238,8 @@ Tests in `family_conformance.rs` keep this table equal to the contract.
 
 | Check id | Rule | Status | Coverage | Evidence |
 |---|---|---|---|---|
-| `quip-namespace-registry-only` | FAM-04 | covered | host-only | `crates/quip-solver-conformance/tests/family_registry.rs::quip_ids_in_vectors_and_contracts_are_registered`, `crates/quip-solver-core/tests/family_registry_declarations.rs::every_advertised_quip_family_is_registered`, `crates/quip-solver-conformance/src/families/registry.rs::an_unregistered_quip_id_is_reported`. Scope: ids that claim a family. SC-2 vectors use `quip/*` ids as abstract identifiers. |
-| `capabilities-exact-revisions-only` | FAM-07 | covered | host-only | `crates/quip-solver-core/tests/family_drive.rs::the_default_path_passes_the_family_gate`, `crates/quip-solver-core/tests/family_drive.rs::the_local_path_passes_the_family_gate` (case `revision-plus-one`) |
+| `quip-namespace-registry-only` | FAM-04 | covered | host-only | `crates/quip-solver-conformance/tests/family_registry.rs::quip_ids_in_vectors_and_contracts_are_registered`, `crates/quip-solver-core/tests/family_registry_declarations.rs::example_declarations_agree_with_the_registry`, `crates/quip-solver-conformance/src/families/registry.rs::an_unregistered_quip_id_is_reported`. Scope: ids that claim a family. SC-2 vectors use `quip/*` ids as abstract identifiers. |
+| `capabilities-exact-revisions-only` | FAM-07 | covered | host-only | `crates/quip-solver-core/tests/family_drive.rs::every_mode_passes_the_family_gate` (case `revision-plus-one`) |
 | `revision-vectors-frozen` | FAM-08 | covered | host-only | `crates/quip-solver-conformance/tests/family_vectors.rs::registered_vectors_are_frozen`, `crates/quip-solver-conformance/tests/family_vectors.rs::changed_registered_case_fails_the_pin` |
 | `status-change-keeps-descriptor-digest` | FAM-09 | covered | host-only | `crates/quip-solver-conformance/tests/family_registry.rs::status_does_not_change_the_descriptor_digest` |
 | `schema-has-no-float-type` | FAM-14 | covered | host-only | `crates/quip-solver-conformance/tests/family_registry.rs::parameter_schemas_use_no_float_type`, `crates/quip-solver-conformance/tests/family_registry.rs::a_float_schema_type_fails` |
@@ -256,20 +256,20 @@ Tests in `family_conformance.rs` keep this table equal to the contract.
 | `soft-defect-counter-diagnostic-only` | FAM-40 | review only | none | review: the Constraint class item of each `soft` contract (FAM-40) |
 | `adapted-families-hard-separate-ids` | FAM-41 | covered | host-only | `crates/quip-solver-conformance/tests/family_registry.rs::adapted_families_are_hard_with_separate_ids`, `crates/quip-solver-conformance/tests/family_registry.rs::an_adapted_soft_family_fails`, `crates/quip-solver-conformance/tests/family_registry.rs::an_adapted_family_sharing_an_original_id_fails` |
 | `proto-existing-tags-unchanged` | FAM-44 | covered | host-only | `crates/quip-solver-conformance/tests/golden_wire.rs::canonical_encodings_match_the_fixture`, `crates/quip-solver-conformance/tests/golden_wire.rs::enum_numbers_match_the_fixture` |
-| `protocol-version-stays-2-with-families` | FAM-45 | covered | host-only | `crates/quip-solver-conformance/tests/golden_wire.rs::protocol_version_stays_two`, `crates/quip-solver-core/tests/family_drive.rs::the_default_path_passes_the_family_gate` (case `hello-protocol-version-2`) |
-| `lease-admission-degree-bound-too-large` | FAM-47 | covered | host-only | `crates/quip-solver-core/tests/family_drive.rs::the_default_path_passes_the_family_gate` (case `degree-bound-too-large`) |
+| `protocol-version-stays-2-with-families` | FAM-45 | covered | host-only | `crates/quip-solver-conformance/tests/golden_wire.rs::protocol_version_stays_two`, `crates/quip-solver-core/tests/family_drive.rs::every_mode_passes_the_family_gate` (case `hello-protocol-version-2`) |
+| `lease-admission-degree-bound-too-large` | FAM-47 | covered | host-only | `crates/quip-solver-core/tests/family_drive.rs::every_mode_passes_the_family_gate` (case `degree-bound-too-large`) |
 | `coordinator-never-sets-family-on-legacy-lease` | FAM-48 | not covered | none | needs CO-2 |
 | `coordinator-regenerates-family-result` | FAM-53 | not covered | none | needs CO-2 |
 | `no-generated-families-rejects-family-lease` | FAM-54 | covered | host-only | `crates/quip-solver-core/tests/family_drive.rs::a_generic_binary_is_not_asked_to_generate` |
 | `coordinator-accepts-plain-model-solve-with-offset` | FAM-55 | not covered | none | needs CO-2 |
-| `capability-tier-per-revision` | FAM-56 | covered | host-only | `crates/quip-solver-core/tests/family_session.rs::a_tier_applies_per_revision` |
-| `generated-family-passes-conformance` | FAM-57 | covered | host-only | `crates/quip-solver-conformance/tests/family_conformance.rs::reference_layered_passes_every_vector_case`, `crates/quip-solver-core/tests/family_drive.rs::the_default_path_passes_the_family_gate`, `crates/quip-solver-core/tests/family_drive.rs::the_local_path_passes_the_family_gate` |
-| `generators-lists-family-algorithm-iff-generated` | FAM-58 | covered | host-only | `crates/quip-solver-core/tests/family_capabilities.rs::generic_sampler_advertises_no_family`, `crates/quip-solver-core/tests/family_capabilities.rs::restricted_family_sampler_advertises_its_declaration`, `crates/quip-solver-core/tests/family_drive.rs::the_default_path_passes_the_family_gate` |
-| `archived-revision-not-generated` | FAM-59 | covered | host-only | `crates/quip-solver-core/tests/family_registry_declarations.rs::no_example_generates_an_archived_revision`, `crates/quip-solver-conformance/src/families/registry.rs::an_archived_generated_revision_is_reported` |
-| `capabilities-json-family-fields` | FAM-63 | covered | host-only | `crates/quip-solver-core/tests/family_capabilities.rs::cli_prints_the_family_fields`, `crates/quip-solver-core/tests/family_capabilities.rs::cli_and_session_answers_agree` |
+| `capability-tier-per-revision` | FAM-56 | covered | host-only | `crates/quip-solver-core/tests/family_session.rs::explicit_job_vectors_hold_in_the_session` |
+| `generated-family-passes-conformance` | FAM-57 | covered | host-only | `crates/quip-solver-conformance/tests/family_conformance.rs::reference_layered_passes_every_vector_case`, `crates/quip-solver-core/tests/family_drive.rs::every_mode_passes_the_family_gate` |
+| `generators-lists-family-algorithm-iff-generated` | FAM-58 | covered | host-only | `crates/quip-solver-core/tests/family_capabilities.rs::capabilities_follow_the_declaration`, `crates/quip-solver-core/tests/family_drive.rs::every_mode_passes_the_family_gate` |
+| `archived-revision-not-generated` | FAM-59 | covered | host-only | `crates/quip-solver-core/tests/family_registry_declarations.rs::example_declarations_agree_with_the_registry`, `crates/quip-solver-conformance/src/families/registry.rs::an_archived_generated_revision_is_reported` |
+| `capabilities-json-family-fields` | FAM-63 | covered | host-only | `crates/quip-solver-core/tests/family_capabilities.rs::cli_and_session_capabilities_agree` |
 | `coordinator-empty-nonce-only-archived` | FAM-66 | not covered | none | needs CO-2 |
-| `accepted-solver-checks-instance-digest-before-structure` | FAM-68 | covered | host-only | `crates/quip-solver-core/tests/family_session.rs::explicit_job_vectors_hold_in_the_session`, `crates/quip-solver-core/tests/family_session.rs::binding_field_lengths_follow_the_vectors` |
-| `generic-solver-ignores-family-binding` | FAM-69 | covered | host-only | `crates/quip-solver-core/tests/family_session.rs::a_generic_solver_ignores_the_binding` |
+| `accepted-solver-checks-instance-digest-before-structure` | FAM-68 | covered | host-only | `crates/quip-solver-core/tests/family_session.rs::explicit_job_vectors_hold_in_the_session`, `crates/quip-solver-core/tests/family_session.rs::field_length_vectors_hold_in_the_session` |
+| `generic-solver-ignores-family-binding` | FAM-69 | covered | host-only | `crates/quip-solver-core/tests/family_session.rs::explicit_job_vectors_hold_in_the_session` |
 | `dispatch-binding-passes-accepted-params-digests` | FAM-70 | not covered | none | needs CO-2 |
 | `dispatch-follows-latest-capabilities` | FAM-71 | not covered | none | needs CO-2 |
 | `dispatch-family-lease-needs-generated-entry` | FAM-72 | not covered | none | needs CO-2 |
