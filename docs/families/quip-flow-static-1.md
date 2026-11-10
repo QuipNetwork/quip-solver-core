@@ -231,7 +231,7 @@ Topology admission then applies these checks. The first failure decides the code
 After these checks, the size bounds give code 13 when an advertised limit of the solver is below the sizes.
 Admission gives no code 14. The `admission` section of the vectors records the code of each request.
 
-The vectors record two cases of code 12 for a window. The topology of `flow-dead-cell` has a dead qubit in the first window, so the window moves to the origin `(1, 2)` and the request is admitted. The topology without an alive window gives code 12.
+The vectors treat the window in three records. The case `flow-dead-cell` has a dead qubit in the first window, so its window moves to the origin `(1, 2)` and the request builds. The admission row `dead-first-window-is-admitted` records the same topology as admitted. Code 12 for a missing window appears in the admission row `topology-without-an-alive-window` and in the recipe `l12`.
 
 ### Recipes
 

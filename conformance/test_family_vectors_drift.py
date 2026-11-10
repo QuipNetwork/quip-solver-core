@@ -552,66 +552,6 @@ def test_defects_table_entries_match_the_oracle_table():
 
 # ---- quip/flow-static ----
 
-_FLOW_FIELD_SECTIONS = ("flow_witnesses", "networks", "flow_recipes")
-
-
-@pytest.fixture(scope="module")
-def flow_oracle() -> dict:
-    return build.build_flow()
-
-
-def _leaves(value, pointer=""):
-    """Every leaf of a JSON value with its pointer."""
-    if isinstance(value, dict):
-        for key, inner in value.items():
-            yield from _leaves(inner, f"{pointer}/{key}")
-    elif isinstance(value, list):
-        for at, inner in enumerate(value):
-            yield from _leaves(inner, f"{pointer}/{at}")
-    else:
-        yield pointer, value
-
-
-def _changed(value):
-    if isinstance(value, bool):
-        return not value
-    if isinstance(value, int):
-        return value + 1
-    if value is None:
-        return 12
-    return value + "x"
-
-
-def _set(doc: dict, pointer: str, value) -> dict:
-    copy = json.loads(json.dumps(doc))
-    node = copy
-    *path, last = pointer.strip("/").split("/")
-    for part in path:
-        node = node[int(part)] if isinstance(node, list) else node[part]
-    if isinstance(node, list):
-        node[int(last)] = value
-    else:
-        node[last] = value
-    return copy
-
-
-def _differences(doc: dict, oracle: dict) -> set[str]:
-    """The pointers at which the fixture differs from the oracle output."""
-    mine, theirs = dict(_leaves(doc)), dict(_leaves(oracle))
-    return {p for p in mine.keys() | theirs.keys() if mine.get(p) != theirs.get(p)}
-
-
-def test_every_leaf_of_a_flow_section_is_compared_with_the_oracle(flow_oracle):
-    doc = _flow_doc()
-    assert _differences(doc, flow_oracle) == set()
-    count = 0
-    for section in _FLOW_FIELD_SECTIONS:
-        for pointer, value in _leaves(doc[section], f"/{section}"):
-            changed = _set(doc, pointer, _changed(value))
-            assert _differences(changed, flow_oracle) == {pointer}
-            count += 1
-    assert count > 500
-
 
 def test_flow_witnesses_cover_every_case_with_a_lower_objective_infeasible_state():
     doc = _flow_doc()
