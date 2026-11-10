@@ -8,30 +8,9 @@ use quip_solver_conformance::driver::{
     drive_miner, drive_miner_bad_welcome, drive_miner_close_after_welcome,
     drive_miner_close_before_welcome, drive_miner_one_job,
 };
-use std::process::Command;
+mod common;
 
-/// Build the named example and return its binary path.
-fn example_bin(name: &str) -> String {
-    #[expect(
-        clippy::expect_used,
-        reason = "test helper: cargo build failure is a setup error"
-    )]
-    let status = Command::new(env!("CARGO"))
-        .args(["build", "--example", name, "-p", "quip-solver-core"])
-        .status()
-        .expect("cargo build --example");
-    assert!(status.success(), "failed to build example {name}");
-    #[expect(
-        clippy::expect_used,
-        reason = "test helper: current_exe is always available under cargo test"
-    )]
-    let mut p = std::env::current_exe().expect("test exe path");
-    let _ = p.pop(); // deps/
-    let _ = p.pop(); // <profile>/
-    p.push("examples");
-    p.push(name);
-    p.to_string_lossy().into_owned()
-}
+use common::example_bin;
 
 fn unique_socket(tag: &str) -> String {
     let nanos = {
@@ -50,7 +29,9 @@ fn unique_socket(tag: &str) -> String {
 /// A solver that uses warm starts is graded on them and passes.
 #[tokio::test]
 async fn warm_sampler_passes_the_initial_spins_grade() {
-    let bin = example_bin("mock_sampler_warm");
+    let bin = example_bin("mock_sampler_warm")
+        .to_string_lossy()
+        .into_owned();
     let socket = unique_socket("warm");
     let report = drive_miner(&bin, &format!("unix://{socket}")).await;
     assert!(report.advertises_initial_spins(), "{report:?}");
@@ -62,7 +43,9 @@ async fn warm_sampler_passes_the_initial_spins_grade() {
 /// it never reaches the proof ring's planted ground state.
 #[tokio::test]
 async fn a_solver_that_ignores_its_seeds_fails_the_initial_spins_grade() {
-    let bin = example_bin("mock_sampler_warm_ignored");
+    let bin = example_bin("mock_sampler_warm_ignored")
+        .to_string_lossy()
+        .into_owned();
     let socket = unique_socket("warm-ignored");
     let report = drive_miner(&bin, &format!("unix://{socket}")).await;
     assert!(report.advertises_initial_spins(), "{report:?}");
@@ -76,7 +59,9 @@ async fn a_solver_that_ignores_its_seeds_fails_the_initial_spins_grade() {
 
 #[tokio::test]
 async fn mock_sampler_passes_loop_conformance() {
-    let bin = example_bin("mock_sampler_miner");
+    let bin = example_bin("mock_sampler_miner")
+        .to_string_lossy()
+        .into_owned();
     let socket = unique_socket("loop");
     let report = drive_miner(&bin, &format!("unix://{socket}")).await;
 
@@ -128,7 +113,9 @@ async fn mock_sampler_passes_loop_conformance() {
 
 #[tokio::test]
 async fn capped_sampler_rejects_too_large() {
-    let bin = example_bin("mock_sampler_capped");
+    let bin = example_bin("mock_sampler_capped")
+        .to_string_lossy()
+        .into_owned();
     let socket = unique_socket("capped");
     let report = drive_miner(&bin, &format!("unix://{socket}")).await;
 
@@ -149,7 +136,9 @@ async fn capped_sampler_rejects_too_large() {
 
 #[tokio::test]
 async fn a_bad_welcome_ends_the_session_with_config_invalid() {
-    let bin = example_bin("mock_sampler_miner");
+    let bin = example_bin("mock_sampler_miner")
+        .to_string_lossy()
+        .into_owned();
     let socket = unique_socket("bad-welcome");
     let report = drive_miner_bad_welcome(&bin, &format!("unix://{socket}")).await;
 
@@ -176,7 +165,9 @@ async fn a_bad_welcome_ends_the_session_with_config_invalid() {
 /// `Fatal { exit_code: 64 }` before returning `SessionError::BadWelcome`.
 #[tokio::test]
 async fn a_bad_welcome_is_explained_before_the_exit() {
-    let bin = example_bin("mock_sampler_miner");
+    let bin = example_bin("mock_sampler_miner")
+        .to_string_lossy()
+        .into_owned();
     let socket = unique_socket("bad-welcome-fatal");
     let report = drive_miner_bad_welcome(&bin, &format!("unix://{socket}")).await;
 
@@ -194,7 +185,9 @@ async fn a_bad_welcome_is_explained_before_the_exit() {
 /// reports exit 0 for it tells its supervisor nothing went wrong.
 #[tokio::test]
 async fn a_coordinator_lost_after_welcome_exits_internal_fatal() {
-    let bin = example_bin("mock_sampler_miner");
+    let bin = example_bin("mock_sampler_miner")
+        .to_string_lossy()
+        .into_owned();
     let socket = unique_socket("close-after-welcome");
     let report = drive_miner_close_after_welcome(&bin, &format!("unix://{socket}")).await;
 
@@ -221,7 +214,9 @@ async fn a_coordinator_lost_after_welcome_exits_internal_fatal() {
 /// wrong place.
 #[tokio::test]
 async fn a_coordinator_lost_before_welcome_exits_token_rejected() {
-    let bin = example_bin("mock_sampler_miner");
+    let bin = example_bin("mock_sampler_miner")
+        .to_string_lossy()
+        .into_owned();
     let socket = unique_socket("close-before-welcome");
     let report = drive_miner_close_before_welcome(&bin, &format!("unix://{socket}")).await;
 
@@ -240,7 +235,9 @@ async fn a_coordinator_lost_before_welcome_exits_token_rejected() {
 
 #[tokio::test]
 async fn a_device_fault_ends_the_session_instead_of_requesting_more_work() {
-    let bin = example_bin("mock_sampler_faulty");
+    let bin = example_bin("mock_sampler_faulty")
+        .to_string_lossy()
+        .into_owned();
     let socket = unique_socket("faulty");
     let report = drive_miner_one_job(&bin, &format!("unix://{socket}")).await;
 

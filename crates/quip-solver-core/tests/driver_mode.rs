@@ -1,29 +1,10 @@
 //! Driver mode: one problem on stdin, one solution array on stdout, exit.
 
+mod common;
+
+use common::example_bin;
 use std::io::Write as _;
 use std::process::{Command, Stdio};
-
-fn example_bin(name: &str) -> String {
-    #[expect(
-        clippy::expect_used,
-        reason = "test helper: cargo build failure is a setup error"
-    )]
-    let status = Command::new(env!("CARGO"))
-        .args(["build", "--example", name, "-p", "quip-solver-core"])
-        .status()
-        .expect("cargo build --example");
-    assert!(status.success(), "failed to build example {name}");
-    #[expect(
-        clippy::expect_used,
-        reason = "test helper: current_exe is always available under cargo test"
-    )]
-    let mut p = std::env::current_exe().expect("test exe path");
-    let _ = p.pop();
-    let _ = p.pop();
-    p.push("examples");
-    p.push(name);
-    p.to_string_lossy().into_owned()
-}
 
 #[test]
 fn solve_reads_a_problem_and_writes_solutions() {

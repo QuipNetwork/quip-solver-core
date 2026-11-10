@@ -1,7 +1,10 @@
 //! Typed family declarations and their validation (FAM-56 to FAM-62).
 
+mod common;
+
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
+use common::example_bin;
 use quip_proto::v1::FamilySupport;
 use quip_proto::v1::GeneratorAlgorithm;
 use quip_protocol::family::support_code;
@@ -360,22 +363,6 @@ fn an_empty_restriction_claims_every_parameter_set() -> Result<(), String> {
     Ok(())
 }
 
-fn example_bin(name: &str) -> Result<String, String> {
-    let status = Command::new(env!("CARGO"))
-        .args(["build", "--example", name, "-p", "quip-solver-core"])
-        .status()
-        .map_err(|e| e.to_string())?;
-    if !status.success() {
-        return Err(format!("failed to build example {name}"));
-    }
-    let mut p = std::env::current_exe().map_err(|e| e.to_string())?;
-    let _ = p.pop();
-    let _ = p.pop();
-    p.push("examples");
-    p.push(name);
-    Ok(p.to_string_lossy().into_owned())
-}
-
 fn unique_socket(tag: &str) -> Result<String, String> {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -508,7 +495,7 @@ fn an_invalid_declaration_has_no_capabilities() -> Result<(), String> {
 }
 
 fn cli_json() -> Result<Value, String> {
-    let out = Command::new(example_bin("mock_sampler_families")?)
+    let out = Command::new(example_bin("mock_sampler_families"))
         .arg("--capabilities")
         .output()
         .map_err(|e| e.to_string())?;
@@ -569,7 +556,9 @@ fn support_json(entries: &[FamilySupport]) -> Value {
 
 #[tokio::test]
 async fn cli_and_session_answers_agree() -> Result<(), String> {
-    let bin = example_bin("mock_sampler_families")?;
+    let bin = example_bin("mock_sampler_families")
+        .to_string_lossy()
+        .into_owned();
     let socket = unique_socket("families")?;
     let report = drive_miner(&bin, &format!("unix://{socket}")).await;
     if !report.is_conformant() {

@@ -2,6 +2,9 @@
 //!
 //! The legacy pins below describe the lease path as it was at 6d272cd. They
 //! must keep passing, unedited, while family leases are added.
+mod common;
+
+use common::example_bin;
 use prost::Message as _;
 use quip_proto::v1::{
     self as wire, coord_msg, miner_msg,
@@ -112,7 +115,7 @@ impl Session {
     }
     async fn start_with(binary: &str, gated: bool, extra_args: &[&str]) -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        let bin = build_example(binary);
+        let bin = example_bin(binary);
         let dir = std::path::PathBuf::from(format!(
             "target/t7-tmp/{}-{}",
             std::process::id(),
@@ -264,19 +267,6 @@ impl Session {
         );
     }
 }
-#[expect(clippy::unwrap_used, reason = "test fixture builds must succeed")]
-fn build_example(name: &str) -> std::path::PathBuf {
-    assert!(std::process::Command::new(env!("CARGO"))
-        .args(["build", "-p", "quip-solver-core", "--example", name])
-        .status()
-        .unwrap()
-        .success());
-    let mut path = std::env::current_exe().unwrap();
-    let _ = path.pop();
-    let _ = path.pop();
-    path.join("examples").join(name)
-}
-
 /// `T_SPARSE` (core.json `topologies[sparse]`), sent with the wire hash `[7; 32]`.
 #[expect(
     clippy::unwrap_used,

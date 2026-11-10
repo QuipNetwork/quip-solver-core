@@ -1,4 +1,7 @@
 //! Lease protocol tests against a real session and deterministic sampler.
+mod common;
+
+use common::example_bin;
 use quip_proto::v1::{
     self as wire, coord_msg, miner_msg,
     miner_service_server::{MinerService, MinerServiceServer},
@@ -8,10 +11,7 @@ use quip_protocol::{
     target::Target,
 };
 use std::{
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        OnceLock,
-    },
+    sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
 };
 use tokio::sync::{mpsc, Mutex};
@@ -131,7 +131,7 @@ impl Session {
         );
         let local = mode.map(|mode| {
             if mode == "wide" {
-                build_example("mock_sampler_lease_wide")
+                example_bin("mock_sampler_lease_wide")
             } else {
                 local_binary()
             }
@@ -861,26 +861,10 @@ async fn plain_id_equal_to_an_old_salt_id_keeps_its_metadata_and_credit() {
 }
 
 fn local_binary() -> std::path::PathBuf {
-    static BIN: OnceLock<std::path::PathBuf> = OnceLock::new();
-    BIN.get_or_init(|| build_example("mock_sampler_lease_local"))
-        .clone()
+    example_bin("mock_sampler_lease_local")
 }
 fn default_binary() -> std::path::PathBuf {
-    static BIN: OnceLock<std::path::PathBuf> = OnceLock::new();
-    BIN.get_or_init(|| build_example("mock_sampler_lease"))
-        .clone()
-}
-#[expect(clippy::unwrap_used, reason = "test fixture builds must succeed")]
-fn build_example(name: &str) -> std::path::PathBuf {
-    assert!(std::process::Command::new(env!("CARGO"))
-        .args(["build", "-p", "quip-solver-core", "--example", name])
-        .status()
-        .unwrap()
-        .success());
-    let mut path = std::env::current_exe().unwrap();
-    let _ = path.pop();
-    let _ = path.pop();
-    path.join("examples").join(name)
+    example_bin("mock_sampler_lease")
 }
 
 #[tokio::test]

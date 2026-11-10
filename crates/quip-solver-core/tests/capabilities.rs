@@ -1,29 +1,10 @@
 //! `--capabilities` must emit the typed Capabilities message, and it must keep
 //! the seven keys the current readers already parse.
 
-use std::process::Command;
+mod common;
 
-fn example_bin(name: &str) -> String {
-    #[expect(
-        clippy::expect_used,
-        reason = "test helper: cargo build failure is a setup error"
-    )]
-    let status = Command::new(env!("CARGO"))
-        .args(["build", "--example", name, "-p", "quip-solver-core"])
-        .status()
-        .expect("cargo build --example");
-    assert!(status.success(), "failed to build example {name}");
-    #[expect(
-        clippy::expect_used,
-        reason = "test helper: current_exe is always available under cargo test"
-    )]
-    let mut p = std::env::current_exe().expect("test exe path");
-    let _ = p.pop();
-    let _ = p.pop();
-    p.push("examples");
-    p.push(name);
-    p.to_string_lossy().into_owned()
-}
+use common::example_bin;
+use std::process::Command;
 
 #[test]
 fn capabilities_flag_emits_the_typed_message() {

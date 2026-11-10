@@ -3,31 +3,35 @@
 use quip_solver_conformance::solve::{drive_solve, CaseOutcome};
 use std::process::Command;
 
+/// The stand-in annealer binary. `cargo test` builds the examples of the
+/// package under test first, so a nested build runs only when it is missing.
 fn mock_qpu_solver() -> String {
-    #[expect(
-        clippy::expect_used,
-        reason = "test helper: cargo build failure is a setup error"
-    )]
-    let status = Command::new(env!("CARGO"))
-        .args([
-            "build",
-            "--example",
-            "mock_qpu_solver",
-            "-p",
-            "quip-solver-conformance",
-        ])
-        .status()
-        .expect("cargo build --example");
-    assert!(status.success(), "failed to build mock_qpu_solver");
     #[expect(
         clippy::expect_used,
         reason = "test helper: current_exe is always available under cargo test"
     )]
     let mut p = std::env::current_exe().expect("test exe path");
-    let _ = p.pop();
-    let _ = p.pop();
+    let _ = p.pop(); // deps/
+    let _ = p.pop(); // <profile>/
     p.push("examples");
     p.push("mock_qpu_solver");
+    if !p.is_file() {
+        #[expect(
+            clippy::expect_used,
+            reason = "test helper: cargo build failure is a setup error"
+        )]
+        let status = Command::new(env!("CARGO"))
+            .args([
+                "build",
+                "--example",
+                "mock_qpu_solver",
+                "-p",
+                "quip-solver-conformance",
+            ])
+            .status()
+            .expect("cargo build --example");
+        assert!(status.success(), "failed to build mock_qpu_solver");
+    }
     p.to_string_lossy().into_owned()
 }
 
