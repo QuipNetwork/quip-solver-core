@@ -5042,6 +5042,18 @@ fn check_defects_routes(doc: &Value) -> Result<(), String> {
         Some("Difference"),
         Some("Obstacle"),
         Some("RepeatedVertex"),
+        Some("Spins"),
+        Some("Shape"),
+        Some("Shape"),
+        Some("NotAdjacent"),
+        Some("NotAdjacent"),
+        Some("RepeatedVertex"),
+        Some("RepeatedVertex"),
+        Some("RepeatedLink"),
+        Some("Obstacle"),
+        Some("Obstacle"),
+        Some("Endpoints"),
+        Some("Endpoints"),
     ]
     .into_iter()
     .map(|name| name.map(str::to_owned))
@@ -5092,8 +5104,95 @@ fn check_defects_tables(doc: &Value) -> Result<(), String> {
             compare(entry, "weight", &meta.weight, &weight)?;
             compare(entry, "dropped", &meta.dropped, &dropped)?;
         }
+        check_defects_table_counts(entry, case)?;
     }
     Ok(())
+}
+
+/// The counts, the magnitudes, and the truncation bound of one table entry
+/// against a table rebuilt from the public dipolar API: islands at the link
+/// midpoints, the pairs with `K <= 4`, and the pairs that share a vertex.
+fn check_defects_table_counts(entry: &Value, case: &Value) -> Result<(), String> {
+    use ising_generators::dipolar::{
+        quantize, Axis as DipolarAxis, Calibration, Geometry, Island, Table,
+    };
+    use ising_generators::square::{Axis, Boundary, SquareLattice};
+    let params = codec::hex_decode(str_field(case, "params_hex")?)?;
+    let side = u16::try_from(defects_side(&params)?).map_err(|e| e.to_string())?;
+    let lattice = SquareLattice::new(side, Boundary::Open).map_err(|e| e.to_string())?;
+    let width = u32::from(side) + 1;
+    let mut islands = Vec::new();
+    for e in 0..lattice.link_count() {
+        let link = lattice.link(e).ok_or("no link")?;
+        let x = u16::try_from(link.tail % width).map_err(|e| e.to_string())? * 2;
+        let y = u16::try_from(link.tail / width).map_err(|e| e.to_string())? * 2;
+        islands.push(match link.axis {
+            Axis::X => Island {
+                x: x + 1,
+                y,
+                axis: DipolarAxis::PlusX,
+                moment: 1,
+            },
+            Axis::Y => Island {
+                x,
+                y: y + 1,
+                axis: DipolarAxis::PlusY,
+                moment: 1,
+            },
+        });
+    }
+    let geometry = Geometry::new(islands, 1, 1000, 4).map_err(|e| format!("{e:?}"))?;
+    let entries = quantize(&geometry).map_err(|e| format!("{e:?}"))?;
+    let table = Table::new(geometry, entries, Calibration::Oracle).map_err(|e| format!("{e:?}"))?;
+    let shares = |i: u32, j: u32| -> Result<bool, String> {
+        let a = lattice.link(i).ok_or("no link")?;
+        let b = lattice.link(j).ok_or("no link")?;
+        Ok([a.tail, a.head]
+            .iter()
+            .any(|v| *v == b.tail || *v == b.head))
+    };
+    let (mut kept, mut kept_magnitude, mut dropped) = (0u64, 0u64, 0u64);
+    for item in table.entries() {
+        let magnitude = u64::from(item.q.unsigned_abs());
+        if shares(item.i, item.j)? {
+            kept += 1;
+            kept_magnitude += magnitude;
+        } else {
+            dropped += magnitude;
+        }
+    }
+    let count = |key: &str| -> Result<u64, String> {
+        entry
+            .get(key)
+            .and_then(Value::as_u64)
+            .ok_or_else(|| format!("no {key}"))
+    };
+    compare(
+        entry,
+        "entries",
+        &u64::try_from(table.entries().len()).map_err(|e| e.to_string())?,
+        &count("entries")?,
+    )?;
+    compare(entry, "kept", &kept, &count("kept")?)?;
+    compare(
+        entry,
+        "kept_magnitude",
+        &kept_magnitude,
+        &count("kept_magnitude")?,
+    )?;
+    compare(entry, "dropped", &dropped, &count("dropped")?)?;
+    compare(
+        entry,
+        "commitment",
+        &codec::hex_encode(&table.commitment()),
+        &str_field(entry, "commitment")?.to_owned(),
+    )?;
+    compare(
+        entry,
+        "truncation_bound",
+        &table.truncation_bound().to_string(),
+        &str_field(entry, "truncation_bound")?.to_owned(),
+    )
 }
 
 #[test]
@@ -5302,6 +5401,15 @@ fn a_changed_defects_table_fails_the_check() -> Result<(), String> {
     expect_err(&check_defects_tables(&broken), "a changed commitment")?;
     let broken = mutate(&doc, "/table/1/dropped", json!(1));
     expect_err(&check_defects_tables(&broken), "a changed dropped sum")?;
+    for (pointer, value) in [
+        ("/table/1/entries", json!(1)),
+        ("/table/1/kept", json!(1)),
+        ("/table/1/kept_magnitude", json!(1)),
+        ("/table/1/truncation_bound", json!("1")),
+    ] {
+        let broken = mutate(&doc, pointer, value);
+        expect_err(&check_defects_tables(&broken), pointer)?;
+    }
     let broken = mutate(&doc, "/table/1/weight", json!(2));
     expect_err(&check_defects_tables(&broken), "a changed weight")
 }

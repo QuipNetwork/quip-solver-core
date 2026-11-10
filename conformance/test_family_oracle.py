@@ -1692,13 +1692,14 @@ def test_defects_route_checks_run_in_order_and_never_touch_feasible():
 
     doc = build.build_defects()
     names = [r["name"].removeprefix("defects-l3-route-") for r in doc["routes"]]
-    assert names == [
+    assert names[:5] == [
         "valid",
         "swapped-endpoints",
         "extra-loop",
         "obstacle-crossing",
         "repeated-vertex",
     ]
+    assert len(names) == 17
     case = next(c for c in doc["cases"] if c["name"] == "defects-l3")
     assert len(case["instances"]) > 0
     feasibility = {r["name"]: r["feasible"] for r in doc["routes"]}
@@ -1712,3 +1713,83 @@ def test_defects_route_checks_run_in_order_and_never_touch_feasible():
     assert defects.check_route(inst, spins, [[5]]) == "Shape"
     assert defects.check_route(inst, spins, [[5, 5]]) == "NotAdjacent"
     assert defects.check_route(inst, spins, []) == "Endpoints"
+
+
+def _defects_l3_instance():
+    nodes, edges = ice.lattice(3, 4)
+    code, inst = _defects(3, 4, 3, 1, 1, 2, 1000, -1000, nodes, edges)
+    assert code == 0
+    return inst
+
+
+def test_defects_metadata_is_checked_before_a_route_a_state_or_the_observables():
+    from family_oracle import defects
+
+    inst = _defects_l3_instance()
+    good = defects.witnesses(inst)["feasible"]
+    assert defects.feasible(inst, good)
+    assert defects.observables(inst, good) is not None
+    broken_metadata = [
+        b"",
+        inst["metadata"][:-1],
+        inst["metadata"] + b"\x00",
+        b"\x03\x00" + inst["metadata"][2:][::-1],
+    ]
+    # One mutation of each kind of field: the label count, a link position, the
+    # weight, the dropped sum, the commitment, an obstacle, and a pin.
+    for at in (
+        2 + 6 + 2 + 5,
+        2 + 6 + 18 + 6 + 4,
+        2 + 24 + 106 + 6,
+        2 + 24 + 106 + 14,
+        2 + 24 + 106 + 20,
+        len(inst["metadata"]) - 1,
+        len(inst["metadata"]) - 9,
+    ):
+        mutated = bytearray(inst["metadata"])
+        mutated[at] ^= 1
+        broken_metadata.append(bytes(mutated))
+    for metadata in broken_metadata:
+        bad = {**inst, "metadata": metadata}
+        assert defects.check_route(bad, good, [[5, 9]]) == "Metadata"
+        assert not defects.feasible(bad, good)
+        assert defects.observables(bad, good) is None
+    # A changed energy is also a metadata fault.
+    bad = {**inst, "h": [inst["h"][0] + 2, *inst["h"][1:]]}
+    assert defects.check_route(bad, good, []) == "Metadata"
+
+
+def test_defects_spins_must_be_one_plus_or_minus_one_per_node():
+    from family_oracle import defects
+
+    inst = _defects_l3_instance()
+    good = defects.witnesses(inst)["feasible"]
+    zero = [0, *good[1:]]
+    for spins in (good[1:], [*good, 1], zero):
+        assert defects.check_route(inst, spins, [[5, 9]]) == "Spins"
+        assert not defects.feasible(inst, spins)
+        assert defects.observables(inst, spins) is None
+    # Metadata comes before spins.
+    assert defects.check_route({**inst, "metadata": b""}, zero, [[5]]) == "Metadata"
+
+
+def test_defects_route_with_two_faults_reports_the_first_in_the_contract_order():
+    from family_oracle import defects
+
+    inst = _defects_l3_instance()
+    reference = defects.state_of_flips(inst, [])
+    obstacle = inst["obstacles"][0]
+    near = defects.neighbours(defects.Lattice(3), obstacle)[0]
+    cases = [
+        ([[5, 6, 5]], "RepeatedVertex"),
+        ([[5, 10, 99]], "Shape"),
+        ([[5, 6, 5, 10]], "NotAdjacent"),
+        ([[obstacle, near], [near, obstacle]], "RepeatedLink"),
+        ([[obstacle, near]], "Obstacle"),
+        ([[5, 10, 5]], "NotAdjacent"),
+    ]
+    for route, want in cases:
+        assert defects.check_route(inst, reference, route) == want, route
+    # Each later fault alone gives its own error.
+    assert defects.check_route(inst, reference, [[5, 6]]) == "Endpoints"
+    assert defects.check_route(inst, reference, []) == "Endpoints"

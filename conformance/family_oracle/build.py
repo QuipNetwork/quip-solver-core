@@ -3750,6 +3750,77 @@ def _unit_squares(lattice: Lattice) -> list[list[int]]:
     ]
 
 
+def _defects_multi_fault_routes(
+    inst: dict, lattice: Lattice, valid: list[int]
+) -> list[tuple[str, list[list[int]], list[int], str]]:
+    """Routes with two faults each. The first fault in the contract order must win.
+
+    Vertices 5, 6, 9, and 10 are the interior vertices of the side 3 lattice. Vertex 5
+    and vertex 6 share a link, and vertex 5 and vertex 10 share none.
+    """
+    labels = inst["labels"]
+    obstacle = inst["obstacles"][0]
+    near = defects.neighbours(lattice, obstacle)[0]
+    plus = labels.index(2)
+    wrong = next(
+        w
+        for w in defects.neighbours(lattice, plus)
+        if labels[w] != -2 and w != obstacle
+    )
+    reference = defects.state_of_flips(inst, [])
+    valid_state = defects.state_of_flips(inst, defects.route_links(inst, [valid]))
+    rows = [
+        ("spins-and-shape", [[5]], reference[1:], "Spins"),
+        ("shape-and-not-adjacent-one-path", [[5, 10, 99]], reference, "Shape"),
+        ("shape-and-not-adjacent-two-paths", [[5, 10], [7]], reference, "Shape"),
+        (
+            "not-adjacent-and-repeated-vertex-one-path",
+            [[5, 6, 5, 10]],
+            reference,
+            "NotAdjacent",
+        ),
+        (
+            "not-adjacent-and-repeated-vertex-two-paths",
+            [[5, 10], [5, 6, 5]],
+            reference,
+            "NotAdjacent",
+        ),
+        (
+            "repeated-vertex-and-repeated-link-one-path",
+            [[5, 6, 5]],
+            reference,
+            "RepeatedVertex",
+        ),
+        (
+            "repeated-vertex-and-repeated-link-two-paths",
+            [[5, 6], [6, 5, 6]],
+            reference,
+            "RepeatedVertex",
+        ),
+        (
+            "repeated-link-and-obstacle",
+            [[obstacle, near], [near, obstacle]],
+            reference,
+            "RepeatedLink",
+        ),
+        ("obstacle-and-endpoints-one-path", [[obstacle, near]], reference, "Obstacle"),
+        (
+            "obstacle-and-endpoints-two-paths",
+            [valid, [obstacle, near]],
+            valid_state,
+            "Obstacle",
+        ),
+        ("endpoints-and-difference-one-path", [[plus, wrong]], reference, "Endpoints"),
+        (
+            "endpoints-and-difference-two-paths",
+            [valid, [plus, wrong]],
+            valid_state,
+            "Endpoints",
+        ),
+    ]
+    return rows
+
+
 def _defects_routes(inst: dict, index: int) -> list[dict]:
     """The five routes of the contract on one instance, each with its expected result."""
     lattice = Lattice(inst["side"])
@@ -3805,9 +3876,13 @@ def _defects_routes(inst: dict, index: int) -> list[dict]:
             "RepeatedVertex",
         ),
     ]
+    states = [
+        (name, route, defects.state_of_flips(inst, flips), want)
+        for name, route, flips, want in rows
+    ]
+    states += _defects_multi_fault_routes(inst, lattice, valid)
     out = []
-    for name, route, flips, want in rows:
-        spins = defects.state_of_flips(inst, flips)
+    for name, route, spins, want in states:
         got = defects.check_route(inst, spins, route)
         if got != want:
             raise ValueError(f"route {name} gives {got}, expected {want}")

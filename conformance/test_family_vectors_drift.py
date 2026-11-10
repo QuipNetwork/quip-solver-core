@@ -492,12 +492,22 @@ def test_defects_contract_states_the_table_numbers_of_the_vectors():
 
 def test_defects_routes_and_witnesses_cover_the_contract():
     doc = _defects_doc()
-    assert [r["error"] for r in doc["routes"]] == [
-        None,
-        "Endpoints",
-        "Difference",
-        "Obstacle",
+    errors = [r["error"] for r in doc["routes"]]
+    assert errors[:5] == [None, "Endpoints", "Difference", "Obstacle", "RepeatedVertex"]
+    # The two-fault routes name every error that a route can hold, in order.
+    assert errors[5:] == [
+        "Spins",
+        "Shape",
+        "Shape",
+        "NotAdjacent",
+        "NotAdjacent",
         "RepeatedVertex",
+        "RepeatedVertex",
+        "RepeatedLink",
+        "Obstacle",
+        "Obstacle",
+        "Endpoints",
+        "Endpoints",
     ]
     for case in doc["cases"]:
         kinds = {
@@ -509,3 +519,18 @@ def test_defects_routes_and_witnesses_cover_the_contract():
     assert {w["physical_status"] for w in doc["defect_witnesses"]} == {
         "InsufficientPhysicalEvidence"
     }
+
+
+def test_defects_table_entries_match_the_oracle_table():
+    from family_oracle import defects
+
+    for row in _defects_doc()["table"]:
+        case = next(c for c in _defects_doc()["cases"] if c["name"] == row["case"])
+        side = _decoded_params(case["params_hex"])[3]
+        table = defects.table_of(side)
+        assert row["entries"] == len(table.entries)
+        assert row["kept"] == len(table.kept)
+        assert row["kept_magnitude"] == table.kept_magnitude
+        assert row["dropped"] == table.dropped
+        assert row["truncation_bound"] == str(table.truncation_bound)
+        assert row["commitment"] == table.commitment().hex()

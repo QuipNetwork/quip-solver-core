@@ -28,7 +28,7 @@
 //! term `h = -field_x` on links along `+x` and `h = -field_y` on links along
 //! `+y`. The penalty is `(U / 2) * sum (Q_v - q_v)^2` over the labeled
 //! vertices plus `U * (1 - s)` for each pinned link. The weight `U` is
-//! derived from the table and the field, see [`penalty`]. It makes every
+//! derived from the table and the field, see the penalty function below. It makes every
 //! infeasible state cost more than every feasible state, so the lowest energy
 //! of the instance is a feasible state with the lowest physical energy.
 //!
@@ -838,7 +838,7 @@ fn label_of(parsed: &Parsed, v: u32) -> Option<i8> {
 /// with every link spin `+1`.
 ///
 /// A route is combinatorial evidence about the state. It does not change
-/// [`feasible`], and a valid route does not make a state feasible. The checks
+/// the `feasible` hook, and a valid route does not make a state feasible. The checks
 /// run in the order of [`RouteError`], and the first failure wins.
 ///
 /// # Errors

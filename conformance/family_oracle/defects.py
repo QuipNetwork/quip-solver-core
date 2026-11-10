@@ -11,6 +11,7 @@ and never changes `feasible`.
 """
 
 import struct
+from collections.abc import Callable
 from itertools import combinations, pairwise
 from math import isqrt
 
@@ -446,7 +447,135 @@ def generate(
         "pins": pins,
         "weight": weight,
         "fields": fields,
+        "params": values,
     }
+
+
+# ---- the metadata check ----
+
+
+class _Cursor:
+    """Reads little-endian integers from a byte string and fails on a short read."""
+
+    def __init__(self, data: bytes):
+        self.data = data
+        self.at = 0
+
+    def take(self, size: int) -> bytes:
+        if size < 0 or self.at + size > len(self.data):
+            raise ValueError("short read")
+        chunk = self.data[self.at : self.at + size]
+        self.at += size
+        return chunk
+
+    def uint(self, size: int) -> int:
+        return int.from_bytes(self.take(size), "little")
+
+    def done(self) -> bool:
+        return self.at == len(self.data)
+
+
+def _ascending_ids(
+    cursor: _Cursor, expected: int, valid: Callable[[int], bool]
+) -> list[int]:
+    count = cursor.uint(2)
+    if count != expected or count * 4 > len(cursor.data) - cursor.at:
+        raise ValueError("bad id count")
+    ids = [cursor.uint(4) for _ in range(count)]
+    if any(a >= b for a, b in pairwise(ids)) or not all(valid(v) for v in ids):
+        raise ValueError("bad ids")
+    return ids
+
+
+def parse_metadata(inst: dict) -> dict | None:
+    """The labels, positions, obstacles, and pins that the metadata states, or None.
+
+    None unless every rule of the contract holds: the three sections parse exactly,
+    the labels, window, and positions are valid, the obstacles and pins are valid,
+    the weight, the dropped sum, and the commitment equal the rebuilt values, and the
+    energy rebuilt from the metadata equals the instance.
+    """
+    params = inst["params"]
+    side, m = params["side"], params["zephyr_m"]
+    lattice = Lattice(side)
+    vertices, links = len(lattice.incident), len(lattice.links)
+    try:
+        outer = _Cursor(inst["metadata"])
+        if outer.uint(2) != 3:
+            return None
+        payloads = []
+        for kind in (KIND_CHARGES, KIND_INCIDENCE, KIND_DEFECTS):
+            if outer.uint(2) != kind:
+                return None
+            payloads.append(_Cursor(outer.take(outer.uint(4))))
+        if not outer.done():
+            return None
+        charges, incidence, defect = payloads
+
+        if charges.uint(2) != side:
+            return None
+        labels: list[int | None] = []
+        for v in range(vertices):
+            raw = charges.uint(1)
+            raw = raw - 256 if raw > 127 else raw
+            if _on_border(lattice, v):
+                if raw != FREE:
+                    return None
+                labels.append(None)
+            elif raw in (-2, 0, 2):
+                labels.append(raw)
+            else:
+                return None
+        if not charges.done():
+            return None
+        if labels.count(2) != params["pairs"] or labels.count(-2) != params["pairs"]:
+            return None
+
+        window = (incidence.uint(2), incidence.uint(2))
+        if min(window) < 1 or max(window) + side > 2 * m - 1:
+            return None
+        positions = [incidence.uint(4) for _ in range(links)]
+        if not incidence.done() or sorted(positions) != list(range(links)):
+            return None
+        if len(inst["node_ids"]) != links:
+            return None
+
+        table = table_of(side)
+        fields = (params["field_x"], params["field_y"])
+        weight = penalty_weight(table, lattice, *fields)
+        if (
+            defect.uint(8) != weight
+            or defect.uint(8) != table.dropped
+            or defect.take(32) != table.commitment()
+        ):
+            return None
+        obstacles = _ascending_ids(
+            defect,
+            params["obstacles"],
+            lambda v: v < vertices and not _on_border(lattice, v) and labels[v] == 0,
+        )
+        border = set(boundary_links(lattice))
+        pins = _ascending_ids(defect, params["pins"], lambda e: e in border)
+        if not defect.done():
+            return None
+    except ValueError:
+        return None
+    rebuilt = energy(lattice, labels, pins, table, positions, links, fields, weight)
+    if rebuilt != (inst["h"], inst["edges"], inst["j"], inst["offset_milli"]):
+        return None
+    return {
+        "labels": labels,
+        "positions": positions,
+        "obstacles": obstacles,
+        "pins": pins,
+        "fields": fields,
+        "side": side,
+    }
+
+
+def valid_spins(inst: dict, spins: list[int]) -> bool:
+    """One +1 or -1 entry for each instance node."""
+    return len(spins) == len(inst["node_ids"]) and all(s in (-1, 1) for s in spins)
 
 
 # ---- states ----
@@ -470,22 +599,28 @@ def encoded_energy(inst: dict, spins: list[int]) -> int:
     )
 
 
-def observables(inst: dict, spins: list[int]) -> dict:
-    """The direct charges, the violations, and the physical energy of a state."""
-    lattice = Lattice(inst["side"])
-    links = link_spins_of(inst, spins)
+def observables(inst: dict, spins: list[int]) -> dict | None:
+    """The direct charges, violations, and physical energy of a state.
+
+    None when the metadata is invalid or `spins` is not one +1 or -1 per node.
+    """
+    view = parse_metadata(inst)
+    if view is None or not valid_spins(inst, spins):
+        return None
+    lattice = Lattice(view["side"])
+    links = [spins[p] for p in view["positions"]]
     got = lattice.charges(links)
-    table = table_of(inst["side"])
+    table = table_of(view["side"])
     physical = sum(q * links[i] * links[j] for i, j, q in table.kept)
     for e, (_, _, axis) in enumerate(lattice.links):
-        physical -= inst["fields"][0 if axis == "x" else 1] * links[e]
+        physical -= view["fields"][0 if axis == "x" else 1] * links[e]
     return {
         "physical_energy": physical,
         "charges": got,
         "violated_labels": sum(
-            1 for v, q in enumerate(inst["labels"]) if q is not None and got[v] != q
+            1 for v, q in enumerate(view["labels"]) if q is not None and got[v] != q
         ),
-        "violated_pins": sum(1 for e in inst["pins"] if links[e] != 1),
+        "violated_pins": sum(1 for e in view["pins"] if links[e] != 1),
         "truncation_bound": table.truncation_bound,
         "dropped": table.dropped,
         "physical_status": PHYSICAL_STATUS,
@@ -493,11 +628,11 @@ def observables(inst: dict, spins: list[int]) -> dict:
 
 
 def feasible(inst: dict, spins: list[int]) -> bool:
-    """One +-1 spin per node, every label holds, and every pin has spin +1."""
-    if len(spins) != len(inst["node_ids"]) or any(s not in (-1, 1) for s in spins):
-        return False
+    """Valid metadata, one +-1 spin per node, every label holds, every pin has spin +1."""
     seen = observables(inst, spins)
-    return seen["violated_labels"] == 0 and seen["violated_pins"] == 0
+    return (
+        seen is not None and seen["violated_labels"] == 0 and seen["violated_pins"] == 0
+    )
 
 
 def witnesses(inst: dict) -> dict[str, list[int]]:
@@ -550,11 +685,14 @@ def link_between(lattice: Lattice, u: int, v: int) -> int | None:
 def check_route(inst: dict, spins: list[int], route: list[list[int]]) -> str | None:
     """None when the route holds, else the name of the first failed check.
 
-    The checks run in this order over the whole route: `Spins`, `Shape`,
+    The checks run in this order over the whole route: `Metadata`, `Spins`, `Shape`,
     `NotAdjacent`, `RepeatedVertex`, `RepeatedLink`, `Obstacle`, `Endpoints`,
     `Difference`.
     """
-    if len(spins) != len(inst["node_ids"]) or any(s not in (-1, 1) for s in spins):
+    view = parse_metadata(inst)
+    if view is None:
+        return "Metadata"
+    if not valid_spins(inst, spins):
         return "Spins"
     lattice = Lattice(inst["side"])
     vertices = len(lattice.incident)
@@ -571,9 +709,9 @@ def check_route(inst: dict, spins: list[int], route: list[list[int]]) -> str | N
     used = [e for found in steps for e in found]
     if len(set(used)) != len(used):
         return "RepeatedLink"
-    if any(v in inst["obstacles"] for path in route for v in path):
+    if any(v in view["obstacles"] for path in route for v in path):
         return "Obstacle"
-    labels = inst["labels"]
+    labels = view["labels"]
     ends = [v for path in route for v in (path[0], path[-1])]
     if any({labels[path[0]], labels[path[-1]]} != {2, -2} for path in route) or len(
         set(ends)

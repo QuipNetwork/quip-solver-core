@@ -4739,6 +4739,539 @@
         1,
         1
       ]
+    },
+    {
+      "case": "defects-l3",
+      "error": "Spins",
+      "evidence": [
+        "SC-16:defects-vectors-frozen"
+      ],
+      "feasible": false,
+      "index": "0",
+      "name": "defects-l3-route-spins-and-shape",
+      "route": [
+        [
+          5
+        ]
+      ],
+      "spins": [
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ]
+    },
+    {
+      "case": "defects-l3",
+      "error": "Shape",
+      "evidence": [
+        "SC-16:defects-vectors-frozen"
+      ],
+      "feasible": false,
+      "index": "0",
+      "name": "defects-l3-route-shape-and-not-adjacent-one-path",
+      "route": [
+        [
+          5,
+          10,
+          99
+        ]
+      ],
+      "spins": [
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ]
+    },
+    {
+      "case": "defects-l3",
+      "error": "Shape",
+      "evidence": [
+        "SC-16:defects-vectors-frozen"
+      ],
+      "feasible": false,
+      "index": "0",
+      "name": "defects-l3-route-shape-and-not-adjacent-two-paths",
+      "route": [
+        [
+          5,
+          10
+        ],
+        [
+          7
+        ]
+      ],
+      "spins": [
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ]
+    },
+    {
+      "case": "defects-l3",
+      "error": "NotAdjacent",
+      "evidence": [
+        "SC-16:defects-vectors-frozen"
+      ],
+      "feasible": false,
+      "index": "0",
+      "name": "defects-l3-route-not-adjacent-and-repeated-vertex-one-path",
+      "route": [
+        [
+          5,
+          6,
+          5,
+          10
+        ]
+      ],
+      "spins": [
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ]
+    },
+    {
+      "case": "defects-l3",
+      "error": "NotAdjacent",
+      "evidence": [
+        "SC-16:defects-vectors-frozen"
+      ],
+      "feasible": false,
+      "index": "0",
+      "name": "defects-l3-route-not-adjacent-and-repeated-vertex-two-paths",
+      "route": [
+        [
+          5,
+          10
+        ],
+        [
+          5,
+          6,
+          5
+        ]
+      ],
+      "spins": [
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ]
+    },
+    {
+      "case": "defects-l3",
+      "error": "RepeatedVertex",
+      "evidence": [
+        "SC-16:defects-vectors-frozen"
+      ],
+      "feasible": false,
+      "index": "0",
+      "name": "defects-l3-route-repeated-vertex-and-repeated-link-one-path",
+      "route": [
+        [
+          5,
+          6,
+          5
+        ]
+      ],
+      "spins": [
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ]
+    },
+    {
+      "case": "defects-l3",
+      "error": "RepeatedVertex",
+      "evidence": [
+        "SC-16:defects-vectors-frozen"
+      ],
+      "feasible": false,
+      "index": "0",
+      "name": "defects-l3-route-repeated-vertex-and-repeated-link-two-paths",
+      "route": [
+        [
+          5,
+          6
+        ],
+        [
+          6,
+          5,
+          6
+        ]
+      ],
+      "spins": [
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ]
+    },
+    {
+      "case": "defects-l3",
+      "error": "RepeatedLink",
+      "evidence": [
+        "SC-16:defects-vectors-frozen"
+      ],
+      "feasible": false,
+      "index": "0",
+      "name": "defects-l3-route-repeated-link-and-obstacle",
+      "route": [
+        [
+          6,
+          2
+        ],
+        [
+          2,
+          6
+        ]
+      ],
+      "spins": [
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ]
+    },
+    {
+      "case": "defects-l3",
+      "error": "Obstacle",
+      "evidence": [
+        "SC-16:defects-vectors-frozen"
+      ],
+      "feasible": false,
+      "index": "0",
+      "name": "defects-l3-route-obstacle-and-endpoints-one-path",
+      "route": [
+        [
+          6,
+          2
+        ]
+      ],
+      "spins": [
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ]
+    },
+    {
+      "case": "defects-l3",
+      "error": "Obstacle",
+      "evidence": [
+        "SC-16:defects-vectors-frozen"
+      ],
+      "feasible": true,
+      "index": "0",
+      "name": "defects-l3-route-obstacle-and-endpoints-two-paths",
+      "route": [
+        [
+          5,
+          9,
+          10
+        ],
+        [
+          6,
+          2
+        ]
+      ],
+      "spins": [
+        1,
+        1,
+        1,
+        -1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        -1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ]
+    },
+    {
+      "case": "defects-l3",
+      "error": "Endpoints",
+      "evidence": [
+        "SC-16:defects-vectors-frozen"
+      ],
+      "feasible": false,
+      "index": "0",
+      "name": "defects-l3-route-endpoints-and-difference-one-path",
+      "route": [
+        [
+          5,
+          1
+        ]
+      ],
+      "spins": [
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ]
+    },
+    {
+      "case": "defects-l3",
+      "error": "Endpoints",
+      "evidence": [
+        "SC-16:defects-vectors-frozen"
+      ],
+      "feasible": true,
+      "index": "0",
+      "name": "defects-l3-route-endpoints-and-difference-two-paths",
+      "route": [
+        [
+          5,
+          9,
+          10
+        ],
+        [
+          5,
+          1
+        ]
+      ],
+      "spins": [
+        1,
+        1,
+        1,
+        -1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        -1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ]
     }
   ],
   "schema_revision": 1,
@@ -4752,7 +5285,7 @@
       "path": "conformance/family_oracle/__main__.py"
     },
     {
-      "blake3": "c3f7c126b08388e0a32a847142356c859fe5fb8ab16e1aedbbebab8bbdef18ef",
+      "blake3": "d7ed4c8e7731c55719d738a41421d37cab50fa395d8b6acd14ead7eaae8b492e",
       "path": "conformance/family_oracle/build.py"
     },
     {
@@ -4768,7 +5301,7 @@
       "path": "conformance/family_oracle/decisions.py"
     },
     {
-      "blake3": "103f11d8e77472a2c660d2a498c8b3c709c63c0396c950e55e8b1cfcd4824f25",
+      "blake3": "73cc8a751a63772e71063d5d5ae0ab98b07fb52db2388edd3e7d11b4e86324f5",
       "path": "conformance/family_oracle/defects.py"
     },
     {

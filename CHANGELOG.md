@@ -14,8 +14,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   of `quip/polariton-static`. Each link is a dipolar island at its midpoint, and
   the couplings come from a table with the oracle calibration. The instance keeps
   the pairs of links that share a vertex, because only those pairs are couplers of
-  the layout. The metadata states the exact magnitude of the dropped pairs and the
-  truncation bound of the table. The request has balanced charges, obstacles that a
+  the layout. The metadata stores the exact magnitude of the dropped pairs and the
+  table commitment, and the observables report the truncation bound of the table. The request has balanced charges, obstacles that a
   route may not enter, and pinned boundary links. A charge penalty and a pin
   penalty with a checked weight make every infeasible state cost more than every
   feasible state. The parameters are the Zephyr shape, `side` of 2 or 3, `pairs`,
