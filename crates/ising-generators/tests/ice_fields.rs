@@ -489,7 +489,7 @@ fn recipes_are_canonical() {
 fn live_recipes_build() {
     let topology = common::live_topology();
     for recipe in &ICE_FIELDS_RECIPES {
-        let instance = build(recipe.params, &topology, nonce_of(9));
+        let instance = build(recipe.params, topology, nonce_of(9));
         let field = if recipe.alias == "h500" { 500 } else { 1000 };
         let nonzero: Vec<i32> = instance.h().iter().copied().filter(|&h| h != 0).collect();
         assert_eq!(nonzero.len(), 285, "{}", recipe.alias);

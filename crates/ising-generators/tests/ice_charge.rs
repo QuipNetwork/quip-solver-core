@@ -774,7 +774,7 @@ fn recipe_params_are_canonical() {
 #[test]
 fn live_recipe_builds() {
     let topology = common::live_topology();
-    let instance = build(ICE_CHARGE_RECIPE.params, &topology, nonce_of(1));
+    let instance = build(ICE_CHARGE_RECIPE.params, topology, nonce_of(1));
     let (tiles, _, _) = decoded(&instance);
     assert_eq!(tiles.len(), 1785);
     assert!(instance.h().iter().all(|&h| h.abs() <= 1000));

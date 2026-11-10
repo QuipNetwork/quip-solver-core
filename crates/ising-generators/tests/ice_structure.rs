@@ -537,8 +537,8 @@ fn live_topology_rebuilds_with_the_pinned_digest() {
 #[test]
 fn live_candidates_match_the_research_counts() {
     let base = common::live_topology();
-    let adjacency = candidates(Lattice::Adjacency, &base).expect("adjacency");
-    let zephyr = candidates(live_lattice("zephyr"), &base).expect("zephyr");
+    let adjacency = candidates(Lattice::Adjacency, base).expect("adjacency");
+    let zephyr = candidates(live_lattice("zephyr"), base).expect("zephyr");
     assert_eq!(adjacency.tiles.len(), 6822);
     assert_eq!(zephyr.tiles.len(), 6822);
     assert_eq!(adjacency.tiles, zephyr.tiles);
@@ -550,8 +550,8 @@ fn live_selection_has_1785_tiles() {
     let doc = common::parse(common::STRUCTURE_JSON);
     for case in array(&doc, "live") {
         let lattice = live_lattice(text(case, "name"));
-        let found = candidates(lattice, &base).expect("candidates");
-        let split = sides(lattice, &base, &found).expect("sides");
+        let found = candidates(lattice, base).expect("candidates");
+        let split = sides(lattice, base, &found).expect("sides");
         assert_eq!(found.tiles.len() as u64, number(case, "candidates"));
         assert_eq!(
             found.spines.iter().filter(|s| s.is_none()).count() as u64,
@@ -581,7 +581,7 @@ fn archived_tiles_are_valid_candidates() {
         text(&sidecar, "bin_blake3")
     );
     let base = common::live_topology();
-    let found = candidates(live_lattice("zephyr"), &base).expect("candidates");
+    let found = candidates(live_lattice("zephyr"), base).expect("candidates");
     let models = common::archived_models();
     assert_eq!(models.len(), 2);
     let total: u64 = array(&sidecar, "models")
@@ -730,8 +730,8 @@ fn repeated_structure_is_identical() {
     for mode in ["adjacency", "zephyr"] {
         let lattice = live_lattice(mode);
         let run = || {
-            let found = candidates(lattice, &base).expect("candidates");
-            let split = sides(lattice, &base, &found).expect("sides");
+            let found = candidates(lattice, base).expect("candidates");
+            let split = sides(lattice, base, &found).expect("sides");
             let (left, right) =
                 seeded_orders(&common::hex(&[7; 32]), split.left.len(), split.right.len());
             let chosen = select(&found, &split, &left, &right).expect("select");

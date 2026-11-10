@@ -1345,7 +1345,7 @@ fn recipe_is_canonical() {
 fn live_template_matches_the_research_template() {
     let topology = common::live_topology();
     let recipe = &ROUTING_RECIPES[0];
-    let instance = build(recipe.params, &topology, nonce_of(0));
+    let instance = build(recipe.params, topology, nonce_of(0));
     let meta = decode(&instance);
     assert_eq!(meta.cells.len(), 505, "template nodes");
     assert_eq!(meta.arcs.len(), 880, "template arcs");

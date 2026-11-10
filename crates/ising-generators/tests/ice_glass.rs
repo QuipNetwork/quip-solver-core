@@ -409,7 +409,7 @@ fn check_metadata_survives_damaged_regions() {
 fn live_generation_has_1785_tiles() {
     let topology = common::live_topology();
     let bytes = params(12, 4, 125);
-    let instance = build(&bytes, &topology, nonce_of(9));
+    let instance = build(&bytes, topology, nonce_of(9));
     let (tiles, gauge) = decode(&instance);
     assert_eq!(tiles.len(), 1785);
     let strong = instance

@@ -699,7 +699,7 @@ fn live_recipes_reach_their_pair_counts() {
             }
         };
         for i in 0..0x20u8 {
-            let instance = build(recipe.params, &topology, nonce_of(i));
+            let instance = build(recipe.params, topology, nonce_of(i));
             let (tiles, gauges) = local_gauges(&instance).expect("local gauges");
             assert_eq!(tiles.len(), 1785, "{} nonce {i}", recipe.alias);
             assert_eq!(

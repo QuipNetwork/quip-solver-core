@@ -772,10 +772,10 @@ fn live_recipes_build() {
     let topology = common::live_topology();
     for recipe in &POLARITON_RECIPES {
         let admitted = admitted(recipe.params).expect("admit");
-        let bounds = bounds(&admitted, &topology).expect("admit topology");
+        let bounds = bounds(&admitted, topology).expect("admit topology");
         let mut built = None;
         for i in 0..64 {
-            if let Ok(instance) = generate_instance(&admitted, &topology, &bounds, nonce_of(i)) {
+            if let Ok(instance) = generate_instance(&admitted, topology, &bounds, nonce_of(i)) {
                 built = Some((i, instance));
                 break;
             }
@@ -807,8 +807,5 @@ fn a_side_16_request_has_no_window_on_the_live_topology() {
     let topology = common::live_topology();
     let bytes = params(12, 4, 16, 28);
     let admitted = admitted(&bytes).expect("admit");
-    assert_eq!(
-        bounds(&admitted, &topology),
-        Err(Code::TopologyIncompatible)
-    );
+    assert_eq!(bounds(&admitted, topology), Err(Code::TopologyIncompatible));
 }
