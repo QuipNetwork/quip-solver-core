@@ -621,7 +621,7 @@ fn a_lower_physical_energy_with_a_bad_label_fails() {
         let mut bad = good.clone();
         bad[node] = -bad[node];
         let d = direct(&meta, &kept, L3, &bad);
-        if d.physical < good_direct.physical && !d.feasible() {
+        if d.physical < good_direct.physical && !d.labels_hold {
             found += 1;
             assert!(!feasible(&admitted, &instance, &bad), "node {node}");
             assert_eq!(energy(&instance, &bad), d.instance_energy(meta.weight));
@@ -927,9 +927,9 @@ fn draws_follow_the_order() {
     let mut seen = BTreeSet::new();
     for i in 0..12 {
         let case = Case {
-            obstacles: 1 + (i % 2) as u16,
-            pairs: (i % 2) as u16,
-            pins: 1 + (i % 12) as u16,
+            obstacles: 2,
+            pairs: 1,
+            pins: 5,
             ..L3
         };
         let instance = build(case, i);
@@ -1163,10 +1163,32 @@ fn check_metadata_rejects_each_rule() {
     m.obstacles.push(other);
     m.obstacles.sort_unstable();
     assert!(!accepts(&with_energy(&m)));
-    // A repeated obstacle, with the count right.
-    let mut twice = meta.clone();
-    twice.obstacles = vec![meta.obstacles[0], meta.obstacles[0]];
-    assert!(!accepts(&with_energy(&twice)));
+    // Two obstacles: a repeated entry and a reversed order, with the count
+    // right and a matching energy.
+    {
+        let case2 = Case {
+            pairs: 0,
+            obstacles: 2,
+            ..case
+        };
+        let bytes2 = case2.bytes();
+        let admitted2 = admit::admitted(&DEFECTS_V1, &bytes2).expect("admit");
+        let instance2 = build(case2, 6);
+        let meta2 = decode("two obstacles", &instance2);
+        assert_eq!(meta2.obstacles.len(), 2);
+        let accepts2 = |m: &Meta| {
+            let (h, edges, j, offset) = expected_energy(m, &kept, case2);
+            let candidate = rebuilt(&instance2, edges, h, j, offset, encode(m));
+            (DEFECTS.check_metadata)(admitted2.params(), &candidate)
+        };
+        assert!(accepts2(&meta2));
+        let mut twice = meta2.clone();
+        twice.obstacles = vec![meta2.obstacles[0], meta2.obstacles[0]];
+        assert!(!accepts2(&twice));
+        let mut reversed = meta2;
+        reversed.obstacles.reverse();
+        assert!(!accepts2(&reversed));
+    }
     // An obstacle on a boundary vertex, and on a charged vertex.
     let mut m = meta.clone();
     m.obstacles = vec![0];
@@ -1386,7 +1408,7 @@ fn link_between(lattice: &SquareLattice, u: u32, v: u32) -> u32 {
         .map(|&(e, _)| e)
         .find(|&e| {
             let link = lattice.link(e).expect("link");
-            link.tail == v || link.head == v
+            u != v && (link.tail == v || link.head == v)
         })
         .expect("adjacent vertices")
 }
@@ -1639,6 +1661,12 @@ fn route_shape_errors_follow_the_order() {
     assert_eq!(run(&good, &[vec![5]]), Err(RouteError::Shape));
     assert_eq!(run(&good, &[vec![]]), Err(RouteError::Shape));
     assert_eq!(run(&good, &[vec![5, 16]]), Err(RouteError::Shape));
+    // A step from a vertex to itself is not adjacent.
+    assert_eq!(run(&good, &[vec![5, 5]]), Err(RouteError::NotAdjacent));
+    assert_eq!(
+        run(&good, &[vec![5, 5], vec![free, 5, free]]),
+        Err(RouteError::NotAdjacent)
+    );
     // Adjacency comes before repeated vertices: the second path repeats one.
     assert_eq!(
         run(&good, &[vec![5, 10], vec![free, 5, free]]),

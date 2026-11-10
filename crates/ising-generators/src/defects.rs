@@ -821,7 +821,7 @@ pub enum RouteError {
 fn link_between(lattice: &SquareLattice, u: u32, v: u32) -> Option<u32> {
     lattice.incident(u).iter().find_map(|&(e, _)| {
         let link = lattice.link(e)?;
-        (link.tail == v || link.head == v).then_some(e)
+        (u != v && (link.tail == v || link.head == v)).then_some(e)
     })
 }
 
