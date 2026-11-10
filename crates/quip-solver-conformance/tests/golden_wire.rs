@@ -338,7 +338,8 @@ fn enum_numbers_match_the_fixture() {
             External,
             Otsuka,
             Sat,
-            Greedy
+            Greedy,
+            PairWorm
         ]
     );
     pin_enum!(

@@ -39,6 +39,7 @@ enum Algorithm {
   ALGORITHM_OTSUKA = 19;
   ALGORITHM_SAT = 20;
   ALGORITHM_GREEDY = 21;
+  ALGORITHM_PAIR_WORM = 22;
 }
 
 enum CoefficientEncoding {

@@ -518,6 +518,7 @@ pub enum Algorithm {
     Otsuka = 19,
     Sat = 20,
     Greedy = 21,
+    PairWorm = 22,
 }
 impl Algorithm {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -548,6 +549,7 @@ impl Algorithm {
             Self::Otsuka => "ALGORITHM_OTSUKA",
             Self::Sat => "ALGORITHM_SAT",
             Self::Greedy => "ALGORITHM_GREEDY",
+            Self::PairWorm => "ALGORITHM_PAIR_WORM",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -575,6 +577,7 @@ impl Algorithm {
             "ALGORITHM_OTSUKA" => Some(Self::Otsuka),
             "ALGORITHM_SAT" => Some(Self::Sat),
             "ALGORITHM_GREEDY" => Some(Self::Greedy),
+            "ALGORITHM_PAIR_WORM" => Some(Self::PairWorm),
             _ => None,
         }
     }

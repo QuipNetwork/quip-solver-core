@@ -41,6 +41,7 @@ ALGORITHM_NAMES: dict[int, str] = {
     miner_pb2.ALGORITHM_OTSUKA: "otsuka",
     miner_pb2.ALGORITHM_SAT: "sat",
     miner_pb2.ALGORITHM_GREEDY: "greedy",
+    miner_pb2.ALGORITHM_PAIR_WORM: "pair-worm",
 }
 
 # Configure zeros mean "use the SDK default". These match

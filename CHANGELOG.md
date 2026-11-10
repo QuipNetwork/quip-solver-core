@@ -5,6 +5,15 @@ This file documents changes to the Quip solver contract.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+
+- `miner.proto`: the enum value `ALGORITHM_PAIR_WORM` = 22, named `pair-worm`,
+  for a solver that runs a pair-aware worm descent on twisted ice with planted
+  pairs, such as a postprocess of supplied states. The Rust, Python, and
+  TypeScript bindings include it.
+
 ## 0.0.8
 
 The greedy algorithm value. `miner.proto` adds `ALGORITHM_GREEDY`, named
