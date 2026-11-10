@@ -10,6 +10,7 @@
 //! the most cells keep a K4. The window is the first block of `(L + 1)^2` alive
 //! cells, in order of `c0`, then `r0`.
 
+use alloc::collections::BTreeMap;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -221,6 +222,15 @@ pub(crate) fn interior_vertices(side: u16) -> Vec<u32> {
         .collect()
 }
 
+/// Whether vertex `v` of an open lattice of side `side` is on the outer
+/// border.
+pub(crate) fn on_border(side: u16, v: u32) -> bool {
+    let width = u32::from(side).saturating_add(1);
+    let (x, y) = (v % width, v / width);
+    let last = u32::from(side);
+    x == 0 || y == 0 || x == last || y == last
+}
+
 /// The charge labels of one draw: `pairs` vertices of `+2`, then `pairs` of
 /// `-2`, then `0` on the rest of `order`. Every other vertex is free.
 pub(crate) fn labels_of(order: &[u32], pairs: usize, vertices: usize) -> Vec<Option<i8>> {
@@ -382,4 +392,139 @@ pub(crate) fn parse_incidence(
         positions.push(position);
     }
     Some((c0, r0, positions))
+}
+
+/// The spin of each link, in link order, from the spins of the instance
+/// nodes. `None` unless `spins` has one entry per instance node and every
+/// position is in range.
+pub(crate) fn link_spins(positions: &[u32], spins: &[i8], nodes: usize) -> Option<Vec<i8>> {
+    if spins.len() != nodes {
+        return None;
+    }
+    positions
+        .iter()
+        .map(|&p| spins.get(usize::try_from(p).ok()?).copied())
+        .collect()
+}
+
+/// The Ising form of an energy over the link positions.
+pub(crate) struct Energy {
+    pub(crate) h: Vec<i32>,
+    pub(crate) edges: Vec<(u32, u32)>,
+    pub(crate) j: Vec<i32>,
+    pub(crate) offset: i64,
+}
+
+/// The sums of an energy in progress. The couplers are ordered by position
+/// pair, so the output order does not depend on the order of the additions.
+pub(crate) struct Expansion {
+    h: Vec<i64>,
+    couplers: BTreeMap<(u32, u32), i64>,
+    offset: i64,
+}
+
+impl Expansion {
+    /// An empty energy over `nodes` instance nodes.
+    pub(crate) fn new(nodes: usize) -> Self {
+        Self {
+            h: vec![0; nodes],
+            couplers: BTreeMap::new(),
+            offset: 0,
+        }
+    }
+
+    /// Adds `value` to the field of link `e`. `None` on an overflow or a
+    /// position out of range.
+    pub(crate) fn add_field(&mut self, positions: &[u32], e: u32, value: i64) -> Option<()> {
+        let at = usize::try_from(*positions.get(usize::try_from(e).ok()?)?).ok()?;
+        let slot = self.h.get_mut(at)?;
+        *slot = slot.checked_add(value)?;
+        Some(())
+    }
+
+    /// Adds `value` to the offset. `None` on an overflow.
+    pub(crate) fn add_offset(&mut self, value: i64) -> Option<()> {
+        self.offset = self.offset.checked_add(value)?;
+        Some(())
+    }
+
+    /// Adds `value` to the coupling of the positions `a` and `b`. `None` on
+    /// an overflow.
+    pub(crate) fn add_coupling(&mut self, a: u32, b: u32, value: i64) -> Option<()> {
+        let slot = self.couplers.entry((a.min(b), a.max(b))).or_insert(0);
+        *slot = slot.checked_add(value)?;
+        Some(())
+    }
+
+    /// `(U / 2) * sum (Q_v - q_v)^2` over the labeled vertices, in vertex
+    /// order, with `U = weight`. For each vertex it adds `(U / 2) (deg + q^2)`
+    /// to the offset, `-U q inc` to the field of each link, and `U inc inc'`
+    /// to each pair of links. `positions` holds the dense instance position
+    /// of each link. `None` on an overflow, a position out of range, or a
+    /// label count that is not one per vertex.
+    pub(crate) fn add_charge_penalty(
+        &mut self,
+        lattice: &SquareLattice,
+        positions: &[u32],
+        labels: &[Option<i8>],
+        weight: i64,
+    ) -> Option<()> {
+        if labels.len() != usize::try_from(lattice.vertex_count()).ok()? {
+            return None;
+        }
+        for (v, label) in (0u32..).zip(labels) {
+            let Some(q) = label.map(i64::from) else {
+                continue;
+            };
+            let at = lattice.incident(v);
+            let degree = i64::try_from(at.len()).ok()?;
+            self.add_offset((weight / 2).checked_mul(degree.checked_add(q.checked_mul(q)?)?)?)?;
+            for (rank, &(e, inc_e)) in at.iter().enumerate() {
+                self.add_field(
+                    positions,
+                    e,
+                    weight
+                        .checked_mul(q)?
+                        .checked_mul(i64::from(inc_e))?
+                        .checked_neg()?,
+                )?;
+                let pe = *positions.get(usize::try_from(e).ok()?)?;
+                for &(f, inc_f) in at.get(rank.checked_add(1)?..)? {
+                    let pf = *positions.get(usize::try_from(f).ok()?)?;
+                    self.add_coupling(
+                        pe,
+                        pf,
+                        weight
+                            .checked_mul(i64::from(inc_e))?
+                            .checked_mul(i64::from(inc_f))?,
+                    )?;
+                }
+            }
+        }
+        Some(())
+    }
+
+    /// The Ising form: the nonzero couplings in ascending pair order. `None`
+    /// when a coefficient does not fit an `i32`.
+    pub(crate) fn finish(self) -> Option<Energy> {
+        let mut edges = Vec::new();
+        let mut j = Vec::new();
+        for (&pair, &value) in &self.couplers {
+            if value != 0 {
+                edges.push(pair);
+                j.push(i32::try_from(value).ok()?);
+            }
+        }
+        let h = self
+            .h
+            .into_iter()
+            .map(|value| i32::try_from(value).ok())
+            .collect::<Option<Vec<i32>>>()?;
+        Some(Energy {
+            h,
+            edges,
+            j,
+            offset: self.offset,
+        })
+    }
 }

@@ -15,8 +15,6 @@
 //! observables are the direct charges, the number of violated labels, and the
 //! charge loss.
 
-use alloc::collections::BTreeMap;
-use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::descriptor::{Contract, FieldSpec, Params, SizeBounds, TopologyStats, ValueType};
@@ -26,8 +24,8 @@ use crate::ice::twisted_dimer::Recipe;
 use crate::instance::{Instance, InstanceLimits};
 use crate::native::{
     charges_payload, dense_links, incidence_payload, interior_vertices, is_zephyr_subgraph,
-    labels_of, parse_charges, parse_incidence, place, DenseLinks, Native, KIND_CHARGES,
-    KIND_INCIDENCE,
+    labels_of, parse_charges, parse_incidence, place, DenseLinks, Energy, Expansion, Native,
+    KIND_CHARGES, KIND_INCIDENCE,
 };
 use crate::rng::shuffle;
 use crate::routing::unsigned;
@@ -238,14 +236,6 @@ fn draw_labels(
     Err(Code::NoInstance)
 }
 
-/// The Ising form of the charge penalty over the link positions.
-struct Energy {
-    h: Vec<i32>,
-    edges: Vec<(u32, u32)>,
-    j: Vec<i32>,
-    offset: i64,
-}
-
 /// `(U / 2) * sum (Q_v - q_v)^2` over the labeled vertices, in vertex order.
 /// `positions` holds the dense instance position of each link. `None` on an
 /// overflow, a position out of range, or a label count that is not one per
@@ -256,51 +246,9 @@ fn energy(
     positions: &[u32],
     nodes: usize,
 ) -> Option<Energy> {
-    if labels.len() != usize::try_from(lattice.vertex_count()).ok()? {
-        return None;
-    }
-    let mut h = vec![0i64; nodes];
-    let mut couplers: BTreeMap<(u32, u32), i64> = BTreeMap::new();
-    let mut offset = 0i64;
-    for (v, label) in (0u32..).zip(labels) {
-        let Some(q) = label.map(i64::from) else {
-            continue;
-        };
-        let at = lattice.incident(v);
-        let degree = i64::try_from(at.len()).ok()?;
-        offset = offset.checked_add((PENALTY / 2).checked_mul(degree.checked_add(q * q)?)?)?;
-        for (rank, &(e, inc_e)) in at.iter().enumerate() {
-            let pe = *positions.get(usize::try_from(e).ok()?)?;
-            let slot = h.get_mut(usize::try_from(pe).ok()?)?;
-            *slot = slot.checked_sub(PENALTY.checked_mul(q)?.checked_mul(i64::from(inc_e))?)?;
-            for &(f, inc_f) in at.get(rank.checked_add(1)?..)? {
-                let pf = *positions.get(usize::try_from(f).ok()?)?;
-                let weight = PENALTY
-                    .checked_mul(i64::from(inc_e))?
-                    .checked_mul(i64::from(inc_f))?;
-                let entry = couplers.entry((pe.min(pf), pe.max(pf))).or_insert(0);
-                *entry = entry.checked_add(weight)?;
-            }
-        }
-    }
-    let mut edges = Vec::new();
-    let mut j = Vec::new();
-    for (&pair, &value) in &couplers {
-        if value != 0 {
-            edges.push(pair);
-            j.push(i32::try_from(value).ok()?);
-        }
-    }
-    let h = h
-        .into_iter()
-        .map(|value| i32::try_from(value).ok())
-        .collect::<Option<Vec<i32>>>()?;
-    Some(Energy {
-        h,
-        edges,
-        j,
-        offset,
-    })
+    let mut sums = Expansion::new(nodes);
+    sums.add_charge_penalty(lattice, positions, labels, PENALTY)?;
+    sums.finish()
 }
 
 /// The metadata region: the labels (kind 4) and the window with the link

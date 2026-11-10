@@ -18,6 +18,8 @@
 //!   families (crate private).
 //! - [`defects`]: the static defect family, a `hard` family that selects a low
 //!   physical energy square-ice state under charges, pins, and obstacles.
+//! - [`flow`]: the static flow family, a `hard` family for the adapted
+//!   active-flow task on a square-link lattice.
 //! - [`dipolar`]: quantized dipolar coupling tables for square ice and their
 //!   exact integer validator.
 //! - [`square`]: the square-lattice link graph, direct charges, and charge
@@ -39,6 +41,7 @@ pub mod defects;
 pub mod descriptor;
 pub mod dipolar;
 pub mod family;
+pub mod flow;
 pub mod ice;
 pub mod instance;
 mod native;

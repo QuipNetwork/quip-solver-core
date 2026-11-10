@@ -324,8 +324,9 @@ These metadata faults give code 16, `MetadataInvalid`:
 | 6 | `tile_charges` |
 | 7 | `routing` |
 | 8 | `defects` |
+| 9 | `flow` |
 
-Kind 6 holds synthetic charges of tiles. Kind 4 holds physical vertex charges. Kind 8 holds the obstacles, the pins, and the table summary of a defect family.
+Kind 6 holds synthetic charges of tiles. Kind 4 holds physical vertex charges. Kind 8 holds the obstacles, the pins, and the table summary of a defect family. Kind 9 holds the penalty weight, the requested directions, and the costs of the links of a flow family.
 
 **FAM-35.** Metadata is part of the instance bytes, so `instance_digest` covers it.
 

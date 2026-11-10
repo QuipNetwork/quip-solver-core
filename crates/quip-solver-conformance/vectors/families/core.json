@@ -3430,7 +3430,7 @@
       "path": "conformance/family_oracle/__main__.py"
     },
     {
-      "blake3": "4beed04224041faedddef84dcf5cef05aa36eb0db2a921768d473511dca377b1",
+      "blake3": "c00ce7e6045b3401657754327207e2a04fb72bb57cfdea2b44c5d5a89960c797",
       "path": "conformance/family_oracle/build.py"
     },
     {
@@ -3458,6 +3458,10 @@
       "path": "conformance/family_oracle/fields.py"
     },
     {
+      "blake3": "71bcd60eae169e0ab83d5cfa88e202b576a4f9bb98e78ef33715a3c4519eafc0",
+      "path": "conformance/family_oracle/flow.py"
+    },
+    {
       "blake3": "d68f3b15cecc90ec667748ab7150d3491d7a742b32b7862e1e6faa36be9c910b",
       "path": "conformance/family_oracle/glass.py"
     },
@@ -3466,7 +3470,7 @@
       "path": "conformance/family_oracle/ice.py"
     },
     {
-      "blake3": "af0253961b2af4299fd16da736d5e48084a6c182d78ec84ffadc9d4f5ee7d000",
+      "blake3": "86d27714fa52582ad3b5ac22c840dcac860dc142bbc33e26312aa60a1a161121",
       "path": "conformance/family_oracle/instance.py"
     },
     {
@@ -3474,7 +3478,7 @@
       "path": "conformance/family_oracle/layered.py"
     },
     {
-      "blake3": "1782b9733feb56f643fb6a2e06a23e0a8abc625762d34291af7f5970ace8d63c",
+      "blake3": "224e127d496871238e6f3c5926e19b1f13d6446b5f273f445ed00652b53f5486",
       "path": "conformance/family_oracle/params.py"
     },
     {
@@ -3494,7 +3498,7 @@
       "path": "conformance/family_oracle/twisted.py"
     },
     {
-      "blake3": "7cb47db804c35c00eea5d64e405208f5c2204b477ea7b9b5363fde0219b4ab5d",
+      "blake3": "efcb7580ad0fcd1e0112642de7df1234ecfae0ae0a194c9a737896d8ede586a5",
       "path": "docs/problem-families.md"
     }
   ],
