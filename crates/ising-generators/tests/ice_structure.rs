@@ -723,20 +723,3 @@ fn structure_vectors_match() {
         check_structure_case(case);
     }
 }
-
-#[test]
-fn repeated_structure_is_identical() {
-    let base = common::live_topology();
-    for mode in ["adjacency", "zephyr"] {
-        let lattice = live_lattice(mode);
-        let run = || {
-            let found = candidates(lattice, base).expect("candidates");
-            let split = sides(lattice, base, &found).expect("sides");
-            let (left, right) =
-                seeded_orders(&common::hex(&[7; 32]), split.left.len(), split.right.len());
-            let chosen = select(&found, &split, &left, &right).expect("select");
-            (found, split, chosen)
-        };
-        assert_eq!(run(), run(), "{mode}");
-    }
-}

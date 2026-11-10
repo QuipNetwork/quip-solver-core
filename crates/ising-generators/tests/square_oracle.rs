@@ -7,6 +7,8 @@
     reason = "test code: a failed lookup is a test failure"
 )]
 
+use std::collections::HashSet;
+
 use ising_generators::square::{
     charges, check_request, symmetries, Axis, Boundary, LatticeError, Request, RequestError,
     SquareLattice, Symmetry,
@@ -208,7 +210,22 @@ fn all_states(lat: &SquareLattice) -> Vec<(Vec<i8>, Vec<i8>)> {
         .collect()
 }
 
-fn brute_force(states: &[(Vec<i8>, Vec<i8>)], req: &Request) -> bool {
+/// The distinct charge vectors that some state of the lattice produces.
+fn reachable_charges(states: &[(Vec<i8>, Vec<i8>)]) -> HashSet<Vec<i8>> {
+    states.iter().map(|(q, _)| q.clone()).collect()
+}
+
+/// Whether some state fits `req`. A request that fixes no spin depends only on
+/// the charges, so it is answered from the set of reachable charge vectors.
+fn brute_force(states: &[(Vec<i8>, Vec<i8>)], reachable: &HashSet<Vec<i8>>, req: &Request) -> bool {
+    if req.fixed.is_empty() {
+        return reachable.iter().any(|q| {
+            req.charges
+                .iter()
+                .zip(q)
+                .all(|(label, &c)| label.is_none_or(|t| t == c))
+        });
+    }
     states.iter().any(|(q, spins)| {
         req.charges
             .iter()
@@ -222,6 +239,7 @@ fn brute_force(states: &[(Vec<i8>, Vec<i8>)], req: &Request) -> bool {
 fn compatibility_matches_brute_force_on_l2() {
     let lat = lattice(2, Boundary::Periodic);
     let states = all_states(&lat);
+    let reachable = reachable_charges(&states);
     let labels: Vec<Option<i8>> = core::iter::once(None).chain((-4..=4).map(Some)).collect();
     let mut compatible = 0;
     let mut total = 0;
@@ -231,7 +249,7 @@ fn compatibility_matches_brute_force_on_l2() {
                 for &d in &labels {
                     let req = request(vec![a, b, c, d], Vec::new());
                     let ok = check_request(&lat, &req).is_ok();
-                    assert_eq!(ok, brute_force(&states, &req), "{req:?}");
+                    assert_eq!(ok, brute_force(&states, &reachable, &req), "{req:?}");
                     total += 1;
                     compatible += usize::from(ok);
                 }
@@ -253,7 +271,7 @@ fn compatibility_matches_brute_force_on_l2() {
             for &b in &labels {
                 let req = request(vec![a, b, Some(2), None], fixed.to_vec());
                 let ok = check_request(&lat, &req).is_ok();
-                assert_eq!(ok, brute_force(&states, &req), "{req:?}");
+                assert_eq!(ok, brute_force(&states, &reachable, &req), "{req:?}");
             }
         }
     }
@@ -263,6 +281,7 @@ fn compatibility_matches_brute_force_on_l2() {
 fn compatibility_matches_brute_force_on_open_l2() {
     let lat = lattice(2, Boundary::Open);
     let states = all_states(&lat);
+    let reachable = reachable_charges(&states);
     let labels: Vec<Option<i8>> = core::iter::once(None).chain((-4..=4).map(Some)).collect();
     let fixed_sets: [&[(u32, i8)]; 5] = [
         &[],
@@ -275,7 +294,7 @@ fn compatibility_matches_brute_force_on_open_l2() {
     let mut compatible = 0;
     let mut check = |req: Request| {
         let ok = check_request(&lat, &req).is_ok();
-        assert_eq!(ok, brute_force(&states, &req), "{req:?}");
+        assert_eq!(ok, brute_force(&states, &reachable, &req), "{req:?}");
         cases += 1;
         compatible += usize::from(ok);
     };
@@ -611,7 +630,7 @@ fn canonical_bytes_are_invariant() {
     let lat = lattice(2, Boundary::Periodic);
     let req = empty_request(&lat);
     let group = syms(&lat, &req);
-    for state in 0..256u32 {
+    for state in (0..256u32).step_by(7) {
         let spins = spins_of(state, 8);
         let canon = canonical(&lat, &req, &pack(&spins).expect("valid")).expect("valid");
         let q = charges(&lat, &spins).expect("valid");

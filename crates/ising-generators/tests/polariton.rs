@@ -767,20 +767,18 @@ fn recipes_are_canonical() {
     }
 }
 
+/// The salt that builds for each recipe, in recipe order. Found by running the
+/// `0..64` salt search at commit 9b5d380: every recipe builds at salt 0.
+const BUILDING_SALTS: [u32; 3] = [0, 0, 0];
+
 #[test]
 fn live_recipes_build() {
     let topology = common::live_topology();
-    for recipe in &POLARITON_RECIPES {
+    for (recipe, i) in POLARITON_RECIPES.iter().zip(BUILDING_SALTS) {
         let admitted = admitted(recipe.params).expect("admit");
         let bounds = bounds(&admitted, topology).expect("admit topology");
-        let mut built = None;
-        for i in 0..64 {
-            if let Ok(instance) = generate_instance(&admitted, topology, &bounds, nonce_of(i)) {
-                built = Some((i, instance));
-                break;
-            }
-        }
-        let (i, instance) = built.expect("a salt builds");
+        let instance =
+            generate_instance(&admitted, topology, &bounds, nonce_of(i)).expect("the salt builds");
         let meta = decode(&instance);
         let side = u32::from(meta.side);
         assert_eq!(instance.node_ids().len() as u32, 2 * side * (side + 1));

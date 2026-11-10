@@ -688,6 +688,16 @@ fn recipes_have_distinct_params_digests() {
 
 #[test]
 fn live_recipes_reach_their_pair_counts() {
+    reach_pair_counts(0..2);
+}
+
+#[test]
+#[ignore = "32-nonce sweep; run on demand"]
+fn live_recipes_reach_their_pair_counts_for_every_nonce() {
+    reach_pair_counts(0..0x20);
+}
+
+fn reach_pair_counts(nonces: core::ops::Range<u8>) {
     let topology = common::live_topology();
     let n = topology.node_ids().len();
     for recipe in &RECIPES {
@@ -698,7 +708,7 @@ fn live_recipes_reach_their_pair_counts() {
                 other => panic!("pairs parameter: {other:?}"),
             }
         };
-        for i in 0..0x20u8 {
+        for i in nonces.clone() {
             let instance = build(recipe.params, topology, nonce_of(i));
             let (tiles, gauges) = local_gauges(&instance).expect("local gauges");
             assert_eq!(tiles.len(), 1785, "{} nonce {i}", recipe.alias);

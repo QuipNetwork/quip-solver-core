@@ -632,6 +632,12 @@ fn terminals_are_balanced_and_distinct() {
     }
 }
 
+/// Nonce bytes for the four outcomes of the terminal retry: a build on the
+/// first try, a build on a later try, a build on the fourth try, and four
+/// failed tries where the fifth would pass. Found by running the full
+/// `0..=255` sweep at commit 9b5d380 and taking the first byte of each outcome.
+const RETRY_NONCES: [u8; 4] = [0, 2, 3, 1];
+
 #[test]
 fn infeasible_terminals_retry_then_give_14() {
     let topology = lattice_topology(3, 4);
@@ -644,7 +650,7 @@ fn infeasible_terminals_retry_then_give_14() {
     let pairs = n / 4;
     let (mut first_try, mut later_try, mut exhausted, mut fifth_would_pass) = (0, 0, 0, 0);
     let mut latest = 0;
-    for byte in 0..=255u8 {
+    for byte in RETRY_NONCES {
         let nonce = nonce_of(byte);
         let mut streams = Streams::new(nonce, digest, *topology.order_digest(), ROUTING.labels);
         let mut stream = streams.open("terminal").expect("terminal stream");

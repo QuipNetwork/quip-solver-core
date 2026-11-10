@@ -170,15 +170,20 @@ fn python_style_header_is_accepted() {
     assert_eq!(decode(&file).expect("decode"), body);
 }
 
+/// The two gzip files hold only zero bytes: 64 MiB plus one byte, and exactly
+/// 64 MiB. They are built once with:
+/// `head -c 67108865 /dev/zero | gzip -9n > tests/data/zeros-64mib-plus-1.bin.gz`
+/// `head -c 67108864 /dev/zero | gzip -9n > tests/data/zeros-64mib.bin.gz`
 #[test]
 fn oversize_payload_is_rejected() {
+    let file = include_bytes!("data/zeros-64mib-plus-1.bin.gz");
+    assert_eq!(decompress(file), Err(BlobError::TooLarge));
     let big = vec![0_u8; MAX_PAYLOAD + 1];
-    let file = compress(&big);
-    assert_eq!(decompress(&file), Err(BlobError::TooLarge));
     assert_eq!(decode_payload(&big), Err(BlobError::TooLarge));
-    let max = vec![0_u8; MAX_PAYLOAD];
     assert_eq!(
-        decompress(&compress(&max)).expect("at the limit").len(),
+        decompress(include_bytes!("data/zeros-64mib.bin.gz"))
+            .expect("at the limit")
+            .len(),
         MAX_PAYLOAD
     );
 }
