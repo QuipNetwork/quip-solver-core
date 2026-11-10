@@ -69,9 +69,12 @@ The registry is the source of truth, and this table copies it.
 ### Which test covers each family
 
 The `family_conformance` test is the acceptance gate for the SC-7 checker.
-It runs the generation and comparison checks on the layered test construction, which is the `vectors/*` pair.
-It does not read the vector files of the other eight families.
-Each of those eight has two kinds of check, and both run in the release gate.
+Its test `every_released_family_passes_its_vector_cases` reads the registry and keeps every entry that is not archived.
+It then runs `check_case` on every case of that revision, using the vector file and the contract of the entry.
+The test fails when an entry has no contract or no cases, so a family added to the registry later is covered without a code change.
+This covers every family in the table above.
+
+Two more kinds of check cover the eight families that a solver can serve.
 
 - A test file of the same name in `crates/ising-generators/tests/` builds instances and checks their structure and energies.
 - The Rust recompute in `crates/quip-solver-conformance/tests/family_vectors.rs` compares each vector file with code that does not share the generator.
@@ -86,7 +89,7 @@ Each of those eight has two kinds of check, and both run in the release gate.
 | `quip/polariton-static` | `ising-generators` `tests/polariton.rs` | `family_vectors`, section checks for `polariton.json` |
 | `quip/twisted-ice-dimer` | `ising-generators` `tests/twisted_dimer.rs` | `family_vectors`, every section of `twisted_dimer.json` |
 | `quip/two-commodity-routing` | `ising-generators` `tests/two_commodity.rs` | `family_vectors`, section checks for `two_commodity.json` |
-| `vectors/restricted-field`, `vectors/uniform-field` | `family_conformance` | `family_vectors`, `layered.json` |
+| `vectors/restricted-field`, `vectors/uniform-field` | The layered tests in `family_conformance` | `family_vectors`, `layered.json` |
 
 The Python wheel has its own check.
 `conformance/test_family_generation.py` runs `test_supported_matches_the_registry`, which requires that `families.supported()` equals the eight families that a solver can serve.
