@@ -9,14 +9,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- The `quip_solver_core.families` module in the Python wheel. It builds the
-  canonical instance of a family lease from the topology and the nonce, so a
-  Python miner produces the same bytes as the Rust generator. The functions are
-  `supported`, `params_digest`, `admit`, `generate`, `validate_instance`, and
-  `feasible`. The `Instance` class holds the canonical fields with the integer
-  milli coefficients. Family faults raise `FamilyError` or one of its
-  subclasses `AdmissionError`, `SaltSkipped`, `InstanceInvalid`, and
-  `GeneratorDefect`. Each carries `code` and `name`.
+- The `families` module of the Python wheel. Import it with
+  `from quip_solver_core import families`. It builds the canonical instance of a
+  family lease from the topology and the nonce, so a Python miner produces the
+  same bytes as the Rust generator. The functions are `supported`,
+  `params_digest`, `admit`, `generate`, `validate_instance`, and `feasible`. The
+  `Instance` class holds the canonical fields with the integer milli
+  coefficients. Family faults raise `FamilyError` or one of its subclasses
+  `AdmissionError`, `SaltSkipped`, `InstanceInvalid`, and `GeneratorDefect`.
+  Each carries `code` and `name`.
 - `ising_generators::registry::CONTRACTS`, the list of every family contract
   that the crate provides.
 - `quip/defects-static@1`, a registered family with status `research` and class
