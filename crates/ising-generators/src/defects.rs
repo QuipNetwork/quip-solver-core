@@ -50,7 +50,7 @@ use crate::ice::build::{region, sections, Reader};
 use crate::instance::{Instance, InstanceLimits};
 use crate::native::{
     charges_payload, dense_links, incidence_payload, interior_vertices, is_zephyr_subgraph,
-    labels_of, parse_charges, parse_incidence, place, DenseLinks, Native, KIND_CHARGES,
+    labels_of, on_border, parse_charges, parse_incidence, place, DenseLinks, Native, KIND_CHARGES,
     KIND_INCIDENCE,
 };
 use crate::rng::shuffle;
@@ -274,15 +274,6 @@ fn check_topology(params: &Params<'_>, topology: &BaseTopology) -> bool {
     is_zephyr_subgraph(config.native, topology)
         && config.fits()
         && place(config.native, topology).is_some()
-}
-
-/// Whether vertex `v` of an open lattice of side `side` is on the outer
-/// border.
-fn on_border(side: u16, v: u32) -> bool {
-    let width = u32::from(side).saturating_add(1);
-    let (x, y) = (v % width, v / width);
-    let last = u32::from(side);
-    x == 0 || y == 0 || x == last || y == last
 }
 
 /// The links with both ends on the outer border, in link order.

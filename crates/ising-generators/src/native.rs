@@ -221,6 +221,15 @@ pub(crate) fn interior_vertices(side: u16) -> Vec<u32> {
         .collect()
 }
 
+/// Whether vertex `v` of an open lattice of side `side` is on the outer
+/// border.
+pub(crate) fn on_border(side: u16, v: u32) -> bool {
+    let width = u32::from(side).saturating_add(1);
+    let (x, y) = (v % width, v / width);
+    let last = u32::from(side);
+    x == 0 || y == 0 || x == last || y == last
+}
+
 /// The charge labels of one draw: `pairs` vertices of `+2`, then `pairs` of
 /// `-2`, then `0` on the rest of `order`. Every other vertex is free.
 pub(crate) fn labels_of(order: &[u32], pairs: usize, vertices: usize) -> Vec<Option<i8>> {
