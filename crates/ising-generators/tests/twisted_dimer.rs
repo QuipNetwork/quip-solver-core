@@ -397,7 +397,9 @@ fn tile_and_pair_structure() {
     let mut shared_nodes = 0;
     for i in 0..4u8 {
         let instance = build(&format!("nonce {i}"), &bytes, &topology, nonce_of(i));
-        let (tiles, gauges) = local_gauges(&instance).expect("local gauges");
+        let local = local_gauges(&instance);
+        assert!(local.is_some(), "nonce {i}: local gauges");
+        let (tiles, gauges) = local.expect("local gauges");
         for (tile, gauge) in tiles.iter().zip(&gauges) {
             let local = |pos: u32| {
                 let at = tile.iter().position(|&x| x == pos).expect("a tile node");
@@ -690,16 +692,22 @@ fn check_metadata_rejects_each_rule() {
         .find(|&(a, b)| [a, b].iter().any(|n| nodes_of_first.contains(n)))
         .expect("an edge touching the first pair");
     let two_bytes = params(2, 2, 62, 2);
-    let listed = |second: (u32, u32)| {
+    let listed = |what: &str, second: (u32, u32)| {
         let mut j = weak_base.clone();
-        j[edge_position("two-pair control", &instance, pairs[0])] = PAIR_MILLI;
-        j[edge_position("two-pair control", &instance, second)] = PAIR_MILLI;
+        j[edge_position(what, &instance, pairs[0])] = PAIR_MILLI;
+        j[edge_position(what, &instance, second)] = PAIR_MILLI;
         let mut both = vec![pairs[0], second];
         both.sort_unstable();
-        with_listed_pairs("two-pair control", &instance, j, &both)
+        with_listed_pairs(what, &instance, j, &both)
     };
-    assert!(check(&two_bytes, &listed(disjoint)), "two-pair control");
-    assert!(!check(&two_bytes, &listed(touching)), "overlapping pairs");
+    assert!(
+        check(&two_bytes, &listed("two-pair control", disjoint)),
+        "two-pair control"
+    );
+    assert!(
+        !check(&two_bytes, &listed("overlapping pairs", touching)),
+        "overlapping pairs"
+    );
 
     // Breaks one rule: the pair count differs from the parameter.
     assert!(!check(&params(2, 2, 62, 9), &instance), "pair count");

@@ -226,7 +226,12 @@ fn fields_sit_on_shared_spins_only() {
                 assert!(!tiles.is_empty(), "nonce {i}: tiles");
                 for &tile in &tiles {
                     for pair in tile_pairs(tile) {
-                        let at = instance.edges().binary_search(&pair).expect("tile edge");
+                        let found = instance.edges().binary_search(&pair);
+                        assert!(
+                            found.is_ok(),
+                            "mode ({m}, {t}) nonce {i}: tile edge {pair:?} is an edge"
+                        );
+                        let at = found.expect("tile edge");
                         let hidden = i64::from(instance.j()[at])
                             * gauge[pair.0 as usize]
                             * gauge[pair.1 as usize];
@@ -242,10 +247,21 @@ fn fields_sit_on_shared_spins_only() {
             let fields: Vec<usize> = (0..n).filter(|&k| instance.h()[k] != 0).collect();
             assert_eq!(fields.len(), n / 16, "mode ({m}, {t}) nonce {i}");
             for k in fields {
-                assert_eq!(seen[k], 2, "field node {k} is in two tiles");
-                assert_eq!(instance.h()[k].abs(), 500);
+                assert_eq!(
+                    seen[k], 2,
+                    "mode ({m}, {t}) nonce {i}: field node {k} is in two tiles"
+                );
+                assert_eq!(
+                    instance.h()[k].abs(),
+                    500,
+                    "mode ({m}, {t}) nonce {i}: field size at node {k}"
+                );
             }
-            assert_eq!(instance.offset_milli(), 0);
+            assert_eq!(
+                instance.offset_milli(),
+                0,
+                "mode ({m}, {t}) nonce {i}: offset"
+            );
             assert!(check(&bytes, &instance), "mode ({m}, {t}) nonce {i}");
         }
     }
