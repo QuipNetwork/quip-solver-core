@@ -14,6 +14,8 @@
 //! - [`ice`]: ice tiles, the 4-clique motifs of a base topology.
 //! - [`routing`]: the two-commodity unit routing family.
 //! - [`polariton`]: the adapted P static charge family, the first `hard` family.
+//! - [`dipolar`]: quantized dipolar coupling tables for square ice and their
+//!   exact integer validator.
 //! - [`square`]: the square-lattice link graph, direct charges, and charge
 //!   requests shared by the link-based families.
 //! - [`witness`]: packed witness bytes, labeled constraints, and canonical
@@ -30,6 +32,7 @@ mod digest;
 #[cfg(feature = "blob")]
 pub mod blob;
 pub mod descriptor;
+pub mod dipolar;
 pub mod family;
 pub mod ice;
 pub mod instance;

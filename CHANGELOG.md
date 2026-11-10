@@ -25,6 +25,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   hook `family::feasible` and the `feasible` field of `Construction` let a `hard`
   family state its feasibility constraint. The coordinator does not call the hook
   yet. The `--family` gate sends the revision the `routing-small` topology.
+- `ising_generators::dipolar`: exact integer coefficient tables for axis-aligned
+  square ice. A validator checks each entry with integers. The module also has the
+  truncation bound, BLAKE3 digests, and `physical_status`. No result of
+  `physical_status` is a physical-validation success. `docs/dipolar-numerics.md`
+  has the formula and the `u128` bound.
 
 ## 0.0.6
 
