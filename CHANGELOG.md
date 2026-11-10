@@ -5,6 +5,21 @@ This file documents changes to the Quip solver contract.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+
+- The `quip_solver_core.families` module in the Python wheel. It builds the
+  canonical instance of a family lease from the topology and the nonce, so a
+  Python miner produces the same bytes as the Rust generator. The functions are
+  `supported`, `params_digest`, `admit`, `generate`, `validate_instance`, and
+  `feasible`. The `Instance` class holds the canonical fields with the integer
+  milli coefficients. Family faults raise `FamilyError` or one of its
+  subclasses `AdmissionError`, `SaltSkipped`, `InstanceInvalid`, and
+  `GeneratorDefect`. Each carries `code` and `name`.
+- `ising_generators::registry::CONTRACTS`, the list of every family contract
+  that the crate provides.
+
 ## 0.0.8
 
 The greedy algorithm value. `miner.proto` adds `ALGORITHM_GREEDY`, named

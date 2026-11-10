@@ -1,0 +1,370 @@
+//! Family generation and checks for `quip_solver_core._core.families`.
+//!
+//! Every function is a thin call into `ising-generators`, so the instance
+//! bytes a Python miner builds are the bytes Rust builds. Family faults raise
+//! a subclass of [`FamilyError`] with `code` and `name` attributes (FAM-42).
+//! A wrong Python argument type stays a `TypeError`.
+
+use ising_generators::descriptor::{self, AdvertisedLimits};
+use ising_generators::family::{self, BaseTopology, SaltFault};
+use ising_generators::instance::{self, InstanceLimits, InstanceParts};
+use ising_generators::registry::CONTRACTS;
+use ising_generators::Code;
+use pyo3::exceptions::{PyMemoryError, PyValueError};
+use pyo3::prelude::*;
+use pyo3::types::PyBytes;
+use pyo3::{create_exception, wrap_pyfunction, PyTypeInfo};
+
+create_exception!(
+    _core,
+    FamilyError,
+    PyValueError,
+    "A family fault. `code` is the FAM-42 code and `name` its stable name."
+);
+create_exception!(
+    _core,
+    AdmissionError,
+    FamilyError,
+    "The descriptor, parameters, or topology fail admission (codes 3 to 13)."
+);
+create_exception!(
+    _core,
+    SaltSkipped,
+    FamilyError,
+    "The salt gives no instance (code 13 or 14). Skip it and continue."
+);
+create_exception!(
+    _core,
+    InstanceInvalid,
+    FamilyError,
+    "An explicit instance is invalid (codes 13, 15, and 16)."
+);
+create_exception!(
+    _core,
+    GeneratorDefect,
+    FamilyError,
+    "The construction broke its contract. `code` is 0 and `name` is the defect."
+);
+
+/// Build `E` with a message and the `code` and `name` attributes.
+fn fault<E: PyTypeInfo>(py: Python<'_>, code: u8, name: &str, message: &str) -> PyErr {
+    let err = PyErr::new::<E, _>(format!("{name} ({code}): {message}"));
+    let value = err.value(py);
+    if let Err(e) = value
+        .setattr("code", code)
+        .and_then(|()| value.setattr("name", name))
+    {
+        return e;
+    }
+    err
+}
+
+fn coded<E: PyTypeInfo>(py: Python<'_>, code: Code, message: &str) -> PyErr {
+    fault::<E>(py, code.value(), &code.to_string(), message)
+}
+
+fn digest_bytes<'py>(py: Python<'py>, digest: &[u8; 32]) -> Bound<'py, PyBytes> {
+    PyBytes::new(py, digest)
+}
+
+/// A digest or nonce of exactly 32 bytes, or `None`.
+fn array32(bytes: &[u8]) -> Option<[u8; 32]> {
+    <[u8; 32]>::try_from(bytes).ok()
+}
+
+/// An immutable canonical instance. Coefficients keep the integer milli scale.
+#[pyclass(frozen, module = "quip_solver_core")]
+struct Instance {
+    inner: instance::Instance,
+}
+
+#[pymethods]
+impl Instance {
+    #[getter]
+    fn descriptor_digest<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        digest_bytes(py, self.inner.descriptor_digest())
+    }
+
+    #[getter]
+    fn topology_order_digest<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        digest_bytes(py, self.inner.topology_order_digest())
+    }
+
+    /// The nonce, or `None` for an archived instance.
+    #[getter]
+    fn nonce<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyBytes>> {
+        self.inner.nonce().map(|n| digest_bytes(py, n))
+    }
+
+    #[getter]
+    fn node_ids(&self) -> Vec<u32> {
+        self.inner.node_ids().to_vec()
+    }
+
+    #[getter]
+    fn edges(&self) -> Vec<(u32, u32)> {
+        self.inner.edges().to_vec()
+    }
+
+    #[getter]
+    fn h(&self) -> Vec<i32> {
+        self.inner.h().to_vec()
+    }
+
+    #[getter]
+    fn j(&self) -> Vec<i32> {
+        self.inner.j().to_vec()
+    }
+
+    #[getter]
+    fn offset_milli(&self) -> i64 {
+        self.inner.offset_milli()
+    }
+
+    #[getter]
+    fn metadata<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        PyBytes::new(py, self.inner.metadata())
+    }
+
+    /// The instance digest (FAM-18).
+    #[getter]
+    fn digest<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        digest_bytes(py, &self.inner.digest())
+    }
+
+    /// The canonical instance bytes (FAM-30).
+    fn canonical_bytes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        let bytes = self
+            .inner
+            .canonical_bytes()
+            .map_err(|e| PyMemoryError::new_err(e.to_string()))?;
+        Ok(PyBytes::new(py, &bytes))
+    }
+}
+
+/// Admit the descriptor against the registry, raising `AdmissionError`.
+fn admit<'a>(
+    py: Python<'_>,
+    family_id: &'a str,
+    revision: u32,
+    params: &'a [u8],
+    params_digest: &[u8],
+) -> PyResult<descriptor::Admitted<'a>> {
+    descriptor::admit(
+        CONTRACTS,
+        family_id.as_bytes(),
+        revision,
+        params,
+        params_digest,
+    )
+    .map_err(|code| coded::<AdmissionError>(py, code, "descriptor admission failed"))
+}
+
+/// The `(family_id, revision)` pairs this build implements, in registry order.
+#[pyfunction]
+fn supported() -> Vec<(&'static str, u32)> {
+    CONTRACTS
+        .iter()
+        .map(|c| (c.family_id, c.revision))
+        .collect()
+}
+
+/// The BLAKE3 digest of the parameter bytes (FAM-13).
+#[pyfunction]
+fn params_digest<'py>(py: Python<'py>, params: &[u8]) -> Bound<'py, PyBytes> {
+    digest_bytes(py, &descriptor::params_digest(params))
+}
+
+/// Check a descriptor.
+///
+/// # Errors
+///
+/// `AdmissionError` with a code from 3 to 9.
+#[pyfunction]
+#[pyo3(name = "admit")]
+fn admit_descriptor(
+    py: Python<'_>,
+    family_id: &str,
+    revision: u32,
+    params: &[u8],
+    params_digest: &[u8],
+) -> PyResult<()> {
+    admit(py, family_id, revision, params, params_digest).map(|_| ())
+}
+
+/// Build the canonical instance of `nonce` on the topology `nodes` and `edges`.
+///
+/// `edges` holds native node ids in registration order. A limit of 0 makes
+/// no advertised claim. The sent order digest is the topology's own, so code
+/// 11 cannot occur here.
+///
+/// # Errors
+///
+/// `AdmissionError` (3 to 9, 12, 13), `SaltSkipped` (13 or 14), or
+/// `GeneratorDefect`. A nonce that is not 32 bytes is a `ValueError`.
+#[pyfunction]
+#[pyo3(signature = (
+    family_id, revision, params, params_digest, nodes, edges, nonce,
+    *, max_nodes = 0, max_edges = 0, max_degree = 0
+))]
+#[expect(
+    clippy::too_many_arguments,
+    clippy::needless_pass_by_value,
+    reason = "the Python signature is the API, and PyO3 extracts owned lists"
+)]
+fn generate(
+    py: Python<'_>,
+    family_id: &str,
+    revision: u32,
+    params: &[u8],
+    params_digest: &[u8],
+    nodes: Vec<u32>,
+    edges: Vec<(u32, u32)>,
+    nonce: &[u8],
+    max_nodes: u64,
+    max_edges: u64,
+    max_degree: u64,
+) -> PyResult<Instance> {
+    let nonce =
+        array32(nonce).ok_or_else(|| PyValueError::new_err("nonce must be exactly 32 bytes"))?;
+    let admitted = admit(py, family_id, revision, params, params_digest)?;
+    let topology = BaseTopology::new(nodes, &edges).map_err(|fault| {
+        coded::<AdmissionError>(py, Code::TopologyIncompatible, &format!("{fault:?}"))
+    })?;
+    let advertised = AdvertisedLimits {
+        max_nodes,
+        max_edges,
+        max_degree,
+    };
+    let order_digest = *topology.order_digest();
+    let bounds = family::admit_topology(&admitted, &topology, &order_digest, &advertised)
+        .map_err(|code| coded::<AdmissionError>(py, code, "topology admission failed"))?;
+    family::generate_instance(&admitted, &topology, &bounds, nonce)
+        .map(|inner| Instance { inner })
+        .map_err(|err| match err {
+            SaltFault::Skip(code) => coded::<SaltSkipped>(py, code, "the salt gives no instance"),
+            SaltFault::Defect(defect) => {
+                fault::<GeneratorDefect>(py, 0, &format!("{defect:?}"), "construction defect")
+            }
+        })
+}
+
+/// Rebuild and check an explicit instance in the FAM-65 order.
+///
+/// # Errors
+///
+/// `AdmissionError` (3 to 9) from the descriptor, then `InstanceInvalid` with
+/// code 13, 15, or 16.
+#[pyfunction]
+#[pyo3(signature = (
+    family_id, revision, params, params_digest, descriptor_digest,
+    topology_order_digest, nonce, node_ids, edges, h, j, offset_milli,
+    metadata, instance_digest
+))]
+#[expect(clippy::too_many_arguments, reason = "the Python signature is the API")]
+fn validate_instance(
+    py: Python<'_>,
+    family_id: &str,
+    revision: u32,
+    params: &[u8],
+    params_digest: &[u8],
+    descriptor_digest: &[u8],
+    topology_order_digest: &[u8],
+    nonce: Option<&[u8]>,
+    node_ids: Vec<u32>,
+    edges: Vec<(u32, u32)>,
+    h: Vec<i32>,
+    j: Vec<i32>,
+    offset_milli: i64,
+    metadata: Vec<u8>,
+    instance_digest: &[u8],
+) -> PyResult<Instance> {
+    let admitted = admit(py, family_id, revision, params, params_digest)?;
+    let mismatch =
+        |message: &str| coded::<InstanceInvalid>(py, Code::InstanceDigestMismatch, message);
+    let own = admitted.descriptor().digest();
+    if array32(descriptor_digest) != Some(own) {
+        return Err(mismatch("descriptor_digest differs from the descriptor"));
+    }
+    let order = array32(topology_order_digest)
+        .ok_or_else(|| mismatch("topology_order_digest must be 32 bytes"))?;
+    let nonce = match nonce {
+        Some(bytes) => Some(array32(bytes).ok_or_else(|| mismatch("nonce must be 32 bytes"))?),
+        None => None,
+    };
+    let sent =
+        array32(instance_digest).ok_or_else(|| mismatch("instance_digest must be 32 bytes"))?;
+    let parts = InstanceParts {
+        descriptor_digest: own,
+        topology_order_digest: order,
+        nonce,
+        node_ids,
+        edges,
+        h,
+        j,
+        offset_milli,
+        metadata,
+    };
+    let contract = admitted.contract();
+    let inner = instance::Instance::new(
+        parts,
+        &InstanceLimits::FAM_37,
+        contract.metadata_kinds,
+        Some(&sent),
+    )
+    .map_err(|code| coded::<InstanceInvalid>(py, code, "the instance is invalid"))?;
+    let accepted = contract
+        .construction
+        .is_some_and(|c| (c.check_metadata)(admitted.params(), &inner));
+    if !accepted {
+        return Err(coded::<InstanceInvalid>(
+            py,
+            Code::MetadataInvalid,
+            "the metadata does not match the instance",
+        ));
+    }
+    Ok(Instance { inner })
+}
+
+/// Whether `spins` is a feasible witness of `instance`.
+///
+/// # Errors
+///
+/// `AdmissionError` (3 to 9) from the descriptor.
+#[pyfunction]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "PyO3 extracts an owned Vec of spins from Python"
+)]
+fn feasible(
+    py: Python<'_>,
+    family_id: &str,
+    revision: u32,
+    params: &[u8],
+    params_digest: &[u8],
+    instance: &Instance,
+    spins: Vec<i8>,
+) -> PyResult<bool> {
+    let admitted = admit(py, family_id, revision, params, params_digest)?;
+    Ok(family::feasible(&admitted, &instance.inner, &spins))
+}
+
+/// Register the `families` submodule and the exception classes.
+pub(crate) fn register(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    let families = PyModule::new(py, "families")?;
+    families.add_function(wrap_pyfunction!(supported, &families)?)?;
+    families.add_function(wrap_pyfunction!(params_digest, &families)?)?;
+    families.add_function(wrap_pyfunction!(admit_descriptor, &families)?)?;
+    families.add_function(wrap_pyfunction!(generate, &families)?)?;
+    families.add_function(wrap_pyfunction!(validate_instance, &families)?)?;
+    families.add_function(wrap_pyfunction!(feasible, &families)?)?;
+    families.add_class::<Instance>()?;
+    m.add_submodule(&families)?;
+
+    m.add("FamilyError", py.get_type::<FamilyError>())?;
+    m.add("AdmissionError", py.get_type::<AdmissionError>())?;
+    m.add("SaltSkipped", py.get_type::<SaltSkipped>())?;
+    m.add("InstanceInvalid", py.get_type::<InstanceInvalid>())?;
+    m.add("GeneratorDefect", py.get_type::<GeneratorDefect>())?;
+    Ok(())
+}
