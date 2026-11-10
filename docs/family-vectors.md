@@ -14,7 +14,7 @@ A pytest drift test checks that the fixture is still the exact output of the ora
 
 | Check | Command | What it proves |
 |---|---|---|
-| Rust recompute | `cargo test -p quip-solver-conformance --test family_vectors` | Rust code in `tests/family_vectors.rs` agrees with `core.json`, `legacy.json`, `layered.json`, the `cases` of `ice_structure.json`, every section of `twisted_dimer.json`, and every section of `ice_charge.json`, `ice_fields.json`, `two_commodity.json`, and `polariton.json`, and checks every file against the schema |
+| Rust recompute | `cargo test -p quip-solver-conformance --test family_vectors` | Rust code in `tests/family_vectors.rs` agrees with `core.json`, `legacy.json`, `layered.json`, the `cases` of `ice_structure.json`, every section of `twisted_dimer.json`, and every section of `ice_charge.json`, `ice_fields.json`, `two_commodity.json`, `polariton.json`, and `defects.json`, and checks every file against the schema |
 | Ice structure | `cargo test -p ising-generators --test ice_structure` | The ice code agrees with `ice_structure.json`, the live topology, and the archived tiles |
 | Drift | `python -m pytest conformance/test_family_vectors_drift.py` | The fixture is the oracle output, and the sources have not changed |
 | Oracle | `python -m pytest conformance/test_family_oracle.py` | The oracle matches the existing goldens and the examples in the contract |
@@ -35,6 +35,7 @@ All files are under `crates/quip-solver-conformance/vectors/families/`.
 | `ice_fields.json` | `specified` | The registered vectors of `quip/ice-fields@1`. The `cases` section holds full canonical instances in the case format of `layered.json`. A case lists the salts that give code 14 in `skipped`. The `selection` section holds the field nodes and their `h` values for each salt that builds. The `field_recipes` section holds two salts for each of the two live z(12, 4) parameter sets, stored as hashes, tile counts, and field counts. The `admission` section holds requests with their expected codes. Evidence id `SC-11:ice-fields-vectors-frozen` |
 | `two_commodity.json` | `specified` | The registered vectors of `quip/two-commodity-routing@1`. The `cases` section holds full canonical instances in the case format of `layered.json`. A case lists the salts that give code 14 in `skipped`. The `terminals` section holds the terminal try that passed and the supply of every template node for each salt that builds. The `routing_recipes` section holds two salts of the live z(12, 4) parameter set, stored as hashes, counts, the chain strength, and the try that passed. The `admission` section holds requests with their expected codes. Evidence id `SC-12:two-commodity-vectors-frozen`. The file `conformance/fixtures/two_commodity_research_template.json` holds the template of an archived research model. A Rust test and a pytest compare it with the template of this revision on the live topology |
 | `polariton.json` | `specified` | The registered vectors of `quip/polariton-static@1`. The `cases` section holds full canonical instances in the case format of `layered.json`. A case lists the salts that give code 14 in `skipped`. The `witnesses` section holds, for the first instance of each case, one valid witness and one invalid witness with low energy, with the expected `feasible` result, the direct charges, the number of violated labels, the charge loss, and the encoded energy. The `polariton_recipes` section holds two salts of each of the three live z(12, 4) parameter sets, stored as hashes, the window, and the charge try that passed. The `admission` section holds requests with their expected codes. Evidence id `SC-14:polariton-vectors-frozen` |
+| `defects.json` | `specified` | The registered vectors of `quip/defects-static@1`. The `cases` section holds full canonical instances in the case format of `layered.json`. A case lists the salts that give code 14 in `skipped`. The `defect_witnesses` section holds, for the first instance of each case, a feasible witness, an infeasible witness with low physical energy, and a witness that violates a pin, with the expected `feasible` result, the observables, and the encoded energy. The `routes` section holds, on the first instance of `defects-l3`, five original routes and twelve precedence cases that each hold two faults. Every route has its state, its first failed check or no error, and the `feasible` result of the state. The `table` section holds the commitment, the entry counts, the dropped magnitude, the truncation bound, and the penalty weight of each case. The `admission` section holds requests with their expected codes. Evidence id `SC-16:defects-vectors-frozen` |
 | `ice/archived-tiles.bin` and `ice/archived-tiles.json` | `archived-research` | Tiles of two archived research models, and their sidecar |
 | `registry.json` | `specified` | The family registry, maintained by hand |
 
@@ -48,7 +49,7 @@ Each one is a file under `crates/quip-solver-conformance/vectors/topologies/`, i
 | `topologies/zephyr-z12t4-live.bin.gz` | `archived-research`. The live z(12, 4) topology as the lattice minus its removed nodes and removed edges (kind 1) |
 
 A topology field in a vectors file holds a string path that starts at the directory of that file. One path is `../topologies/t-sparse.bin.gz`.
-A file takes the name of the first case that uses it, in the order `core.json`, `layered.json`, `ice_structure.json`, `twisted_dimer.json`, `ice_charge.json`, `ice_fields.json`, `two_commodity.json`, `polariton.json`.
+A file takes the name of the first case that uses it, in the order `core.json`, `layered.json`, `ice_structure.json`, `twisted_dimer.json`, `ice_charge.json`, `ice_fields.json`, `two_commodity.json`, `polariton.json`, `defects.json`.
 The T_SPARSE file is `t-sparse.bin.gz`.
 A path starts at `vectors/families/`, the only directory with topology references today.
 Each file in `topologies/` has an index entry. A vectors file refers to it.
@@ -207,7 +208,7 @@ The fixture format makes these decisions.
 
 ## Regenerating
 
-Run `make family-vectors` to rewrite `core.json`, `legacy.json`, `layered.json`, `ice_structure.json`, `twisted_dimer.json`, `ice_charge.json`, `ice_fields.json`, `two_commodity.json`, and `polariton.json`.
+Run `make family-vectors` to rewrite `core.json`, `legacy.json`, `layered.json`, `ice_structure.json`, `twisted_dimer.json`, `ice_charge.json`, `ice_fields.json`, `two_commodity.json`, `polariton.json`, and `defects.json`.
 The `sources` pins of every file hash the oracle modules, so a new oracle module changes the pins of every file.
 The target needs the `blake3` package, which the `dev` extra installs.
 Run `cd conformance && python -m family_oracle check` to compare the files with the oracle output without writing.

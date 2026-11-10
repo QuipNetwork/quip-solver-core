@@ -14,6 +14,10 @@
 //! - [`ice`]: ice tiles, the 4-clique motifs of a base topology.
 //! - [`routing`]: the two-commodity unit routing family.
 //! - [`polariton`]: the adapted P static charge family, the first `hard` family.
+//! - `native`: the square-link layout on Zephyr cells, shared by the link-based
+//!   families (crate private).
+//! - [`defects`]: the static defect family, a `hard` family that selects a low
+//!   physical energy square-ice state under charges, pins, and obstacles.
 //! - [`dipolar`]: quantized dipolar coupling tables for square ice and their
 //!   exact integer validator.
 //! - [`square`]: the square-lattice link graph, direct charges, and charge
@@ -31,11 +35,13 @@ mod digest;
 
 #[cfg(feature = "blob")]
 pub mod blob;
+pub mod defects;
 pub mod descriptor;
 pub mod dipolar;
 pub mod family;
 pub mod ice;
 pub mod instance;
+mod native;
 pub mod polariton;
 pub mod random;
 pub mod rng;

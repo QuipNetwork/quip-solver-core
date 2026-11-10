@@ -13,7 +13,7 @@ pub const INSTANCE_FORMAT: u8 = 0x01;
 pub const MILLI_SCALE: i32 = 1000;
 
 /// The highest registered metadata section kind (FAM-34).
-const MAX_KIND: u16 = 7;
+const MAX_KIND: u16 = 8;
 
 /// Bytes of the fixed head: format byte and three 32-byte fields.
 const HEAD_LEN: usize = 1 + 32 * 3;

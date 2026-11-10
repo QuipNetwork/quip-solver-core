@@ -229,6 +229,193 @@
       ],
       "type": "object"
     },
+    "defects_route": {
+      "additionalProperties": false,
+      "properties": {
+        "case": {
+          "type": "string"
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "evidence": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "feasible": {
+          "type": "boolean"
+        },
+        "index": {
+          "$ref": "#/$defs/u64s"
+        },
+        "name": {
+          "type": "string"
+        },
+        "route": {
+          "items": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array"
+          },
+          "type": "array"
+        },
+        "spins": {
+          "items": {
+            "enum": [
+              -1,
+              1
+            ]
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "name",
+        "evidence",
+        "case",
+        "index",
+        "route",
+        "spins",
+        "error",
+        "feasible"
+      ],
+      "type": "object"
+    },
+    "defects_table": {
+      "additionalProperties": false,
+      "properties": {
+        "case": {
+          "type": "string"
+        },
+        "commitment": {
+          "$ref": "#/$defs/hex32"
+        },
+        "dropped": {
+          "type": "integer"
+        },
+        "entries": {
+          "type": "integer"
+        },
+        "evidence": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "kept": {
+          "type": "integer"
+        },
+        "kept_magnitude": {
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "truncation_bound": {
+          "$ref": "#/$defs/u64s"
+        },
+        "weight": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name",
+        "evidence",
+        "case",
+        "commitment",
+        "entries",
+        "kept",
+        "kept_magnitude",
+        "dropped",
+        "truncation_bound",
+        "weight"
+      ],
+      "type": "object"
+    },
+    "defects_witness": {
+      "additionalProperties": false,
+      "properties": {
+        "case": {
+          "type": "string"
+        },
+        "charges": {
+          "items": {
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "dropped": {
+          "type": "integer"
+        },
+        "energy_milli": {
+          "type": "integer"
+        },
+        "evidence": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "feasible": {
+          "type": "boolean"
+        },
+        "index": {
+          "$ref": "#/$defs/u64s"
+        },
+        "name": {
+          "type": "string"
+        },
+        "physical_energy": {
+          "type": "integer"
+        },
+        "physical_status": {
+          "enum": [
+            "InsufficientPhysicalEvidence"
+          ]
+        },
+        "spins": {
+          "items": {
+            "enum": [
+              -1,
+              1
+            ]
+          },
+          "type": "array"
+        },
+        "truncation_bound": {
+          "$ref": "#/$defs/u64s"
+        },
+        "violated_labels": {
+          "type": "integer"
+        },
+        "violated_pins": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "case",
+        "charges",
+        "dropped",
+        "energy_milli",
+        "evidence",
+        "feasible",
+        "index",
+        "name",
+        "physical_energy",
+        "physical_status",
+        "spins",
+        "truncation_bound",
+        "violated_labels",
+        "violated_pins"
+      ],
+      "type": "object"
+    },
     "descriptor_case": {
       "additionalProperties": false,
       "properties": {
@@ -2789,6 +2976,12 @@
       },
       "type": "array"
     },
+    "defect_witnesses": {
+      "items": {
+        "$ref": "#/$defs/defects_witness"
+      },
+      "type": "array"
+    },
     "descriptors": {
       "items": {
         "$ref": "#/$defs/descriptor_case"
@@ -2956,6 +3149,12 @@
       },
       "type": "array"
     },
+    "routes": {
+      "items": {
+        "$ref": "#/$defs/defects_route"
+      },
+      "type": "array"
+    },
     "routing_recipes": {
       "items": {
         "$ref": "#/$defs/routing_recipe"
@@ -3023,6 +3222,12 @@
     "structure": {
       "items": {
         "$ref": "#/$defs/ice_structure_case"
+      },
+      "type": "array"
+    },
+    "table": {
+      "items": {
+        "$ref": "#/$defs/defects_table"
       },
       "type": "array"
     },

@@ -2330,6 +2330,7 @@ fn check_layered_case(case: &Value, bounds: SizeBoundsOf) -> Result<(), String> 
 /// Generate every slot of one case with the Rust construction and compare it
 /// with the Python port.
 fn check_layered_against_rust(case: &Value) -> Result<(), String> {
+    use ising_generators::defects::DEFECTS_V1;
     use ising_generators::descriptor::{admit, params_digest};
     use ising_generators::family::{admit_topology, generate_instance, BaseTopology, SaltFault};
     use ising_generators::ice::{CHARGED_ICE_V1, ICE_FIELDS_V1, ICE_GLASS_V1, TWISTED_DIMER_V1};
@@ -2346,6 +2347,7 @@ fn check_layered_against_rust(case: &Value) -> Result<(), String> {
         "quip/ice-fields" => ICE_FIELDS_V1,
         "quip/two-commodity-routing" => ROUTING_V1,
         "quip/polariton-static" => POLARITON_V1,
+        "quip/defects-static" => DEFECTS_V1,
         other => return Err(format!("{}: unknown family {other}", case_name(case))),
     };
     let params = codec::hex_decode(str_field(case, "params_hex")?)?;
@@ -4457,6 +4459,959 @@ fn a_changed_polariton_try_fails_the_replay() -> Result<(), String> {
         .ok_or("no recipe")?;
     expect_err(&check_polariton_recipe(changed, 0), "a changed window")?;
     check_polariton_recipe(recipe, 0)
+}
+
+// ---- static defect vectors (defects.json) ----
+
+fn defects_doc() -> Result<Value, String> {
+    serde_json::from_str(include_str!("../vectors/families/defects.json"))
+        .map_err(|e| e.to_string())
+}
+
+/// `side` of canonical defects params. The params have 68 bytes with fixed
+/// offsets: the payloads of `zephyr_m`, `side`, `pairs`, `obstacles`, `pins`,
+/// `field_x`, and `field_y` start at 7, 22, 30, 38, 46, 54, and 64.
+fn defects_side(params: &[u8]) -> Result<u64, String> {
+    if params.len() != 68 {
+        return Err(format!("defects params have {} bytes", params.len()));
+    }
+    Ok(u64::from(le_u16(params, 22)?))
+}
+
+/// The bounds of `quip/defects-static`: the links, six couplers for each
+/// vertex of the `(L + 1)` by `(L + 1)` grid, and degree six.
+fn defects_size_bounds(
+    _: &Value,
+    params: &[u8],
+    nodes: &[u32],
+    edges: &[(u32, u32)],
+) -> Result<Option<(u64, u64, u64)>, String> {
+    let side = defects_side(params)?;
+    let n = u64::try_from(nodes.len())
+        .map_err(|e| e.to_string())?
+        .min(2 * side * (side + 1));
+    let e = u64::try_from(edges.len())
+        .map_err(|e| e.to_string())?
+        .min(6 * (side + 1) * (side + 1));
+    let d = topology_max_degree(nodes, edges)
+        .min(6)
+        .min(n.saturating_sub(1));
+    Ok(Some((n, e, d)))
+}
+
+/// Recompute the digests, nonces, and instance bytes of every registered
+/// `quip/defects-static` case with Rust code that does not call the
+/// construction.
+fn check_defects(doc: &Value) -> Result<(), String> {
+    validate(&schema()?, doc)?;
+    check_names_unique(doc)?;
+    for case in section(doc, "cases")? {
+        check_layered_case(case, defects_size_bounds)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn defects_fixture_matches_schema() -> Result<(), String> {
+    let doc = defects_doc()?;
+    validate(&schema()?, &doc)?;
+    match doc.get("provenance").and_then(Value::as_str) {
+        Some("specified") => {}
+        other => return Err(format!("provenance is {other:?}, expected specified")),
+    }
+    check_names_unique(&doc)?;
+    for name in ["cases", "defect_witnesses", "routes", "table", "admission"] {
+        section(&doc, name).map(|_| ())?;
+    }
+    Ok(())
+}
+
+#[test]
+fn defects_cases_recompute() -> Result<(), String> {
+    check_defects(&defects_doc()?)
+}
+
+#[test]
+fn defects_cases_match_the_rust_construction() -> Result<(), String> {
+    for case in section(&defects_doc()?, "cases")? {
+        check_layered_against_rust(case)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn defects_params_constants_match_the_vectors() -> Result<(), String> {
+    use quip_solver_conformance::families::defects::{
+        P_DEFECTS_SIDE4, P_DEFECTS_Z24_L2, P_DEFECTS_Z34_L3,
+    };
+    let doc = defects_doc()?;
+    for (section_name, name, want) in [
+        ("cases", "defects-l2", &P_DEFECTS_Z24_L2[..]),
+        ("cases", "defects-l3", &P_DEFECTS_Z34_L3[..]),
+        ("admission", "side-4-is-out-of-bounds", &P_DEFECTS_SIDE4[..]),
+    ] {
+        let case = find_named(&doc, section_name, name)?;
+        compare(
+            case,
+            "params_hex",
+            &str_field(case, "params_hex")?.to_owned(),
+            &codec::hex_encode(want),
+        )?;
+    }
+    compare(&doc, "case count", &section(&doc, "cases")?.len(), &4)
+}
+
+/// What the three metadata sections of a built defects instance say, decoded
+/// by hand from the layouts of the contract.
+struct DefectsMeta {
+    side: u16,
+    labels: Vec<i8>,
+    window: (u16, u16),
+    positions: Vec<u32>,
+    weight: u64,
+    dropped: u64,
+    commitment: Vec<u8>,
+    obstacles: Vec<u32>,
+    pins: Vec<u32>,
+}
+
+fn defects_meta(built: &ising_generators::instance::Instance) -> Result<DefectsMeta, String> {
+    let region = built.metadata();
+    if le_u16(region, 0)? != 3 {
+        return Err("the region does not hold three sections".to_owned());
+    }
+    let mut at = 2;
+    let mut payloads = Vec::new();
+    for kind in [4u16, 5, 8] {
+        if le_u16(region, at)? != kind {
+            return Err(format!("the section at {at} is not kind {kind}"));
+        }
+        let len = usize::try_from(le_u32(region, at + 2)?).map_err(|e| e.to_string())?;
+        payloads.push(
+            region
+                .get(at + 6..at + 6 + len)
+                .ok_or("section past the region")?,
+        );
+        at += 6 + len;
+    }
+    if at != region.len() {
+        return Err("trailing bytes in the region".to_owned());
+    }
+    let [charges, incidence, defects] = payloads[..] else {
+        return Err("three payloads".to_owned());
+    };
+    let weight = u64::from_le_bytes(
+        defects
+            .get(0..8)
+            .ok_or("short kind 8")?
+            .try_into()
+            .map_err(|_| "short")?,
+    );
+    let dropped = u64::from_le_bytes(
+        defects
+            .get(8..16)
+            .ok_or("short kind 8")?
+            .try_into()
+            .map_err(|_| "short")?,
+    );
+    let commitment = defects.get(16..48).ok_or("short kind 8")?.to_vec();
+    let mut cursor = 48;
+    let mut lists = Vec::new();
+    for _ in 0..2 {
+        let count = usize::from(le_u16(defects, cursor)?);
+        let ids = (0..count)
+            .map(|k| le_u32(defects, cursor + 2 + 4 * k))
+            .collect::<Result<Vec<u32>, String>>()?;
+        cursor += 2 + 4 * count;
+        lists.push(ids);
+    }
+    if cursor != defects.len() {
+        return Err("trailing bytes in kind 8".to_owned());
+    }
+    let [obstacles, pins] = <[Vec<u32>; 2]>::try_from(lists).map_err(|_| "two lists")?;
+    Ok(DefectsMeta {
+        side: le_u16(charges, 0)?,
+        labels: charges
+            .get(2..)
+            .ok_or("short charges")?
+            .iter()
+            .map(|&b| i8::from_le_bytes([b]))
+            .collect(),
+        window: (le_u16(incidence, 0)?, le_u16(incidence, 2)?),
+        positions: incidence
+            .get(4..)
+            .ok_or("short incidence")?
+            .chunks_exact(4)
+            .map(|c| <[u8; 4]>::try_from(c).map(u32::from_le_bytes))
+            .collect::<Result<_, _>>()
+            .map_err(|_| "short position".to_owned())?,
+        weight,
+        dropped,
+        commitment,
+        obstacles,
+        pins,
+    })
+}
+
+/// The `charges` stream of one salt, replayed with the FAM-24 shuffle and the
+/// request check of `square`: the labels, the obstacles, and the pins of the
+/// first try that passes. `None` when all four tries fail.
+type DefectsReplay = (u64, Vec<Option<i8>>, Vec<u32>, Vec<u32>);
+
+fn replay_defects(case: &Value, slot: u64) -> Result<Option<DefectsReplay>, String> {
+    use ising_generators::family::Streams;
+    use ising_generators::rng::shuffle;
+    use ising_generators::square::{check_request, Boundary, Request, SquareLattice};
+    let params = codec::hex_decode(str_field(case, "params_hex")?)?;
+    let side = u16::try_from(defects_side(&params)?).map_err(|e| e.to_string())?;
+    let count = |at: usize| le_u16(&params, at).map(usize::from);
+    let (pairs, obstacles, pins) = (count(30)?, count(38)?, count(46)?);
+    let (nodes, edges) = topology_inputs(object_field(case, "topology")?)?;
+    let mut streams = Streams::new(
+        codec::hex32(&lease_nonce(case, slot)?)?,
+        digests::descriptor_digest(
+            str_field(case, "family_id")?.as_bytes(),
+            u32_field(case, "revision")?,
+            &digests::params_digest(&params),
+        ),
+        digests::topology_order_digest(&nodes, &edges),
+        ising_generators::defects::DEFECTS.labels,
+    );
+    let mut stream = streams.open("charges").ok_or("no charges stream")?;
+    let lattice = SquareLattice::new(side, Boundary::Open).map_err(|e| e.to_string())?;
+    let width = u32::from(side) + 1;
+    let last = u32::from(side);
+    let border = |v: u32| {
+        v.is_multiple_of(width) || v / width == 0 || v % width == last || v / width == last
+    };
+    let interior: Vec<u32> = (1..last)
+        .flat_map(|y| (1..last).map(move |x| y * width + x))
+        .collect();
+    let boundary: Vec<u32> = (0..lattice.link_count())
+        .filter(|&e| {
+            lattice
+                .link(e)
+                .is_some_and(|link| border(link.tail) && border(link.head))
+        })
+        .collect();
+    let vertices = usize::try_from(lattice.vertex_count()).map_err(|e| e.to_string())?;
+    let shuffled = |stream: &mut _, mut list: Vec<u32>| -> Result<Vec<u32>, String> {
+        shuffle(stream, &mut list).map_err(|e| format!("{e:?}"))?;
+        Ok(list)
+    };
+    for attempt in 1..=4u64 {
+        let order = shuffled(&mut stream, interior.clone())?;
+        let mut labels = vec![None; vertices];
+        for (rank, &v) in order.iter().enumerate() {
+            let label = if rank < pairs {
+                2
+            } else if rank < 2 * pairs {
+                -2
+            } else {
+                0
+            };
+            *labels
+                .get_mut(usize::try_from(v).map_err(|e| e.to_string())?)
+                .ok_or("a vertex outside the lattice")? = Some(label);
+        }
+        let zeros: Vec<u32> = (0..lattice.vertex_count())
+            .filter(|&v| {
+                usize::try_from(v)
+                    .ok()
+                    .and_then(|v| labels.get(v))
+                    .is_some_and(|label| *label == Some(0))
+            })
+            .collect();
+        let mut chosen = shuffled(&mut stream, zeros)?
+            .get(..obstacles)
+            .ok_or("fewer zero vertices than obstacles")?
+            .to_vec();
+        chosen.sort_unstable();
+        let mut pinned = shuffled(&mut stream, boundary.clone())?
+            .get(..pins)
+            .ok_or("fewer boundary links than pins")?
+            .to_vec();
+        pinned.sort_unstable();
+        let request = Request {
+            charges: labels.clone(),
+            fixed: pinned.iter().map(|&e| (e, 1)).collect(),
+            fields: Vec::new(),
+        };
+        if check_request(&lattice, &request).is_ok() {
+            return Ok(Some((attempt, labels, chosen, pinned)));
+        }
+    }
+    Ok(None)
+}
+
+/// Build one instance of a case and check the Rust metadata check against it.
+fn check_defects_metadata(
+    params: &ising_generators::descriptor::Params<'_>,
+    built: &ising_generators::instance::Instance,
+) -> Result<DefectsMeta, String> {
+    use ising_generators::defects::DEFECTS;
+    if !(DEFECTS.check_metadata)(params, built) {
+        return Err("check_metadata rejected a built instance".to_owned());
+    }
+    defects_meta(built)
+}
+
+/// Rebuild every salt of every case with the Rust construction, replay the
+/// request draw, and compare the labels, the obstacles, and the pins.
+fn check_defects_draws(doc: &Value) -> Result<(), String> {
+    use ising_generators::defects::DEFECTS_V1;
+    for case in section(doc, "cases")? {
+        for entry in entries_of(case, "skipped")? {
+            let replay = replay_defects(case, u64_decimal(entry, "index")?)?;
+            compare(case, "a skipped salt fails every try", &replay, &None)?;
+        }
+        for instance in entries_of(case, "instances")? {
+            let slot = u64_decimal(instance, "index")?;
+            let meta = with_ice_instance(DEFECTS_V1, case, slot, |params, built| {
+                check_defects_metadata(params, built)
+            })?;
+            let (_, labels, obstacles, pins) =
+                replay_defects(case, slot)?.ok_or("a salt that builds has a passing try")?;
+            let want: Vec<i8> = labels.iter().map(|l| l.unwrap_or(127)).collect();
+            compare(case, "labels", &meta.labels, &want)?;
+            compare(case, "obstacles", &meta.obstacles, &obstacles)?;
+            compare(case, "pins", &meta.pins, &pins)?;
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn defects_draws_match_a_replay_of_the_charges_stream() -> Result<(), String> {
+    check_defects_draws(&defects_doc()?)
+}
+
+/// Recompute the feasible result, the observables, and the encoded energy of
+/// one witness through the Rust construction. Returns the expected feasible
+/// flag.
+fn check_defects_witness(doc: &Value, witness: &Value) -> Result<bool, String> {
+    use ising_generators::defects::{defect_observables, DEFECTS_V1};
+    use ising_generators::family::feasible;
+    let case = find_named(doc, "cases", str_field(witness, "case")?)?;
+    let slot = u64_decimal(witness, "index")?;
+    let spins: Vec<i8> = entries_of(witness, "spins")?
+        .iter()
+        .map(|v| {
+            v.as_i64()
+                .and_then(|n| i8::try_from(n).ok())
+                .ok_or_else(|| "a spin is not an i8".to_owned())
+        })
+        .collect::<Result<_, _>>()?;
+    let want_feasible = witness
+        .get("feasible")
+        .and_then(Value::as_bool)
+        .ok_or("no feasible flag")?;
+    let int = |key: &str| {
+        witness
+            .get(key)
+            .and_then(Value::as_i64)
+            .ok_or_else(|| format!("no {key}"))
+    };
+    with_ice_instance(DEFECTS_V1, case, slot, |params, built| {
+        let contracts = [DEFECTS_V1];
+        let bytes = codec::hex_decode(str_field(case, "params_hex")?)?;
+        let admitted = ising_generators::descriptor::admit(
+            &contracts,
+            str_field(case, "family_id")?.as_bytes(),
+            u32_field(case, "revision")?,
+            &bytes,
+            &ising_generators::descriptor::params_digest(&bytes),
+        )
+        .map_err(|c| format!("admit failed with {c}"))?;
+        compare(
+            witness,
+            "feasible",
+            &feasible(&admitted, built, &spins),
+            &want_feasible,
+        )?;
+        let seen = defect_observables(params, built, &spins).ok_or("no observables")?;
+        compare(
+            witness,
+            "physical_energy",
+            &seen.physical_energy,
+            &int("physical_energy")?,
+        )?;
+        compare(
+            witness,
+            "violated_labels",
+            &i64::from(seen.violated_labels),
+            &int("violated_labels")?,
+        )?;
+        compare(
+            witness,
+            "violated_pins",
+            &i64::from(seen.violated_pins),
+            &int("violated_pins")?,
+        )?;
+        compare(
+            witness,
+            "dropped",
+            &i64::try_from(seen.dropped).map_err(|e| e.to_string())?,
+            &int("dropped")?,
+        )?;
+        compare(
+            witness,
+            "truncation_bound",
+            &seen.truncation_bound.to_string(),
+            &str_field(witness, "truncation_bound")?.to_owned(),
+        )?;
+        compare(
+            witness,
+            "physical_status",
+            &format!("{:?}", seen.physical_status),
+            &str_field(witness, "physical_status")?.to_owned(),
+        )?;
+        compare(
+            witness,
+            "charges",
+            &seen
+                .charges
+                .iter()
+                .map(|&q| json!(q))
+                .collect::<Vec<Value>>(),
+            &entries_of(witness, "charges")?.to_vec(),
+        )?;
+        compare(
+            witness,
+            "energy_milli",
+            &encoded_energy(built, &spins)?,
+            &i128::from(int("energy_milli")?),
+        )?;
+        // The expected flag is the two counts, so the oracle and the Rust
+        // observables must agree on it.
+        compare(
+            witness,
+            "feasible is no violation",
+            &want_feasible,
+            &(seen.violated_labels == 0 && seen.violated_pins == 0),
+        )
+    })?;
+    Ok(want_feasible)
+}
+
+/// Recompute every witness. Each case has one feasible, one infeasible, and
+/// one pin violating witness, and every infeasible witness has an encoded
+/// energy above the feasible one.
+fn check_defects_witnesses(doc: &Value) -> Result<(), String> {
+    let (mut feasible_count, mut infeasible_count) = (0usize, 0usize);
+    for witness in section(doc, "defect_witnesses")? {
+        if check_defects_witness(doc, witness)? {
+            feasible_count += 1;
+        } else {
+            infeasible_count += 1;
+        }
+    }
+    let cases = section(doc, "cases")?.len();
+    compare(doc, "feasible witnesses", &feasible_count, &cases)?;
+    compare(doc, "infeasible witnesses", &infeasible_count, &(2 * cases))?;
+    for case in section(doc, "cases")? {
+        let energy = |kind: &str| -> Result<i64, String> {
+            let witness = find_named(
+                doc,
+                "defect_witnesses",
+                &format!("{}-{kind}", case_name(case)),
+            )?;
+            witness
+                .get("energy_milli")
+                .and_then(Value::as_i64)
+                .ok_or_else(|| "no energy_milli".to_owned())
+        };
+        let good = energy("feasible")?;
+        for kind in ["infeasible", "pin-violating"] {
+            compare(case, kind, &(energy(kind)? > good), &true)?;
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn defects_witnesses_match_the_rust_feasibility_and_observables() -> Result<(), String> {
+    check_defects_witnesses(&defects_doc()?)
+}
+
+#[test]
+fn a_pin_violating_witness_breaks_no_label() -> Result<(), String> {
+    let doc = defects_doc()?;
+    for case in section(&doc, "cases")? {
+        let witness = find_named(
+            &doc,
+            "defect_witnesses",
+            &format!("{}-pin-violating", case_name(case)),
+        )?;
+        compare(
+            witness,
+            "violated_pins",
+            &witness.get("violated_pins"),
+            &Some(&json!(1)),
+        )?;
+        compare(
+            witness,
+            "violated_labels",
+            &witness.get("violated_labels"),
+            &Some(&json!(0)),
+        )?;
+    }
+    Ok(())
+}
+
+/// Check one route through `check_route` and the `feasible` hook. Returns the
+/// error name, `None` for a valid route.
+fn check_defects_route(doc: &Value, route: &Value) -> Result<(), String> {
+    use ising_generators::defects::{check_route, DEFECTS_V1};
+    use ising_generators::family::feasible;
+    let case = find_named(doc, "cases", str_field(route, "case")?)?;
+    let spins: Vec<i8> = entries_of(route, "spins")?
+        .iter()
+        .map(|v| {
+            v.as_i64()
+                .and_then(|n| i8::try_from(n).ok())
+                .ok_or_else(|| "a spin is not an i8".to_owned())
+        })
+        .collect::<Result<_, _>>()?;
+    let paths: Vec<Vec<u32>> = entries_of(route, "route")?
+        .iter()
+        .map(|path| {
+            path.as_array()
+                .ok_or_else(|| "a path is not an array".to_owned())?
+                .iter()
+                .map(|v| {
+                    v.as_u64()
+                        .and_then(|n| u32::try_from(n).ok())
+                        .ok_or_else(|| "a vertex is not a u32".to_owned())
+                })
+                .collect::<Result<Vec<u32>, String>>()
+        })
+        .collect::<Result<_, _>>()?;
+    let want = route
+        .get("error")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let want_feasible = route
+        .get("feasible")
+        .and_then(Value::as_bool)
+        .ok_or("no feasible flag")?;
+    with_ice_instance(
+        DEFECTS_V1,
+        case,
+        u64_decimal(route, "index")?,
+        |params, built| {
+            let got = check_route(params, built, &spins, &paths)
+                .err()
+                .map(|e| format!("{e:?}"));
+            compare(route, "error", &got, &want)?;
+            let contracts = [DEFECTS_V1];
+            let bytes = codec::hex_decode(str_field(case, "params_hex")?)?;
+            let admitted = ising_generators::descriptor::admit(
+                &contracts,
+                str_field(case, "family_id")?.as_bytes(),
+                u32_field(case, "revision")?,
+                &bytes,
+                &ising_generators::descriptor::params_digest(&bytes),
+            )
+            .map_err(|c| format!("admit failed with {c}"))?;
+            // A route never changes the feasible result.
+            compare(
+                route,
+                "feasible",
+                &feasible(&admitted, built, &spins),
+                &want_feasible,
+            )
+        },
+    )
+}
+
+fn check_defects_routes(doc: &Value) -> Result<(), String> {
+    let mut errors = Vec::new();
+    for route in section(doc, "routes")? {
+        check_defects_route(doc, route)?;
+        errors.push(
+            route
+                .get("error")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+        );
+    }
+    let want: Vec<Option<String>> = [
+        None,
+        Some("Endpoints"),
+        Some("Difference"),
+        Some("Obstacle"),
+        Some("RepeatedVertex"),
+        Some("Spins"),
+        Some("Shape"),
+        Some("Shape"),
+        Some("NotAdjacent"),
+        Some("NotAdjacent"),
+        Some("RepeatedVertex"),
+        Some("RepeatedVertex"),
+        Some("RepeatedLink"),
+        Some("Obstacle"),
+        Some("Obstacle"),
+        Some("Endpoints"),
+        Some("Endpoints"),
+    ]
+    .into_iter()
+    .map(|name| name.map(str::to_owned))
+    .collect();
+    compare(doc, "route results", &errors, &want)
+}
+
+#[test]
+fn defects_routes_match_the_rust_route_check() -> Result<(), String> {
+    check_defects_routes(&defects_doc()?)
+}
+
+/// The table entry of each case against the Rust table, the kind 8 section of
+/// every instance, and the observables.
+fn check_defects_tables(doc: &Value) -> Result<(), String> {
+    use ising_generators::defects::DEFECTS_V1;
+    let tables = section(doc, "table")?;
+    compare(
+        doc,
+        "table count",
+        &tables.len(),
+        &section(doc, "cases")?.len(),
+    )?;
+    for entry in tables {
+        let case = find_named(doc, "cases", str_field(entry, "case")?)?;
+        let want_commitment = str_field(entry, "commitment")?.to_owned();
+        let weight = entry
+            .get("weight")
+            .and_then(Value::as_u64)
+            .ok_or("no weight")?;
+        let dropped = entry
+            .get("dropped")
+            .and_then(Value::as_u64)
+            .ok_or("no dropped")?;
+        for instance in entries_of(case, "instances")? {
+            let meta = with_ice_instance(
+                DEFECTS_V1,
+                case,
+                u64_decimal(instance, "index")?,
+                check_defects_metadata,
+            )?;
+            compare(
+                entry,
+                "commitment",
+                &codec::hex_encode(&meta.commitment),
+                &want_commitment,
+            )?;
+            compare(entry, "weight", &meta.weight, &weight)?;
+            compare(entry, "dropped", &meta.dropped, &dropped)?;
+        }
+        check_defects_table_counts(entry, case)?;
+    }
+    Ok(())
+}
+
+/// The counts, the magnitudes, and the truncation bound of one table entry
+/// against a table rebuilt from the public dipolar API: islands at the link
+/// midpoints, the pairs with `K <= 4`, and the pairs that share a vertex.
+fn check_defects_table_counts(entry: &Value, case: &Value) -> Result<(), String> {
+    use ising_generators::dipolar::{
+        quantize, Axis as DipolarAxis, Calibration, Geometry, Island, Table,
+    };
+    use ising_generators::square::{Axis, Boundary, SquareLattice};
+    let params = codec::hex_decode(str_field(case, "params_hex")?)?;
+    let side = u16::try_from(defects_side(&params)?).map_err(|e| e.to_string())?;
+    let lattice = SquareLattice::new(side, Boundary::Open).map_err(|e| e.to_string())?;
+    let width = u32::from(side) + 1;
+    let mut islands = Vec::new();
+    for e in 0..lattice.link_count() {
+        let link = lattice.link(e).ok_or("no link")?;
+        let x = u16::try_from(link.tail % width).map_err(|e| e.to_string())? * 2;
+        let y = u16::try_from(link.tail / width).map_err(|e| e.to_string())? * 2;
+        islands.push(match link.axis {
+            Axis::X => Island {
+                x: x + 1,
+                y,
+                axis: DipolarAxis::PlusX,
+                moment: 1,
+            },
+            Axis::Y => Island {
+                x,
+                y: y + 1,
+                axis: DipolarAxis::PlusY,
+                moment: 1,
+            },
+        });
+    }
+    let geometry = Geometry::new(islands, 1, 1000, 4).map_err(|e| format!("{e:?}"))?;
+    let entries = quantize(&geometry).map_err(|e| format!("{e:?}"))?;
+    let table = Table::new(geometry, entries, Calibration::Oracle).map_err(|e| format!("{e:?}"))?;
+    let shares = |i: u32, j: u32| -> Result<bool, String> {
+        let a = lattice.link(i).ok_or("no link")?;
+        let b = lattice.link(j).ok_or("no link")?;
+        Ok([a.tail, a.head]
+            .iter()
+            .any(|v| *v == b.tail || *v == b.head))
+    };
+    let (mut kept, mut kept_magnitude, mut dropped) = (0u64, 0u64, 0u64);
+    for item in table.entries() {
+        let magnitude = u64::from(item.q.unsigned_abs());
+        if shares(item.i, item.j)? {
+            kept += 1;
+            kept_magnitude += magnitude;
+        } else {
+            dropped += magnitude;
+        }
+    }
+    let count = |key: &str| -> Result<u64, String> {
+        entry
+            .get(key)
+            .and_then(Value::as_u64)
+            .ok_or_else(|| format!("no {key}"))
+    };
+    compare(
+        entry,
+        "entries",
+        &u64::try_from(table.entries().len()).map_err(|e| e.to_string())?,
+        &count("entries")?,
+    )?;
+    compare(entry, "kept", &kept, &count("kept")?)?;
+    compare(
+        entry,
+        "kept_magnitude",
+        &kept_magnitude,
+        &count("kept_magnitude")?,
+    )?;
+    compare(entry, "dropped", &dropped, &count("dropped")?)?;
+    compare(
+        entry,
+        "commitment",
+        &codec::hex_encode(&table.commitment()),
+        &str_field(entry, "commitment")?.to_owned(),
+    )?;
+    compare(
+        entry,
+        "truncation_bound",
+        &table.truncation_bound().to_string(),
+        &str_field(entry, "truncation_bound")?.to_owned(),
+    )
+}
+
+#[test]
+fn defects_tables_match_the_rust_table() -> Result<(), String> {
+    check_defects_tables(&defects_doc()?)
+}
+
+#[test]
+fn the_defects_penalty_weight_is_even_and_follows_the_table() -> Result<(), String> {
+    let doc = defects_doc()?;
+    for entry in section(&doc, "table")? {
+        let weight = entry
+            .get("weight")
+            .and_then(Value::as_u64)
+            .ok_or("no weight")?;
+        compare(entry, "weight is even", &(weight % 2), &0)?;
+        // Each case has |field_x| and |field_y| of 1000 or the l2 fields, so
+        // the weight is the kept magnitude plus the field sum, made even.
+        let case = find_named(&doc, "cases", str_field(entry, "case")?)?;
+        let params = codec::hex_decode(str_field(case, "params_hex")?)?;
+        let side = defects_side(&params)?;
+        let field = |at: usize| -> Result<u64, String> {
+            let raw = params.get(at..at + 4).ok_or("short params")?;
+            Ok(u64::from(
+                i32::from_le_bytes(raw.try_into().map_err(|_| "short")?).unsigned_abs(),
+            ))
+        };
+        let links_per_axis = side * (side + 1);
+        let kept = entry
+            .get("kept_magnitude")
+            .and_then(Value::as_u64)
+            .ok_or("no kept_magnitude")?;
+        let mut want = kept + links_per_axis * (field(54)? + field(64)?) + 1;
+        want += want % 2;
+        compare(entry, "weight", &weight, &want)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn defects_windows_are_inside_the_cell_grid_and_the_dead_cell_moves_it() -> Result<(), String> {
+    use ising_generators::defects::DEFECTS_V1;
+    let doc = defects_doc()?;
+    for case in section(&doc, "cases")? {
+        let params = codec::hex_decode(str_field(case, "params_hex")?)?;
+        let side = defects_side(&params)?;
+        let m = u64::from(le_u16(&params, 7)?);
+        let first = entries_of(case, "instances")?
+            .first()
+            .ok_or("a case builds no instance")?;
+        let meta = with_ice_instance(
+            DEFECTS_V1,
+            case,
+            u64_decimal(first, "index")?,
+            check_defects_metadata,
+        )?;
+        let (c0, r0) = (u64::from(meta.window.0), u64::from(meta.window.1));
+        compare(case, "side", &u64::from(meta.side), &side)?;
+        compare(
+            case,
+            "the window fits the cell grid",
+            &(c0 >= 1 && r0 >= 1 && c0 + side < 2 * m && r0 + side < 2 * m),
+            &true,
+        )?;
+        let expected = match case_name(case) {
+            "defects-dead-cell" => Some((1, 2)),
+            "defects-l2" | "defects-l3" | "defects-l3-permuted" => Some((1, 1)),
+            _ => None,
+        };
+        if let Some(window) = expected {
+            compare(case, "window", &(c0, r0), &window)?;
+        }
+        compare(
+            case,
+            "the link positions are every instance node",
+            &{
+                let mut sorted = meta.positions.clone();
+                sorted.sort_unstable();
+                sorted
+            },
+            &(0..u32::try_from(meta.positions.len()).map_err(|e| e.to_string())?).collect(),
+        )?;
+        compare(
+            case,
+            "the pins are boundary links",
+            &(meta.pins.len() <= 4 * usize::try_from(side).map_err(|e| e.to_string())?),
+            &true,
+        )?;
+    }
+    Ok(())
+}
+
+#[test]
+fn defects_admission_codes_match_the_rust_admission() -> Result<(), String> {
+    use ising_generators::defects::DEFECTS_V1;
+    use ising_generators::descriptor::{admit, params_digest, AdvertisedLimits};
+    use ising_generators::family::{admit_topology, BaseTopology};
+    let doc = defects_doc()?;
+    let contracts = [DEFECTS_V1];
+    let mut codes = Vec::new();
+    for case in section(&doc, "admission")? {
+        let params = codec::hex_decode(str_field(case, "params_hex")?)?;
+        let (nodes, edges) = topology_inputs(object_field(case, "topology")?)?;
+        let topology = BaseTopology::new(nodes, &edges).map_err(|e| format!("{e:?}"))?;
+        let got = admit(
+            &contracts,
+            str_field(case, "family_id")?.as_bytes(),
+            u32_field(case, "revision")?,
+            &params,
+            &params_digest(&params),
+        )
+        .and_then(|admitted| {
+            admit_topology(
+                &admitted,
+                &topology,
+                topology.order_digest(),
+                &AdvertisedLimits {
+                    max_nodes: 0,
+                    max_edges: 0,
+                    max_degree: 0,
+                },
+            )
+        });
+        let got = got.err().map(ising_generators::Code::value);
+        compare(case, "admission code", &got, &expected_code(case)?)?;
+        codes.push(got);
+    }
+    compare(&doc, "codes 9 present", &codes.contains(&Some(9)), &true)?;
+    compare(&doc, "code 12 present", &codes.contains(&Some(12)), &true)?;
+    compare(&doc, "an admitted request", &codes.contains(&None), &true)
+}
+
+#[test]
+fn a_changed_defects_coupling_fails_the_recompute() -> Result<(), String> {
+    let doc = defects_doc()?;
+    let pointer = "/cases/0/instances/0/h/0";
+    let was = doc
+        .pointer(pointer)
+        .and_then(Value::as_i64)
+        .ok_or("no field")?;
+    let broken = mutate(&doc, pointer, json!(was + 4));
+    expect_err(&check_defects(&broken), "a changed field")
+}
+
+#[test]
+fn a_changed_defects_witness_fails_the_check() -> Result<(), String> {
+    let doc = defects_doc()?;
+    for pointer in [
+        "/defect_witnesses/0/feasible",
+        "/defect_witnesses/1/feasible",
+        "/defect_witnesses/1/physical_energy",
+        "/defect_witnesses/1/violated_labels",
+        "/defect_witnesses/2/violated_pins",
+        "/defect_witnesses/1/energy_milli",
+        "/defect_witnesses/1/dropped",
+    ] {
+        let was = doc.pointer(pointer).ok_or("no value")?.clone();
+        let changed = match was {
+            Value::Bool(flag) => json!(!flag),
+            Value::Number(n) => json!(n.as_i64().ok_or("not an integer")? + 500),
+            _ => return Err("unexpected witness value".to_owned()),
+        };
+        let broken = mutate(&doc, pointer, changed);
+        expect_err(&check_defects_witnesses(&broken), pointer)?;
+    }
+    let broken = mutate(&doc, "/defect_witnesses/1/truncation_bound", json!("1"));
+    expect_err(
+        &check_defects_witnesses(&broken),
+        "a changed truncation bound",
+    )?;
+    let spins = doc
+        .pointer("/defect_witnesses/0/spins")
+        .and_then(Value::as_array)
+        .ok_or("no spins")?;
+    let mut flipped = spins.clone();
+    let first = flipped.first_mut().ok_or("no spin")?;
+    *first = json!(-first.as_i64().ok_or("not an integer")?);
+    let broken = mutate(&doc, "/defect_witnesses/0/spins", Value::Array(flipped));
+    expect_err(&check_defects_witnesses(&broken), "a changed spin")
+}
+
+#[test]
+fn a_changed_defects_route_fails_the_check() -> Result<(), String> {
+    let doc = defects_doc()?;
+    let broken = mutate(&doc, "/routes/0/error", json!("Endpoints"));
+    expect_err(
+        &check_defects_routes(&broken),
+        "a valid route given an error",
+    )?;
+    let broken = mutate(&doc, "/routes/1/error", Value::Null);
+    expect_err(
+        &check_defects_routes(&broken),
+        "an invalid route given no error",
+    )?;
+    let broken = mutate(&doc, "/routes/0/feasible", json!(false));
+    expect_err(&check_defects_routes(&broken), "a changed feasible flag")?;
+    let broken = mutate(&doc, "/routes/0/route/0/0", json!(0));
+    expect_err(&check_defects_routes(&broken), "a changed path")
+}
+
+#[test]
+fn a_changed_defects_table_fails_the_check() -> Result<(), String> {
+    let doc = defects_doc()?;
+    let was = str_field(doc.pointer("/table/0").ok_or("no table")?, "commitment")?;
+    let broken = mutate(&doc, "/table/0/commitment", json!(flip_last_hex_digit(was)));
+    expect_err(&check_defects_tables(&broken), "a changed commitment")?;
+    let broken = mutate(&doc, "/table/1/dropped", json!(1));
+    expect_err(&check_defects_tables(&broken), "a changed dropped sum")?;
+    for (pointer, value) in [
+        ("/table/1/entries", json!(1)),
+        ("/table/1/kept", json!(1)),
+        ("/table/1/kept_magnitude", json!(1)),
+        ("/table/1/truncation_bound", json!("1")),
+    ] {
+        let broken = mutate(&doc, pointer, value);
+        expect_err(&check_defects_tables(&broken), pointer)?;
+    }
+    let broken = mutate(&doc, "/table/1/weight", json!(2));
+    expect_err(&check_defects_tables(&broken), "a changed weight")
 }
 
 // ---- topology files (vectors/topologies/) ----

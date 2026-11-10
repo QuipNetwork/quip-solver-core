@@ -21,13 +21,17 @@ use alloc::vec::Vec;
 
 use crate::descriptor::{Contract, FieldSpec, Params, SizeBounds, TopologyStats, ValueType};
 use crate::family::{BaseTopology, Construction, InstanceBody, Streams};
-use crate::ice::build::{region, sections, Reader};
-use crate::ice::topology::{zephyr_coordinates, zephyr_coupler};
+use crate::ice::build::{region, sections};
 use crate::ice::twisted_dimer::Recipe;
 use crate::instance::{Instance, InstanceLimits};
+use crate::native::{
+    charges_payload, dense_links, incidence_payload, interior_vertices, is_zephyr_subgraph,
+    labels_of, parse_charges, parse_incidence, place, DenseLinks, Native, KIND_CHARGES,
+    KIND_INCIDENCE,
+};
 use crate::rng::shuffle;
-use crate::routing::{best_choice, unsigned, Cell, Grid, Shape};
-use crate::square::{charges, check_request, Axis, Boundary, Request, SquareLattice};
+use crate::routing::unsigned;
+use crate::square::{charges, check_request, Boundary, Request, SquareLattice};
 use crate::Code;
 
 /// The parameters of `quip/polariton-static@1`.
@@ -58,18 +62,8 @@ pub const POLARITON_SCHEMA: &[FieldSpec] = &[
     },
 ];
 
-/// Tag of the Zephyr grid size parameter.
-const TAG_M: u16 = 1;
-/// Tag of the Zephyr tile size parameter.
-const TAG_T: u16 = 2;
-/// Tag of the lattice side parameter.
-const TAG_SIDE: u16 = 3;
 /// Tag of the parameter for the number of `+2` labels, and of `-2` labels.
 const TAG_PAIRS: u16 = 4;
-/// Metadata kind of the vertex labels.
-const KIND_CHARGES: u16 = 4;
-/// Metadata kind of the window and the link positions.
-const KIND_INCIDENCE: u16 = 5;
 
 /// The stream that shuffles the interior vertices.
 const CHARGES: &str = "charges";
@@ -78,8 +72,6 @@ const CHARGES: &str = "charges";
 const PENALTY: i64 = 250;
 /// The number of charge draws before the salt gives code 14.
 const CHARGE_TRIES: usize = 4;
-/// The label value of a free vertex in the metadata.
-const FREE: i8 = 127;
 /// The largest degree of a link in the instance.
 const LINK_DEGREE: u64 = 6;
 
@@ -154,46 +146,24 @@ pub const POLARITON_RECIPES: [Recipe; 3] = [
 /// The parameters of a revision.
 #[derive(Clone, Copy)]
 struct Config {
-    m: u16,
-    t: u8,
-    side: u16,
+    native: Native,
     pairs: usize,
 }
 
 impl Config {
     fn of(params: &Params<'_>) -> Option<Self> {
-        let m = u16::try_from(unsigned(params, TAG_M)?).ok()?;
-        let t = u8::try_from(unsigned(params, TAG_T)?).ok()?;
-        let side = u16::try_from(unsigned(params, TAG_SIDE)?).ok()?;
+        let native = Native::of(params)?;
         let pairs = usize::try_from(unsigned(params, TAG_PAIRS)?).ok()?;
-        (m >= 1 && t >= 1 && side >= 2).then_some(Self { m, t, side, pairs })
-    }
-
-    /// The Zephyr cell grid side `2m - 1`.
-    fn grid_side(self) -> Option<u16> {
-        self.m.checked_mul(2)?.checked_sub(1)
-    }
-
-    /// The number of interior vertices, `(L - 1)^2`.
-    fn interior(self) -> usize {
-        let inner = usize::from(self.side.saturating_sub(1));
-        inner.saturating_mul(inner)
-    }
-
-    /// The links of the lattice, `2 L (L + 1)`.
-    fn links(self) -> usize {
-        let l = usize::from(self.side);
-        l.saturating_mul(l.saturating_add(1)).saturating_mul(2)
+        Some(Self { native, pairs })
     }
 
     /// Whether the charge counts and the lattice fit the Zephyr grid.
     fn fits(self) -> bool {
-        let wide = self.side.checked_add(1).zip(self.grid_side());
-        wide.is_some_and(|(cells, grid)| cells <= grid)
+        self.native.fits_grid()
             && self
                 .pairs
                 .checked_mul(2)
-                .is_some_and(|n| n <= self.interior())
+                .is_some_and(|n| n <= self.native.interior())
     }
 }
 
@@ -205,9 +175,9 @@ fn polariton_size_bounds(params: &Params<'_>, stats: &TopologyStats) -> Result<S
     let overflow = Code::BoundsExceeded;
     let nodes = stats
         .n_nodes
-        .min(u64::try_from(config.links()).map_err(|_| overflow)?);
+        .min(u64::try_from(config.native.links()).map_err(|_| overflow)?);
     let edges = stats.n_edges.min(
-        u64::try_from(config.interior())
+        u64::try_from(config.native.interior())
             .map_err(|_| overflow)?
             .checked_mul(6)
             .ok_or(overflow)?,
@@ -223,121 +193,6 @@ fn polariton_size_bounds(params: &Params<'_>, stats: &TopologyStats) -> Result<S
     })
 }
 
-/// The lines of every row and column that keep the most cells alive.
-/// `rows[r]` and `cols[c]` are indexed by the coordinate, so entry 0 is
-/// unused.
-fn layout(grid: &Grid) -> Option<(Vec<u8>, Vec<u8>)> {
-    let side = grid.shape.side;
-    let lines: Vec<u8> = (0..grid.shape.t).collect();
-    let mut rows = vec![0u8; usize::from(side) + 1];
-    let mut cols = rows.clone();
-    loop {
-        let mut changed = false;
-        for r in 1..=side {
-            let score = |k2: u8| -> usize {
-                (1..=side)
-                    .filter(|&c| {
-                        cols.get(usize::from(c))
-                            .is_some_and(|&k| grid.has_k4((c, r), k, k2))
-                    })
-                    .count()
-            };
-            let current = *rows.get(usize::from(r))?;
-            if let Some(best) = best_choice(&lines, score(current), score) {
-                *rows.get_mut(usize::from(r))? = best;
-                changed = true;
-            }
-        }
-        for c in 1..=side {
-            let score = |k: u8| -> usize {
-                (1..=side)
-                    .filter(|&r| {
-                        rows.get(usize::from(r))
-                            .is_some_and(|&k2| grid.has_k4((c, r), k, k2))
-                    })
-                    .count()
-            };
-            let current = *cols.get(usize::from(c))?;
-            if let Some(best) = best_choice(&lines, score(current), score) {
-                *cols.get_mut(usize::from(c))? = best;
-                changed = true;
-            }
-        }
-        if !changed {
-            return Some((rows, cols));
-        }
-    }
-}
-
-/// The lines and the window origin of a topology.
-struct Placement {
-    rows: Vec<u8>,
-    cols: Vec<u8>,
-    c0: u16,
-    r0: u16,
-}
-
-/// The layout and the first window of `(L + 1)^2` alive cells, in order of
-/// `c0`, then `r0`.
-fn place(config: Config, topology: &BaseTopology) -> Option<(Grid, Placement)> {
-    let side = config.grid_side()?;
-    let shape = Shape {
-        m: config.m,
-        t: config.t,
-        // The divisor belongs to the routing family. Nothing here reads it.
-        divisor: 1,
-        side,
-    };
-    let grid = Grid::new(shape, topology);
-    let (rows, cols) = layout(&grid)?;
-    let width = usize::from(side);
-    let mut alive = vec![false; width.checked_mul(width)?];
-    for c in 1..=side {
-        for r in 1..=side {
-            let cell: Cell = (c, r);
-            let k = *cols.get(usize::from(c))?;
-            let k2 = *rows.get(usize::from(r))?;
-            let at = usize::from(c - 1) * width + usize::from(r - 1);
-            *alive.get_mut(at)? = grid.has_k4(cell, k, k2);
-        }
-    }
-    let is_alive = |c: u16, r: u16| {
-        let at = usize::from(c - 1) * width + usize::from(r - 1);
-        alive.get(at).copied().unwrap_or(false)
-    };
-    let last = side.checked_sub(config.side)?;
-    for c0 in 1..=last {
-        for r0 in 1..=last {
-            let whole =
-                (0..=config.side).all(|x| (0..=config.side).all(|y| is_alive(c0 + x, r0 + y)));
-            if whole {
-                return Some((grid, Placement { rows, cols, c0, r0 }));
-            }
-        }
-    }
-    None
-}
-
-/// The topology positions of the link qubits, in the link order of the
-/// lattice. The link along `+x` is the right horizontal corner of its tail
-/// cell and the link along `+y` is the high vertical corner.
-fn link_qubits(lattice: &SquareLattice, grid: &Grid, placement: &Placement) -> Option<Vec<u32>> {
-    let width = u32::from(lattice.side()).checked_add(1)?;
-    (0..lattice.link_count())
-        .map(|e| {
-            let link = lattice.link(e)?;
-            let x = i64::from(link.tail % width);
-            let y = i64::from(link.tail / width);
-            let c = i64::from(placement.c0) + x;
-            let r = i64::from(placement.r0) + y;
-            match link.axis {
-                Axis::X => grid.seg(1, r, *placement.rows.get(usize::try_from(r).ok()?)?, c),
-                Axis::Y => grid.seg(0, c, *placement.cols.get(usize::try_from(c).ok()?)?, r),
-            }
-        })
-        .collect()
-}
-
 /// Admission: the topology is a subgraph of the Zephyr lattice named by the
 /// parameters, the charge counts fit the interior, the lattice fits the cell
 /// grid, and some window is fully alive (code 12 otherwise).
@@ -345,43 +200,9 @@ fn check_topology(params: &Params<'_>, topology: &BaseTopology) -> bool {
     let Some(config) = Config::of(params) else {
         return false;
     };
-    let ids = topology.node_ids();
-    let zephyr_nodes = ids
-        .iter()
-        .all(|&id| zephyr_coordinates(config.m, config.t, id).is_some());
-    let zephyr_edges = topology.edges().iter().all(|&(u, v)| {
-        let at = |pos: u32| usize::try_from(pos).ok().and_then(|pos| ids.get(pos));
-        matches!((at(u), at(v)), (Some(&a), Some(&b)) if zephyr_coupler(config.m, config.t, a, b))
-    });
-    zephyr_nodes && zephyr_edges && config.fits() && place(config, topology).is_some()
-}
-
-/// The charge labels of one draw: `pairs` vertices of `+2`, then `pairs` of
-/// `-2`, then `0` on the rest of `order`. Every other vertex is free.
-fn labels_of(order: &[u32], pairs: usize, vertices: usize) -> Vec<Option<i8>> {
-    let mut labels = vec![None; vertices];
-    for (rank, &v) in order.iter().enumerate() {
-        let label = if rank < pairs {
-            2
-        } else if rank < pairs.saturating_mul(2) {
-            -2
-        } else {
-            0
-        };
-        if let Some(slot) = usize::try_from(v).ok().and_then(|v| labels.get_mut(v)) {
-            *slot = Some(label);
-        }
-    }
-    labels
-}
-
-/// The interior vertices of the open lattice, in vertex order.
-fn interior_vertices(side: u16) -> Vec<u32> {
-    let side = u32::from(side);
-    let width = side.saturating_add(1);
-    (1..side)
-        .flat_map(|y| (1..side).map(move |x| y * width + x))
-        .collect()
+    is_zephyr_subgraph(config.native, topology)
+        && config.fits()
+        && place(config.native, topology).is_some()
 }
 
 /// Draw the labels: shuffle the interior list on the `charges` stream and
@@ -491,18 +312,10 @@ fn metadata_region(
     r0: u16,
     positions: &[u32],
 ) -> Result<Vec<u8>, Code> {
-    let mut charges_payload = side.to_le_bytes().to_vec();
-    charges_payload.extend(
-        labels
-            .iter()
-            .map(|label| label.unwrap_or(FREE).to_le_bytes()[0]),
-    );
-    let mut incidence = c0.to_le_bytes().to_vec();
-    incidence.extend_from_slice(&r0.to_le_bytes());
-    for position in positions {
-        incidence.extend_from_slice(&position.to_le_bytes());
-    }
-    region(&[(KIND_CHARGES, charges_payload), (KIND_INCIDENCE, incidence)])
+    region(&[
+        (KIND_CHARGES, charges_payload(side, labels)),
+        (KIND_INCIDENCE, incidence_payload(c0, r0, positions)),
+    ])
 }
 
 fn generate(
@@ -515,31 +328,22 @@ fn generate(
     if !config.fits() {
         return Err(defect);
     }
-    let lattice = SquareLattice::new(config.side, Boundary::Open).map_err(|_| defect)?;
-    let (grid, placement) = place(config, topology).ok_or(defect)?;
-    let qubits = link_qubits(&lattice, &grid, &placement).ok_or(defect)?;
-    let mut sorted = qubits.clone();
-    sorted.sort_unstable();
-    if sorted
-        .windows(2)
-        .any(|pair| matches!(pair, [a, b] if a == b))
-    {
-        return Err(defect);
-    }
-    let mut positions = Vec::with_capacity(qubits.len());
-    for qubit in &qubits {
-        let at = sorted.binary_search(qubit).map_err(|_| defect)?;
-        positions.push(u32::try_from(at).map_err(|_| Code::BoundsExceeded)?);
-    }
-    let mut node_ids = Vec::with_capacity(sorted.len());
-    for &qubit in &sorted {
-        let at = usize::try_from(qubit).map_err(|_| defect)?;
-        node_ids.push(*topology.node_ids().get(at).ok_or(defect)?);
-    }
+    let lattice = SquareLattice::new(config.native.side, Boundary::Open).map_err(|_| defect)?;
+    let (grid, placement) = place(config.native, topology).ok_or(defect)?;
+    let DenseLinks {
+        node_ids,
+        positions,
+    } = dense_links(&lattice, &grid, &placement, topology)?;
     let labels = draw_labels(streams, &lattice, config.pairs)?;
     let built =
         energy(&lattice, &labels, &positions, node_ids.len()).ok_or(Code::BoundsExceeded)?;
-    let metadata = metadata_region(config.side, &labels, placement.c0, placement.r0, &positions)?;
+    let metadata = metadata_region(
+        config.native.side,
+        &labels,
+        placement.c0,
+        placement.r0,
+        &positions,
+    )?;
     Ok(InstanceBody {
         node_ids,
         edges: built.edges,
@@ -562,69 +366,14 @@ struct Parsed {
 /// [`check_metadata`] holds.
 fn parse(params: &Params<'_>, instance: &Instance) -> Option<Parsed> {
     let config = Config::of(params)?;
-    let lattice = SquareLattice::new(config.side, Boundary::Open).ok()?;
+    let lattice = SquareLattice::new(config.native.side, Boundary::Open).ok()?;
     let [payload_charges, payload_incidence] =
         sections(instance.metadata(), [KIND_CHARGES, KIND_INCIDENCE])?;
 
-    let mut reader = Reader::new(payload_charges);
-    if reader.u16()? != config.side {
-        return None;
-    }
-    let raw = reader.rest();
-    if raw.len() != usize::try_from(lattice.vertex_count()).ok()? {
-        return None;
-    }
-    let width = usize::from(config.side).checked_add(1)?;
-    let mut labels = Vec::with_capacity(raw.len());
-    let (mut plus, mut minus) = (0usize, 0usize);
-    for (v, &byte) in raw.iter().enumerate() {
-        let value = i8::from_le_bytes([byte]);
-        let (x, y) = (v % width, v / width);
-        let boundary =
-            x == 0 || y == 0 || x == usize::from(config.side) || y == usize::from(config.side);
-        if boundary {
-            if value != FREE {
-                return None;
-            }
-            labels.push(None);
-            continue;
-        }
-        match value {
-            2 => plus = plus.checked_add(1)?,
-            -2 => minus = minus.checked_add(1)?,
-            0 => {}
-            _ => return None,
-        }
-        labels.push(Some(value));
-    }
-    if plus != config.pairs || minus != config.pairs {
-        return None;
-    }
-
-    let mut reader = Reader::new(payload_incidence);
-    let (c0, r0) = (reader.u16()?, reader.u16()?);
-    let grid = config.grid_side()?;
-    if c0 < 1
-        || r0 < 1
-        || c0.checked_add(config.side)? > grid
-        || r0.checked_add(config.side)? > grid
-    {
-        return None;
-    }
-    let links = config.links();
-    if reader.rest().len() != links.checked_mul(4)? || instance.node_ids().len() != links {
-        return None;
-    }
-    let mut seen = vec![false; links];
-    let mut positions = Vec::with_capacity(links);
-    for _ in 0..links {
-        let position = reader.u32()?;
-        let slot = seen.get_mut(usize::try_from(position).ok()?)?;
-        if core::mem::replace(slot, true) {
-            return None;
-        }
-        positions.push(position);
-    }
+    let labels = parse_charges(payload_charges, config.native, &lattice, config.pairs)?;
+    let (_, _, positions) =
+        parse_incidence(payload_incidence, config.native, instance.node_ids().len())?;
+    let links = config.native.links();
 
     let rebuilt = energy(&lattice, &labels, &positions, links)?;
     let same = rebuilt.h == instance.h()

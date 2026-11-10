@@ -119,6 +119,21 @@ POLARITON = Schema(
     ),
 )
 
+DEFECTS = Schema(
+    "quip/defects-static",
+    1,
+    (
+        Field(1, "zephyr_m", "u16", 1, 1, 32),
+        Field(2, "zephyr_t", "u8", 1, 1, 8),
+        Field(3, "side", "u16", 1, 2, 3),
+        Field(4, "pairs", "u16", 1, 0, 2),
+        Field(5, "obstacles", "u16", 1, 0, 4),
+        Field(6, "pins", "u16", 1, 0, 12),
+        Field(7, "field_x", "i32", 1, -1000, 1000),
+        Field(8, "field_y", "i32", 1, -1000, 1000),
+    ),
+)
+
 ALL_TYPES = Schema(
     "example/all-types",
     1,

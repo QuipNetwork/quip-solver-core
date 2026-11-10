@@ -36,6 +36,7 @@ def _layered_doc() -> dict:
         pytest.param(build.build_legacy, build.LEGACY_PATH, id="legacy"),
         pytest.param(build.build_layered, build.LAYERED_PATH, id="layered"),
         pytest.param(build.build_polariton, build.POLARITON_PATH, id="polariton"),
+        pytest.param(build.build_defects, build.DEFECTS_PATH, id="defects"),
         pytest.param(
             build.build_two_commodity, build.TWO_COMMODITY_PATH, id="two-commodity"
         ),
@@ -78,6 +79,10 @@ def _polariton_doc() -> dict:
     return json.loads(build.POLARITON_PATH.read_text())
 
 
+def _defects_doc() -> dict:
+    return json.loads(build.DEFECTS_PATH.read_text())
+
+
 def _registry_entry(name: str) -> dict:
     registry = json.loads((build.FAMILIES_DIR / "registry.json").read_text())[
         "registry"
@@ -93,6 +98,12 @@ def _registry_entry(name: str) -> dict:
             _polariton_doc,
             ("cases", "witnesses", "polariton_recipes", "admission"),
             id="polariton",
+        ),
+        pytest.param(
+            "quip/defects-static@1",
+            _defects_doc,
+            ("cases", "defect_witnesses", "routes", "table", "admission"),
+            id="defects",
         ),
         pytest.param(
             "quip/two-commodity-routing@1",
@@ -134,6 +145,7 @@ def test_evidence_matches_the_registry(name, load, sections):
     ("name", "load"),
     [
         pytest.param("quip/polariton-static@1", _polariton_doc, id="polariton"),
+        pytest.param("quip/defects-static@1", _defects_doc, id="defects"),
         pytest.param("quip/two-commodity-routing@1", _routing_doc, id="two-commodity"),
         pytest.param("quip/charged-ice@1", _charge_doc, id="charged-ice"),
         pytest.param("quip/ice-fields@1", _fields_doc, id="ice-fields"),
@@ -275,6 +287,7 @@ def test_every_json_topology_reference_names_an_indexed_file():
         _fields_doc,
         _routing_doc,
         _polariton_doc,
+        _defects_doc,
     ):
         walk(load())
     assert refs
@@ -437,6 +450,7 @@ def test_every_provided_id_has_a_case():
         _fields_doc,
         _routing_doc,
         _polariton_doc,
+        _defects_doc,
     ],
 )
 def test_sources_hash_spec_and_oracle(load):
@@ -466,3 +480,57 @@ def test_layered_evidence_is_sc7():
     for tag in tagged:
         assert tag.startswith("SC-7:")
         assert tag.removeprefix("SC-7:") in table
+
+
+def test_defects_contract_states_the_table_numbers_of_the_vectors():
+    text = (build.ROOT / "docs/families/quip-defects-static-1.md").read_text()
+    l3 = next(t for t in _defects_doc()["table"] if t["case"] == "defects-l3")
+    assert l3["kept"] == 52
+    assert f"= {l3['kept_magnitude']}" in text
+    assert f"`U = {l3['weight']}`" in text
+
+
+def test_defects_routes_and_witnesses_cover_the_contract():
+    doc = _defects_doc()
+    errors = [r["error"] for r in doc["routes"]]
+    assert errors[:5] == [None, "Endpoints", "Difference", "Obstacle", "RepeatedVertex"]
+    # The two-fault routes name every error that a route can hold, in order.
+    assert errors[5:] == [
+        "Spins",
+        "Shape",
+        "Shape",
+        "NotAdjacent",
+        "NotAdjacent",
+        "RepeatedVertex",
+        "RepeatedVertex",
+        "RepeatedLink",
+        "Obstacle",
+        "Obstacle",
+        "Endpoints",
+        "Endpoints",
+    ]
+    for case in doc["cases"]:
+        kinds = {
+            w["name"].removeprefix(case["name"] + "-")
+            for w in doc["defect_witnesses"]
+            if w["case"] == case["name"]
+        }
+        assert kinds == {"feasible", "infeasible", "pin-violating"}
+    assert {w["physical_status"] for w in doc["defect_witnesses"]} == {
+        "InsufficientPhysicalEvidence"
+    }
+
+
+def test_defects_table_entries_match_the_oracle_table():
+    from family_oracle import defects
+
+    for row in _defects_doc()["table"]:
+        case = next(c for c in _defects_doc()["cases"] if c["name"] == row["case"])
+        side = _decoded_params(case["params_hex"])[3]
+        table = defects.table_of(side)
+        assert row["entries"] == len(table.entries)
+        assert row["kept"] == len(table.kept)
+        assert row["kept_magnitude"] == table.kept_magnitude
+        assert row["dropped"] == table.dropped
+        assert row["truncation_bound"] == str(table.truncation_bound)
+        assert row["commitment"] == table.commitment().hex()

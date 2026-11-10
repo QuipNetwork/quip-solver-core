@@ -1596,3 +1596,259 @@ def test_polariton_dead_cell_moves_the_window_and_the_retry_case_retries():
     by_name = {c["name"]: c for c in cases}
     assert {s["skip_code"] for s in by_name["polariton-retry"]["skipped"]} == {14}
     assert len(witnesses) == 2 * len(cases)
+
+
+# ---- quip/defects-static ----
+
+
+def _defects(m, t, side, pairs, obstacles, pins, fx, fy, nodes, edges, nonce=None):
+    from family_oracle import defects
+
+    params = build._defects_params(m, t, side, pairs, obstacles, pins, fx, fy)
+    return defects.generate(
+        b"quip/defects-static", 1, params, nodes, edges, nonce or bytes(range(32))
+    )
+
+
+def test_defects_energy_is_physical_plus_penalties_for_every_l2_state():
+    from family_oracle import defects
+
+    code, inst = _defects(2, 4, 2, 0, 0, 2, 300, -200, *ice.lattice(2, 4))
+    assert code == 0
+    weight = inst["weight"]
+    assert weight % 2 == 0
+    feasible_energies, infeasible_energies = [], []
+    for bits in range(1 << 12):
+        spins = defects.node_spins(
+            inst, [1 if bits >> e & 1 else -1 for e in range(12)]
+        )
+        seen = defects.observables(inst, spins)
+        gaps = [
+            seen["charges"][v] - q
+            for v, q in enumerate(inst["labels"])
+            if q is not None
+        ]
+        penalty = (weight // 2) * sum(g * g for g in gaps)
+        penalty += 2 * weight * seen["violated_pins"]
+        encoded = defects.encoded_energy(inst, spins)
+        assert encoded == seen["physical_energy"] + penalty
+        is_feasible = defects.feasible(inst, spins)
+        assert is_feasible == (penalty == 0)
+        (feasible_energies if is_feasible else infeasible_energies).append(encoded)
+    assert feasible_energies
+    assert max(feasible_energies) < min(infeasible_energies)
+
+
+def test_defects_table_numbers():
+    from family_oracle import defects
+
+    for side, kept, magnitude, dropped, bound in (
+        (2, 22, 9980, 1000, 904),
+        (3, 52, 23080, 2250, 3646),
+    ):
+        table = defects.table_of(side)
+        assert len(table.kept) == kept
+        assert table.kept_magnitude == magnitude
+        assert table.dropped == dropped
+        assert table.truncation_bound == bound
+    lattice = defects.Lattice(3)
+    assert defects.penalty_weight(defects.table_of(3), lattice, 1000, -1000) == 47082
+    assert defects.penalty_weight(defects.table_of(3), lattice, 0, 0) == 23082
+
+
+def test_defects_quantize_rounds_ties_away_from_zero():
+    from family_oracle import defects
+
+    # K = 4 gives K^(5/2) = 32, so x = 16 is the tie 0.5 and x = -16 is -0.5.
+    assert defects._quantize(16, 4) == 1
+    assert defects._quantize(-16, 4) == -1
+    assert defects._quantize(15, 4) == 0
+    assert defects._quantize(48, 4) == 2
+    assert defects._quantize(47, 4) == 1
+
+
+def test_defects_admission_codes():
+    from family_oracle import defects
+
+    z34 = ice.lattice(3, 4)
+
+    def code(*values, topology=z34):
+        return defects.admission_code(build._defects_params(*values), *topology)
+
+    base = (3, 4, 3, 1, 1, 2, 1000, -1000)
+    assert code(*base) is None
+    assert code(3, 4, 4, 0, 0, 0, 0, 0) == 9
+    assert code(3, 4, 3, 3, 1, 2, 0, 0) == 9
+    assert code(3, 4, 3, 2, 1, 2, 0, 0) == 12
+    assert code(3, 4, 3, 1, 1, 13, 0, 0) == 9
+    assert code(2, 4, 2, 0, 0, 9, 0, 0, topology=ice.lattice(2, 4)) == 12
+    assert code(2, 4, 3, 0, 0, 0, 0, 0, topology=ice.lattice(2, 4)) == 12
+    assert defects.admission_code(b"\x01", *z34) == 7
+    assert code(3, 1, 2, 0, 0, 0, 0, 0, topology=build._polariton_no_window()) == 12
+
+
+def test_defects_route_checks_run_in_order_and_never_touch_feasible():
+    from family_oracle import defects
+
+    doc = build.build_defects()
+    names = [r["name"].removeprefix("defects-l3-route-") for r in doc["routes"]]
+    assert names[:5] == [
+        "valid",
+        "swapped-endpoints",
+        "extra-loop",
+        "obstacle-crossing",
+        "repeated-vertex",
+    ]
+    assert len(names) == 17
+    case = next(c for c in doc["cases"] if c["name"] == "defects-l3")
+    assert len(case["instances"]) > 0
+    feasibility = {r["name"]: r["feasible"] for r in doc["routes"]}
+    assert feasibility["defects-l3-route-valid"] is True
+    assert feasibility["defects-l3-route-obstacle-crossing"] is True
+    assert feasibility["defects-l3-route-extra-loop"] is False
+    nodes, edges = ice.lattice(3, 4)
+    _, inst = _defects(3, 4, 3, 1, 1, 2, 1000, -1000, nodes, edges, bytes(range(32)))
+    spins = [1] * len(inst["node_ids"])
+    assert defects.check_route(inst, spins[1:], [[0, 1]]) == "Spins"
+    assert defects.check_route(inst, spins, [[5]]) == "Shape"
+    assert defects.check_route(inst, spins, [[5, 5]]) == "NotAdjacent"
+    assert defects.check_route(inst, spins, []) == "Endpoints"
+
+
+def _defects_l3_instance():
+    nodes, edges = ice.lattice(3, 4)
+    code, inst = _defects(3, 4, 3, 1, 1, 2, 1000, -1000, nodes, edges)
+    assert code == 0
+    return inst
+
+
+def test_defects_metadata_is_checked_before_a_route_a_state_or_the_observables():
+    from family_oracle import defects
+
+    inst = _defects_l3_instance()
+    good = defects.witnesses(inst)["feasible"]
+    assert defects.feasible(inst, good)
+    assert defects.observables(inst, good) is not None
+    broken_metadata = [
+        b"",
+        inst["metadata"][:-1],
+        inst["metadata"] + b"\x00",
+        b"\x03\x00" + inst["metadata"][2:][::-1],
+    ]
+    # One mutation of each kind of field: the label count, a link position, the
+    # weight, the dropped sum, the commitment, an obstacle, and a pin.
+    for at in (
+        2 + 6 + 2 + 5,
+        2 + 6 + 18 + 6 + 4,
+        2 + 24 + 106 + 6,
+        2 + 24 + 106 + 14,
+        2 + 24 + 106 + 6 + 16 + 4,
+        len(inst["metadata"]) - 1,
+        len(inst["metadata"]) - 9,
+    ):
+        mutated = bytearray(inst["metadata"])
+        mutated[at] ^= 1
+        broken_metadata.append(bytes(mutated))
+    for metadata in broken_metadata:
+        bad = {**inst, "metadata": metadata}
+        assert defects.check_route(bad, good, [[5, 9]]) == "Metadata"
+        assert not defects.feasible(bad, good)
+        assert defects.observables(bad, good) is None
+    # A changed energy is also a metadata fault.
+    bad = {**inst, "h": [inst["h"][0] + 2, *inst["h"][1:]]}
+    assert defects.check_route(bad, good, []) == "Metadata"
+
+
+def test_defects_spins_must_be_one_plus_or_minus_one_per_node():
+    from family_oracle import defects
+
+    inst = _defects_l3_instance()
+    good = defects.witnesses(inst)["feasible"]
+    zero = [0, *good[1:]]
+    for spins in (good[1:], [*good, 1], zero):
+        assert defects.check_route(inst, spins, [[5, 9]]) == "Spins"
+        assert not defects.feasible(inst, spins)
+        assert defects.observables(inst, spins) is None
+    # Metadata comes before spins.
+    assert defects.check_route({**inst, "metadata": b""}, zero, [[5]]) == "Metadata"
+
+
+def test_defects_route_with_two_faults_reports_the_first_in_the_contract_order():
+    from family_oracle import defects
+
+    inst = _defects_l3_instance()
+    reference = defects.state_of_flips(inst, [])
+    obstacle = inst["obstacles"][0]
+    near = defects.neighbours(defects.Lattice(3), obstacle)[0]
+    cases = [
+        ([[5, 6, 5]], "RepeatedVertex"),
+        ([[5, 10, 99]], "Shape"),
+        ([[5, 6, 5, 10]], "NotAdjacent"),
+        ([[obstacle, near], [near, obstacle]], "RepeatedLink"),
+        ([[obstacle, near]], "Obstacle"),
+        ([[5, 10, 5]], "NotAdjacent"),
+    ]
+    for route, want in cases:
+        assert defects.check_route(inst, reference, route) == want, route
+    # Each later fault alone gives its own error.
+    assert defects.check_route(inst, reference, [[5, 6]]) == "Endpoints"
+    assert defects.check_route(inst, reference, []) == "Endpoints"
+
+
+def test_defects_route_is_judged_against_the_parsed_positions():
+    from family_oracle import defects
+
+    inst = _defects_l3_instance()
+    lattice = defects.Lattice(3)
+    plus, minus = inst["labels"].index(2), inst["labels"].index(-2)
+    obstacle = inst["obstacles"][0]
+    route = defects.simple_paths(lattice, plus, minus, {obstacle})[0]
+    links = defects.route_links(inst, [route])
+    positions = list(inst["positions"])
+    a = links[0]
+    b = next(e for e in range(len(positions)) if e not in links)
+    positions[a], positions[b] = positions[b], positions[a]
+    table = defects.table_of(3)
+    fields = inst["fields"]
+    h, edges, j, offset = defects.energy(
+        lattice,
+        inst["labels"],
+        inst["pins"],
+        table,
+        positions,
+        len(positions),
+        fields,
+        inst["weight"],
+    )
+    meta = defects.metadata(
+        3,
+        inst["labels"],
+        inst["window"],
+        positions,
+        inst["weight"],
+        table,
+        inst["obstacles"],
+        inst["pins"],
+    )
+    # A valid reindexing: the metadata and the energy agree, the cache is stale.
+    moved = {
+        **inst,
+        "h": h,
+        "edges": edges,
+        "j": j,
+        "offset_milli": offset,
+        "metadata": meta,
+    }
+    assert defects.parse_metadata(moved)["positions"] == positions
+    flat = [1] * len(positions)
+    for e in links:
+        flat[e] = -1
+    by_parsed = [0] * len(positions)
+    for e, p in enumerate(positions):
+        by_parsed[p] = flat[e]
+    by_cache = [0] * len(positions)
+    for e, p in enumerate(inst["positions"]):
+        by_cache[p] = flat[e]
+    assert defects.check_route(moved, by_parsed, [route]) is None
+    assert by_cache != by_parsed
+    assert defects.check_route(moved, by_cache, [route]) == "Difference"
