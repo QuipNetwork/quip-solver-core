@@ -16,8 +16,12 @@
 
 use std::collections::BTreeSet;
 
-use ising_generators::defects::{DEFECTS, DEFECTS_SCHEMA, DEFECTS_V1};
-use ising_generators::dipolar::{quantize, Axis, Calibration, Entry, Geometry, Island, Table};
+use ising_generators::defects::{
+    check_route, defect_observables, RouteError, DEFECTS, DEFECTS_SCHEMA, DEFECTS_V1,
+};
+use ising_generators::dipolar::{
+    quantize, Axis, Calibration, Entry, Geometry, Island, PhysicalStatus, Table,
+};
 use ising_generators::family::{feasible, generate_instance, BaseTopology, SaltFault, Streams};
 use ising_generators::ice::zephyr_lattice;
 use ising_generators::instance::{Instance, InstanceLimits, InstanceParts};
@@ -1357,4 +1361,451 @@ fn limits_are_the_smallest_that_hold() {
     assert_eq!(max_coefficient, limits.max_coefficient());
     assert_eq!(max_offset, limits.max_offset());
     assert!(max_edges <= limits.max_edges() as usize);
+}
+
+// ---- route and observables ----
+
+/// The first built instance of `case` whose metadata satisfies `want`.
+fn find(case: Case, want: impl Fn(&Meta) -> bool) -> (Instance, Meta) {
+    for nonce in 0..4000 {
+        let instance = build(case, nonce);
+        let meta = decode("find", &instance);
+        if want(&meta) {
+            return (instance, meta);
+        }
+    }
+    panic!("{case:?}: no nonce gives the wanted draw");
+}
+
+/// The link that joins vertices `u` and `v` of the lattice.
+fn link_between(lattice: &SquareLattice, u: u32, v: u32) -> u32 {
+    lattice
+        .incident(u)
+        .iter()
+        .map(|&(e, _)| e)
+        .find(|&e| {
+            let link = lattice.link(e).expect("link");
+            link.tail == v || link.head == v
+        })
+        .expect("adjacent vertices")
+}
+
+/// The links of the paths.
+fn path_links(lattice: &SquareLattice, route: &[Vec<u32>]) -> Vec<u32> {
+    route
+        .iter()
+        .flat_map(|path| path.windows(2).map(|w| link_between(lattice, w[0], w[1])))
+        .collect()
+}
+
+/// The reference state with the given links flipped to `-1`, one spin per
+/// instance node.
+fn flipped(meta: &Meta, links: &[u32]) -> Vec<i8> {
+    let mut spins = vec![1i8; meta.positions.len()];
+    for &e in links {
+        spins[meta.positions[e as usize] as usize] = -1;
+    }
+    spins
+}
+
+/// The vertices of the 3 by 3 lattice that the tests name: `(x, y)` is
+/// `4 y + x`. The interior is 5, 6, 9, and 10.
+const BOTTOM_LEFT: u32 = 5;
+const BOTTOM_RIGHT: u32 = 6;
+const TOP_LEFT: u32 = 9;
+const TOP_RIGHT: u32 = 10;
+
+/// One pair with `+2` at the bottom left and `-2` at the top right, one
+/// obstacle on a zero vertex, and no pins. Returns the instance, its
+/// metadata, the open path, and the blocked path.
+fn diagonal() -> (Instance, Meta, Vec<u32>, Vec<u32>) {
+    let case = Case { pins: 0, ..L3 };
+    let (instance, meta) = find(case, |m| {
+        m.labels[BOTTOM_LEFT as usize] == 2 && m.labels[TOP_RIGHT as usize] == -2
+    });
+    let obstacle = meta.obstacles[0];
+    assert!(obstacle == BOTTOM_RIGHT || obstacle == TOP_LEFT);
+    let open = if obstacle == BOTTOM_RIGHT {
+        TOP_LEFT
+    } else {
+        BOTTOM_RIGHT
+    };
+    (
+        instance,
+        meta,
+        vec![BOTTOM_LEFT, open, TOP_RIGHT],
+        vec![BOTTOM_LEFT, obstacle, TOP_RIGHT],
+    )
+}
+
+/// Two pairs with `+2` on the left column and `-2` on the right column of the
+/// interior, so a valid route joins the rows and a swapped route joins the
+/// columns.
+fn columns() -> (Instance, Meta) {
+    let case = Case {
+        pairs: 2,
+        obstacles: 0,
+        pins: 0,
+        ..L3
+    };
+    find(case, |m| {
+        m.labels[BOTTOM_LEFT as usize] == 2
+            && m.labels[TOP_LEFT as usize] == 2
+            && m.labels[BOTTOM_RIGHT as usize] == -2
+            && m.labels[TOP_RIGHT as usize] == -2
+    })
+}
+
+fn params_of(case: Case) -> Vec<u8> {
+    case.bytes()
+}
+
+#[test]
+fn a_valid_route_passes() {
+    let lattice = SquareLattice::new(3, Boundary::Open).expect("lattice");
+    let (instance, meta, open, _) = diagonal();
+    let bytes = params_of(Case { pins: 0, ..L3 });
+    let admitted = admitted(&DEFECTS_V1, &bytes).expect("admit");
+    let route = vec![open.clone()];
+    let spins = flipped(&meta, &path_links(&lattice, &route));
+    assert!(feasible(&admitted, &instance, &spins));
+    assert_eq!(
+        check_route(admitted.params(), &instance, &spins, &route),
+        Ok(())
+    );
+    // A path is undirected: the reverse passes too.
+    let mut reversed = open;
+    reversed.reverse();
+    assert_eq!(
+        check_route(admitted.params(), &instance, &spins, &[reversed]),
+        Ok(())
+    );
+    // Two paths, one for each pair.
+    let (instance, meta) = columns();
+    let bytes = params_of(Case {
+        pairs: 2,
+        obstacles: 0,
+        pins: 0,
+        ..L3
+    });
+    let admitted_next = admit::admitted(&DEFECTS_V1, &bytes).expect("admit");
+    let route = vec![vec![BOTTOM_LEFT, BOTTOM_RIGHT], vec![TOP_LEFT, TOP_RIGHT]];
+    let spins = flipped(&meta, &path_links(&lattice, &route));
+    assert!(feasible(&admitted_next, &instance, &spins));
+    assert_eq!(
+        check_route(admitted_next.params(), &instance, &spins, &route),
+        Ok(())
+    );
+}
+
+#[test]
+fn swapped_endpoints_fail() {
+    let lattice = SquareLattice::new(3, Boundary::Open).expect("lattice");
+    let (instance, meta) = columns();
+    let bytes = params_of(Case {
+        pairs: 2,
+        obstacles: 0,
+        pins: 0,
+        ..L3
+    });
+    let admitted = admitted(&DEFECTS_V1, &bytes).expect("admit");
+    // The swapped route joins the two `+2` vertices and the two `-2` vertices.
+    let swapped = vec![vec![BOTTOM_LEFT, TOP_LEFT], vec![BOTTOM_RIGHT, TOP_RIGHT]];
+    // The state flips exactly those links, so only the endpoints are wrong.
+    let spins = flipped(&meta, &path_links(&lattice, &swapped));
+    assert_eq!(
+        check_route(admitted.params(), &instance, &spins, &swapped),
+        Err(RouteError::Endpoints)
+    );
+    // The same swapped route against the state of the valid route.
+    let valid = vec![vec![BOTTOM_LEFT, BOTTOM_RIGHT], vec![TOP_LEFT, TOP_RIGHT]];
+    let good = flipped(&meta, &path_links(&lattice, &valid));
+    assert!(feasible(&admitted, &instance, &good));
+    assert_eq!(
+        check_route(admitted.params(), &instance, &good, &swapped),
+        Err(RouteError::Endpoints)
+    );
+    // A path that ends on a zero vertex, and a pair of paths that share an
+    // endpoint.
+    let (instance, meta, open, _) = diagonal();
+    let bytes = params_of(Case { pins: 0, ..L3 });
+    let admitted_next = admit::admitted(&DEFECTS_V1, &bytes).expect("admit");
+    let short = vec![vec![open[0], open[1]]];
+    let spins = flipped(&meta, &path_links(&lattice, &short));
+    assert_eq!(
+        check_route(admitted_next.params(), &instance, &spins, &short),
+        Err(RouteError::Endpoints)
+    );
+}
+
+#[test]
+fn an_extra_loop_fails() {
+    let lattice = SquareLattice::new(3, Boundary::Open).expect("lattice");
+    let (instance, meta, open, _) = diagonal();
+    let bytes = params_of(Case { pins: 0, ..L3 });
+    let admitted = admitted(&DEFECTS_V1, &bytes).expect("admit");
+    let route = vec![open];
+    // The outer border loop flips links that touch no labeled vertex. The
+    // charges stay as they were, so the state stays feasible.
+    let border: Vec<u32> = (0..lattice.link_count())
+        .filter(|&e| {
+            let link = lattice.link(e).expect("link");
+            [link.tail, link.head]
+                .iter()
+                .all(|&v| v.is_multiple_of(4) || v / 4 == 0 || v % 4 == 3 || v / 4 == 3)
+        })
+        .collect();
+    assert_eq!(border.len(), 12);
+    let mut links = path_links(&lattice, &route);
+    links.extend(&border);
+    let spins = flipped(&meta, &links);
+    assert!(
+        feasible(&admitted, &instance, &spins),
+        "the loop is invisible to the charges"
+    );
+    assert_eq!(
+        check_route(admitted.params(), &instance, &spins, &route),
+        Err(RouteError::Difference)
+    );
+    // The loop cannot be listed as a path: it repeats its first vertex, and
+    // without the closing vertex it has no labeled endpoints.
+    let ring = vec![0u32, 1, 2, 3, 7, 11, 15, 14, 13, 12, 8, 4];
+    let mut closed = ring.clone();
+    closed.push(0);
+    let with_loop = vec![route[0].clone(), closed];
+    assert_eq!(
+        check_route(admitted.params(), &instance, &spins, &with_loop),
+        Err(RouteError::RepeatedVertex)
+    );
+    let open_ring = vec![route[0].clone(), ring];
+    assert_eq!(
+        check_route(admitted.params(), &instance, &spins, &open_ring),
+        Err(RouteError::Endpoints)
+    );
+}
+
+#[test]
+fn a_route_through_an_obstacle_fails() {
+    let lattice = SquareLattice::new(3, Boundary::Open).expect("lattice");
+    let (instance, meta, open, blocked) = diagonal();
+    let bytes = params_of(Case { pins: 0, ..L3 });
+    let admitted = admitted(&DEFECTS_V1, &bytes).expect("admit");
+    let route = vec![blocked];
+    let spins = flipped(&meta, &path_links(&lattice, &route));
+    // The blocked path is a feasible state of the same shape, and only the
+    // obstacle refuses it.
+    assert!(feasible(&admitted, &instance, &spins));
+    assert_eq!(
+        check_route(admitted.params(), &instance, &spins, &route),
+        Err(RouteError::Obstacle)
+    );
+    let good = flipped(&meta, &path_links(&lattice, std::slice::from_ref(&open)));
+    assert_eq!(
+        check_route(admitted.params(), &instance, &good, &[open]),
+        Ok(())
+    );
+}
+
+#[test]
+fn route_shape_errors_follow_the_order() {
+    let lattice = SquareLattice::new(3, Boundary::Open).expect("lattice");
+    let (instance, meta, open, blocked) = diagonal();
+    let obstacle = blocked[1];
+    let free = open[1];
+    let bytes = params_of(Case { pins: 0, ..L3 });
+    let admitted = admitted(&DEFECTS_V1, &bytes).expect("admit");
+    let valid = vec![open];
+    let good = flipped(&meta, &path_links(&lattice, &valid));
+    let run =
+        |spins: &[i8], route: &[Vec<u32>]| check_route(admitted.params(), &instance, spins, route);
+    assert_eq!(run(&good, &valid), Ok(()));
+
+    // Metadata comes first, before the spins.
+    let mut bad = decode("order", &instance);
+    bad.weight += 2;
+    let broken = same_fields(&instance, encode(&bad));
+    assert_eq!(
+        check_route(admitted.params(), &broken, &good[1..], &[vec![5]]),
+        Err(RouteError::Metadata)
+    );
+    // Spins come before the shape.
+    assert_eq!(run(&good[1..], &[vec![5]]), Err(RouteError::Spins));
+    let mut zero = good.clone();
+    zero[0] = 0;
+    assert_eq!(run(&zero, &[vec![5]]), Err(RouteError::Spins));
+    // Shape comes before adjacency: the first path is not adjacent.
+    assert_eq!(run(&good, &[vec![5, 10], vec![7]]), Err(RouteError::Shape));
+    assert_eq!(run(&good, &[vec![5]]), Err(RouteError::Shape));
+    assert_eq!(run(&good, &[vec![]]), Err(RouteError::Shape));
+    assert_eq!(run(&good, &[vec![5, 16]]), Err(RouteError::Shape));
+    // Adjacency comes before repeated vertices: the second path repeats one.
+    assert_eq!(
+        run(&good, &[vec![5, 10], vec![free, 5, free]]),
+        Err(RouteError::NotAdjacent)
+    );
+    // Repeated vertices come before repeated links: the paths share links.
+    assert_eq!(
+        run(&good, &[vec![5, free, 5], vec![5, free]]),
+        Err(RouteError::RepeatedVertex)
+    );
+    // Repeated links come before obstacles: both paths use the obstacle link.
+    assert_eq!(
+        run(&good, &[vec![5, obstacle], vec![obstacle, 5]]),
+        Err(RouteError::RepeatedLink)
+    );
+    // Obstacles come before endpoints: the path ends on the obstacle.
+    assert_eq!(run(&good, &[vec![5, obstacle]]), Err(RouteError::Obstacle));
+    // Endpoints come before the difference: a route with the right links but
+    // a path that ends on a zero vertex, and an uncovered charged vertex.
+    assert_eq!(run(&good, &[vec![5, free]]), Err(RouteError::Endpoints));
+    assert_eq!(run(&good, &[]), Err(RouteError::Endpoints));
+    // Two paths between the same endpoints reuse the endpoints.
+    let around = vec![5, 1, 2, 3, 7, 11, 10];
+    assert_eq!(
+        run(&good, &[vec![5, free, 10], around]),
+        Err(RouteError::Endpoints)
+    );
+    // The difference comes last.
+    let flat = vec![1i8; good.len()];
+    assert_eq!(run(&flat, &valid), Err(RouteError::Difference));
+    let mut extra = good;
+    let spare = meta.positions[link_between(&lattice, 0, 1) as usize] as usize;
+    extra[spare] = -1;
+    assert_eq!(run(&extra, &valid), Err(RouteError::Difference));
+}
+
+#[test]
+fn a_route_never_changes_feasibility() {
+    let lattice = SquareLattice::new(3, Boundary::Open).expect("lattice");
+    // A valid route to a feasible state, and a bad route to the same state.
+    let (instance, meta, open, _) = diagonal();
+    let bytes = params_of(Case { pins: 0, ..L3 });
+    let admitted_diag = admitted(&DEFECTS_V1, &bytes).expect("admit");
+    let route = vec![open];
+    let good = flipped(&meta, &path_links(&lattice, &route));
+    assert!(feasible(&admitted_diag, &instance, &good));
+    assert!(check_route(admitted_diag.params(), &instance, &good, &route).is_ok());
+    assert!(check_route(admitted_diag.params(), &instance, &good, &[vec![5]]).is_err());
+    assert!(
+        feasible(&admitted_diag, &instance, &good),
+        "a bad route changes nothing"
+    );
+
+    // A valid route to an infeasible state: the pair is `+2` at the bottom
+    // right and `-2` at the top left. The route through the bottom left is
+    // well formed, and its flips match the state, but the charges are wrong.
+    let case = Case {
+        obstacles: 0,
+        pins: 0,
+        ..L3
+    };
+    let (instance, meta) = find(case, |m| {
+        m.labels[BOTTOM_RIGHT as usize] == 2 && m.labels[TOP_LEFT as usize] == -2
+    });
+    let bytes = params_of(case);
+    let admitted_anti = admitted(&DEFECTS_V1, &bytes).expect("admit");
+    let route = vec![vec![BOTTOM_RIGHT, BOTTOM_LEFT, TOP_LEFT]];
+    let spins = flipped(&meta, &path_links(&lattice, &route));
+    assert_eq!(
+        check_route(admitted_anti.params(), &instance, &spins, &route),
+        Ok(())
+    );
+    assert!(
+        !feasible(&admitted_anti, &instance, &spins),
+        "the route is evidence only"
+    );
+
+    // An empty route is valid for a request without charges, and a pinned
+    // link that flips makes the state infeasible and the route wrong.
+    let case = Case {
+        pairs: 0,
+        obstacles: 0,
+        pins: 4,
+        ..L3
+    };
+    let instance = build(case, 11);
+    let meta = decode("pins", &instance);
+    let bytes = params_of(case);
+    let admitted_pins = admitted(&DEFECTS_V1, &bytes).expect("admit");
+    let reference = vec![1i8; meta.positions.len()];
+    assert!(feasible(&admitted_pins, &instance, &reference));
+    assert_eq!(
+        check_route(admitted_pins.params(), &instance, &reference, &[]),
+        Ok(())
+    );
+    let pinned = flipped(&meta, &meta.pins[..1]);
+    assert!(!feasible(&admitted_pins, &instance, &pinned));
+    assert_eq!(
+        check_route(admitted_pins.params(), &instance, &pinned, &[]),
+        Err(RouteError::Difference)
+    );
+}
+
+#[test]
+fn observables_report_insufficient_physical_evidence() {
+    let bytes = L3.bytes();
+    let admitted = admitted(&DEFECTS_V1, &bytes).expect("admit");
+    let instance = build(L3, 12);
+    let meta = decode("observables", &instance);
+    let lattice = SquareLattice::new(3, Boundary::Open).expect("lattice");
+    let table = reference_table(&lattice);
+    let (kept, dropped) = split(&lattice, &table);
+    let good = feasible_state(&meta, &kept, L3);
+    let seen = defect_observables(admitted.params(), &instance, &good).expect("observables");
+    let d = direct(&meta, &kept, L3, &good);
+    assert_eq!(seen.physical_energy, d.physical);
+    assert_eq!(seen.violated_labels, 0);
+    assert_eq!(seen.violated_pins, 0);
+    assert_eq!(seen.dropped, dropped);
+    assert_eq!(seen.truncation_bound, table.truncation_bound());
+    assert!(seen.truncation_bound > 0);
+    assert_eq!(
+        seen.physical_status,
+        PhysicalStatus::InsufficientPhysicalEvidence
+    );
+    assert_eq!(seen.charges.len(), 16);
+    for (&got, &label) in seen.charges.iter().zip(&meta.labels) {
+        if label != FREE {
+            assert_eq!(got, label);
+        }
+    }
+    // The instance energy of a feasible state is its physical energy plus the
+    // constant of the penalty, which is 0 here.
+    assert_eq!(energy(&instance, &good), seen.physical_energy);
+
+    // A flipped pin, and a flipped link at a labeled vertex.
+    let mut bad = good.clone();
+    let pin = meta.positions[meta.pins[0] as usize] as usize;
+    bad[pin] = -bad[pin];
+    let seen = defect_observables(admitted.params(), &instance, &bad).expect("observables");
+    let d = direct(&meta, &kept, L3, &bad);
+    assert_eq!(seen.violated_pins, 1);
+    assert_eq!(seen.violated_labels, 0);
+    assert_eq!(seen.physical_energy, d.physical);
+    assert_eq!(energy(&instance, &bad), d.instance_energy(meta.weight));
+    let inner = link_between(&lattice, BOTTOM_LEFT, BOTTOM_RIGHT);
+    let mut bad = good.clone();
+    let slot = meta.positions[inner as usize] as usize;
+    bad[slot] = -bad[slot];
+    let seen = defect_observables(admitted.params(), &instance, &bad).expect("observables");
+    let d = direct(&meta, &kept, L3, &bad);
+    assert_eq!(seen.violated_labels, 2);
+    assert_eq!(seen.physical_energy, d.physical);
+    let wanted: u32 = seen
+        .charges
+        .iter()
+        .zip(&meta.labels)
+        .filter(|(&q, &label)| label != FREE && q != label)
+        .count() as u32;
+    assert_eq!(seen.violated_labels, wanted);
+
+    // No observables for a wrong length, a bad entry, or bad metadata.
+    assert!(defect_observables(admitted.params(), &instance, &good[1..]).is_none());
+    let mut zero = good.clone();
+    zero[0] = 0;
+    assert!(defect_observables(admitted.params(), &instance, &zero).is_none());
+    let mut mutated = meta;
+    mutated.weight += 2;
+    let broken = same_fields(&instance, encode(&mutated));
+    assert!(defect_observables(admitted.params(), &broken, &good).is_none());
 }

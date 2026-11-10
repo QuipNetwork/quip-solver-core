@@ -36,12 +36,15 @@
 //! [`check_route`], is combinatorial evidence about a state and never changes
 //! feasibility.
 
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::descriptor::{Contract, FieldSpec, Params, SizeBounds, TopologyStats, Value, ValueType};
-use crate::dipolar::{Axis as DipolarAxis, Calibration, Entry, Geometry, Island, Table};
+use crate::dipolar::{
+    physical_status, Axis as DipolarAxis, Calibration, Entry, Geometry, Island, PhysicalStatus,
+    Table,
+};
 use crate::family::{BaseTopology, Construction, InstanceBody, Streams};
 use crate::ice::build::{region, sections, Reader};
 use crate::instance::{Instance, InstanceLimits};
@@ -647,12 +650,16 @@ fn generate(
 }
 
 /// What a valid instance carries: its lattice, its labels, the dense position
-/// of each link, and its pins.
+/// of each link, its obstacles and pins, its table, and its field.
 pub(crate) struct Parsed {
     pub(crate) lattice: SquareLattice,
     pub(crate) labels: Vec<Option<i8>>,
     pub(crate) positions: Vec<u32>,
+    pub(crate) obstacles: Vec<u32>,
     pub(crate) pins: Vec<u32>,
+    couplings: Couplings,
+    field_x: i32,
+    field_y: i32,
 }
 
 /// A strictly ascending list of `u32` that follows a `u16` count. `None` for
@@ -733,7 +740,11 @@ fn parse(params: &Params<'_>, instance: &Instance) -> Option<Parsed> {
         lattice,
         labels,
         positions,
+        obstacles,
         pins,
+        couplings,
+        field_x: config.field_x,
+        field_y: config.field_y,
     })
 }
 
@@ -773,4 +784,214 @@ fn feasible(params: &Params<'_>, instance: &Instance, spins: &[i8]) -> bool {
         .iter()
         .all(|&e| usize::try_from(e).ok().and_then(|e| links.get(e)) == Some(&1));
     labels_hold && pins_hold
+}
+
+/// A route: a list of paths. A path is a sequence of lattice vertices, with
+/// at least two vertices, and each step joins two vertices that share a link.
+pub type Route = Vec<Vec<u32>>;
+
+/// Why a route is refused. The checks run in the order of the variants and the
+/// first failure wins. Each check covers the whole route before the next one
+/// starts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RouteError {
+    /// The instance metadata is not valid for the parameters.
+    Metadata,
+    /// `spins` is not one `+1` or `-1` entry per instance node.
+    Spins,
+    /// A path has fewer than two vertices, or a vertex is not in the lattice.
+    Shape,
+    /// A step of a path joins two vertices that share no link.
+    NotAdjacent,
+    /// A path visits a vertex twice.
+    RepeatedVertex,
+    /// Two paths use the same link.
+    RepeatedLink,
+    /// A path visits an obstacle.
+    Obstacle,
+    /// The endpoints of a path are not one `+2` and one `-2` labeled vertex,
+    /// or some `+2` or `-2` vertex is not the endpoint of exactly one path.
+    Endpoints,
+    /// The links with spin `-1` are not exactly the links of the paths.
+    Difference,
+}
+
+/// The link that joins vertices `u` and `v`, if there is one.
+fn link_between(lattice: &SquareLattice, u: u32, v: u32) -> Option<u32> {
+    lattice.incident(u).iter().find_map(|&(e, _)| {
+        let link = lattice.link(e)?;
+        (link.tail == v || link.head == v).then_some(e)
+    })
+}
+
+/// The label of vertex `v`, if it is a labeled vertex.
+fn label_of(parsed: &Parsed, v: u32) -> Option<i8> {
+    usize::try_from(v)
+        .ok()
+        .and_then(|v| parsed.labels.get(v))
+        .copied()
+        .flatten()
+}
+
+/// Checks `route` against the state `spins`, relative to the reference state
+/// with every link spin `+1`.
+///
+/// A route is combinatorial evidence about the state. It does not change
+/// [`feasible`], and a valid route does not make a state feasible. The checks
+/// run in the order of [`RouteError`], and the first failure wins.
+///
+/// # Errors
+///
+/// The first failed check, see [`RouteError`].
+pub fn check_route(
+    params: &Params<'_>,
+    instance: &Instance,
+    spins: &[i8],
+    route: &[Vec<u32>],
+) -> Result<(), RouteError> {
+    let parsed = parse(params, instance).ok_or(RouteError::Metadata)?;
+    let links = link_spins(&parsed, spins, instance.node_ids().len())
+        .filter(|links| links.iter().all(|&s| s == 1 || s == -1))
+        .ok_or(RouteError::Spins)?;
+    let lattice = &parsed.lattice;
+    let vertices = lattice.vertex_count();
+    if route
+        .iter()
+        .any(|path| path.len() < 2 || path.iter().any(|&v| v >= vertices))
+    {
+        return Err(RouteError::Shape);
+    }
+    let mut steps: Vec<Vec<u32>> = Vec::with_capacity(route.len());
+    for path in route {
+        let step_links: Option<Vec<u32>> = path
+            .windows(2)
+            .map(|pair| match pair {
+                [u, v] => link_between(lattice, *u, *v),
+                _ => None,
+            })
+            .collect();
+        steps.push(step_links.ok_or(RouteError::NotAdjacent)?);
+    }
+    for path in route {
+        let mut seen = path.clone();
+        seen.sort_unstable();
+        if seen.windows(2).any(|pair| matches!(pair, [a, b] if a == b)) {
+            return Err(RouteError::RepeatedVertex);
+        }
+    }
+    let mut used = BTreeSet::new();
+    for &e in steps.iter().flatten() {
+        if !used.insert(e) {
+            return Err(RouteError::RepeatedLink);
+        }
+    }
+    if route
+        .iter()
+        .flatten()
+        .any(|v| parsed.obstacles.binary_search(v).is_ok())
+    {
+        return Err(RouteError::Obstacle);
+    }
+    let mut ends = BTreeSet::new();
+    for path in route {
+        let (first, last) = (path.first().copied(), path.last().copied());
+        let labels = (
+            first.and_then(|v| label_of(&parsed, v)),
+            last.and_then(|v| label_of(&parsed, v)),
+        );
+        let opposite = matches!(labels, (Some(2), Some(-2)) | (Some(-2), Some(2)));
+        let fresh = first.is_some_and(|v| ends.insert(v)) && last.is_some_and(|v| ends.insert(v));
+        if !opposite || !fresh {
+            return Err(RouteError::Endpoints);
+        }
+    }
+    let charged = parsed
+        .labels
+        .iter()
+        .filter(|label| matches!(label, Some(2 | -2)))
+        .count();
+    if Some(charged) != route.len().checked_mul(2) {
+        return Err(RouteError::Endpoints);
+    }
+    let flipped: BTreeSet<u32> = (0u32..)
+        .zip(&links)
+        .filter(|&(_, &spin)| spin == -1)
+        .map(|(e, _)| e)
+        .collect();
+    if flipped != used {
+        return Err(RouteError::Difference);
+    }
+    Ok(())
+}
+
+/// The observables of a state. The table has the oracle calibration, so
+/// `physical_status` is [`PhysicalStatus::InsufficientPhysicalEvidence`] and
+/// the physical energy supports no claim about a device.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DefectObservables {
+    /// The physical energy in milli: the kept couplings and the field, without
+    /// any penalty.
+    pub physical_energy: i64,
+    /// The direct charge of every vertex, in vertex order.
+    pub charges: Vec<i8>,
+    /// The number of labeled vertices whose charge differs from the label.
+    pub violated_labels: u32,
+    /// The number of pinned links whose spin is not `+1`.
+    pub violated_pins: u32,
+    /// The bound of the table on the magnitude of the pairs beyond `R2`, in
+    /// units of the table.
+    pub truncation_bound: u128,
+    /// The sum of `|q|` over the table entries that the native layout cannot
+    /// carry.
+    pub dropped: u64,
+    /// What the table may claim about physics.
+    pub physical_status: PhysicalStatus,
+}
+
+/// The observables of `spins` on `instance`, or `None` when the metadata is
+/// invalid or `spins` is not one `+1` or `-1` entry per instance node.
+#[must_use]
+pub fn defect_observables(
+    params: &Params<'_>,
+    instance: &Instance,
+    spins: &[i8],
+) -> Option<DefectObservables> {
+    let parsed = parse(params, instance)?;
+    let links = link_spins(&parsed, spins, instance.node_ids().len())?;
+    let got = charges(&parsed.lattice, &links)?;
+    let mut violated_labels = 0u32;
+    for (&q, label) in got.iter().zip(&parsed.labels) {
+        if label.is_some_and(|want| want != q) {
+            violated_labels = violated_labels.checked_add(1)?;
+        }
+    }
+    let mut violated_pins = 0u32;
+    for &e in &parsed.pins {
+        if links.get(usize::try_from(e).ok()?) != Some(&1) {
+            violated_pins = violated_pins.checked_add(1)?;
+        }
+    }
+    let mut physical = 0i64;
+    for entry in &parsed.couplings.kept {
+        let si = i64::from(*links.get(usize::try_from(entry.i).ok()?)?);
+        let sj = i64::from(*links.get(usize::try_from(entry.j).ok()?)?);
+        physical = physical.checked_add(i64::from(entry.q).checked_mul(si)?.checked_mul(sj)?)?;
+    }
+    for (e, &spin) in (0u32..).zip(&links) {
+        let field = match parsed.lattice.link(e)?.axis {
+            Axis::X => parsed.field_x,
+            Axis::Y => parsed.field_y,
+        };
+        physical = physical.checked_sub(i64::from(field).checked_mul(i64::from(spin))?)?;
+    }
+    Some(DefectObservables {
+        physical_energy: physical,
+        charges: got,
+        violated_labels,
+        violated_pins,
+        truncation_bound: parsed.couplings.table.truncation_bound(),
+        dropped: parsed.couplings.dropped,
+        physical_status: physical_status(&parsed.couplings.table),
+    })
 }
