@@ -338,6 +338,9 @@ def test_metadata_faults():
     assert metadata_code(SPARSE_METADATA + b"\x00", kinds) == 16
     assert metadata_code(b"\x00", kinds) == 16
     assert metadata_code(b"", kinds) == 16
+    # FAM-34 registers kinds 1 to 9, so kind 9 is accepted and kind 10 is not.
+    assert metadata_code(_region(_section(9, b"")), [9]) is None
+    assert metadata_code(_region(_section(10, b"")), [9, 10]) == 16
     assert metadata_code(bytes.fromhex("0000") + b"\x00", kinds) == 16
 
 

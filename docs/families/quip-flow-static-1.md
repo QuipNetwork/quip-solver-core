@@ -235,7 +235,7 @@ The vectors treat the window in three records. The case `flow-dead-cell` has a d
 
 ### Recipes
 
-The recipes are the parameter sets on the live z(12, 4) topology with `cost_half_max` 500. The `flow_recipes` section of the vectors holds two salts of each.
+The recipes are the parameter sets on the live z(12, 4) topology with `cost_half_max` 500. The `flow_recipes` section of the vectors holds two salts of each recipe that builds.
 
 | Alias | Cell | `side` | Result on the live topology |
 |---|---|---|---|
