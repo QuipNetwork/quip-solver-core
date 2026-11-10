@@ -367,6 +367,7 @@ mod tests {
         for (label, nodes, edges, h, j, ok) in cases {
             let drawn = draw_ising_milli([0u8; 32], nodes, edges, h, j);
             if ok {
+                assert!(drawn.is_ok(), "{label}: {drawn:?}");
                 let (h, j) = drawn.unwrap();
                 assert!(h.is_empty(), "{label}");
                 assert!(j.is_empty(), "{label}");

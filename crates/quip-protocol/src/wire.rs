@@ -201,11 +201,13 @@ mod tests {
             decode_spins_packed(&[0b1000_0001, 0b10], 10).unwrap(),
             spins
         );
+        assert_eq!(encode_spins_packed(&[]), Vec::<u8>::new());
         for n in 0..=17usize {
             let spins: Vec<i8> = (0..n).map(|i| if i % 3 == 0 { 1 } else { -1 }).collect();
             assert_eq!(
-                decode_spins_packed(&encode_spins_packed(&spins), n).unwrap(),
-                spins
+                decode_spins_packed(&encode_spins_packed(&spins), n),
+                Ok(spins.clone()),
+                "n={n}"
             );
         }
     }
