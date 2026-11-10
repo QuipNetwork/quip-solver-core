@@ -45,12 +45,16 @@ check-release: check-crate-publish check-python-dist check-npm-dist check-clib
 # tarballs.
 .PHONY: check-crate-publish
 check-crate-publish:
-	find target/package -maxdepth 1 -name '*.crate' -delete 2>/dev/null || true
+	find $${CARGO_TARGET_DIR:-target}/package -maxdepth 1 -name '*.crate' -delete 2>/dev/null || true
 	cargo package --locked --workspace \
 		--exclude quip-protocol-py \
 		--exclude quip-protocol-wasm \
 		--exclude quip-solver-c
-	@ls -la target/package/*.crate
+	@ls -la $${CARGO_TARGET_DIR:-target}/package/*.crate
+	# cargo package proves each crate builds from its tarball. It does not
+	# prove the tarball holds the family generators and every registered
+	# vector file, so this reads the tarballs.
+	bash scripts/check-crate-contents.sh
 
 # Needs maturin and twine on PATH. twine check catches the metadata problems
 # PyPI rejects on upload, which is the class of failure that otherwise only
@@ -71,6 +75,9 @@ check-python-dist:
 	# sdist with 400, after the wheel of the same version has been accepted.
 	bash scripts/check-sdist-license-files.sh dist/python/*.tar.gz
 	bash scripts/check-sdist-stub-package.sh dist/python/*.tar.gz
+	# The wheel must hold the `families` module and list every registered
+	# family. A wheel without it installs and imports cleanly.
+	bash scripts/check-wheel-families.sh dist/python/*.whl
 
 # `npm pack`, for the same reason check-crate-publish uses `cargo package`. It
 # runs the same prepack build the publish path runs and writes the tarball the

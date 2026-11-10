@@ -11,6 +11,7 @@ If a vector and the contract disagree, the contract wins and the vector is wrong
 An independent Python oracle writes the vectors.
 A Rust test recomputes every expected value with its own code and compares the result with the fixture.
 A pytest drift test checks that the fixture is still the exact output of the oracle.
+[The family release](family-release.md) lists the pin of every registered revision.
 
 | Check | Command | What it proves |
 |---|---|---|
