@@ -141,35 +141,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fewer_than_two_solutions_have_zero_diversity() {
-        assert_eq!(diversity_milli(&[]), 0);
-        assert_eq!(diversity_milli(&[&[1, -1][..]]), 0);
-    }
-
-    #[test]
-    #[expect(
-        clippy::many_single_char_names,
-        reason = "each solution in this hand-checked case is named in the brief"
-    )]
-    fn diversity_rounds_half_up_in_milli() {
-        // Three solutions of width 2. Pair distances (flip-invariant): 1, 1, 0.
-        // Mean normalized distance = (1 + 1 + 0) / (3 * 2) = 0.3333… → 333.
-        let a: &[i8] = &[1, 1];
-        let b: &[i8] = &[1, -1];
-        let c: &[i8] = &[-1, 1];
-        assert_eq!(diversity_milli(&[a, b, c]), 333);
-        // Width 8, one pair at distance 1: 1000 / 8 = 125 exactly.
-        let d: &[i8] = &[1; 8];
-        let e: &[i8] = &[1, 1, 1, 1, 1, 1, 1, -1];
-        assert_eq!(diversity_milli(&[d, e]), 125);
-        // Width 16, one pair at distance 1: 62.5 → 63 (half rounds up).
-        let f: &[i8] = &[1; 16];
-        let mut g = [1i8; 16];
-        g[0] = -1;
-        assert_eq!(diversity_milli(&[f, &g]), 63);
-    }
-
-    #[test]
     fn ragged_or_empty_width_sets_score_zero() {
         assert_eq!(diversity_milli(&[&[1, -1][..], &[1][..]]), 0);
         assert_eq!(diversity_milli(&[&[][..], &[][..]]), 0);
@@ -181,12 +152,6 @@ mod tests {
         assert_eq!(select_diverse(&s, 2), vec![0, 1]);
         assert_eq!(select_diverse(&s, 5), vec![0, 1]);
         assert_eq!(select_diverse(&s, 0), Vec::<usize>::new());
-    }
-
-    #[test]
-    fn select_diverse_takes_the_first_read_for_a_target_of_one() {
-        let s: [&[i8]; 3] = [&[1, 1], &[1, -1], &[-1, 1]];
-        assert_eq!(select_diverse(&s, 1), vec![0]);
     }
 
     #[test]

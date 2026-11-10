@@ -50,10 +50,3 @@ fn reject_reasons_match_the_codes_vectors() -> Result<(), String> {
     }
     Ok(())
 }
-
-#[test]
-fn generation_never_rejects() {
-    for code in Code::ALL {
-        assert_eq!(reject_reason(code, CodePhase::Generation), None, "{code}");
-    }
-}

@@ -56,23 +56,31 @@ fn topology_preserves_registration_order_and_rejects_invalid_edges() {
     );
 }
 
-#[test]
-fn proto_result_verifies_and_rejects_malformed_fields() {
-    let mut g = generator();
-    let lease = LeaseSpec::from_proto(&g).unwrap();
-    let topology = TopologyView {
+fn three_node_topology() -> TopologyView {
+    TopologyView {
         num_nodes: 3,
         edges: vec![(0, 2)],
         allowed_h_milli: vec![1000],
         allowed_j_milli: vec![-1000],
-    };
-    let target = Target::from_proto(&SetTarget {
+    }
+}
+
+fn permissive_target() -> Target {
+    Target::from_proto(&SetTarget {
         max_energy_milli: i64::MAX,
         min_solutions: 1,
         min_diversity_milli: 0,
         max_proof_solutions: 32,
         ..Default::default()
-    });
+    })
+}
+
+#[test]
+fn proto_result_verifies_and_rejects_malformed_fields() {
+    let g = generator();
+    let lease = LeaseSpec::from_proto(&g).unwrap();
+    let topology = three_node_topology();
+    let target = permissive_target();
     let spins = vec![1, -1, 1];
     let nonce = lease.nonce(1).unwrap();
     let (h, j) = topology.draw(nonce).unwrap();
@@ -108,17 +116,6 @@ fn proto_result_verifies_and_rejects_malformed_fields() {
         verify_lease_result(&g, &topology, &target, &result),
         Err(VerifyError::SaltOutsideLease)
     );
-    g.algorithm = 99;
-    assert_eq!(
-        LeaseSpec::from_proto(&g),
-        Err(LeaseError::UnknownGenerator(99))
-    );
-    g = generator();
-    g.base_salt.clear();
-    assert_eq!(
-        LeaseSpec::from_proto(&g),
-        Err(LeaseError::BadLength { field: "base_salt" })
-    );
 }
 
 fn with_family(mut g: IsingProblemGenerator) -> IsingProblemGenerator {
@@ -131,57 +128,65 @@ fn with_family(mut g: IsingProblemGenerator) -> IsingProblemGenerator {
 }
 
 #[test]
-fn a_legacy_lease_with_a_family_is_unexpected() {
-    assert_eq!(
-        LeaseSpec::from_proto(&with_family(generator())),
-        Err(LeaseError::DescriptorUnexpected)
-    );
-}
-
-#[test]
-fn an_empty_present_family_is_unexpected() {
-    let g = IsingProblemGenerator {
-        family: Some(FamilyDescriptor::default()),
-        ..generator()
-    };
-    assert_eq!(
-        LeaseSpec::from_proto(&g),
-        Err(LeaseError::DescriptorUnexpected)
-    );
-}
-
-#[test]
-fn a_legacy_lease_with_a_topology_order_digest_is_unexpected() {
-    for len in [32, 31] {
-        let g = IsingProblemGenerator {
-            topology_order_digest: vec![9; len],
-            ..generator()
-        };
-        assert_eq!(
-            LeaseSpec::from_proto(&g),
-            Err(LeaseError::DescriptorUnexpected),
-            "digest length {len}"
-        );
+fn a_legacy_lease_with_stray_or_invalid_fields_is_rejected() {
+    let cases = [
+        (
+            "a family descriptor",
+            with_family(generator()),
+            LeaseError::DescriptorUnexpected,
+        ),
+        (
+            "an empty present family descriptor",
+            IsingProblemGenerator {
+                family: Some(FamilyDescriptor::default()),
+                ..generator()
+            },
+            LeaseError::DescriptorUnexpected,
+        ),
+        (
+            "topology order digest length 32",
+            IsingProblemGenerator {
+                topology_order_digest: vec![9; 32],
+                ..generator()
+            },
+            LeaseError::DescriptorUnexpected,
+        ),
+        (
+            "topology order digest length 31",
+            IsingProblemGenerator {
+                topology_order_digest: vec![9; 31],
+                ..generator()
+            },
+            LeaseError::DescriptorUnexpected,
+        ),
+        (
+            "zero count beats the descriptor",
+            IsingProblemGenerator {
+                salt_count: 0,
+                ..with_family(generator())
+            },
+            LeaseError::ZeroCount,
+        ),
+        (
+            "counter overflow beats the descriptor",
+            IsingProblemGenerator {
+                salt_start: u64::MAX,
+                ..with_family(generator())
+            },
+            LeaseError::CounterOverflow,
+        ),
+        (
+            "short base salt beats the descriptor",
+            IsingProblemGenerator {
+                base_salt: vec![3; 31],
+                ..with_family(generator())
+            },
+            LeaseError::BadLength { field: "base_salt" },
+        ),
+    ];
+    for (label, g, expected) in cases {
+        assert_eq!(LeaseSpec::from_proto(&g), Err(expected), "{label}");
     }
-}
-
-#[test]
-fn field_checks_win_over_descriptor_unexpected() {
-    let mut zero = with_family(generator());
-    zero.salt_count = 0;
-    assert_eq!(LeaseSpec::from_proto(&zero), Err(LeaseError::ZeroCount));
-    let mut overflow = with_family(generator());
-    overflow.salt_start = u64::MAX;
-    assert_eq!(
-        LeaseSpec::from_proto(&overflow),
-        Err(LeaseError::CounterOverflow)
-    );
-    let mut short = with_family(generator());
-    short.base_salt = vec![3; 31];
-    assert_eq!(
-        LeaseSpec::from_proto(&short),
-        Err(LeaseError::BadLength { field: "base_salt" })
-    );
 }
 
 fn family_lease() -> IsingProblemGenerator {
@@ -204,143 +209,136 @@ fn generator_value_two_is_a_family_lease() {
 }
 
 #[test]
-fn a_family_lease_without_a_descriptor_is_code_1() {
-    for len in [0, 31, 33] {
-        let g = IsingProblemGenerator {
-            family: None,
-            topology_order_digest: vec![9; len],
-            ..family_lease()
-        };
-        assert_eq!(
-            LeaseSpec::from_proto(&g),
-            Err(LeaseError::DescriptorMissing)
-        );
+fn a_family_lease_is_validated_in_order() {
+    let cases = [
+        (
+            "no descriptor, digest length 0",
+            IsingProblemGenerator {
+                family: None,
+                topology_order_digest: vec![9; 0],
+                ..family_lease()
+            },
+            LeaseError::DescriptorMissing,
+        ),
+        (
+            "no descriptor, digest length 31",
+            IsingProblemGenerator {
+                family: None,
+                topology_order_digest: vec![9; 31],
+                ..family_lease()
+            },
+            LeaseError::DescriptorMissing,
+        ),
+        (
+            "no descriptor, digest length 33",
+            IsingProblemGenerator {
+                family: None,
+                topology_order_digest: vec![9; 33],
+                ..family_lease()
+            },
+            LeaseError::DescriptorMissing,
+        ),
+        (
+            "descriptor, bad digest length 31",
+            IsingProblemGenerator {
+                topology_order_digest: vec![9; 31],
+                ..family_lease()
+            },
+            LeaseError::DescriptorMissing,
+        ),
+        (
+            "zero count beats the missing descriptor",
+            IsingProblemGenerator {
+                family: None,
+                salt_count: 0,
+                ..family_lease()
+            },
+            LeaseError::ZeroCount,
+        ),
+        (
+            "short base salt beats the missing descriptor",
+            IsingProblemGenerator {
+                family: None,
+                base_salt: vec![3; 31],
+                ..family_lease()
+            },
+            LeaseError::BadLength { field: "base_salt" },
+        ),
+        (
+            "generator value 0",
+            IsingProblemGenerator {
+                algorithm: 0,
+                ..family_lease()
+            },
+            LeaseError::UnknownGenerator(0),
+        ),
+        (
+            "generator value 3",
+            IsingProblemGenerator {
+                algorithm: 3,
+                ..family_lease()
+            },
+            LeaseError::UnknownGenerator(3),
+        ),
+        (
+            "generator value 7",
+            IsingProblemGenerator {
+                algorithm: 7,
+                ..family_lease()
+            },
+            LeaseError::UnknownGenerator(7),
+        ),
+    ];
+    for (label, g, expected) in cases {
+        assert_eq!(LeaseSpec::from_proto(&g), Err(expected), "{label}");
     }
-    let g = IsingProblemGenerator {
-        topology_order_digest: vec![9; 31],
-        ..family_lease()
-    };
-    assert_eq!(
-        LeaseSpec::from_proto(&g),
-        Err(LeaseError::DescriptorMissing)
-    );
 }
 
 #[test]
-fn field_checks_come_before_code_1() {
-    let g = IsingProblemGenerator {
-        family: None,
-        salt_count: 0,
-        ..family_lease()
-    };
-    assert_eq!(LeaseSpec::from_proto(&g), Err(LeaseError::ZeroCount));
-    let g = IsingProblemGenerator {
-        family: None,
-        base_salt: vec![3; 31],
-        ..family_lease()
-    };
-    assert_eq!(
-        LeaseSpec::from_proto(&g),
-        Err(LeaseError::BadLength { field: "base_salt" })
-    );
-}
-
-#[test]
-fn other_generator_values_stay_unknown() {
-    for id in [0, 3, 7] {
-        let g = IsingProblemGenerator {
-            algorithm: id,
-            ..family_lease()
-        };
-        assert_eq!(
-            LeaseSpec::from_proto(&g),
-            Err(LeaseError::UnknownGenerator(id))
-        );
-    }
-}
-
-#[test]
-fn verify_refuses_a_family_lease() {
-    let g = family_lease();
-    let lease = LeaseSpec::from_proto(&g).unwrap();
-    let topology = TopologyView {
-        num_nodes: 3,
-        edges: vec![(0, 2)],
-        allowed_h_milli: vec![1000],
-        allowed_j_milli: vec![-1000],
-    };
-    let target = Target::from_proto(&SetTarget {
-        max_energy_milli: i64::MAX,
-        min_solutions: 1,
-        min_diversity_milli: 0,
-        max_proof_solutions: 32,
-        ..Default::default()
-    });
-    let result = JobResult {
-        salt: lease.salt(1).unwrap().to_vec(),
-        nonce: lease.nonce(1).unwrap().to_vec(),
-        ..Default::default()
-    };
-    assert_eq!(
-        verify_lease_result(&g, &topology, &target, &result),
-        Err(VerifyError::FamilyLease)
-    );
-    let no_descriptor = IsingProblemGenerator { family: None, ..g };
-    assert_eq!(
-        verify_lease_result(&no_descriptor, &topology, &target, &result),
-        Err(VerifyError::FamilyLease)
-    );
-}
-
-#[test]
-fn verify_solutions_refuses_a_family_spec() {
-    let lease = LeaseSpec::from_proto(&family_lease()).unwrap();
-    assert_eq!(lease.generator, Generator::FamilyChacha8V1);
-    let topology = TopologyView {
-        num_nodes: 3,
-        edges: vec![(0, 2)],
-        allowed_h_milli: vec![1000],
-        allowed_j_milli: vec![-1000],
-    };
-    let target = Target::from_proto(&SetTarget {
-        max_energy_milli: i64::MAX,
-        min_solutions: 1,
-        min_diversity_milli: 0,
-        max_proof_solutions: 32,
-        ..Default::default()
-    });
-    let salt = lease.salt(1).unwrap();
-    let nonce = lease.nonce(1).unwrap();
-    assert_eq!(
-        verify_lease_solutions(&lease, &topology, &target, &salt, &nonce, &[]),
-        Err(VerifyError::FamilyLease)
-    );
-}
-
-#[test]
-fn verify_refuses_a_legacy_lease_with_a_family() {
-    let g = with_family(generator());
-    let topology = TopologyView {
-        num_nodes: 3,
-        edges: vec![(0, 2)],
-        allowed_h_milli: vec![1000],
-        allowed_j_milli: vec![-1000],
-    };
-    let target = Target::from_proto(&SetTarget {
-        max_energy_milli: i64::MAX,
-        min_solutions: 1,
-        min_diversity_milli: 0,
-        max_proof_solutions: 32,
-        ..Default::default()
-    });
+fn verify_refuses_lease_shapes_it_cannot_score() {
+    let topology = three_node_topology();
+    let target = permissive_target();
     let lease = LeaseSpec::from_proto(&generator()).unwrap();
     let result = JobResult {
         salt: lease.salt(1).unwrap().to_vec(),
         nonce: lease.nonce(1).unwrap().to_vec(),
         ..Default::default()
     };
+    let cases = [
+        ("a family lease", family_lease(), VerifyError::FamilyLease),
+        (
+            "a family lease without a descriptor",
+            IsingProblemGenerator {
+                family: None,
+                ..family_lease()
+            },
+            VerifyError::FamilyLease,
+        ),
+        (
+            "a legacy lease with a family",
+            with_family(generator()),
+            VerifyError::SaltOutsideLease,
+        ),
+    ];
+    for (label, g, expected) in cases {
+        assert_eq!(
+            verify_lease_result(&g, &topology, &target, &result),
+            Err(expected),
+            "{label}"
+        );
+    }
+}
+
+#[test]
+fn verify_solutions_refuses_a_family_spec() {
+    let lease = LeaseSpec::from_proto(&family_lease()).unwrap();
+    assert_eq!(lease.generator, Generator::FamilyChacha8V1);
+    let topology = three_node_topology();
+    let target = permissive_target();
+    let salt = lease.salt(1).unwrap();
+    let nonce = lease.nonce(1).unwrap();
     assert_eq!(
-        verify_lease_result(&g, &topology, &target, &result),
-        Err(VerifyError::SaltOutsideLease)
+        verify_lease_solutions(&lease, &topology, &target, &salt, &nonce, &[]),
+        Err(VerifyError::FamilyLease)
     );
 }

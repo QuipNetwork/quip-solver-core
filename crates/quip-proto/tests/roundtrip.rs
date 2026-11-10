@@ -37,8 +37,10 @@ fn hello_roundtrips_through_prost() {
     }
 }
 
+/// Optional model limits keep their presence across the wire: an explicit `0`
+/// (unbounded) is distinct from an unset field (no claim).
 #[test]
-fn capabilities_roundtrips() {
+fn capabilities_roundtrip_keeps_optional_limit_presence() {
     use prost::Message as _;
     use quip_proto::v1::{Capabilities, JobKind};
 
@@ -63,14 +65,6 @@ fn capabilities_roundtrips() {
     };
     let bytes = c.encode_to_vec();
     assert_eq!(Capabilities::decode(&bytes[..]).expect("decode"), c);
-}
-
-/// Optional model limits keep their presence across the wire: an explicit `0`
-/// (unbounded) is distinct from an unset field (no claim).
-#[test]
-fn model_limits_keep_presence() {
-    use prost::Message as _;
-    use quip_proto::v1::Capabilities;
 
     let unbounded = Capabilities {
         max_degree: Some(0),

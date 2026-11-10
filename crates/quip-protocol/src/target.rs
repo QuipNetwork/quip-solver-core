@@ -189,22 +189,30 @@ mod tests {
     }
 
     #[test]
-    fn energy_equal_to_the_ceiling_does_not_count() {
-        let a: &[i8] = &[1, 1, 1, 1];
-        assert_eq!(
-            validate_proof_set(&[(a, -100)], &T),
-            Err(TargetMiss::InsufficientEnergy)
-        );
-    }
-
-    #[test]
-    fn too_few_valid_reads_fail_on_count() {
+    fn validate_proof_set_reports_the_failed_gate() {
         let a: &[i8] = &[1, 1, 1, 1];
         let b: &[i8] = &[1, 1, -1, -1];
-        assert_eq!(
-            validate_proof_set(&[(a, -200), (b, -50)], &T),
-            Err(TargetMiss::InsufficientSolutions)
-        );
+        let single: &[i8] = &[1];
+        let cases = [
+            (
+                "energy equal to the ceiling does not count",
+                vec![(a, -100)],
+                TargetMiss::InsufficientEnergy,
+            ),
+            (
+                "too few valid reads fail on count",
+                vec![(a, -200), (b, -50)],
+                TargetMiss::InsufficientSolutions,
+            ),
+            (
+                "a set larger than the proof limit",
+                vec![(single, -200); 4],
+                TargetMiss::TooManySolutions,
+            ),
+        ];
+        for (label, set, expected) in cases {
+            assert_eq!(validate_proof_set(&set, &T), Err(expected), "{label}");
+        }
     }
 
     #[test]
@@ -216,16 +224,6 @@ mod tests {
         assert_eq!(stats.best_energy_milli, -300);
         assert_eq!(stats.diversity_milli, 200);
         assert_eq!(stats.valid_solution_count, 2);
-    }
-
-    #[test]
-    fn a_set_larger_than_the_proof_limit_is_rejected() {
-        let a: &[i8] = &[1];
-        let set = [(a, -200); 4];
-        assert_eq!(
-            validate_proof_set(&set, &T),
-            Err(TargetMiss::TooManySolutions)
-        );
     }
 
     #[test]

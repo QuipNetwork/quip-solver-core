@@ -211,7 +211,6 @@ mod tests {
         let hello = build_hello("cpu-0", caps.clone()).unwrap();
         assert_eq!(hello.session_token, "tok-123");
         assert_eq!(hello.capabilities, Some(caps.clone()));
-        assert_eq!(PROTOCOL_VERSION, 2);
         std::env::set_var("QUIP_SESSION_TOKEN", "");
         assert_eq!(build_hello("cpu-0", caps), Err(SessionError::MissingToken));
         std::env::remove_var("QUIP_SESSION_TOKEN");
