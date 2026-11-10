@@ -40,7 +40,7 @@ use super::{
 };
 use crate::driver::{
     configure, dispatch, drain_to_end, read_hello, read_until, run_miner, send, ScriptKind,
-    SessionOutcome, Terminal, CONFIGURED_SWEEPS, PHASE_TIMEOUT,
+    SessionOutcome, Terminal, CONFIGURED_SWEEPS, PHASE_TIMEOUT, STDERR_DRAIN_TIMEOUT,
 };
 use crate::solve::CaseOutcome;
 
@@ -1911,6 +1911,7 @@ pub async fn drive_miner_family(bin_path: &str, args: &[&str], socket: &str) -> 
         socket,
         ScriptKind::Family,
         family_child_timeout(),
+        STDERR_DRAIN_TIMEOUT,
     )
     .await;
     if outcome.family_cases.is_empty() {

@@ -2488,10 +2488,10 @@ mod tests {
             }))
             .await
             .unwrap();
-            // Wait for the hand-over to settle: no new job for 200 ms.
+            // Wait for the hand-over to settle: no new job for 50 ms.
             let mut last = usize::MAX;
             loop {
-                tokio::time::sleep(Duration::from_millis(200)).await;
+                tokio::time::sleep(Duration::from_millis(50)).await;
                 let now = seen.load(Ordering::SeqCst);
                 if now == last {
                     break;

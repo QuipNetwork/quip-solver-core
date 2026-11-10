@@ -1156,7 +1156,7 @@ async fn a_deadline_stops_a_family_lease() {
             .as_millis(),
     )
     .unwrap()
-        + 500;
+        + 100;
     s.send(coord_msg::Msg::Job(lease)).await;
     let mut held = s.blocked_sample().await;
     let (results, done) = drain_lease(&mut s).await;

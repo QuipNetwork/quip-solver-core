@@ -578,7 +578,7 @@ async fn a_deadline_reports_a_lease_while_its_salt_is_still_running() {
             .as_millis(),
     )
     .unwrap()
-        + 500;
+        + 100;
     s.send(coord_msg::Msg::Job(lease)).await;
     let mut held = s.blocked_sample().await;
     assert!(matches!(s.recv().await, miner_msg::Msg::LeaseDone(d) if d.salts_done == 0));
@@ -771,9 +771,9 @@ async fn an_expired_lease_is_rejected_and_a_deadline_mid_lease_stops_it() {
             .as_millis(),
     )
     .unwrap()
-        + 5000;
+        + 500;
     // Model a coordinator task descheduled between constructing and sending a job.
-    let _ = tokio::time::timeout(Duration::from_millis(300), std::future::pending::<()>()).await;
+    let _ = tokio::time::timeout(Duration::from_millis(100), std::future::pending::<()>()).await;
     let deadline_ms = j.deadline_ms;
     s.send(coord_msg::Msg::Job(j)).await;
     first(&mut s).await;
@@ -782,7 +782,7 @@ async fn an_expired_lease_is_rejected_and_a_deadline_mid_lease_stops_it() {
             miner_msg::Msg::Result(r) => verify(&r),
             miner_msg::Msg::LeaseDone(d) => {
                 assert!(d.salts_done < 10_000);
-                assert!(start.elapsed() < Duration::from_secs(7));
+                assert!(start.elapsed() < Duration::from_secs(2));
                 assert!(
                     std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
@@ -1178,7 +1178,7 @@ async fn shutdown_reports_a_lease_whose_salt_never_returns() {
     s.send(coord_msg::Msg::Job(job(40))).await;
     // Hold the salt through the whole grace window.
     let held = s.blocked_sample().await;
-    s.send(coord_msg::Msg::Shutdown(wire::Shutdown { grace_ms: 400 }))
+    s.send(coord_msg::Msg::Shutdown(wire::Shutdown { grace_ms: 100 }))
         .await;
     assert!(matches!(s.recv().await, miner_msg::Msg::LeaseDone(d) if d.salts_done == 0));
     s.refund().await;

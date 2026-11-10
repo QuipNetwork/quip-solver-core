@@ -48,6 +48,10 @@ const CHILD_TIMEOUT: Duration = Duration::from_secs(PHASE_TIMEOUT.as_secs() * 13
 /// once the child has exited.
 const OUTCOME_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// How long the harness waits for the miner's stderr pipe to close once the
+/// miner has exited.
+pub(crate) const STDERR_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// `num_sweeps` the script pushes through `Configure.backend_toml`. Chosen
 /// different from the SDK default (64) so an implementation that ignores
 /// `backend_toml` and reports its default cannot pass by coincidence.
@@ -1088,6 +1092,7 @@ async fn run_lease(
     tx: &mpsc::Sender<Result<CoordMsg, Status>>,
     inbound: &mut Streaming<MinerMsg>,
     outcome: &mut SessionOutcome,
+    budget: Duration,
 ) {
     outcome.lease = Some(LeaseOutcome::default());
     let _ = send(tx, coord_msg::Msg::Topology(lease_topology())).await;
@@ -1109,7 +1114,7 @@ async fn run_lease(
     .await;
     // Bound the whole scenario, including its refund, even if messages keep arriving.
     if tokio::time::timeout(
-        PHASE_TIMEOUT,
+        budget,
         read_until(inbound, outcome, "salt-lease", |o| {
             o.lease
                 .as_ref()
@@ -1424,7 +1429,7 @@ async fn run_script(
 
     // 11. Generation runs above the cancellation watermark from the plain jobs.
     if advertises_lease(outcome.hello.as_ref()) {
-        run_lease(tx, inbound, &mut outcome).await;
+        run_lease(tx, inbound, &mut outcome, PHASE_TIMEOUT).await;
     }
 
     // 12. Shutdown -> miner flushes and exits 0, closing its send stream.
@@ -1551,15 +1556,16 @@ async fn run_script_close(
     outcome
 }
 
-/// Wait up to five seconds for the stderr reader, then return what it captured.
+/// Wait up to `drain` for the stderr reader, then return what it captured.
 /// A read error, a failed reader task, or a timeout appends an
 /// incomplete-capture marker line. On timeout the reader task is aborted.
 async fn finish_stderr_capture(
     mut reader: Option<tokio::task::JoinHandle<std::io::Result<()>>>,
     captured: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    drain: Duration,
 ) -> String {
     let incomplete_reason = match reader.as_mut() {
-        Some(reader) => match tokio::time::timeout(Duration::from_secs(5), &mut *reader).await {
+        Some(reader) => match tokio::time::timeout(drain, &mut *reader).await {
             Ok(Ok(Ok(()))) => None,
             Ok(Ok(Err(error))) => Some(format!("read error: {error}")),
             Ok(Err(error)) => Some(format!("reader task failed: {error}")),
@@ -1589,7 +1595,8 @@ async fn finish_stderr_capture(
 
 /// Bind the socket, serve `MockCoordinator` with `script`, spawn
 /// `bin_path --quip-coordinator <socket> --miner-id mock-0 <extra_args...>`,
-/// and wait up to `child_timeout`. Returns the outcome, the exit code (-1 on timeout), and stderr.
+/// and wait up to `child_timeout`, then up to `stderr_drain` for its stderr
+/// pipe to close. Returns the outcome, the exit code (-1 on timeout), and stderr.
 ///
 /// `socket` is a `unix://<path>` URI; the same value is passed to the miner via
 /// `--quip-coordinator`.
@@ -1599,6 +1606,7 @@ pub(crate) async fn run_miner(
     socket: &str,
     script: ScriptKind,
     child_timeout: Duration,
+    stderr_drain: Duration,
 ) -> (SessionOutcome, i32, String) {
     let path = socket.strip_prefix("unix://").unwrap_or(socket).to_string();
     let _ = std::fs::remove_file(&path);
@@ -1672,15 +1680,21 @@ pub(crate) async fn run_miner(
         let _ = child.kill().await;
         -1
     };
-    let stderr = finish_stderr_capture(stderr_reader, captured_stderr).await;
+    let stderr = finish_stderr_capture(stderr_reader, captured_stderr, stderr_drain).await;
     // The session handler sends the outcome as the miner closes its stream on
-    // exit; the timeout guards a miner that dies before ever connecting.
-    let mut outcome = tokio::time::timeout(OUTCOME_TIMEOUT, orx)
-        .await
-        .ok()
-        .and_then(Result::ok)
-        .unwrap_or_default();
-    outcome.connected = connected.load(std::sync::atomic::Ordering::SeqCst);
+    // exit. A miner that exited without ever connecting has no session, so
+    // there is no outcome to wait for.
+    let connected = connected.load(std::sync::atomic::Ordering::SeqCst);
+    let mut outcome = if connected {
+        tokio::time::timeout(OUTCOME_TIMEOUT, orx)
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .unwrap_or_default()
+    } else {
+        SessionOutcome::default()
+    };
+    outcome.connected = connected;
     server.abort();
     let _ = std::fs::remove_file(&path);
 
@@ -1693,8 +1707,15 @@ pub(crate) async fn run_miner(
 /// `socket` is a `unix://<path>` URI; the same value is passed to the miner via
 /// `--quip-coordinator`.
 async fn drive_miner_with_script(bin_path: &str, socket: &str, script: ScriptKind) -> DriverReport {
-    let (outcome, exit_code, stderr) =
-        run_miner(bin_path, &[], socket, script, CHILD_TIMEOUT).await;
+    let (outcome, exit_code, stderr) = run_miner(
+        bin_path,
+        &[],
+        socket,
+        script,
+        CHILD_TIMEOUT,
+        STDERR_DRAIN_TIMEOUT,
+    )
+    .await;
     DriverReport {
         lease: outcome.lease,
         handshake_ok: outcome.handshake_ok,
@@ -2123,7 +2144,7 @@ mod tests {
             let mut inbound = request.into_inner();
             let _task = tokio::spawn(async move {
                 let mut outcome = SessionOutcome::default();
-                run_lease(&tx, &mut inbound, &mut outcome).await;
+                run_lease(&tx, &mut inbound, &mut outcome, Duration::from_millis(200)).await;
                 let _ = sender.send(outcome);
             });
             Ok(Response::new(ReceiverStream::new(rx)))
@@ -2170,7 +2191,7 @@ mod tests {
                 }
             }
         });
-        let result = tokio::time::timeout(PHASE_TIMEOUT + Duration::from_secs(2), outcome).await;
+        let result = tokio::time::timeout(Duration::from_secs(2), outcome).await;
         traffic.abort();
         server.abort();
         let outcome = result
@@ -2178,6 +2199,73 @@ mod tests {
             .unwrap();
         assert_eq!(outcome.timed_out_phases, vec!["salt-lease"]);
         assert!(!outcome.statuses.is_empty());
+    }
+
+    /// Spawn the freshly written wrapper until one exec succeeds. A sibling
+    /// test that forks while the wrapper is open for writing holds the write
+    /// descriptor until its own exec, and exec meanwhile fails with
+    /// `ExecutableFileBusy`. Once one exec succeeds no writer is left, so the
+    /// driver's spawn cannot hit it.
+    async fn wait_until_executable(wrapper: &std::path::Path) {
+        for _ in 0..20 {
+            match std::process::Command::new(wrapper).arg("--probe").status() {
+                Ok(status) => {
+                    assert!(status.success(), "wrapper probe failed: {status}");
+                    return;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                Err(error) => panic!("probe wrapper: {error}"),
+            }
+        }
+        panic!("the wrapper stayed busy after 20 attempts");
+    }
+
+    #[tokio::test]
+    async fn stderr_capture_preserves_partial_output_when_a_descendant_holds_the_pipe_open() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let base = format!(
+            "/tmp/quip-conformance-stderr-{}-{nanos}",
+            std::process::id()
+        );
+        let dir = std::path::PathBuf::from(format!("{base}-wrapper"));
+        std::fs::create_dir_all(&dir).expect("create wrapper directory");
+        let wrapper = dir.join("miner-wrapper");
+        // The background sleep inherits stderr and holds the pipe open after
+        // the wrapper exits.
+        let script = "#!/bin/sh\n[ \"$1\" = --probe ] && exit 0\nsleep 30 &\nprintf '%s\\n' 'known wrapper diagnostic' >&2\n";
+        std::fs::write(&wrapper, script).expect("write miner wrapper");
+        let mut permissions = std::fs::metadata(&wrapper)
+            .expect("read wrapper metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&wrapper, permissions).expect("make wrapper executable");
+        wait_until_executable(&wrapper).await;
+
+        let (_, _, stderr) = run_miner(
+            &wrapper.to_string_lossy(),
+            &[],
+            &format!("unix://{base}.sock"),
+            ScriptKind::Full,
+            PHASE_TIMEOUT,
+            Duration::from_millis(300),
+        )
+        .await;
+
+        assert!(stderr.contains("known wrapper diagnostic"), "{stderr}");
+        assert!(
+            stderr.contains(
+                "[stderr capture incomplete: the pipe stayed open after the miner exited]"
+            ),
+            "{stderr}"
+        );
+        std::fs::remove_dir_all(dir).expect("remove wrapper directory");
     }
 
     #[test]
