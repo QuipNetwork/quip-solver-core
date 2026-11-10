@@ -335,7 +335,8 @@ fn enum_numbers_match_the_fixture() {
             Sbqa,
             Tedsb,
             External,
-            Otsuka
+            Otsuka,
+            IceSat
         ]
     );
     pin_enum!(

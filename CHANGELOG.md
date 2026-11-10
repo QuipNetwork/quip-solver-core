@@ -9,6 +9,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `miner.proto`: the enum value `ALGORITHM_ICE_SAT` = 20, named `ice-sat`, for the
+  strong-layer SAT baseline on synthetic ice. The Rust, Python, and TypeScript
+  bindings include it.
 - `quip/polariton-static@1`, a registered family with status `research` and the
   first `hard` family. An open square-link lattice of side `L` sits natively on
   Zephyr cells, where each vertex is a cell K4 and each link is one shared segment

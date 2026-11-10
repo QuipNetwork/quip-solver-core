@@ -516,6 +516,7 @@ pub enum Algorithm {
     Tedsb = 17,
     External = 18,
     Otsuka = 19,
+    IceSat = 20,
 }
 impl Algorithm {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -544,6 +545,7 @@ impl Algorithm {
             Self::Tedsb => "ALGORITHM_TEDSB",
             Self::External => "ALGORITHM_EXTERNAL",
             Self::Otsuka => "ALGORITHM_OTSUKA",
+            Self::IceSat => "ALGORITHM_ICE_SAT",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -569,6 +571,7 @@ impl Algorithm {
             "ALGORITHM_TEDSB" => Some(Self::Tedsb),
             "ALGORITHM_EXTERNAL" => Some(Self::External),
             "ALGORITHM_OTSUKA" => Some(Self::Otsuka),
+            "ALGORITHM_ICE_SAT" => Some(Self::IceSat),
             _ => None,
         }
     }
