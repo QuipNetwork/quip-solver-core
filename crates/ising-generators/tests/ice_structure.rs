@@ -19,15 +19,13 @@ use ising_generators::rng::{shuffle, ChaCha8Rng};
 use serde_json::Value;
 
 mod common;
+#[path = "common/lattice.rs"]
+mod lattice;
 use common::{array, field, number, pairs, text, u32s};
+use lattice::lattice_topology;
 
 fn topology(nodes: Vec<u32>, edges: &[(u32, u32)]) -> BaseTopology {
     BaseTopology::new(nodes, edges).expect("test topology is valid")
-}
-
-fn lattice_topology(m: u16, t: u8) -> BaseTopology {
-    let (nodes, edges) = zephyr_lattice(m, t).expect("lattice");
-    topology(nodes, &edges)
 }
 
 fn adjacency_graph(edges: &[(u32, u32)]) -> BaseTopology {

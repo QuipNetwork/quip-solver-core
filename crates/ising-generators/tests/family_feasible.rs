@@ -123,8 +123,12 @@ fn feasible_follows_the_construction() -> Result<(), String> {
         ("no construction: [1, 1]", &none, &[1, 1], false),
     ];
     for (label, contracts, spins, want) in rows {
-        let admitted = admitted(contracts).map_err(|e| format!("{label}: {e}"))?;
-        assert_eq!(feasible(&admitted, &instance, spins), want, "{label}");
+        let admitted = admitted(contracts).map_err(|e| format!("{label}: spins={spins:?}: {e}"))?;
+        assert_eq!(
+            feasible(&admitted, &instance, spins),
+            want,
+            "{label}: spins={spins:?}"
+        );
     }
     Ok(())
 }

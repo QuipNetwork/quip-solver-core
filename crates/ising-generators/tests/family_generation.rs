@@ -16,6 +16,10 @@ use ising_generators::rng::uniform;
 use ising_generators::Code;
 use serde_json::Value;
 
+#[path = "common/size_bounds.rs"]
+mod size_bounds;
+use size_bounds::bounds;
+
 const UNIFORM_FIELD: &[FieldSpec] = &[
     FieldSpec {
         tag: 1,
@@ -474,13 +478,7 @@ fn nonce_where(topology: &BaseTopology, want: impl Fn(u32) -> bool) -> Result<[u
 }
 
 fn bounds_of(admitted: &Admitted<'_>, topology: &BaseTopology) -> Result<SizeBounds, String> {
-    admit_topology(
-        admitted,
-        topology,
-        topology.order_digest(),
-        &AdvertisedLimits::default(),
-    )
-    .map_err(|c| format!("admit_topology failed with {c}"))
+    bounds(admitted, topology).map_err(|c| format!("admit_topology failed with {c}"))
 }
 
 // ---- tests ----

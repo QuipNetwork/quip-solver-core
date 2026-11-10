@@ -37,10 +37,12 @@ fn spins_of(state: u32, links: u32) -> Vec<i8> {
 }
 
 /// Charges by counting arrows: arrows into the vertex minus arrows out.
-fn arrow_charges(lattice: &SquareLattice, spins: &[i8]) -> Vec<i8> {
+fn arrow_charges(what: &str, lattice: &SquareLattice, spins: &[i8]) -> Vec<i8> {
     let mut q = vec![0i8; lattice.vertex_count() as usize];
     for e in 0..lattice.link_count() {
-        let link = lattice.link(e).expect("link exists");
+        let link = lattice.link(e);
+        assert!(link.is_some(), "{what}: link {e} exists");
+        let link = link.expect("link exists");
         let (into, out) = if spins[e as usize] == 1 {
             (link.head, link.tail)
         } else {
@@ -146,16 +148,28 @@ fn check_all_states(lat: &SquareLattice, boundary: Boundary) {
         let q = charges(lat, &spins);
         assert!(q.is_some(), "{boundary:?} state {state}: valid spins");
         let q = q.expect("valid spins");
-        assert_eq!(q, arrow_charges(lat, &spins), "{boundary:?} state {state}");
+        assert_eq!(
+            q,
+            arrow_charges(&format!("{boundary:?} state {state}"), lat, &spins),
+            "{boundary:?} state {state}"
+        );
         assert_eq!(
             q.iter().map(|&c| i32::from(c)).sum::<i32>(),
             0,
             "{boundary:?} state {state}: charges sum to zero"
         );
         for (v, &c) in q.iter().enumerate() {
-            let deg = lat
-                .degree(u32::try_from(v).expect("small"))
-                .expect("vertex");
+            let vertex = u32::try_from(v);
+            assert!(
+                vertex.is_ok(),
+                "{boundary:?} state {state}: vertex {v} fits"
+            );
+            let deg = lat.degree(vertex.expect("small"));
+            assert!(
+                deg.is_some(),
+                "{boundary:?} state {state}: vertex {v} has a degree"
+            );
+            let deg = deg.expect("vertex");
             assert_eq!(
                 (i32::from(c) - i32::from(deg)) % 2,
                 0,

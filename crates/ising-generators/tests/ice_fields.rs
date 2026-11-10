@@ -21,10 +21,19 @@ use ising_generators::Code;
 #[expect(dead_code, reason = "this test uses only the live topology loader")]
 mod common;
 
-#[path = "common/family.rs"]
-mod family;
+#[path = "common/admit.rs"]
+mod admit;
+#[path = "common/lattice.rs"]
+mod lattice;
+#[path = "common/nonce.rs"]
+mod nonce;
+#[path = "common/size_bounds.rs"]
+mod size_bounds;
 
-use family::{admitted, bounds, lattice_topology, nonce_of};
+use admit::admitted;
+use lattice::lattice_topology;
+use nonce::nonce_of;
+use size_bounds::bounds;
 
 /// Canonical parameter bytes: format, then `(tag, len, payload)` per field.
 fn params(m: u16, t: u8, glass: u16, field: u16, divisor: u16) -> Vec<u8> {
@@ -53,21 +62,28 @@ fn try_build(
     generate_instance(&admitted, topology, &bounds, nonce)
 }
 
-fn build(bytes: &[u8], topology: &BaseTopology, nonce: [u8; 32]) -> Instance {
-    try_build(bytes, topology, nonce)
-        .map_err(|fault| format!("{fault:?}"))
-        .expect("generate")
+fn build(what: &str, bytes: &[u8], topology: &BaseTopology, nonce: [u8; 32]) -> Instance {
+    let admitted = admitted(&ICE_FIELDS_V1, bytes);
+    assert!(admitted.is_ok(), "{what}: admit");
+    let admitted = admitted.expect("admit");
+    let bounds = bounds(&admitted, topology);
+    assert!(bounds.is_ok(), "{what}: admit topology");
+    let bounds = bounds.expect("admit topology");
+    let built = generate_instance(&admitted, topology, &bounds, nonce)
+        .map_err(|fault| format!("{fault:?}"));
+    assert!(built.is_ok(), "{what}: generate: {built:?}");
+    built.expect("generate")
 }
 
 /// The decoded metadata: tiles and gauge.
-fn decode(instance: &Instance) -> (Vec<[u32; 4]>, Vec<i64>) {
+fn decode(what: &str, instance: &Instance) -> (Vec<[u32; 4]>, Vec<i64>) {
     let region = instance.metadata();
     let word = |at: usize| u32::from_le_bytes(region[at..at + 4].try_into().expect("four bytes"));
-    assert_eq!(&region[..2], &[2, 0], "two sections");
-    assert_eq!(&region[2..4], &[1, 0], "tiles first");
+    assert_eq!(&region[..2], &[2, 0], "{what}: two sections");
+    assert_eq!(&region[2..4], &[1, 0], "{what}: tiles first");
     let tile_len = word(4) as usize;
     let count = word(8) as usize;
-    assert_eq!(tile_len, 4 + 16 * count);
+    assert_eq!(tile_len, 4 + 16 * count, "{what}: tile length");
     let tiles = (0..count)
         .map(|k| {
             let at = 12 + 16 * k;
@@ -75,13 +91,17 @@ fn decode(instance: &Instance) -> (Vec<[u32; 4]>, Vec<i64>) {
         })
         .collect();
     let gauge_at = 8 + tile_len;
-    assert_eq!(&region[gauge_at..gauge_at + 2], &[2, 0], "gauge second");
+    assert_eq!(
+        &region[gauge_at..gauge_at + 2],
+        &[2, 0],
+        "{what}: gauge second"
+    );
     let n = word(gauge_at + 6) as usize;
     let gauge = region[gauge_at + 10..]
         .iter()
         .map(|&b| if b == 0 { 1 } else { -1 })
         .collect::<Vec<i64>>();
-    assert_eq!(gauge.len(), n);
+    assert_eq!(gauge.len(), n, "{what}: gauge length");
     (tiles, gauge)
 }
 
@@ -102,7 +122,7 @@ fn memberships(tiles: &[[u32; 4]], n: usize) -> Vec<u8> {
 }
 
 /// A copy of `instance` with new fields and metadata.
-fn rebuilt(instance: &Instance, h: Vec<i32>, metadata: Vec<u8>) -> Instance {
+fn rebuilt(what: &str, instance: &Instance, h: Vec<i32>, metadata: Vec<u8>) -> Instance {
     let parts = InstanceParts {
         descriptor_digest: *instance.descriptor_digest(),
         topology_order_digest: *instance.topology_order_digest(),
@@ -114,13 +134,14 @@ fn rebuilt(instance: &Instance, h: Vec<i32>, metadata: Vec<u8>) -> Instance {
         offset_milli: instance.offset_milli(),
         metadata,
     };
-    Instance::new(
+    let built = Instance::new(
         parts,
         &ICE_FIELDS_V1.limits,
         ICE_FIELDS_V1.metadata_kinds,
         None,
-    )
-    .expect("rebuilt instance is well formed")
+    );
+    assert!(built.is_ok(), "{what}: rebuilt instance is well formed");
+    built.expect("rebuilt instance is well formed")
 }
 
 fn check(bytes: &[u8], instance: &Instance) -> bool {
@@ -179,7 +200,10 @@ fn field_streams_do_not_change_the_glass() {
     for (field, divisor) in [(1000, 16), (500, 40), (1000, 40)] {
         let other = raw(&params(2, 2, 125, field, divisor), &topology, nonce_of(1)).expect("other");
         assert_eq!(base.j(), other.j(), "field {field} divisor {divisor}");
-        assert_eq!(decode(&base).1, decode(&other).1);
+        assert_eq!(
+            decode("field_streams_do_not_change_the_glass", &base).1,
+            decode("field_streams_do_not_change_the_glass", &other).1
+        );
         assert_eq!(base.metadata(), other.metadata());
     }
 }
@@ -191,8 +215,13 @@ fn fields_sit_on_shared_spins_only() {
     for (m, t) in [(2, 2), (0, 0)] {
         let bytes = params(m, t, 125, 500, 16);
         for i in 0..4 {
-            let instance = build(&bytes, &topology, nonce_of(i));
-            let (tiles, gauge) = decode(&instance);
+            let instance = build(
+                &format!("mode ({m}, {t}) nonce {i}"),
+                &bytes,
+                &topology,
+                nonce_of(i),
+            );
+            let (tiles, gauge) = decode(&format!("mode ({m}, {t}) nonce {i}"), &instance);
             if (m, t) == (2, 2) {
                 assert!(!tiles.is_empty(), "nonce {i}: tiles");
                 for &tile in &tiles {
@@ -227,8 +256,13 @@ fn field_values_are_drawn_sign_times_gauge() {
     let topology = lattice_topology(2, 2);
     let bytes = params(2, 2, 125, 500, 16);
     let nonce = nonce_of(5);
-    let instance = build(&bytes, &topology, nonce);
-    let (tiles, gauge) = decode(&instance);
+    let instance = build(
+        "field_values_are_drawn_sign_times_gauge",
+        &bytes,
+        &topology,
+        nonce,
+    );
+    let (tiles, gauge) = decode("field_values_are_drawn_sign_times_gauge", &instance);
     let n = topology.node_ids().len();
     let seen = memberships(&tiles, n);
     let mut eligible: Vec<u32> = (0..u32::try_from(n).expect("fits"))
@@ -363,7 +397,12 @@ fn a_large_divisor_gives_no_fields() {
     let n = topology.node_ids().len();
     assert!(n < 65_535);
     let bytes = params(2, 2, 125, 500, 65_535);
-    let instance = build(&bytes, &topology, nonce_of(2));
+    let instance = build(
+        "a_large_divisor_gives_no_fields",
+        &bytes,
+        &topology,
+        nonce_of(2),
+    );
     assert!(instance.h().iter().all(|&h| h == 0));
     assert!(check(&bytes, &instance));
 }
@@ -374,8 +413,8 @@ fn generation_is_repeatable() {
     let bytes = params(2, 2, 125, 500, 16);
     let mut bodies = Vec::new();
     for nonce in [nonce_of(1), nonce_of(2)] {
-        let first = build(&bytes, &topology, nonce);
-        let again = build(&bytes, &topology, nonce);
+        let first = build("generation_is_repeatable", &bytes, &topology, nonce);
+        let again = build("generation_is_repeatable", &bytes, &topology, nonce);
         assert_eq!(first.canonical_bytes(), again.canonical_bytes());
         bodies.push((
             first.j().to_vec(),
@@ -391,9 +430,9 @@ fn check_metadata_rejects_each_rule() {
     let topology = lattice_topology(2, 2);
     let n = topology.node_ids().len();
     let bytes = params(2, 2, 125, 500, 16);
-    let instance = build(&bytes, &topology, nonce_of(6));
+    let instance = build("positive control", &bytes, &topology, nonce_of(6));
     assert!(check(&bytes, &instance), "positive control");
-    let (tiles, _) = decode(&instance);
+    let (tiles, _) = decode("positive control", &instance);
     let seen = memberships(&tiles, n);
     let metadata = instance.metadata().to_vec();
     let held: Vec<usize> = (0..n).filter(|&k| instance.h()[k] != 0).collect();
@@ -402,23 +441,25 @@ fn check_metadata_rejects_each_rule() {
         .expect("an eligible node without a field");
     let single = (0..n).find(|&k| seen[k] == 1).expect("a node in one tile");
 
-    let with = |edit: &dyn Fn(&mut Vec<i32>)| {
+    let with = |what: &str, edit: &dyn Fn(&mut Vec<i32>)| {
         let mut h = instance.h().to_vec();
         edit(&mut h);
-        rebuilt(&instance, h, metadata.clone())
+        rebuilt(what, &instance, h, metadata.clone())
     };
-    let moved = with(&|h| {
+    let moved = with("a field on a node in one tile", &|h| {
         h[single] = h[held[0]];
         h[held[0]] = 0;
     });
     assert!(!check(&bytes, &moved), "a field on a node in one tile");
-    let wrong = with(&|h| h[held[0]] = h[held[0]].signum() * 501);
+    let wrong = with("a field of the wrong size", &|h| {
+        h[held[0]] = h[held[0]].signum() * 501;
+    });
     assert!(!check(&bytes, &wrong), "a field of the wrong size");
-    let many = with(&|h| h[spare] = 500);
+    let many = with("one field too many", &|h| h[spare] = 500);
     assert!(!check(&bytes, &many), "one field too many");
-    let few = with(&|h| h[held[0]] = 0);
+    let few = with("one field too few", &|h| h[held[0]] = 0);
     assert!(!check(&bytes, &few), "one field too few");
-    let flipped = with(&|h| h[held[0]] = -h[held[0]]);
+    let flipped = with("the sign is not checked", &|h| h[held[0]] = -h[held[0]]);
     assert!(check(&bytes, &flipped), "the sign is not checked");
 
     // Breaks one rule: a count is u32::MAX.
@@ -428,7 +469,12 @@ fn check_metadata_rejects_each_rule() {
     for at in [8, gauge_count_at] {
         let mut damaged = region.clone();
         damaged[at..at + 4].copy_from_slice(&u32::MAX.to_le_bytes());
-        let bad = rebuilt(&instance, instance.h().to_vec(), damaged);
+        let bad = rebuilt(
+            &format!("count at {at}"),
+            &instance,
+            instance.h().to_vec(),
+            damaged,
+        );
         assert!(!check(&bytes, &bad), "count at {at}");
     }
 }
@@ -453,7 +499,7 @@ fn recipes_are_canonical() {
 fn live_recipes_build() {
     let topology = common::live_topology();
     for recipe in &ICE_FIELDS_RECIPES {
-        let instance = build(recipe.params, topology, nonce_of(9));
+        let instance = build("live_recipes_build", recipe.params, topology, nonce_of(9));
         let field = if recipe.alias == "h500" { 500 } else { 1000 };
         let nonzero: Vec<i32> = instance.h().iter().copied().filter(|&h| h != 0).collect();
         assert_eq!(nonzero.len(), 285, "{}", recipe.alias);

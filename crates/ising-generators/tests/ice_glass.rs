@@ -18,10 +18,19 @@ use ising_generators::Code;
 #[expect(dead_code, reason = "this test uses only the live topology loader")]
 mod common;
 
-#[path = "common/family.rs"]
-mod family;
+#[path = "common/admit.rs"]
+mod admit;
+#[path = "common/lattice.rs"]
+mod lattice;
+#[path = "common/nonce.rs"]
+mod nonce;
+#[path = "common/size_bounds.rs"]
+mod size_bounds;
 
-use family::{admitted, bounds, lattice_topology, nonce_of};
+use admit::admitted;
+use lattice::lattice_topology;
+use nonce::nonce_of;
+use size_bounds::bounds;
 
 /// Canonical parameter bytes: format, then `(tag, len, payload)` per field.
 fn params(m: u16, t: u8, glass: u16) -> Vec<u8> {
@@ -73,7 +82,7 @@ fn tile_pairs(tile: [u32; 4]) -> [(u32, u32); 6] {
 }
 
 /// A copy of `instance` with new couplings and metadata.
-fn rebuilt(instance: &Instance, j: Vec<i32>, metadata: Vec<u8>) -> Instance {
+fn rebuilt(what: &str, instance: &Instance, j: Vec<i32>, metadata: Vec<u8>) -> Instance {
     let parts = InstanceParts {
         descriptor_digest: *instance.descriptor_digest(),
         topology_order_digest: *instance.topology_order_digest(),
@@ -85,13 +94,14 @@ fn rebuilt(instance: &Instance, j: Vec<i32>, metadata: Vec<u8>) -> Instance {
         offset_milli: instance.offset_milli(),
         metadata,
     };
-    Instance::new(
+    let built = Instance::new(
         parts,
         &ICE_GLASS_V1.limits,
         ICE_GLASS_V1.metadata_kinds,
         None,
-    )
-    .expect("rebuilt instance is well formed")
+    );
+    assert!(built.is_ok(), "{what}: rebuilt instance is well formed");
+    built.expect("rebuilt instance is well formed")
 }
 
 fn check(bytes: &[u8], instance: &Instance) -> bool {
@@ -369,8 +379,11 @@ fn valid_z22(nonce: u8) -> (Vec<u8>, Instance, Vec<[u32; 4]>, Vec<u8>) {
 
 /// Whether the family check rejects `instance` with its metadata replaced by
 /// `region`.
-fn rejects_region(bytes: &[u8], instance: &Instance, region: Vec<u8>) -> bool {
-    !check(bytes, &rebuilt(instance, instance.j().to_vec(), region))
+fn rejects_region(what: &str, bytes: &[u8], instance: &Instance, region: Vec<u8>) -> bool {
+    !check(
+        bytes,
+        &rebuilt(what, instance, instance.j().to_vec(), region),
+    )
 }
 
 /// A copy of `instance` with a new offset. A looser offset limit lets the
@@ -402,7 +415,12 @@ fn rejects_coupling_tile_and_field_faults(bytes: &[u8], instance: &Instance, til
     let at = instance.edges().binary_search(&pair).expect("tile edge");
     let mut couplings = instance.j().to_vec();
     couplings[at] = -couplings[at];
-    let flipped = rebuilt(instance, couplings, instance.metadata().to_vec());
+    let flipped = rebuilt(
+        "flipped tile coupler",
+        instance,
+        couplings,
+        instance.metadata().to_vec(),
+    );
     assert!(!check(bytes, &flipped), "flipped tile coupler");
 
     // Breaks one rule: a tile is not a clique of the instance.
@@ -417,7 +435,12 @@ fn rejects_coupling_tile_and_field_faults(bytes: &[u8], instance: &Instance, til
         let at = 12 + 4 * k;
         region[at..at + 4].copy_from_slice(&pos.to_le_bytes());
     }
-    let moved = rebuilt(instance, instance.j().to_vec(), region);
+    let moved = rebuilt(
+        "tile off the instance",
+        instance,
+        instance.j().to_vec(),
+        region,
+    );
     assert!(!check(bytes, &moved), "tile off the instance");
 
     // Breaks one rule: a field is nonzero.
@@ -439,9 +462,49 @@ fn rejects_coupling_tile_and_field_faults(bytes: &[u8], instance: &Instance, til
         &ICE_GLASS_V1.limits,
         ICE_GLASS_V1.metadata_kinds,
         None,
-    )
-    .expect("well formed");
+    );
+    assert!(tilted.is_ok(), "nonzero field: well formed");
+    let tilted = tilted.expect("well formed");
     assert!(!check(bytes, &tilted), "nonzero field");
+}
+
+/// The ordering rules on tiles: each mutation of `instance` breaks one rule.
+fn rejects_tile_order_faults(bytes: &[u8], instance: &Instance, tiles: &[[u32; 4]], gauge: &[u8]) {
+    // Breaks one rule: tiles are not ascending.
+    let mut swapped = tiles.to_vec();
+    swapped[0].swap(0, 1);
+    assert!(
+        rejects_region(
+            "positions out of order inside a tile",
+            bytes,
+            instance,
+            region_of(&swapped, gauge)
+        ),
+        "positions out of order inside a tile"
+    );
+    let mut reordered = tiles.to_vec();
+    reordered.swap(0, 1);
+    assert!(
+        rejects_region(
+            "tiles out of order",
+            bytes,
+            instance,
+            region_of(&reordered, gauge)
+        ),
+        "tiles out of order"
+    );
+
+    // Breaks one rule: tiles are not distinct.
+    let first = tiles[0];
+    assert!(
+        rejects_region(
+            "tiles not distinct",
+            bytes,
+            instance,
+            region_of(&[first, first], gauge)
+        ),
+        "tiles not distinct"
+    );
 }
 
 #[test]
@@ -455,7 +518,12 @@ fn check_metadata_rejects_each_rule() {
     let mut bad_gauge = gauge.clone();
     bad_gauge[0] = 2;
     assert!(
-        rejects_region(&bytes, &instance, region_of(&tiles, &bad_gauge)),
+        rejects_region(
+            "gauge byte above one",
+            &bytes,
+            &instance,
+            region_of(&tiles, &bad_gauge)
+        ),
         "gauge byte above one"
     );
 
@@ -465,7 +533,12 @@ fn check_metadata_rejects_each_rule() {
     let short = u32::try_from(gauge.len() - 1).expect("fits");
     region[count_at..count_at + 4].copy_from_slice(&short.to_le_bytes());
     assert!(
-        rejects_region(&bytes, &instance, region),
+        rejects_region(
+            "gauge count differs from node count",
+            &bytes,
+            &instance,
+            region
+        ),
         "gauge count differs from node count"
     );
 
@@ -477,7 +550,12 @@ fn check_metadata_rejects_each_rule() {
         "the overlapping tile sorts after the first"
     );
     assert!(
-        rejects_region(&bytes, &instance, region_of(&[first, overlap], &gauge)),
+        rejects_region(
+            "tiles share an edge",
+            &bytes,
+            &instance,
+            region_of(&[first, overlap], &gauge)
+        ),
         "tiles share an edge"
     );
 
@@ -493,6 +571,7 @@ fn check_metadata_rejects_each_rule() {
     assert!(second_tile < third, "the third tile sorts last");
     assert!(
         rejects_region(
+            "node in three tiles",
             &bytes,
             &instance,
             region_of(&[first_tile, second_tile, third], &gauge)
@@ -504,7 +583,12 @@ fn check_metadata_rejects_each_rule() {
     let mut region = region_of(&tiles, &gauge);
     region[8..12].copy_from_slice(&u32::MAX.to_le_bytes());
     assert!(
-        rejects_region(&bytes, &instance, region),
+        rejects_region(
+            "tile count the payload cannot hold",
+            &bytes,
+            &instance,
+            region
+        ),
         "tile count the payload cannot hold"
     );
 
@@ -517,29 +601,16 @@ fn check_metadata_rejects_each_rule() {
         .expect("a glass edge");
     let mut couplings = instance.j().to_vec();
     couplings[at] = 1;
-    let bad = rebuilt(&instance, couplings, instance.metadata().to_vec());
+    let bad = rebuilt(
+        "glass edge of the wrong magnitude",
+        &instance,
+        couplings,
+        instance.metadata().to_vec(),
+    );
     assert!(!check(&bytes, &bad), "glass edge of the wrong magnitude");
 
     // Breaks one rule: the offset is nonzero.
     assert!(!check(&bytes, &with_offset(&instance, 1)), "nonzero offset");
 
-    // Breaks one rule: tiles are not ascending.
-    let mut swapped = tiles.clone();
-    swapped[0].swap(0, 1);
-    assert!(
-        rejects_region(&bytes, &instance, region_of(&swapped, &gauge)),
-        "positions out of order inside a tile"
-    );
-    let mut reordered = tiles;
-    reordered.swap(0, 1);
-    assert!(
-        rejects_region(&bytes, &instance, region_of(&reordered, &gauge)),
-        "tiles out of order"
-    );
-
-    // Breaks one rule: tiles are not distinct.
-    assert!(
-        rejects_region(&bytes, &instance, region_of(&[first, first], &gauge)),
-        "tiles not distinct"
-    );
+    rejects_tile_order_faults(&bytes, &instance, &tiles, &gauge);
 }

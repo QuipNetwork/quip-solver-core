@@ -18,10 +18,19 @@ use ising_generators::Code;
 #[expect(dead_code, reason = "this test uses only the live topology loader")]
 mod common;
 
-#[path = "common/family.rs"]
-mod family;
+#[path = "common/admit.rs"]
+mod admit;
+#[path = "common/lattice.rs"]
+mod lattice;
+#[path = "common/nonce.rs"]
+mod nonce;
+#[path = "common/size_bounds.rs"]
+mod size_bounds;
 
-use family::{admitted, bounds, lattice_topology, nonce_of};
+use admit::admitted;
+use lattice::lattice_topology;
+use nonce::nonce_of;
+use size_bounds::bounds;
 
 /// Canonical parameter bytes: format, then `(tag, len, payload)` per field.
 fn params(m: u16, t: u8, scale: u16, background: u16, charged: u16) -> Vec<u8> {
@@ -42,12 +51,17 @@ fn k4() -> BaseTopology {
     BaseTopology::new(vec![0, 1, 2, 3], &edges).expect("k4")
 }
 
-fn build(bytes: &[u8], topology: &BaseTopology, nonce: [u8; 32]) -> Instance {
-    let admitted = admitted(&CHARGED_ICE_V1, bytes).expect("admit");
-    let bounds = bounds(&admitted, topology).expect("admit topology");
-    generate_instance(&admitted, topology, &bounds, nonce)
-        .map_err(|fault| format!("{fault:?}"))
-        .expect("generate")
+fn build(what: &str, bytes: &[u8], topology: &BaseTopology, nonce: [u8; 32]) -> Instance {
+    let built = admitted(&CHARGED_ICE_V1, bytes)
+        .map_err(|code| format!("admit: {code}"))
+        .and_then(|admitted| {
+            let bounds =
+                bounds(&admitted, topology).map_err(|code| format!("admit topology: {code}"))?;
+            generate_instance(&admitted, topology, &bounds, nonce)
+                .map_err(|fault| format!("generate: {fault:?}"))
+        });
+    assert!(built.is_ok(), "{what}: {built:?}");
+    built.expect("generated")
 }
 
 fn check(bytes: &[u8], instance: &Instance) -> bool {
@@ -57,12 +71,16 @@ fn check(bytes: &[u8], instance: &Instance) -> bool {
 }
 
 /// The three metadata payloads, in kind order 1, 2, 6.
-fn split(instance: &Instance) -> [Vec<u8>; 3] {
+fn split(what: &str, instance: &Instance) -> [Vec<u8>; 3] {
     let region = instance.metadata();
-    assert_eq!(&region[..2], &[3, 0], "three sections");
+    assert_eq!(&region[..2], &[3, 0], "{what}: three sections");
     let mut at = 2;
     [1u16, 2, 6].map(|kind| {
-        assert_eq!(&region[at..at + 2], &kind.to_le_bytes());
+        assert_eq!(
+            &region[at..at + 2],
+            &kind.to_le_bytes(),
+            "{what}: section kind {kind}"
+        );
         let len = u32::from_le_bytes(region[at + 2..at + 6].try_into().expect("four bytes"));
         let end = at + 6 + len as usize;
         let payload = region[at + 6..end].to_vec();
@@ -86,8 +104,8 @@ fn join(sections: &[(u16, &Vec<u8>)]) -> Vec<u8> {
 }
 
 /// The tiles, gauges, and charges of a generated instance.
-fn decoded(instance: &Instance) -> (Vec<[u32; 4]>, Vec<[i64; 4]>, Vec<i64>) {
-    let [tiles, gauges, charges] = split(instance);
+fn decoded(what: &str, instance: &Instance) -> (Vec<[u32; 4]>, Vec<[i64; 4]>, Vec<i64>) {
+    let [tiles, gauges, charges] = split(what, instance);
     let word = |at: usize| u32::from_le_bytes(tiles[at..at + 4].try_into().expect("four bytes"));
     let count = word(0) as usize;
     let tiles: Vec<[u32; 4]> = (0..count)
@@ -101,8 +119,8 @@ fn decoded(instance: &Instance) -> (Vec<[u32; 4]>, Vec<[i64; 4]>, Vec<i64>) {
         .iter()
         .map(|&b| i64::from(i8::from_le_bytes([b])))
         .collect();
-    assert_eq!(tiles.len(), gauges.len());
-    assert_eq!(tiles.len(), charges.len());
+    assert_eq!(tiles.len(), gauges.len(), "{what}: gauge count");
+    assert_eq!(tiles.len(), charges.len(), "{what}: charge count");
     (tiles, gauges, charges)
 }
 
@@ -134,12 +152,12 @@ fn fields(instance: &Instance) -> Fields {
 }
 
 /// A copy of `instance` with new fields.
-fn rebuilt(instance: &Instance, new: Fields) -> Instance {
-    rebuilt_with_kinds(instance, new, CHARGED_ICE_V1.metadata_kinds)
+fn rebuilt(what: &str, instance: &Instance, new: Fields) -> Instance {
+    rebuilt_with_kinds(what, instance, new, CHARGED_ICE_V1.metadata_kinds)
 }
 
 /// A copy of `instance` with new fields, under the registered kind list `kinds`.
-fn rebuilt_with_kinds(instance: &Instance, new: Fields, kinds: &[u16]) -> Instance {
+fn rebuilt_with_kinds(what: &str, instance: &Instance, new: Fields, kinds: &[u16]) -> Instance {
     let parts = InstanceParts {
         descriptor_digest: *instance.descriptor_digest(),
         topology_order_digest: *instance.topology_order_digest(),
@@ -151,8 +169,9 @@ fn rebuilt_with_kinds(instance: &Instance, new: Fields, kinds: &[u16]) -> Instan
         offset_milli: new.offset,
         metadata: new.metadata,
     };
-    Instance::new(parts, &CHARGED_ICE_V1.limits, kinds, None)
-        .expect("rebuilt instance is well formed")
+    let built = Instance::new(parts, &CHARGED_ICE_V1.limits, kinds, None);
+    assert!(built.is_ok(), "{what}: rebuilt instance is well formed");
+    built.expect("rebuilt instance is well formed")
 }
 
 /// `A * (sum - q)^2 / 2`, exact because `sum - q` is even.
@@ -205,8 +224,8 @@ fn k4_with_gauge(
         bytes_for(256)
     };
     for nonce in 0..=255u8 {
-        let instance = build(&bytes, &topology, nonce_of(nonce));
-        let (_, gauges, charges) = decoded(&instance);
+        let instance = build("k4_with_gauge", &bytes, &topology, nonce_of(nonce));
+        let (_, gauges, charges) = decoded("k4_with_gauge", &instance);
         let equal = gauges[0].iter().all(|&g| g == gauges[0][0]);
         if charges == [want] && equal == uniform {
             return (bytes, instance);
@@ -223,7 +242,10 @@ fn every_state_of_one_tile_matches_the_direct_penalty() {
                 let (bytes, instance) =
                     k4_with_gauge(|charged| params(0, 0, scale, 31, charged), want, uniform);
                 assert!(check(&bytes, &instance));
-                let (tiles, gauges, _) = decoded(&instance);
+                let (tiles, gauges, _) = decoded(
+                    "every_state_of_one_tile_matches_the_direct_penalty",
+                    &instance,
+                );
                 assert_eq!(tiles, vec![[0, 1, 2, 3]]);
                 for state in 0..16u32 {
                     let spins: [i64; 4] =
@@ -247,8 +269,16 @@ fn encoded_energy_equals_direct_energy_on_a_lattice() {
     let bytes = params(1, 2, scale, 31, 128);
     let mut rng = Xorshift(0x9e37_79b9_7f4a_7c15);
     for nonce in 0..4u8 {
-        let instance = build(&bytes, &topology, nonce_of(nonce));
-        let (tiles, gauges, charges) = decoded(&instance);
+        let instance = build(
+            "encoded_energy_equals_direct_energy_on_a_lattice",
+            &bytes,
+            &topology,
+            nonce_of(nonce),
+        );
+        let (tiles, gauges, charges) = decoded(
+            "encoded_energy_equals_direct_energy_on_a_lattice",
+            &instance,
+        );
         let tile_edges: BTreeSet<(u32, u32)> = tiles.iter().flat_map(|&t| tile_pairs(t)).collect();
         for _ in 0..64 {
             let spins = rng.spins(instance.node_ids().len());
@@ -274,10 +304,10 @@ fn generation_is_repeatable() {
     let bytes = params(2, 2, 250, 31, 128);
     let mut seen = Vec::new();
     for nonce in [nonce_of(1), nonce_of(2)] {
-        let first = build(&bytes, &topology, nonce)
+        let first = build("generation_is_repeatable", &bytes, &topology, nonce)
             .canonical_bytes()
             .expect("bytes");
-        let again = build(&bytes, &topology, nonce)
+        let again = build("generation_is_repeatable", &bytes, &topology, nonce)
             .canonical_bytes()
             .expect("bytes");
         assert_eq!(first, again);
@@ -292,9 +322,14 @@ fn both_modes_build_valid_instances() {
     let mut counts = Vec::new();
     for (m, t) in [(2, 2), (0, 0)] {
         let bytes = params(m, t, 250, 31, 128);
-        let instance = build(&bytes, &topology, nonce_of(3));
+        let instance = build(
+            "both_modes_build_valid_instances",
+            &bytes,
+            &topology,
+            nonce_of(3),
+        );
         assert!(check(&bytes, &instance), "mode ({m}, {t})");
-        let (tiles, _, _) = decoded(&instance);
+        let (tiles, _, _) = decoded("both_modes_build_valid_instances", &instance);
         assert!(!tiles.is_empty());
         counts.push(tiles.len());
         assert_eq!(instance.edges().len(), topology.edges().len(), "all edges");
@@ -309,14 +344,22 @@ fn both_modes_build_valid_instances() {
 fn a_node_in_two_charged_tiles_sums_its_fields() {
     let topology = lattice_topology(2, 2);
     let bytes = params(2, 2, 250, 31, 256);
+    let uncharged = params(2, 2, 250, 31, 0);
     let mut shared_nodes = 0;
     for nonce in 0..4u8 {
-        let instance = build(&bytes, &topology, nonce_of(nonce));
-        let (tiles, gauges, charges) = decoded(&instance);
+        let context = format!("nonce {nonce}");
+        let instance = build(&context, &bytes, &topology, nonce_of(nonce));
+        let (tiles, gauges, charges) = decoded(&context, &instance);
+        // The tile count of the same nonce with no charge, an independent
+        // source for the offset.
+        let (zero_tiles, _, _) = decoded(
+            &context,
+            &build(&context, &uncharged, &topology, nonce_of(nonce)),
+        );
         let mut want = vec![0i64; instance.node_ids().len()];
         let mut slots = vec![0u32; want.len()];
         for ((tile, gauge), &q) in tiles.iter().zip(&gauges).zip(&charges) {
-            assert_ne!(q, 0, "every tile is charged");
+            assert_ne!(q, 0, "{context}: every tile is charged");
             for (&pos, &g) in tile.iter().zip(gauge) {
                 want[pos as usize] -= 250 * q * g;
                 slots[pos as usize] += 1;
@@ -327,17 +370,17 @@ fn a_node_in_two_charged_tiles_sums_its_fields() {
             charges.iter().all(|&q| q.abs() == 2),
             "nonce {nonce}: every charge is 2 or -2"
         );
-        let count = i64::try_from(tiles.len()).expect("fits");
+        let count = i64::try_from(zero_tiles.len()).expect("fits");
         assert_eq!(
             instance.offset_milli(),
             count * 250 * 8 / 2,
             "nonce {nonce}: offset"
         );
         for (at, (&h, &w)) in instance.h().iter().zip(&want).enumerate() {
-            assert_eq!(i64::from(h), w, "node {at}");
-            assert!(h.abs() <= 1000, "node {at}");
+            assert_eq!(i64::from(h), w, "{context}: node {at}");
+            assert!(h.abs() <= 1000, "{context}: node {at}");
         }
-        assert!(check(&bytes, &instance));
+        assert!(check(&bytes, &instance), "{context}: check");
     }
     assert!(shared_nodes > 0, "z(2,2) has nodes in two tiles");
 }
@@ -347,8 +390,13 @@ fn a_charged_of_zero_gives_no_charges() {
     let topology = lattice_topology(2, 2);
     for nonce in 0..4u8 {
         let none = params(2, 2, 250, 31, 0);
-        let instance = build(&none, &topology, nonce_of(nonce));
-        let (tiles, _, charges) = decoded(&instance);
+        let instance = build(
+            "a_charged_of_zero_gives_no_charges",
+            &none,
+            &topology,
+            nonce_of(nonce),
+        );
+        let (tiles, _, charges) = decoded("a_charged_of_zero_gives_no_charges", &instance);
         assert!(charges.iter().all(|&q| q == 0));
         assert!(instance.h().iter().all(|&h| h == 0));
         let count = i64::try_from(tiles.len()).expect("fits");
@@ -442,26 +490,69 @@ fn admission_codes() {
 fn valid_z22(nonce: u8) -> (Vec<u8>, Instance) {
     let topology = lattice_topology(2, 2);
     let bytes = params(2, 2, 250, 31, 128);
-    let instance = build(&bytes, &topology, nonce_of(nonce));
+    let instance = build("valid_z22", &bytes, &topology, nonce_of(nonce));
     assert!(check(&bytes, &instance), "the base instance is valid");
     (bytes, instance)
+}
+
+/// The section kind and count rules: each mutation of `instance` breaks one rule.
+fn rejects_kind_and_count_faults(bytes: &[u8], instance: &Instance) {
+    // Breaks one rule: one registered kind among the three sections is wrong.
+    // The kinds stay strictly ascending, so the first section has no other
+    // kind to take. The outer kind list is permissive, so only the family
+    // comparison can reject.
+    let [tiles, gauges, charges] = split("kind mutations", instance);
+    let valid = admitted(&CHARGED_ICE_V1, bytes).expect("admit");
+    let construction = CHARGED_ICE_V1.construction.expect("construction");
+    for wrong in [[1, 3, 6], [1, 2, 3]] {
+        let mut fields = fields(instance);
+        fields.metadata = join(&[
+            (wrong[0], &tiles),
+            (wrong[1], &gauges),
+            (wrong[2], &charges),
+        ]);
+        let built =
+            rebuilt_with_kinds(&format!("kinds {wrong:?}"), instance, fields, &[1, 2, 3, 6]);
+        assert!(
+            !(construction.check_metadata)(valid.params(), &built),
+            "kinds {wrong:?}"
+        );
+    }
+
+    // Breaks one rule: a section count is u32::MAX.
+    for which in [0usize, 1, 2] {
+        let mut payloads = split(&format!("section {which} count"), instance);
+        payloads[which][..4].copy_from_slice(&u32::MAX.to_le_bytes());
+        let mut bad = fields(instance);
+        bad.metadata = join(&[(1, &payloads[0]), (2, &payloads[1]), (6, &payloads[2])]);
+        assert!(
+            !check(
+                bytes,
+                &rebuilt(&format!("section {which} count"), instance, bad)
+            ),
+            "section {which} count"
+        );
+    }
 }
 
 #[test]
 fn check_metadata_rejects_each_rule() {
     let (bytes, instance) = valid_z22(10);
     let base = fields(&instance);
-    let (tiles, _, _) = decoded(&instance);
+    let (tiles, _, _) = decoded("check_metadata_rejects_each_rule", &instance);
     let tile_edges: BTreeSet<(u32, u32)> = tiles.iter().flat_map(|&t| tile_pairs(t)).collect();
-    let [tile_payload, gauge_payload, _] = split(&instance);
+    let [tile_payload, gauge_payload, _] = split("check_metadata_rejects_each_rule", &instance);
     // The positive control: each mutation below starts from this instance.
-    assert!(check(&bytes, &rebuilt(&instance, base.clone())), "control");
+    assert!(
+        check(&bytes, &rebuilt("control", &instance, base.clone())),
+        "control"
+    );
 
     // Breaks one rule: a tile edge carries the wrong sign.
     let tile_edge = *tile_edges.iter().next().expect("a tile edge");
     let mut bad = base.clone();
     bad.j[edge_position(&instance, tile_edge)] *= -1;
-    assert!(!check(&bytes, &rebuilt(&instance, bad)), "tile J");
+    assert!(!check(&bytes, &rebuilt("tile J", &instance, bad)), "tile J");
 
     // Breaks one rule: a background edge has the wrong magnitude.
     let background_at = instance
@@ -471,56 +562,31 @@ fn check_metadata_rejects_each_rule() {
         .expect("a background edge");
     let mut bad = base.clone();
     bad.j[background_at] = if bad.j[background_at] > 0 { 32 } else { -32 };
-    assert!(!check(&bytes, &rebuilt(&instance, bad)), "background J");
+    assert!(
+        !check(&bytes, &rebuilt("background J", &instance, bad)),
+        "background J"
+    );
 
     // Breaks one rule: a field differs from its formula.
     let mut bad = base.clone();
     bad.h[0] += 1;
-    assert!(!check(&bytes, &rebuilt(&instance, bad)), "h");
+    assert!(!check(&bytes, &rebuilt("h", &instance, bad)), "h");
 
     // Breaks one rule: the offset differs from its formula.
     let mut bad = base.clone();
     bad.offset += 1;
-    assert!(!check(&bytes, &rebuilt(&instance, bad)), "offset");
+    assert!(!check(&bytes, &rebuilt("offset", &instance, bad)), "offset");
 
     // Breaks one rule: the kind list is not exactly 1, 2, 6. Instance::new
     // already refuses kinds out of order, so the tile charges are left out.
     let mut bad = base;
     bad.metadata = join(&[(1, &tile_payload), (2, &gauge_payload)]);
-    assert!(!check(&bytes, &rebuilt(&instance, bad)), "kind list");
+    assert!(
+        !check(&bytes, &rebuilt("kind list", &instance, bad)),
+        "kind list"
+    );
 
-    // Breaks one rule: one registered kind among the three sections is wrong.
-    // The kinds stay strictly ascending, so the first section has no other
-    // kind to take. The outer kind list is permissive, so only the family
-    // comparison can reject.
-    let [tiles, gauges, charges] = split(&instance);
-    let valid = admitted(&CHARGED_ICE_V1, &bytes).expect("admit");
-    let construction = CHARGED_ICE_V1.construction.expect("construction");
-    for wrong in [[1, 3, 6], [1, 2, 3]] {
-        let mut fields = fields(&instance);
-        fields.metadata = join(&[
-            (wrong[0], &tiles),
-            (wrong[1], &gauges),
-            (wrong[2], &charges),
-        ]);
-        let built = rebuilt_with_kinds(&instance, fields, &[1, 2, 3, 6]);
-        assert!(
-            !(construction.check_metadata)(valid.params(), &built),
-            "kinds {wrong:?}"
-        );
-    }
-
-    // Breaks one rule: a section count is u32::MAX.
-    for which in [0usize, 1, 2] {
-        let mut payloads = split(&instance);
-        payloads[which][..4].copy_from_slice(&u32::MAX.to_le_bytes());
-        let mut bad = fields(&instance);
-        bad.metadata = join(&[(1, &payloads[0]), (2, &payloads[1]), (6, &payloads[2])]);
-        assert!(
-            !check(&bytes, &rebuilt(&instance, bad)),
-            "section {which} count"
-        );
-    }
+    rejects_kind_and_count_faults(&bytes, &instance);
 }
 
 /// The fields a verifier expects for these tiles, gauges, and charges, with the
@@ -563,11 +629,11 @@ fn each_parser_rule_rejects_on_its_own() {
     let scale = 100;
     let topology = lattice_topology(2, 2);
     let bytes = params(2, 2, scale, 31, 128);
-    let instance = build(&bytes, &topology, nonce_of(10));
-    let (tiles, gauges, charges) = decoded(&instance);
+    let instance = build("parser", &bytes, &topology, nonce_of(10));
+    let (tiles, gauges, charges) = decoded("parser", &instance);
     let count = tiles.len();
     assert!(count >= 2, "the instance has several tiles");
-    let [tile_payload, gauge_payload, charge_payload] = split(&instance);
+    let [tile_payload, gauge_payload, charge_payload] = split("parser", &instance);
     let scale = i64::from(scale);
     let region = |kinds: [u16; 3], gauges: &Vec<u8>, charges: &Vec<u8>| {
         join(&[
@@ -582,10 +648,9 @@ fn each_parser_rule_rejects_on_its_own() {
         consistent_fields(&instance, scale, (&tiles, gauges_in, charges_in), region)
     };
     let good = fields_of(&gauges, &charges, instance.metadata().to_vec());
-    assert!(check(&bytes, &rebuilt(&instance, good)), "control");
-    let reject = |fields: Fields, why: &str| {
-        assert!(!check(&bytes, &rebuilt(&instance, fields)), "{why}");
-    };
+    let accepts = |fields: Fields, what: &str| check(&bytes, &rebuilt(what, &instance, fields));
+    assert!(accepts(good, "control"), "control");
+    let reject = |fields: Fields, why: &str| assert!(!accepts(fields, why), "{why}");
 
     // A charge outside {0, 2, -2}, with h and the offset computed from it.
     for value in [4_i64, 1] {
@@ -684,7 +749,7 @@ fn charge_defects_count_mismatched_tiles() {
             k4_with_gauge(|charged| params(0, 0, 250, 31, charged), want, false);
         let admitted = admitted(&CHARGED_ICE_V1, &bytes).expect("admit");
         let params = admitted.params();
-        let (_, gauges, _) = decoded(&instance);
+        let (_, gauges, _) = decoded("charge_defects_count_mismatched_tiles", &instance);
         let ground: Vec<i8> = (0..16u32)
             .map(|state| [0, 1, 2, 3].map(|k| if state >> k & 1 == 0 { 1i8 } else { -1 }))
             .find(|spins| {
@@ -720,7 +785,7 @@ fn charge_defects_count_mismatched_tiles() {
     let (bytes, instance) = valid_z22(12);
     let valid = admitted(&CHARGED_ICE_V1, &bytes).expect("admit");
     let spins = vec![1i8; instance.node_ids().len()];
-    let (tiles, _, _) = decoded(&instance);
+    let (tiles, _, _) = decoded("charge_defects_count_mismatched_tiles", &instance);
     let tile_edge = tile_pairs(tiles[0])[0];
     let mut offset = fields(&instance);
     offset.offset += 1;
@@ -729,17 +794,17 @@ fn charge_defects_count_mismatched_tiles() {
     let mut coupling = fields(&instance);
     coupling.j[edge_position(&instance, tile_edge)] *= -1;
     for (why, new) in [("offset", offset), ("h", field), ("tile J", coupling)] {
-        let bad = rebuilt(&instance, new);
+        let bad = rebuilt("charge_defects_count_mismatched_tiles", &instance, new);
         assert!(!check(&bytes, &bad), "{why} is invalid");
         assert_eq!(charge_defects(valid.params(), &bad, &spins), None, "{why}");
     }
 
     // A malformed instance: the tile charges are missing.
     let (bytes, instance) = valid_z22(12);
-    let [tiles, gauges, _] = split(&instance);
+    let [tiles, gauges, _] = split("charge_defects_count_mismatched_tiles", &instance);
     let mut bad = fields(&instance);
     bad.metadata = join(&[(1, &tiles), (2, &gauges)]);
-    let bad = rebuilt(&instance, bad);
+    let bad = rebuilt("charge_defects_count_mismatched_tiles", &instance, bad);
     let admitted = admitted(&CHARGED_ICE_V1, &bytes).expect("admit");
     let spins = vec![1i8; bad.node_ids().len()];
     assert_eq!(charge_defects(admitted.params(), &bad, &spins), None);
@@ -761,8 +826,13 @@ fn recipe_params_are_canonical() {
 #[test]
 fn live_recipe_builds() {
     let topology = common::live_topology();
-    let instance = build(ICE_CHARGE_RECIPE.params, topology, nonce_of(1));
-    let (tiles, _, _) = decoded(&instance);
+    let instance = build(
+        "live_recipe_builds",
+        ICE_CHARGE_RECIPE.params,
+        topology,
+        nonce_of(1),
+    );
+    let (tiles, _, _) = decoded("live_recipe_builds", &instance);
     assert_eq!(tiles.len(), 1785);
     assert!(instance.h().iter().all(|&h| h.abs() <= 1000));
     assert!(instance.j().iter().all(|&j| j != 0), "no coupling is zero");

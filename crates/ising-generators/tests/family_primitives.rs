@@ -1153,7 +1153,7 @@ fn instance_new_check_order() -> Result<(), String> {
     let mut parts = two_node_parts(0, 0, 0);
     parts.metadata = vec![1, 0, 6, 0, 0, 0, 0, 0];
     let kinds = [1, 2, 3];
-    let right = digest_over(&parts)?;
+    let right = digest_over(&parts).map_err(|e| format!("digest beats metadata, setup: {e}"))?;
     let wrong = [0xEE; 32];
     expect_eq!(code_of(&new_with_digest(&parts, &kinds, &wrong)), Some(15))
         .map_err(|e| format!("wrong digest on a bad kind: {e}"))?;
@@ -1161,13 +1161,14 @@ fn instance_new_check_order() -> Result<(), String> {
         .map_err(|e| format!("right digest on a bad kind: {e}"))?;
     // A kind the contract does not list gives the same order.
     parts.metadata = vec![1, 0, 2, 0, 0, 0, 0, 0];
-    let right = digest_over(&parts)?;
+    let right = digest_over(&parts).map_err(|e| format!("unlisted kind, setup: {e}"))?;
     expect_eq!(code_of(&new_with_digest(&parts, &[1], &wrong)), Some(15))
         .map_err(|e| format!("wrong digest on an unlisted kind: {e}"))?;
     expect_eq!(code_of(&new_with_digest(&parts, &[1], &right)), Some(16))
         .map_err(|e| format!("right digest on an unlisted kind: {e}"))?;
     // Valid metadata and the right digest is Ok, and the digest matches.
-    let ok = new_with_digest(&parts, &[1, 2], &right).map_err(|c| c.to_string())?;
+    let ok = new_with_digest(&parts, &[1, 2], &right)
+        .map_err(|c| format!("valid metadata with the right digest: code {c}"))?;
     expect_eq!(ok.digest(), right).map_err(|e| format!("the digest matches: {e}"))?;
     expect_eq!(code_of(&new_with_digest(&parts, &[1, 2], &wrong)), Some(15))
         .map_err(|e| format!("wrong digest on valid metadata: {e}"))?;

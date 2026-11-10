@@ -36,10 +36,19 @@ use ising_generators::Code;
 #[expect(dead_code, reason = "this test uses only the live topology loader")]
 mod common;
 
-#[path = "common/family.rs"]
-mod family;
+#[path = "common/admit.rs"]
+mod admit;
+#[path = "common/lattice.rs"]
+mod lattice;
+#[path = "common/nonce.rs"]
+mod nonce;
+#[path = "common/size_bounds.rs"]
+mod size_bounds;
 
-use family::{admitted, bounds, lattice_topology, nonce_of};
+use admit::admitted;
+use lattice::lattice_topology;
+use nonce::nonce_of;
+use size_bounds::bounds;
 
 /// The twelve native ids of the 2 by 2 street block of `z(2, 4)` that holds
 /// four arcs in a directed cycle: the spins of cells (1, 2), (2, 2), (2, 3),
@@ -176,7 +185,13 @@ fn section(payload: &[u8]) -> Vec<u8> {
 }
 
 /// A copy of `instance` with new fields and metadata.
-fn rebuilt(instance: &Instance, h: Vec<i32>, j: Vec<i32>, metadata: Vec<u8>) -> Instance {
+fn rebuilt(
+    what: &str,
+    instance: &Instance,
+    h: Vec<i32>,
+    j: Vec<i32>,
+    metadata: Vec<u8>,
+) -> Instance {
     let parts = InstanceParts {
         descriptor_digest: *instance.descriptor_digest(),
         topology_order_digest: *instance.topology_order_digest(),
@@ -188,12 +203,14 @@ fn rebuilt(instance: &Instance, h: Vec<i32>, j: Vec<i32>, metadata: Vec<u8>) -> 
         offset_milli: instance.offset_milli(),
         metadata,
     };
-    Instance::new(parts, &ROUTING_V1.limits, ROUTING_V1.metadata_kinds, None)
-        .expect("rebuilt instance is well formed")
+    let built = Instance::new(parts, &ROUTING_V1.limits, ROUTING_V1.metadata_kinds, None);
+    assert!(built.is_ok(), "{what}: rebuilt instance is well formed");
+    built.expect("rebuilt instance is well formed")
 }
 
 /// A copy of `instance` with every coefficient field replaced.
 fn make(
+    what: &str,
     instance: &Instance,
     edges: Vec<(u32, u32)>,
     h: Vec<i32>,
@@ -212,8 +229,9 @@ fn make(
         offset_milli,
         metadata,
     };
-    Instance::new(parts, &ROUTING_V1.limits, ROUTING_V1.metadata_kinds, None)
-        .expect("well formed instance")
+    let built = Instance::new(parts, &ROUTING_V1.limits, ROUTING_V1.metadata_kinds, None);
+    assert!(built.is_ok(), "{what}: well formed instance");
+    built.expect("well formed instance")
 }
 
 /// Fields, edges, couplings, and offset of an energy, in milli.
@@ -222,7 +240,7 @@ type Coefficients = (Vec<i32>, Vec<(u32, u32)>, Vec<i32>, i64);
 /// The Ising form of the structured energy of `meta` over `n` spins, found by
 /// finite differences from the all-up state, independent of the generator:
 /// `(h, edges, j, offset)`, with every pair of nonzero coupling as an edge.
-fn fit(meta: &Meta, n: usize) -> Coefficients {
+fn fit(what: &str, meta: &Meta, n: usize) -> Coefficients {
     let up = vec![1i64; n];
     let flip = |flips: &[usize]| {
         let mut state = up.clone();
@@ -238,7 +256,7 @@ fn fit(meta: &Meta, n: usize) -> Coefficients {
     for i in 0..n {
         for k in i + 1..n {
             let sum = flip(&[i, k]) - single[i] - single[k] + base;
-            assert_eq!(sum % 4, 0, "coupling ({i}, {k})");
+            assert_eq!(sum % 4, 0, "{what}: coupling ({i}, {k})");
             if sum != 0 {
                 couplings.push(((i as u32, k as u32), sum / 4));
                 row[i] += sum / 4;
@@ -248,7 +266,7 @@ fn fit(meta: &Meta, n: usize) -> Coefficients {
     }
     let h: Vec<i64> = (0..n)
         .map(|i| {
-            assert_eq!((base - single[i]) % 2, 0, "field {i}");
+            assert_eq!((base - single[i]) % 2, 0, "{what}: field {i}");
             (base - single[i]) / 2 - row[i]
         })
         .collect();
@@ -268,10 +286,10 @@ fn fit(meta: &Meta, n: usize) -> Coefficients {
 
 /// `meta` with the chain strength its own energy implies, and the matching
 /// instance fields, so that only a structural rule can reject it.
-fn consistent(meta: &Meta, n: usize) -> (Meta, Coefficients) {
+fn consistent(what: &str, meta: &Meta, n: usize) -> (Meta, Coefficients) {
     let mut bare = meta.clone();
     bare.strength = 0;
-    let (h, edges, j, _) = fit(&bare, n);
+    let (h, edges, j, _) = fit(what, &bare, n);
     let mut load = vec![0i64; n];
     for (&(u, v), &value) in edges.iter().zip(&j) {
         load[u as usize] += i64::from(value).abs();
@@ -288,14 +306,15 @@ fn consistent(meta: &Meta, n: usize) -> (Meta, Coefficients) {
     full.strength = u16::try_from(worst + 1).expect("strength");
     assert!(
         full.strength <= 1000,
-        "the mutation keeps the strength in range"
+        "{what}: the mutation keeps the strength in range"
     );
-    let (h, edges, j, offset) = fit(&full, n);
+    let (h, edges, j, offset) = fit(what, &full, n);
     (full, (h, edges, j, offset))
 }
 
-fn with_metadata(instance: &Instance, metadata: Vec<u8>) -> Instance {
+fn with_metadata(what: &str, instance: &Instance, metadata: Vec<u8>) -> Instance {
     rebuilt(
+        what,
         instance,
         instance.h().to_vec(),
         instance.j().to_vec(),
@@ -853,7 +872,11 @@ fn defects_find_broken_chains_and_capacity() {
     assert!(defects(&instance, &zero).is_none(), "a value outside ±1");
     let mut wrong = meta.clone();
     wrong.arcs[0].cost[0] = 63;
-    let bad = with_metadata(&instance, encode(&wrong));
+    let bad = with_metadata(
+        "defects_find_broken_chains_and_capacity",
+        &instance,
+        encode(&wrong),
+    );
     assert!(defects(&bad, &ground).is_none(), "an invalid instance");
 }
 
@@ -1008,7 +1031,8 @@ fn check_metadata_rejects_each_rule() {
     assert!(check(&bytes, &instance), "positive control");
     assert_eq!(encode(&meta), instance.metadata(), "the codec round-trips");
     // The rebuilt energy reproduces the instance.
-    let (full, (rebuilt_h, rebuilt_edges, rebuilt_j, rebuilt_offset)) = consistent(&meta, n);
+    let (full, (rebuilt_h, rebuilt_edges, rebuilt_j, rebuilt_offset)) =
+        consistent("rebuilt energy", &meta, n);
     assert_eq!(full, meta, "the rebuild keeps the metadata");
     assert_eq!(rebuilt_h, instance.h(), "the rebuilt fields");
     assert_eq!(rebuilt_edges, instance.edges(), "the rebuilt edges");
@@ -1024,8 +1048,8 @@ fn check_metadata_rejects_each_rule() {
     let mut structural = |what: &'static str, edit: &dyn Fn(&mut Meta)| {
         let mut edited = meta.clone();
         edit(&mut edited);
-        let (edited, (h, edges, j, offset)) = consistent(&edited, n);
-        let bad = make(&instance, edges, h, j, offset, encode(&edited));
+        let (edited, (h, edges, j, offset)) = consistent(what, &edited, n);
+        let bad = make(what, &instance, edges, h, j, offset, encode(&edited));
         if check(&bytes, &bad) {
             accepted.push(what);
         }
@@ -1097,7 +1121,7 @@ fn check_metadata_rejects_each_rule() {
     let mut metadata_only = |what: &'static str, edit: &dyn Fn(&mut Meta)| {
         let mut edited = meta.clone();
         edit(&mut edited);
-        if check(&bytes, &with_metadata(&instance, encode(&edited))) {
+        if check(&bytes, &with_metadata(what, &instance, encode(&edited))) {
             accepted.push(what);
         }
     };
@@ -1122,7 +1146,7 @@ fn check_metadata_rejects_each_rule() {
     let region = instance.metadata().to_vec();
     let mut fields =
         |what: &'static str, edges: Vec<(u32, u32)>, h: Vec<i32>, j: Vec<i32>, offset: i64| {
-            let bad = make(&instance, edges, h, j, offset, region.clone());
+            let bad = make(what, &instance, edges, h, j, offset, region.clone());
             if check(&bytes, &bad) {
                 accepted.push(what);
             }
@@ -1248,8 +1272,8 @@ fn check_metadata_rejects_each_rule() {
         let mut edited = meta.clone();
         edited.arcs[0].tail = tail;
         edited.arcs[0].head = head;
-        let (edited, (h, edges, j, offset)) = consistent(&edited, n);
-        let bad = make(&instance, edges, h, j, offset, encode(&edited));
+        let (edited, (h, edges, j, offset)) = consistent(what, &edited, n);
+        let bad = make(what, &instance, edges, h, j, offset, encode(&edited));
         if check(&bytes, &bad) {
             accepted.push(what);
         }
@@ -1282,10 +1306,14 @@ fn check_metadata_rejects_each_rule() {
         } else {
             let _ = payload.pop();
         }
-        let bad = with_metadata(&instance, section(&payload));
+        let bad = with_metadata(
+            &format!("payload length edit {edit}"),
+            &instance,
+            section(&payload),
+        );
         assert!(!check(&bytes, &bad), "payload length edit {edit}");
     }
-    let empty = with_metadata(&instance, vec![0, 0]);
+    let empty = with_metadata("no section", &instance, vec![0, 0]);
     assert!(!check(&bytes, &empty), "no section");
 
     // Counts of u32::MAX. The node count is at payload offset 0 and the arc
@@ -1295,13 +1323,13 @@ fn check_metadata_rejects_each_rule() {
     for at in [8, 8 + 4 + 6 * cells] {
         let mut damaged = region.clone();
         damaged[at..at + 4].copy_from_slice(&u32::MAX.to_le_bytes());
-        let bad = with_metadata(&instance, damaged);
+        let bad = with_metadata(&format!("count at {at}"), &instance, damaged);
         assert!(!check(&bytes, &bad), "count at {at}");
     }
     // A short payload that names a huge node count.
     let mut payload = u32::MAX.to_le_bytes().to_vec();
     payload.extend_from_slice(&[0; 12]);
-    let bad = with_metadata(&instance, section(&payload));
+    let bad = with_metadata("a short payload", &instance, section(&payload));
     assert!(!check(&bytes, &bad), "a short payload");
 }
 
