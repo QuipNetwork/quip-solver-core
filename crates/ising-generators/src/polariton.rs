@@ -21,11 +21,14 @@ use alloc::vec::Vec;
 
 use crate::descriptor::{Contract, FieldSpec, Params, SizeBounds, TopologyStats, ValueType};
 use crate::family::{BaseTopology, Construction, InstanceBody, Streams};
-use crate::ice::build::{region, sections, Reader};
-use crate::ice::topology::{zephyr_coordinates, zephyr_coupler};
+use crate::ice::build::{region, sections};
 use crate::ice::twisted_dimer::Recipe;
 use crate::instance::{Instance, InstanceLimits};
-use crate::native::{link_qubits, place, Native};
+use crate::native::{
+    charges_payload, dense_links, incidence_payload, interior_vertices, is_zephyr_subgraph,
+    labels_of, parse_charges, parse_incidence, place, DenseLinks, Native, KIND_CHARGES,
+    KIND_INCIDENCE,
+};
 use crate::rng::shuffle;
 use crate::routing::unsigned;
 use crate::square::{charges, check_request, Boundary, Request, SquareLattice};
@@ -61,10 +64,6 @@ pub const POLARITON_SCHEMA: &[FieldSpec] = &[
 
 /// Tag of the parameter for the number of `+2` labels, and of `-2` labels.
 const TAG_PAIRS: u16 = 4;
-/// Metadata kind of the vertex labels.
-const KIND_CHARGES: u16 = 4;
-/// Metadata kind of the window and the link positions.
-const KIND_INCIDENCE: u16 = 5;
 
 /// The stream that shuffles the interior vertices.
 const CHARGES: &str = "charges";
@@ -73,8 +72,6 @@ const CHARGES: &str = "charges";
 const PENALTY: i64 = 250;
 /// The number of charge draws before the salt gives code 14.
 const CHARGE_TRIES: usize = 4;
-/// The label value of a free vertex in the metadata.
-const FREE: i8 = 127;
 /// The largest degree of a link in the instance.
 const LINK_DEGREE: u64 = 6;
 
@@ -203,43 +200,9 @@ fn check_topology(params: &Params<'_>, topology: &BaseTopology) -> bool {
     let Some(config) = Config::of(params) else {
         return false;
     };
-    let ids = topology.node_ids();
-    let zephyr_nodes = ids
-        .iter()
-        .all(|&id| zephyr_coordinates(config.native.m, config.native.t, id).is_some());
-    let zephyr_edges = topology.edges().iter().all(|&(u, v)| {
-        let at = |pos: u32| usize::try_from(pos).ok().and_then(|pos| ids.get(pos));
-        matches!((at(u), at(v)), (Some(&a), Some(&b)) if zephyr_coupler(config.native.m, config.native.t, a, b))
-    });
-    zephyr_nodes && zephyr_edges && config.fits() && place(config.native, topology).is_some()
-}
-
-/// The charge labels of one draw: `pairs` vertices of `+2`, then `pairs` of
-/// `-2`, then `0` on the rest of `order`. Every other vertex is free.
-fn labels_of(order: &[u32], pairs: usize, vertices: usize) -> Vec<Option<i8>> {
-    let mut labels = vec![None; vertices];
-    for (rank, &v) in order.iter().enumerate() {
-        let label = if rank < pairs {
-            2
-        } else if rank < pairs.saturating_mul(2) {
-            -2
-        } else {
-            0
-        };
-        if let Some(slot) = usize::try_from(v).ok().and_then(|v| labels.get_mut(v)) {
-            *slot = Some(label);
-        }
-    }
-    labels
-}
-
-/// The interior vertices of the open lattice, in vertex order.
-fn interior_vertices(side: u16) -> Vec<u32> {
-    let side = u32::from(side);
-    let width = side.saturating_add(1);
-    (1..side)
-        .flat_map(|y| (1..side).map(move |x| y * width + x))
-        .collect()
+    is_zephyr_subgraph(config.native, topology)
+        && config.fits()
+        && place(config.native, topology).is_some()
 }
 
 /// Draw the labels: shuffle the interior list on the `charges` stream and
@@ -349,18 +312,10 @@ fn metadata_region(
     r0: u16,
     positions: &[u32],
 ) -> Result<Vec<u8>, Code> {
-    let mut charges_payload = side.to_le_bytes().to_vec();
-    charges_payload.extend(
-        labels
-            .iter()
-            .map(|label| label.unwrap_or(FREE).to_le_bytes()[0]),
-    );
-    let mut incidence = c0.to_le_bytes().to_vec();
-    incidence.extend_from_slice(&r0.to_le_bytes());
-    for position in positions {
-        incidence.extend_from_slice(&position.to_le_bytes());
-    }
-    region(&[(KIND_CHARGES, charges_payload), (KIND_INCIDENCE, incidence)])
+    region(&[
+        (KIND_CHARGES, charges_payload(side, labels)),
+        (KIND_INCIDENCE, incidence_payload(c0, r0, positions)),
+    ])
 }
 
 fn generate(
@@ -375,25 +330,10 @@ fn generate(
     }
     let lattice = SquareLattice::new(config.native.side, Boundary::Open).map_err(|_| defect)?;
     let (grid, placement) = place(config.native, topology).ok_or(defect)?;
-    let qubits = link_qubits(&lattice, &grid, &placement).ok_or(defect)?;
-    let mut sorted = qubits.clone();
-    sorted.sort_unstable();
-    if sorted
-        .windows(2)
-        .any(|pair| matches!(pair, [a, b] if a == b))
-    {
-        return Err(defect);
-    }
-    let mut positions = Vec::with_capacity(qubits.len());
-    for qubit in &qubits {
-        let at = sorted.binary_search(qubit).map_err(|_| defect)?;
-        positions.push(u32::try_from(at).map_err(|_| Code::BoundsExceeded)?);
-    }
-    let mut node_ids = Vec::with_capacity(sorted.len());
-    for &qubit in &sorted {
-        let at = usize::try_from(qubit).map_err(|_| defect)?;
-        node_ids.push(*topology.node_ids().get(at).ok_or(defect)?);
-    }
+    let DenseLinks {
+        node_ids,
+        positions,
+    } = dense_links(&lattice, &grid, &placement, topology)?;
     let labels = draw_labels(streams, &lattice, config.pairs)?;
     let built =
         energy(&lattice, &labels, &positions, node_ids.len()).ok_or(Code::BoundsExceeded)?;
@@ -430,67 +370,10 @@ fn parse(params: &Params<'_>, instance: &Instance) -> Option<Parsed> {
     let [payload_charges, payload_incidence] =
         sections(instance.metadata(), [KIND_CHARGES, KIND_INCIDENCE])?;
 
-    let mut reader = Reader::new(payload_charges);
-    if reader.u16()? != config.native.side {
-        return None;
-    }
-    let raw = reader.rest();
-    if raw.len() != usize::try_from(lattice.vertex_count()).ok()? {
-        return None;
-    }
-    let width = usize::from(config.native.side).checked_add(1)?;
-    let mut labels = Vec::with_capacity(raw.len());
-    let (mut plus, mut minus) = (0usize, 0usize);
-    for (v, &byte) in raw.iter().enumerate() {
-        let value = i8::from_le_bytes([byte]);
-        let (x, y) = (v % width, v / width);
-        let boundary = x == 0
-            || y == 0
-            || x == usize::from(config.native.side)
-            || y == usize::from(config.native.side);
-        if boundary {
-            if value != FREE {
-                return None;
-            }
-            labels.push(None);
-            continue;
-        }
-        match value {
-            2 => plus = plus.checked_add(1)?,
-            -2 => minus = minus.checked_add(1)?,
-            0 => {}
-            _ => return None,
-        }
-        labels.push(Some(value));
-    }
-    if plus != config.pairs || minus != config.pairs {
-        return None;
-    }
-
-    let mut reader = Reader::new(payload_incidence);
-    let (c0, r0) = (reader.u16()?, reader.u16()?);
-    let grid = config.native.grid_side()?;
-    if c0 < 1
-        || r0 < 1
-        || c0.checked_add(config.native.side)? > grid
-        || r0.checked_add(config.native.side)? > grid
-    {
-        return None;
-    }
+    let labels = parse_charges(payload_charges, config.native, &lattice, config.pairs)?;
+    let (_, _, positions) =
+        parse_incidence(payload_incidence, config.native, instance.node_ids().len())?;
     let links = config.native.links();
-    if reader.rest().len() != links.checked_mul(4)? || instance.node_ids().len() != links {
-        return None;
-    }
-    let mut seen = vec![false; links];
-    let mut positions = Vec::with_capacity(links);
-    for _ in 0..links {
-        let position = reader.u32()?;
-        let slot = seen.get_mut(usize::try_from(position).ok()?)?;
-        if core::mem::replace(slot, true) {
-            return None;
-        }
-        positions.push(position);
-    }
 
     let rebuilt = energy(&lattice, &labels, &positions, links)?;
     let same = rebuilt.h == instance.h()

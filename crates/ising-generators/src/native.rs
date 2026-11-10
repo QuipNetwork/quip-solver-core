@@ -15,8 +15,11 @@ use alloc::vec::Vec;
 
 use crate::descriptor::Params;
 use crate::family::BaseTopology;
+use crate::ice::build::Reader;
+use crate::ice::topology::{zephyr_coordinates, zephyr_coupler};
 use crate::routing::{best_choice, unsigned, Cell, Grid, Shape};
 use crate::square::{Axis, SquareLattice};
+use crate::Code;
 
 /// Tag of the Zephyr grid size parameter.
 pub(crate) const TAG_M: u16 = 1;
@@ -24,6 +27,13 @@ pub(crate) const TAG_M: u16 = 1;
 pub(crate) const TAG_T: u16 = 2;
 /// Tag of the lattice side parameter.
 pub(crate) const TAG_SIDE: u16 = 3;
+
+/// Metadata kind of the vertex labels.
+pub(crate) const KIND_CHARGES: u16 = 4;
+/// Metadata kind of the window and the link positions.
+pub(crate) const KIND_INCIDENCE: u16 = 5;
+/// The label value of a free vertex in the metadata.
+pub(crate) const FREE: i8 = 127;
 
 /// The Zephyr parameters of a native layout.
 #[derive(Clone, Copy)]
@@ -186,4 +196,190 @@ pub(crate) fn link_qubits(
             }
         })
         .collect()
+}
+
+/// Whether the topology is a subgraph of the Zephyr lattice `z(m, t)`: every
+/// node id and every edge exists there.
+pub(crate) fn is_zephyr_subgraph(config: Native, topology: &BaseTopology) -> bool {
+    let ids = topology.node_ids();
+    let nodes = ids
+        .iter()
+        .all(|&id| zephyr_coordinates(config.m, config.t, id).is_some());
+    let edges = topology.edges().iter().all(|&(u, v)| {
+        let at = |pos: u32| usize::try_from(pos).ok().and_then(|pos| ids.get(pos));
+        matches!((at(u), at(v)), (Some(&a), Some(&b)) if zephyr_coupler(config.m, config.t, a, b))
+    });
+    nodes && edges
+}
+
+/// The interior vertices of the open lattice, in vertex order.
+pub(crate) fn interior_vertices(side: u16) -> Vec<u32> {
+    let side = u32::from(side);
+    let width = side.saturating_add(1);
+    (1..side)
+        .flat_map(|y| (1..side).map(move |x| y * width + x))
+        .collect()
+}
+
+/// The charge labels of one draw: `pairs` vertices of `+2`, then `pairs` of
+/// `-2`, then `0` on the rest of `order`. Every other vertex is free.
+pub(crate) fn labels_of(order: &[u32], pairs: usize, vertices: usize) -> Vec<Option<i8>> {
+    let mut labels = vec![None; vertices];
+    for (rank, &v) in order.iter().enumerate() {
+        let label = if rank < pairs {
+            2
+        } else if rank < pairs.saturating_mul(2) {
+            -2
+        } else {
+            0
+        };
+        if let Some(slot) = usize::try_from(v).ok().and_then(|v| labels.get_mut(v)) {
+            *slot = Some(label);
+        }
+    }
+    labels
+}
+
+/// The instance nodes of a layout: the qubit of each link, sorted, and the
+/// dense instance position of each link.
+pub(crate) struct DenseLinks {
+    /// The topology node id of each instance node, ascending.
+    pub(crate) node_ids: Vec<u32>,
+    /// The instance position of each link, in link order.
+    pub(crate) positions: Vec<u32>,
+}
+
+/// The dense link positions of a placement. `TopologyIncompatible` when two
+/// links share a qubit or a qubit is missing, and `BoundsExceeded` when a
+/// position does not fit a `u32`.
+pub(crate) fn dense_links(
+    lattice: &SquareLattice,
+    grid: &Grid,
+    placement: &Placement,
+    topology: &BaseTopology,
+) -> Result<DenseLinks, Code> {
+    let defect = Code::TopologyIncompatible;
+    let qubits = link_qubits(lattice, grid, placement).ok_or(defect)?;
+    let mut sorted = qubits.clone();
+    sorted.sort_unstable();
+    if sorted
+        .windows(2)
+        .any(|pair| matches!(pair, [a, b] if a == b))
+    {
+        return Err(defect);
+    }
+    let mut positions = Vec::with_capacity(qubits.len());
+    for qubit in &qubits {
+        let at = sorted.binary_search(qubit).map_err(|_| defect)?;
+        positions.push(u32::try_from(at).map_err(|_| Code::BoundsExceeded)?);
+    }
+    let mut node_ids = Vec::with_capacity(sorted.len());
+    for &qubit in &sorted {
+        let at = usize::try_from(qubit).map_err(|_| defect)?;
+        node_ids.push(*topology.node_ids().get(at).ok_or(defect)?);
+    }
+    Ok(DenseLinks {
+        node_ids,
+        positions,
+    })
+}
+
+/// The payload of the `charges` section: the side, then one byte per vertex.
+pub(crate) fn charges_payload(side: u16, labels: &[Option<i8>]) -> Vec<u8> {
+    let mut payload = side.to_le_bytes().to_vec();
+    payload.extend(
+        labels
+            .iter()
+            .map(|label| label.unwrap_or(FREE).to_le_bytes()[0]),
+    );
+    payload
+}
+
+/// The payload of the `incidence` section: the window origin, then the dense
+/// position of each link.
+pub(crate) fn incidence_payload(c0: u16, r0: u16, positions: &[u32]) -> Vec<u8> {
+    let mut payload = c0.to_le_bytes().to_vec();
+    payload.extend_from_slice(&r0.to_le_bytes());
+    for position in positions {
+        payload.extend_from_slice(&position.to_le_bytes());
+    }
+    payload
+}
+
+/// The labels of a `charges` payload. `None` unless the side matches, there is
+/// one byte per vertex, boundary vertices are free, interior labels are `-2`,
+/// `0`, or `2`, and there are `pairs` of each of `+2` and `-2`.
+pub(crate) fn parse_charges(
+    payload: &[u8],
+    config: Native,
+    lattice: &SquareLattice,
+    pairs: usize,
+) -> Option<Vec<Option<i8>>> {
+    let mut reader = Reader::new(payload);
+    if reader.u16()? != config.side {
+        return None;
+    }
+    let raw = reader.rest();
+    if raw.len() != usize::try_from(lattice.vertex_count()).ok()? {
+        return None;
+    }
+    let width = usize::from(config.side).checked_add(1)?;
+    let mut labels = Vec::with_capacity(raw.len());
+    let (mut plus, mut minus) = (0usize, 0usize);
+    for (v, &byte) in raw.iter().enumerate() {
+        let value = i8::from_le_bytes([byte]);
+        let (x, y) = (v % width, v / width);
+        let boundary =
+            x == 0 || y == 0 || x == usize::from(config.side) || y == usize::from(config.side);
+        if boundary {
+            if value != FREE {
+                return None;
+            }
+            labels.push(None);
+            continue;
+        }
+        match value {
+            2 => plus = plus.checked_add(1)?,
+            -2 => minus = minus.checked_add(1)?,
+            0 => {}
+            _ => return None,
+        }
+        labels.push(Some(value));
+    }
+    (plus == pairs && minus == pairs).then_some(labels)
+}
+
+/// The window origin and the link positions of an `incidence` payload.
+/// `None` unless the window lies in the cell grid and the positions are a
+/// permutation of `0..links`.
+pub(crate) fn parse_incidence(
+    payload: &[u8],
+    config: Native,
+    nodes: usize,
+) -> Option<(u16, u16, Vec<u32>)> {
+    let mut reader = Reader::new(payload);
+    let (c0, r0) = (reader.u16()?, reader.u16()?);
+    let grid = config.grid_side()?;
+    if c0 < 1
+        || r0 < 1
+        || c0.checked_add(config.side)? > grid
+        || r0.checked_add(config.side)? > grid
+    {
+        return None;
+    }
+    let links = config.links();
+    if reader.rest().len() != links.checked_mul(4)? || nodes != links {
+        return None;
+    }
+    let mut seen = vec![false; links];
+    let mut positions = Vec::with_capacity(links);
+    for _ in 0..links {
+        let position = reader.u32()?;
+        let slot = seen.get_mut(usize::try_from(position).ok()?)?;
+        if core::mem::replace(slot, true) {
+            return None;
+        }
+        positions.push(position);
+    }
+    Some((c0, r0, positions))
 }
