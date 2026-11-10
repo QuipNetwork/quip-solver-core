@@ -2143,40 +2143,69 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_reject_with_its_refund_passes() {
-        let slice = [msg_reject(RejectReason::Malformed), msg_request(1)];
-        let want = RejectReason::Malformed as i32;
-        assert_eq!(grade_reject(&slice, JOB, want), CaseOutcome::Passed);
+    /// Asserts that `outcome` passes, or that it fails, as the row says.
+    fn assert_graded(label: &str, outcome: &CaseOutcome, passes: bool) {
+        if passes {
+            assert_eq!(outcome, &CaseOutcome::Passed, "{label}");
+        } else {
+            assert!(failed(outcome), "{label}: {outcome:?}");
+        }
     }
 
     #[test]
-    fn a_reject_without_a_refund_fails() {
-        let slice = [msg_reject(RejectReason::Malformed)];
-        let want = RejectReason::Malformed as i32;
-        assert!(failed(&grade_reject(&slice, JOB, want)));
-    }
-
-    #[test]
-    fn a_wrong_reject_reason_fails() {
-        let slice = [msg_reject(RejectReason::Malformed), msg_request(1)];
-        let want = RejectReason::Unspecified as i32;
-        assert!(failed(&grade_reject(&slice, JOB, want)));
-    }
-
-    #[test]
-    fn a_second_refund_fails_the_case() {
-        let slice = [
-            msg_reject(RejectReason::Malformed),
-            msg_request(1),
-            msg_request(1),
+    fn grade_reject_cases() {
+        let expected = expected_lease();
+        let malformed = RejectReason::Malformed as i32;
+        let unspecified = RejectReason::Unspecified as i32;
+        // (label, slice, wanted reason, whether it passes)
+        let rows = [
+            (
+                "a reject with its refund",
+                vec![msg_reject(RejectReason::Malformed), msg_request(1)],
+                malformed,
+                true,
+            ),
+            (
+                "a reject without a refund",
+                vec![msg_reject(RejectReason::Malformed)],
+                malformed,
+                false,
+            ),
+            (
+                "a wrong reject reason",
+                vec![msg_reject(RejectReason::Malformed), msg_request(1)],
+                unspecified,
+                false,
+            ),
+            (
+                "a second refund",
+                vec![
+                    msg_reject(RejectReason::Malformed),
+                    msg_request(1),
+                    msg_request(1),
+                ],
+                malformed,
+                false,
+            ),
+            (
+                "a result in a reject slice",
+                vec![
+                    msg_reject(RejectReason::Malformed),
+                    result_of(&expected, 1, true),
+                    msg_request(1),
+                ],
+                malformed,
+                false,
+            ),
         ];
-        let want = RejectReason::Malformed as i32;
-        assert!(failed(&grade_reject(&slice, JOB, want)));
+        for (label, slice, want, passes) in rows {
+            assert_graded(label, &grade_reject(&slice, JOB, want), passes);
+        }
     }
 
     #[test]
-    fn a_correct_lease_transcript_passes() {
+    fn lease_transcripts_grade_as_expected() {
+        type Edit = fn(&ExpectedLease, &mut Vec<miner_msg::Msg>);
         let expected = expected_lease();
         let skipped: Vec<usize> = expected
             .salts
@@ -2185,50 +2214,144 @@ mod tests {
             .filter(|(_, salt)| salt.is_err())
             .map(|(slot, _)| slot)
             .collect();
-        assert_eq!(skipped, [0, 3]);
-        let outcome = grade_lease(&good_transcript(&expected), JOB, &expected);
-        assert_eq!(outcome, CaseOutcome::Passed);
-    }
-
-    #[test]
-    fn a_lease_result_without_the_offset_fails() {
-        let expected = expected_lease();
-        let mut slice = good_transcript(&expected);
-        *slice.first_mut().expect("non-empty") = result_of(&expected, 1, false);
-        assert!(failed(&grade_lease(&slice, JOB, &expected)));
-    }
-
-    #[test]
-    fn a_result_for_a_skipped_salt_fails() {
-        let expected = expected_lease();
-        let mut slice = good_transcript(&expected);
-        let mut stray = result_of(&expected, 1, true);
-        if let miner_msg::Msg::Result(result) = &mut stray {
-            result.salt = expected.spec.salt(0).expect("in lease").to_vec();
-            result.nonce = expected.spec.nonce(0).expect("in lease").to_vec();
+        assert_eq!(skipped, [0, 3], "the skipped slots of the lease");
+        // (label, edit of the good transcript, whether it passes)
+        let rows: [(&str, Edit, bool); 10] = [
+            ("a correct transcript", |_, _| {}, true),
+            (
+                "a result without the offset",
+                |e, slice| {
+                    if let Some(first) = slice.first_mut() {
+                        *first = result_of(e, 1, false);
+                    }
+                },
+                false,
+            ),
+            (
+                "a result for a skipped salt",
+                |e, slice| {
+                    let mut stray = result_of(e, 1, true);
+                    if let miner_msg::Msg::Result(result) = &mut stray {
+                        result.salt = e.spec.salt(0).expect("in lease").to_vec();
+                        result.nonce = e.spec.nonce(0).expect("in lease").to_vec();
+                    }
+                    slice.insert(0, stray);
+                },
+                false,
+            ),
+            (
+                "a LeaseDone with a wrong count",
+                |e, slice| {
+                    if let Some(done) = slice.get_mut(6) {
+                        *done = lease_done(e, 7);
+                    }
+                },
+                false,
+            ),
+            (
+                "a result after the LeaseDone",
+                |e, slice| {
+                    slice.insert(7, result_of(e, 1, true));
+                },
+                false,
+            ),
+            (
+                "a repeated salt",
+                |e, slice| {
+                    slice.insert(0, result_of(e, 1, true));
+                },
+                false,
+            ),
+            (
+                "a nonce mismatch",
+                |_, slice| {
+                    if let Some(miner_msg::Msg::Result(result)) = slice.first_mut() {
+                        result.nonce = vec![0; 32];
+                    }
+                },
+                false,
+            ),
+            (
+                "a generated slot without a result",
+                |_, slice| {
+                    let _ = slice.remove(0);
+                },
+                false,
+            ),
+            (
+                "a wrong best energy",
+                |_, slice| {
+                    if let Some(miner_msg::Msg::LeaseDone(done)) = slice.get_mut(6) {
+                        done.best_energy_milli += 1;
+                    }
+                },
+                false,
+            ),
+            (
+                "undecodable spins",
+                |_, slice| {
+                    if let Some(miner_msg::Msg::Result(result)) = slice.first_mut() {
+                        if let Some(solution) = result.solutions.first_mut() {
+                            solution.spins = vec![];
+                        }
+                    }
+                },
+                false,
+            ),
+        ];
+        for (label, edit, passes) in rows {
+            let mut slice = good_transcript(&expected);
+            edit(&expected, &mut slice);
+            assert_graded(label, &grade_lease(&slice, JOB, &expected), passes);
         }
-        slice.insert(0, stray);
-        assert!(failed(&grade_lease(&slice, JOB, &expected)));
     }
 
     #[test]
-    fn a_lease_done_with_a_wrong_count_fails() {
+    fn grade_stale_cases() {
         let expected = expected_lease();
-        let mut slice = good_transcript(&expected);
-        *slice.get_mut(6).expect("the LeaseDone") = lease_done(&expected, 7);
-        assert!(failed(&grade_lease(&slice, JOB, &expected)));
-    }
-
-    #[test]
-    fn a_stale_lease_with_a_result_fails() {
-        let expected = expected_lease();
-        let slice = [result_of(&expected, 1, true), msg_request(1)];
-        assert!(failed(&grade_stale(&slice, JOB)));
-    }
-
-    #[test]
-    fn a_stale_lease_with_only_a_refund_passes() {
-        assert_eq!(grade_stale(&[msg_request(1)], JOB), CaseOutcome::Passed);
+        let done = |salts_done| {
+            miner_msg::Msg::LeaseDone(LeaseDone {
+                job_id: JOB.to_vec(),
+                salts_done,
+                best_energy_milli: i64::MAX,
+            })
+        };
+        // (label, slice, whether it passes)
+        let rows = [
+            (
+                "a stale lease with a result",
+                vec![result_of(&expected, 1, true), msg_request(1)],
+                false,
+            ),
+            (
+                "a stale lease with only a refund",
+                vec![msg_request(1)],
+                true,
+            ),
+            (
+                "a stale LeaseDone with work",
+                vec![done(1), msg_request(1)],
+                false,
+            ),
+            (
+                "a stale LeaseDone without work",
+                vec![done(0), msg_request(1)],
+                true,
+            ),
+            (
+                "two stale LeaseDone messages",
+                vec![done(0), done(0), msg_request(1)],
+                false,
+            ),
+            (
+                "a reject in a stale slice",
+                vec![msg_reject(RejectReason::Malformed), msg_request(1)],
+                false,
+            ),
+        ];
+        for (label, slice, passes) in rows {
+            assert_graded(label, &grade_stale(&slice, JOB), passes);
+        }
     }
 
     #[test]
@@ -2319,71 +2442,91 @@ mod tests {
     }
 
     #[test]
-    fn no_admitting_params_set_fails_supported_revision() {
-        let caps = Capabilities {
-            max_nodes: 1,
-            ..mock_caps()
-        };
-        let subject = "vectors/uniform-field@1";
-        let cases = select_supported(&caps, subject, Some(uniform_reference()), &t_sparse(false))
-            .expect_err("no params set admits with max_nodes 1");
-        let why = "no reference params set admits under the advertised limits \
-                   (P_SPEC gives code 13, P_L2_F0 gives code 13, P_L3_F0 gives code 13)";
-        assert_eq!(cases.len(), 10);
-        assert_eq!(
-            cases.first(),
-            Some(&("supported-revision", CaseOutcome::Failed(why.to_owned())))
-        );
-        for (_, outcome) in cases.iter().skip(1) {
-            assert_eq!(outcome, &CaseOutcome::Skipped(why.to_owned()));
-        }
-    }
-
-    #[test]
-    fn a_reference_run_on_t_sparse_without_its_tiles_fails_with_code_12() {
-        let mut caps = mock_caps();
-        caps.generated_families.push(FamilySupport {
+    fn supported_revision_failures_name_the_reason() {
+        let ice = reference_revision("quip/ice-glass", 1).expect("a reference revision");
+        let mut ice_caps = mock_caps();
+        ice_caps.generated_families.push(FamilySupport {
             family_id: "quip/ice-glass".to_owned(),
             revisions: vec![1],
             params_digests: vec![],
         });
-        let reference = reference_revision("quip/ice-glass", 1).expect("a reference revision");
-        let cases = select_supported(&caps, "quip/ice-glass@1", Some(reference), &t_sparse(false))
-            .expect_err("T_SPARSE carries no ice tiles");
-        let why = "no reference params set admits under the advertised limits \
-                   (P_ICE_ADJ_125 gives code 12, P_ICE_Z12_200 gives code 12)";
-        assert_eq!(cases.len(), 10);
-        assert_eq!(
-            cases.first(),
-            Some(&("supported-revision", CaseOutcome::Failed(why.to_owned())))
-        );
-    }
-
-    #[test]
-    fn a_list_that_breaks_fam_61_fails_supported_revision_with_the_rule() {
-        let mut caps = mock_caps();
-        let repeat = caps.generated_families.first().cloned().expect("an entry");
-        caps.generated_families.push(repeat);
-        let subject = "vectors/uniform-field@1";
-        let cases = select_supported(&caps, subject, Some(uniform_reference()), &t_sparse(false))
-            .expect_err("the list claims nothing for the family");
-        let why = "generated_families lists vectors/uniform-field 2 times, \
-                   so the list claims nothing for it (FAM-61)";
-        assert_eq!(
-            cases.first(),
-            Some(&("supported-revision", CaseOutcome::Failed(why.to_owned())))
-        );
-        let _ = caps.generated_families.pop();
-        if let Some(entry) = caps.generated_families.first_mut() {
+        let mut repeated = mock_caps();
+        let repeat = repeated
+            .generated_families
+            .first()
+            .cloned()
+            .expect("an entry");
+        repeated.generated_families.push(repeat);
+        let mut zero_revision = mock_caps();
+        if let Some(entry) = zero_revision.generated_families.first_mut() {
             entry.revisions = vec![0, 1];
         }
-        let cases = select_supported(&caps, subject, Some(uniform_reference()), &t_sparse(false))
-            .expect_err("the entry claims nothing");
-        let why = "the entry for vectors/uniform-field lists revision 0 (FAM-61)";
-        assert_eq!(
-            cases.first(),
-            Some(&("supported-revision", CaseOutcome::Failed(why.to_owned())))
-        );
+        let uniform = "vectors/uniform-field@1";
+        // (label, caps, subject, reference, reason of the first case, whether the
+        // case list has ten cases, whether the other cases skip with the reason)
+        let rows = [
+            (
+                "no params set admits",
+                Capabilities {
+                    max_nodes: 1,
+                    ..mock_caps()
+                },
+                uniform,
+                uniform_reference(),
+                "no reference params set admits under the advertised limits \
+                 (P_SPEC gives code 13, P_L2_F0 gives code 13, P_L3_F0 gives code 13)",
+                true,
+                true,
+            ),
+            (
+                "T_SPARSE without ice tiles",
+                ice_caps,
+                "quip/ice-glass@1",
+                ice,
+                "no reference params set admits under the advertised limits \
+                 (P_ICE_ADJ_125 gives code 12, P_ICE_Z12_200 gives code 12)",
+                true,
+                false,
+            ),
+            (
+                "a repeated entry",
+                repeated,
+                uniform,
+                uniform_reference(),
+                "generated_families lists vectors/uniform-field 2 times, \
+                 so the list claims nothing for it (FAM-61)",
+                false,
+                false,
+            ),
+            (
+                "an entry that lists revision 0",
+                zero_revision,
+                uniform,
+                uniform_reference(),
+                "the entry for vectors/uniform-field lists revision 0 (FAM-61)",
+                false,
+                false,
+            ),
+        ];
+        let topology = t_sparse(false);
+        for (label, caps, subject, reference, why, ten_cases, rest_skipped) in rows {
+            let selected = select_supported(&caps, subject, Some(reference), &topology);
+            assert!(selected.is_err(), "{label}: the gate accepted the revision");
+            let cases = selected.expect_err("checked above");
+            if ten_cases {
+                assert_eq!(cases.len(), 10, "{label}");
+            }
+            assert_eq!(
+                cases.first(),
+                Some(&("supported-revision", CaseOutcome::Failed(why.to_owned()))),
+                "{label}"
+            );
+            if rest_skipped {
+                for (_, outcome) in cases.iter().skip(1) {
+                    assert_eq!(outcome, &CaseOutcome::Skipped(why.to_owned()), "{label}");
+                }
+            }
+        }
     }
 
     #[test]
@@ -2440,33 +2583,39 @@ mod tests {
     }
 
     #[test]
-    fn skips_do_not_fail_the_report() {
-        let report = FamilyReport {
-            cases: vec![
-                case("a", CaseOutcome::Passed),
-                case("b", CaseOutcome::Skipped("no reference".to_owned())),
-            ],
-            ..FamilyReport::default()
-        };
-        assert!(report.is_conformant());
-        let only_skips = FamilyReport {
-            cases: vec![case("b", CaseOutcome::Skipped("no reference".to_owned()))],
-            ..FamilyReport::default()
-        };
-        assert!(!only_skips.is_conformant());
-    }
-
-    #[test]
-    fn a_failed_case_fails_the_report() {
-        let report = FamilyReport {
-            cases: vec![
-                case("a", CaseOutcome::Passed),
-                case("b", CaseOutcome::Failed("why".to_owned())),
-            ],
-            ..FamilyReport::default()
-        };
-        assert!(!report.is_conformant());
-        assert!(!FamilyReport::default().is_conformant());
+    fn report_conformance_follows_the_outcomes() {
+        // (label, cases, whether the report is conformant)
+        let rows = [
+            (
+                "a pass and a skip",
+                vec![
+                    case("a", CaseOutcome::Passed),
+                    case("b", CaseOutcome::Skipped("no reference".to_owned())),
+                ],
+                true,
+            ),
+            (
+                "only a skip",
+                vec![case("b", CaseOutcome::Skipped("no reference".to_owned()))],
+                false,
+            ),
+            (
+                "a pass and a failure",
+                vec![
+                    case("a", CaseOutcome::Passed),
+                    case("b", CaseOutcome::Failed("why".to_owned())),
+                ],
+                false,
+            ),
+            ("no cases", vec![], false),
+        ];
+        for (label, cases, conformant) in rows {
+            let report = FamilyReport {
+                cases,
+                ..FamilyReport::default()
+            };
+            assert_eq!(report.is_conformant(), conformant, "{label}");
+        }
     }
 
     #[test]
@@ -2492,111 +2641,6 @@ mod tests {
             Some(&CaseOutcome::Failed("why".to_owned()))
         );
         assert_eq!(report.outcome("b", None), None);
-    }
-
-    fn lease_failure(slice: &[miner_msg::Msg], expected: &ExpectedLease) -> bool {
-        failed(&grade_lease(slice, JOB, expected))
-    }
-
-    fn with_result(
-        expected: &ExpectedLease,
-        edit: impl FnOnce(&mut quip_proto::v1::Result),
-    ) -> Vec<miner_msg::Msg> {
-        let mut slice = good_transcript(expected);
-        if let Some(miner_msg::Msg::Result(result)) = slice.first_mut() {
-            edit(result);
-        }
-        slice
-    }
-
-    #[test]
-    fn a_result_after_the_lease_done_fails() {
-        let expected = expected_lease();
-        let mut slice = good_transcript(&expected);
-        slice.insert(7, result_of(&expected, 1, true));
-        assert!(lease_failure(&slice, &expected));
-    }
-
-    #[test]
-    fn a_repeated_salt_fails() {
-        let expected = expected_lease();
-        let mut slice = good_transcript(&expected);
-        slice.insert(0, result_of(&expected, 1, true));
-        assert!(lease_failure(&slice, &expected));
-    }
-
-    #[test]
-    fn a_nonce_mismatch_fails() {
-        let expected = expected_lease();
-        let slice = with_result(&expected, |result| result.nonce = vec![0; 32]);
-        assert!(lease_failure(&slice, &expected));
-    }
-
-    #[test]
-    fn a_generated_slot_without_a_result_fails() {
-        let expected = expected_lease();
-        let mut slice = good_transcript(&expected);
-        let _ = slice.remove(0);
-        assert!(lease_failure(&slice, &expected));
-    }
-
-    #[test]
-    fn a_wrong_best_energy_fails() {
-        let expected = expected_lease();
-        let mut slice = good_transcript(&expected);
-        if let Some(miner_msg::Msg::LeaseDone(done)) = slice.get_mut(6) {
-            done.best_energy_milli += 1;
-        }
-        assert!(lease_failure(&slice, &expected));
-    }
-
-    #[test]
-    fn undecodable_spins_fail() {
-        let expected = expected_lease();
-        let slice = with_result(&expected, |result| {
-            if let Some(solution) = result.solutions.first_mut() {
-                solution.spins = vec![];
-            }
-        });
-        assert!(lease_failure(&slice, &expected));
-    }
-
-    #[test]
-    fn a_stale_lease_done_with_work_fails() {
-        let done = |salts_done| {
-            miner_msg::Msg::LeaseDone(LeaseDone {
-                job_id: JOB.to_vec(),
-                salts_done,
-                best_energy_milli: i64::MAX,
-            })
-        };
-        assert!(failed(&grade_stale(&[done(1), msg_request(1)], JOB)));
-        assert_eq!(
-            grade_stale(&[done(0), msg_request(1)], JOB),
-            CaseOutcome::Passed
-        );
-        assert!(failed(&grade_stale(
-            &[done(0), done(0), msg_request(1)],
-            JOB
-        )));
-    }
-
-    #[test]
-    fn a_reject_in_a_stale_slice_fails() {
-        let slice = [msg_reject(RejectReason::Malformed), msg_request(1)];
-        assert!(failed(&grade_stale(&slice, JOB)));
-    }
-
-    #[test]
-    fn a_result_in_a_reject_slice_fails() {
-        let expected = expected_lease();
-        let slice = [
-            msg_reject(RejectReason::Malformed),
-            result_of(&expected, 1, true),
-            msg_request(1),
-        ];
-        let want = RejectReason::Malformed as i32;
-        assert!(failed(&grade_reject(&slice, JOB, want)));
     }
 
     #[test]
@@ -2629,39 +2673,52 @@ mod tests {
     }
 
     #[test]
-    fn an_accepted_only_pair_has_no_lease_subject_but_an_explicit_one() {
-        let mut caps = mock_caps();
-        caps.generated_families = vec![];
-        assert!(plan_subjects(&caps).is_empty());
-        let subjects = plan_explicit_subjects(&caps);
-        let names: Vec<&str> = subjects.iter().map(|(name, _)| name.as_str()).collect();
-        assert_eq!(
-            names,
-            ["vectors/uniform-field@1", "vectors/restricted-field@1"]
+    fn subject_plans_follow_the_lists() {
+        type PlanRow<'a> = (
+            &'a str,
+            Capabilities,
+            Option<usize>,
+            usize,
+            Option<&'a [&'a str]>,
         );
-    }
-
-    #[test]
-    fn a_generated_only_pair_has_no_explicit_subject() {
-        let mut caps = mock_caps();
-        caps.accepted_families = vec![];
-        assert!(plan_explicit_subjects(&caps).is_empty());
-        assert_eq!(plan_subjects(&caps).len(), 2);
-    }
-
-    #[test]
-    fn an_accepted_pair_without_a_reference_has_no_explicit_subject() {
-        let mut caps = mock_caps();
-        caps.accepted_families = vec![FamilySupport {
+        let mut no_generated = mock_caps();
+        no_generated.generated_families = vec![];
+        let mut no_accepted = mock_caps();
+        no_accepted.accepted_families = vec![];
+        let mut no_reference = mock_caps();
+        no_reference.accepted_families = vec![FamilySupport {
             family_id: "vectors/other".to_owned(),
             revisions: vec![1, 1],
             params_digests: vec![],
         }];
-        assert!(plan_explicit_subjects(&caps).is_empty());
-        let mut caps = mock_caps();
-        let repeat = caps.accepted_families.clone();
-        caps.accepted_families.extend(repeat);
-        assert_eq!(plan_explicit_subjects(&caps).len(), 2);
+        let mut repeated = mock_caps();
+        let repeat = repeated.accepted_families.clone();
+        repeated.accepted_families.extend(repeat);
+        // (label, caps, number of lease subjects if checked, number of explicit
+        // subjects, names of the explicit subjects if checked)
+        let rows: [PlanRow<'_>; 4] = [
+            (
+                "accepted only",
+                no_generated,
+                Some(0),
+                2,
+                Some(&["vectors/uniform-field@1", "vectors/restricted-field@1"]),
+            ),
+            ("generated only", no_accepted, Some(2), 0, None),
+            ("accepted without a reference", no_reference, None, 0, None),
+            ("accepted listed twice", repeated, None, 2, None),
+        ];
+        for (label, caps, lease_count, explicit_count, explicit_names) in rows {
+            if let Some(count) = lease_count {
+                assert_eq!(plan_subjects(&caps).len(), count, "{label}: lease subjects");
+            }
+            let subjects = plan_explicit_subjects(&caps);
+            assert_eq!(subjects.len(), explicit_count, "{label}: explicit subjects");
+            if let Some(want) = explicit_names {
+                let names: Vec<&str> = subjects.iter().map(|(name, _)| name.as_str()).collect();
+                assert_eq!(names, want, "{label}: explicit subject names");
+            }
+        }
     }
 
     fn explicit_base() -> Instance {
@@ -2692,90 +2749,99 @@ mod tests {
     }
 
     #[test]
-    fn a_solved_explicit_job_with_its_refund_passes() {
+    fn explicit_solved_transcripts_grade_as_expected() {
+        type Build = fn(&Instance) -> Vec<miner_msg::Msg>;
         let instance = explicit_base();
         assert_ne!(
             instance.offset_milli(),
             0,
             "the offset check needs an offset"
         );
-        let slice = [explicit_result(&instance, false), msg_request(1)];
-        assert_eq!(solved(&slice, &instance), CaseOutcome::Passed);
-    }
-
-    #[test]
-    fn an_explicit_result_scored_with_the_offset_fails() {
-        let instance = explicit_base();
-        let slice = [explicit_result(&instance, true), msg_request(1)];
-        assert!(failed(&solved(&slice, &instance)));
-    }
-
-    #[test]
-    fn an_explicit_job_without_a_result_fails() {
-        let instance = explicit_base();
-        assert!(failed(&solved(&[msg_request(1)], &instance)));
-    }
-
-    #[test]
-    fn a_rejected_valid_explicit_job_fails() {
-        let instance = explicit_base();
-        let slice = [msg_reject(RejectReason::Malformed), msg_request(1)];
-        assert!(failed(&solved(&slice, &instance)));
-    }
-
-    #[test]
-    fn an_explicit_result_without_a_refund_fails() {
-        let instance = explicit_base();
-        let slice = [explicit_result(&instance, false)];
-        assert!(failed(&solved(&slice, &instance)));
-        let early = [msg_request(1), explicit_result(&instance, false)];
-        assert!(failed(&solved(&early, &instance)));
-        let twice = [
-            explicit_result(&instance, false),
-            msg_request(1),
-            msg_request(1),
+        // (label, slice built from the instance, whether it passes)
+        let rows: [(&str, Build, bool); 11] = [
+            (
+                "a solved job with its refund",
+                |i| vec![explicit_result(i, false), msg_request(1)],
+                true,
+            ),
+            (
+                "a result scored with the offset",
+                |i| vec![explicit_result(i, true), msg_request(1)],
+                false,
+            ),
+            ("a job without a result", |_| vec![msg_request(1)], false),
+            (
+                "a rejected valid job",
+                |_| vec![msg_reject(RejectReason::Malformed), msg_request(1)],
+                false,
+            ),
+            (
+                "a result without a refund",
+                |i| vec![explicit_result(i, false)],
+                false,
+            ),
+            (
+                "an early refund",
+                |i| vec![msg_request(1), explicit_result(i, false)],
+                false,
+            ),
+            (
+                "two refunds",
+                |i| vec![explicit_result(i, false), msg_request(1), msg_request(1)],
+                false,
+            ),
+            (
+                "a second result",
+                |i| {
+                    vec![
+                        explicit_result(i, false),
+                        explicit_result(i, false),
+                        msg_request(1),
+                    ]
+                },
+                false,
+            ),
+            (
+                "a result without solutions",
+                |i| {
+                    let mut empty = explicit_result(i, false);
+                    if let miner_msg::Msg::Result(result) = &mut empty {
+                        result.solutions.clear();
+                    }
+                    vec![empty, msg_request(1)]
+                },
+                false,
+            ),
+            (
+                "a result with bad spins",
+                |i| {
+                    let mut bad = explicit_result(i, false);
+                    if let miner_msg::Msg::Result(result) = &mut bad {
+                        if let Some(solution) = result.solutions.first_mut() {
+                            solution.spins = vec![];
+                        }
+                    }
+                    vec![bad, msg_request(1)]
+                },
+                false,
+            ),
+            (
+                "a LeaseDone",
+                |i| {
+                    let done = miner_msg::Msg::LeaseDone(LeaseDone {
+                        job_id: JOB.to_vec(),
+                        salts_done: 0,
+                        best_energy_milli: 0,
+                    });
+                    vec![explicit_result(i, false), done, msg_request(1)]
+                },
+                false,
+            ),
         ];
-        assert!(failed(&solved(&twice, &instance)));
-    }
-
-    #[test]
-    fn a_second_explicit_result_fails() {
-        let instance = explicit_base();
-        let slice = [
-            explicit_result(&instance, false),
-            explicit_result(&instance, false),
-            msg_request(1),
-        ];
-        assert!(failed(&solved(&slice, &instance)));
-    }
-
-    #[test]
-    fn an_explicit_result_without_solutions_or_with_bad_spins_fails() {
-        let instance = explicit_base();
-        let mut empty = explicit_result(&instance, false);
-        if let miner_msg::Msg::Result(result) = &mut empty {
-            result.solutions.clear();
+        for (label, build, passes) in rows {
+            let slice = build(&instance);
+            assert_graded(label, &solved(&slice, &instance), passes);
         }
-        assert!(failed(&solved(&[empty, msg_request(1)], &instance)));
-        let mut bad = explicit_result(&instance, false);
-        if let miner_msg::Msg::Result(result) = &mut bad {
-            if let Some(solution) = result.solutions.first_mut() {
-                solution.spins = vec![];
-            }
-        }
-        assert!(failed(&solved(&[bad, msg_request(1)], &instance)));
-    }
-
-    #[test]
-    fn a_lease_done_for_an_explicit_job_fails() {
-        let instance = explicit_base();
-        let done = miner_msg::Msg::LeaseDone(LeaseDone {
-            job_id: JOB.to_vec(),
-            salts_done: 0,
-            best_energy_milli: 0,
-        });
-        let slice = [explicit_result(&instance, false), done, msg_request(1)];
-        assert!(failed(&solved(&slice, &instance)));
     }
 
     fn explicit_plans(caps: &Capabilities) -> Vec<ExplicitCase> {
@@ -2791,57 +2857,72 @@ mod tests {
             .expect("the case builds")
     }
 
-    #[test]
-    fn the_explicit_cases_run_in_the_documented_order() {
-        let cases = explicit_plans(&mock_caps());
-        let names: Vec<&str> = cases.iter().map(|case| case.name).collect();
-        assert_eq!(names, EXPLICIT_CASES);
-        assert!(cases.iter().all(|case| case.plan.is_ok()));
-    }
-
-    #[test]
-    fn the_supported_explicit_job_carries_the_reference_instance() {
-        let cases = explicit_plans(&mock_caps());
-        let instance = explicit_base();
-        let (job, grade) = plan_of(&cases, "explicit-supported");
-        assert_eq!(job.instance_digest, instance.digest().to_vec());
-        assert_eq!(job.offset_milli, instance.offset_milli());
-        assert_eq!(job.node_ids, instance.node_ids());
-        assert_eq!(job.nonce.len(), 32);
-        assert!(matches!(grade, ExplicitGrade::Solved(_)));
-        let wire = job.job("explicit-supported/x");
-        assert_eq!(wire.kind, JobKind::IsingSample as i32);
-        assert_eq!(wire.generation, FAMILY_LIVE_GENERATION);
+    fn check_supported_explicit_plan(cases: &[ExplicitCase], instance: &Instance) {
+        // explicit-supported
+        let (base, grade) = plan_of(cases, "explicit-supported");
+        assert_eq!(
+            base.instance_digest,
+            instance.digest().to_vec(),
+            "explicit-supported"
+        );
+        assert_eq!(
+            base.offset_milli,
+            instance.offset_milli(),
+            "explicit-supported"
+        );
+        assert_eq!(base.node_ids, instance.node_ids(), "explicit-supported");
+        assert_eq!(base.nonce.len(), 32, "explicit-supported");
+        assert!(
+            matches!(grade, ExplicitGrade::Solved(_)),
+            "explicit-supported grades as solved"
+        );
+        let wire = base.job("explicit-supported/x");
+        assert_eq!(wire.kind, JobKind::IsingSample as i32, "explicit-supported");
+        assert_eq!(
+            wire.generation, FAMILY_LIVE_GENERATION,
+            "explicit-supported"
+        );
         let ising = wire.ising.expect("an IsingProblem");
-        assert!(matches!(ising.graph, Some(Graph::Edges(_))));
-        assert_eq!(ising.scale, 1000);
+        assert!(
+            matches!(ising.graph, Some(Graph::Edges(_))),
+            "explicit-supported sends the edges"
+        );
+        assert_eq!(ising.scale, 1000, "explicit-supported");
         let binding = ising.family.expect("a binding");
-        assert_eq!(binding.instance_digest, instance.digest().to_vec());
+        assert_eq!(
+            binding.instance_digest,
+            instance.digest().to_vec(),
+            "explicit-supported"
+        );
     }
 
-    #[test]
-    fn the_digest_case_changes_one_byte_and_expects_code_15() {
-        let cases = explicit_plans(&mock_caps());
-        let (base, _) = plan_of(&cases, "explicit-supported");
-        let (job, grade) = plan_of(&cases, "explicit-digest-mismatch");
+    fn check_digest_explicit_plan(cases: &[ExplicitCase]) {
+        let (base, _) = plan_of(cases, "explicit-supported");
+        // explicit-digest-mismatch
+        let (job, grade) = plan_of(cases, "explicit-digest-mismatch");
         let differing = job
             .instance_digest
             .iter()
             .zip(&base.instance_digest)
             .filter(|(a, b)| a != b)
             .count();
-        assert_eq!(differing, 1);
-        assert_eq!(job.instance_digest.len(), 32);
+        assert_eq!(differing, 1, "explicit-digest-mismatch");
+        assert_eq!(job.instance_digest.len(), 32, "explicit-digest-mismatch");
         let malformed = RejectReason::Malformed as i32;
-        assert!(matches!(grade, ExplicitGrade::Reject(want) if want == malformed));
+        assert!(
+            matches!(grade, ExplicitGrade::Reject(want) if want == malformed),
+            "explicit-digest-mismatch expects the malformed reject"
+        );
     }
 
-    #[test]
-    fn the_metadata_case_passes_steps_one_to_three_and_fails_the_family_check() {
-        let cases = explicit_plans(&mock_caps());
-        let instance = explicit_base();
-        let (job, grade) = plan_of(&cases, "explicit-metadata-invalid");
-        assert_ne!(job.metadata, instance.metadata());
+    fn check_metadata_explicit_plan(cases: &[ExplicitCase], instance: &Instance) {
+        // explicit-metadata-invalid
+        let (job, grade) = plan_of(cases, "explicit-metadata-invalid");
+        assert_ne!(
+            job.metadata,
+            instance.metadata(),
+            "explicit-metadata-invalid"
+        );
         let contract = &UNIFORM_V1;
         let parts = InstanceParts {
             descriptor_digest: *instance.descriptor_digest(),
@@ -2861,7 +2942,7 @@ mod tests {
             contract.metadata_kinds,
             Some(&sent),
         )
-        .expect("the layout and the digest are valid");
+        .expect("explicit-metadata-invalid: the layout and the digest are valid");
         let admitted = admit(
             from_ref(contract),
             contract.family_id.as_bytes(),
@@ -2874,38 +2955,85 @@ mod tests {
             .construction
             .expect("a construction")
             .check_metadata;
-        assert!(!check(admitted.params(), &rebuilt));
+        assert!(
+            !check(admitted.params(), &rebuilt),
+            "explicit-metadata-invalid fails the family check"
+        );
         let invalid = explicit_reason(Code::MetadataInvalid);
-        assert!(matches!(grade, ExplicitGrade::Reject(want) if want == invalid));
+        assert!(
+            matches!(grade, ExplicitGrade::Reject(want) if want == invalid),
+            "explicit-metadata-invalid expects the metadata reject"
+        );
     }
 
-    #[test]
-    fn the_params_case_sends_out_of_bounds_params_with_their_digest() {
-        let cases = explicit_plans(&mock_caps());
-        let (base, _) = plan_of(&cases, "explicit-supported");
-        let (job, grade) = plan_of(&cases, "explicit-params-out-of-bounds");
-        assert_eq!(job.family.params, P_F5000);
-        assert_eq!(job.family.params_digest, params_digest(&P_F5000).to_vec());
-        assert_eq!(job.instance_digest, base.instance_digest);
+    fn check_params_explicit_plan(cases: &[ExplicitCase]) {
+        let (base, _) = plan_of(cases, "explicit-supported");
+        // explicit-params-out-of-bounds
+        let (job, grade) = plan_of(cases, "explicit-params-out-of-bounds");
+        assert_eq!(job.family.params, P_F5000, "explicit-params-out-of-bounds");
+        assert_eq!(
+            job.family.params_digest,
+            params_digest(&P_F5000).to_vec(),
+            "explicit-params-out-of-bounds"
+        );
+        assert_eq!(
+            job.instance_digest, base.instance_digest,
+            "explicit-params-out-of-bounds"
+        );
         let want = explicit_reason(Code::ParamsOutOfBounds);
-        assert!(matches!(grade, ExplicitGrade::Reject(got) if got == want));
+        assert!(
+            matches!(grade, ExplicitGrade::Reject(got) if got == want),
+            "explicit-params-out-of-bounds expects the params reject"
+        );
     }
 
-    #[test]
-    fn the_hash_form_case_swaps_the_graph_and_expects_code_15() {
-        let cases = explicit_plans(&mock_caps());
-        let (job, grade) = plan_of(&cases, "explicit-topology-hash-form");
+    fn check_hash_form_explicit_plan(cases: &[ExplicitCase]) {
+        // explicit-topology-hash-form
+        let (job, grade) = plan_of(cases, "explicit-topology-hash-form");
         let topology = t_sparse(false);
         assert_eq!(
             job.graph,
-            Graph::TopologyHash(FAMILY_TOPOLOGY_HASH.to_vec())
+            Graph::TopologyHash(FAMILY_TOPOLOGY_HASH.to_vec()),
+            "explicit-topology-hash-form"
         );
-        assert_eq!(job.h.len(), topology.node_ids().len());
-        assert_eq!(job.j.len(), topology.edges().len());
+        assert_eq!(
+            job.h.len(),
+            topology.node_ids().len(),
+            "explicit-topology-hash-form"
+        );
+        assert_eq!(
+            job.j.len(),
+            topology.edges().len(),
+            "explicit-topology-hash-form"
+        );
         let wire = job.job("explicit-topology-hash-form/x");
-        assert!(wire.ising.and_then(|ising| ising.family).is_some());
+        assert!(
+            wire.ising.and_then(|ising| ising.family).is_some(),
+            "explicit-topology-hash-form carries a binding"
+        );
         let want = explicit_reason(Code::InstanceDigestMismatch);
-        assert!(matches!(grade, ExplicitGrade::Reject(got) if got == want));
+        assert!(
+            matches!(grade, ExplicitGrade::Reject(got) if got == want),
+            "explicit-topology-hash-form expects the digest mismatch reject"
+        );
+    }
+
+    #[test]
+    fn explicit_case_plans_match_their_rules() {
+        let cases = explicit_plans(&mock_caps());
+        let instance = explicit_base();
+        // The order of the cases.
+        let names: Vec<&str> = cases.iter().map(|case| case.name).collect();
+        assert_eq!(names, EXPLICIT_CASES, "the order of the cases");
+        assert!(
+            cases.iter().all(|case| case.plan.is_ok()),
+            "every case builds"
+        );
+        check_supported_explicit_plan(&cases, &instance);
+        check_digest_explicit_plan(&cases);
+        check_metadata_explicit_plan(&cases, &instance);
+        check_params_explicit_plan(&cases);
+        check_hash_form_explicit_plan(&cases);
     }
 
     #[test]
@@ -2972,27 +3100,27 @@ mod tests {
     }
 
     #[test]
-    fn the_layered_revisions_keep_t_sparse_and_its_hash() {
+    fn gate_hashes_follow_the_topology_files() {
         for family in ["vectors/uniform-field", "vectors/restricted-field"] {
             let reference = reference_revision(family, 1).expect("a reference revision");
-            assert_eq!(reference.topology, T_SPARSE_TOPOLOGY);
-            assert_eq!(gate_of(reference).hash, FAMILY_TOPOLOGY_HASH);
+            assert_eq!(reference.topology, T_SPARSE_TOPOLOGY, "{family}");
+            assert_eq!(gate_of(reference).hash, FAMILY_TOPOLOGY_HASH, "{family}");
         }
-    }
-
-    #[test]
-    fn each_distinct_topology_has_its_own_hash() {
         let mut seen: Vec<(&str, [u8; 32])> = Vec::new();
         for reference in REFERENCE_REVISIONS {
             let hash = gate_of(reference).hash;
-            if let Some((_, known)) = seen.iter().find(|(file, _)| *file == reference.topology) {
-                assert_eq!(*known, hash);
+            let file = reference.topology;
+            if let Some((_, known)) = seen.iter().find(|(known_file, _)| *known_file == file) {
+                assert_eq!(*known, hash, "{file}");
             } else {
-                assert!(seen.iter().all(|(_, known)| *known != hash));
-                seen.push((reference.topology, hash));
+                assert!(
+                    seen.iter().all(|(_, known)| *known != hash),
+                    "{file}: its hash is shared with another topology file"
+                );
+                seen.push((file, hash));
             }
         }
-        assert_eq!(seen.len(), 4);
+        assert_eq!(seen.len(), 4, "the distinct topology files");
     }
 
     #[test]

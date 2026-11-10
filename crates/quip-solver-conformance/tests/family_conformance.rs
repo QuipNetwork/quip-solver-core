@@ -91,37 +91,32 @@ fn canonical(instance: &Instance) -> Result<Vec<u8>, String> {
 }
 
 #[test]
-fn faulty_j_keeps_the_all_up_energy_and_changes_the_couplings() -> Result<(), String> {
-    let (honest, broken) = honest_and_faulty(FAULTY_J_V1)?;
-    let (a, b) = (all_up_energy(&honest), all_up_energy(&broken));
-    if a != b {
-        return Err(format!("energies differ: {a} and {b}"));
-    }
-    let sum = |i: &Instance| i.j().iter().copied().map(i64::from).sum::<i64>();
-    if sum(&honest) != sum(&broken) {
-        return Err("sum of J differs".to_owned());
-    }
-    if honest.j() == broken.j() {
-        return Err("the couplings are equal at slot 1".to_owned());
-    }
-    if canonical(&honest)? == canonical(&broken)? {
-        return Err("canonical bytes are equal".to_owned());
-    }
-    Ok(())
-}
-
-#[test]
-fn faulty_metadata_keeps_the_energy_and_changes_the_region() -> Result<(), String> {
-    let (honest, broken) = honest_and_faulty(FAULTY_METADATA_V1)?;
-    let (a, b) = (all_up_energy(&honest), all_up_energy(&broken));
-    if a != b {
-        return Err(format!("energies differ: {a} and {b}"));
-    }
-    if honest.metadata() == broken.metadata() {
-        return Err("the metadata regions are equal".to_owned());
-    }
-    if canonical(&honest)? == canonical(&broken)? {
-        return Err("canonical bytes are equal".to_owned());
+fn faulty_generators_keep_the_all_up_energy() -> Result<(), String> {
+    // (label, faulty contract, whether the couplings differ or only the metadata region)
+    let rows = [
+        ("faulty J", FAULTY_J_V1, true),
+        ("faulty metadata", FAULTY_METADATA_V1, false),
+    ];
+    for (label, faulty, changes_couplings) in rows {
+        let (honest, broken) = honest_and_faulty(faulty)?;
+        let (a, b) = (all_up_energy(&honest), all_up_energy(&broken));
+        if a != b {
+            return Err(format!("{label}: energies differ: {a} and {b}"));
+        }
+        if changes_couplings {
+            let sum = |i: &Instance| i.j().iter().copied().map(i64::from).sum::<i64>();
+            if sum(&honest) != sum(&broken) {
+                return Err(format!("{label}: sum of J differs"));
+            }
+            if honest.j() == broken.j() {
+                return Err(format!("{label}: the couplings are equal at slot 1"));
+            }
+        } else if honest.metadata() == broken.metadata() {
+            return Err(format!("{label}: the metadata regions are equal"));
+        }
+        if canonical(&honest)? == canonical(&broken)? {
+            return Err(format!("{label}: canonical bytes are equal"));
+        }
     }
     Ok(())
 }
@@ -382,31 +377,29 @@ fn first_diff_names_each_component_in_fam_30_order() -> Result<(), String> {
 }
 
 #[test]
-fn equal_bytes_with_a_wrong_digest_is_an_instance_digest_difference() -> Result<(), String> {
+fn compare_names_the_differing_component() -> Result<(), String> {
     let cases = cases()?;
     let case = case_named(&cases, "uniform-p-spec-sparse")?;
-    let (mut salt, _) = slot_one(&cases)?;
-    let Expected::Instance { digest, .. } = &mut salt.expected else {
+    // Equal bytes with a wrong digest are an instance digest difference.
+    let (mut tampered, _) = slot_one(&cases)?;
+    let Expected::Instance { digest, .. } = &mut tampered.expected else {
         return Err("slot 1 is a skip".to_owned());
     };
     if let Some(byte) = digest.first_mut() {
         *byte ^= 0x01;
     }
-    let generated = export_instances(&UNIFORM_V1, &case.params, &case.topology, &[salt.nonce])
+    let generated = export_instances(&UNIFORM_V1, &case.params, &case.topology, &[tampered.nonce])
         .map_err(|c| format!("admission {c}"))?;
     let got = generated.first().ok_or("no instance")?;
-    match compare(&salt, got) {
-        Err(diff) if diff.component == Component::InstanceDigest => Ok(()),
-        other => Err(format!(
-            "expected an instance digest difference, got {other:?}"
-        )),
+    match compare(&tampered, got) {
+        Err(diff) if diff.component == Component::InstanceDigest => {}
+        other => {
+            return Err(format!(
+                "expected an instance digest difference, got {other:?}"
+            ))
+        }
     }
-}
-
-#[test]
-fn a_skip_where_an_instance_is_expected_is_an_outcome_difference() -> Result<(), String> {
-    let cases = cases()?;
-    let case = case_named(&cases, "uniform-p-spec-sparse")?;
+    // A skip where an instance is expected is an outcome difference.
     let (salt, _) = slot_one(&cases)?;
     let skipped = case
         .salts
@@ -466,11 +459,42 @@ fn mismatch_of(contract: &Contract) -> Result<CaseMismatch, String> {
 }
 
 #[test]
-fn faulty_j_fails_at_the_j_component_with_equal_energy() -> Result<(), String> {
-    let mismatch = mismatch_of(&FAULTY_J_V1)?;
-    if mismatch.salt_index != Some(1) || mismatch.diff.component != Component::J {
-        return Err(format!("{:?} {}", mismatch.salt_index, mismatch.diff));
+fn faulty_generators_fail_at_their_component() -> Result<(), String> {
+    // (label, faulty contract, slot that must differ, component, section index,
+    // text of the generated value). `None` means the original test did not check it.
+    let rows = [
+        ("faulty J", FAULTY_J_V1, Some(1), Component::J, None, None),
+        (
+            "faulty metadata",
+            FAULTY_METADATA_V1,
+            Some(1),
+            Component::MetadataSection,
+            Some(0),
+            None,
+        ),
+        (
+            "faulty oversize",
+            FAULTY_OVERSIZE_V1,
+            None,
+            Component::Outcome,
+            None,
+            Some("SizeBound"),
+        ),
+    ];
+    for (label, faulty, salt_index, component, index, got_text) in rows {
+        let mismatch = mismatch_of(&faulty).map_err(|e| format!("{label}: {e}"))?;
+        let fits = salt_index.is_none_or(|s| mismatch.salt_index == Some(s))
+            && mismatch.diff.component == component
+            && index.is_none_or(|i| mismatch.diff.index == Some(i))
+            && got_text.is_none_or(|text| mismatch.diff.got.contains(text));
+        if !fits {
+            return Err(format!(
+                "{label}: {:?} {}",
+                mismatch.salt_index, mismatch.diff
+            ));
+        }
     }
+    // The faulty J generator keeps the energy of the vector.
     let cases = cases()?;
     let (salt, _) = slot_one(&cases)?;
     let Expected::Instance {
@@ -478,36 +502,13 @@ fn faulty_j_fails_at_the_j_component_with_equal_energy() -> Result<(), String> {
         ..
     } = salt.expected
     else {
-        return Err("slot 1 is a skip".to_owned());
+        return Err("faulty J: slot 1 is a skip".to_owned());
     };
     let (_, broken) = honest_and_faulty(FAULTY_J_V1)?;
     if all_up_energy(&broken) == energy_all_up_milli {
         Ok(())
     } else {
-        Err("the faulty energy differs from the vector energy".to_owned())
-    }
-}
-
-#[test]
-fn faulty_metadata_fails_at_metadata_section_0() -> Result<(), String> {
-    let mismatch = mismatch_of(&FAULTY_METADATA_V1)?;
-    if mismatch.salt_index == Some(1)
-        && mismatch.diff.component == Component::MetadataSection
-        && mismatch.diff.index == Some(0)
-    {
-        Ok(())
-    } else {
-        Err(format!("{:?} {}", mismatch.salt_index, mismatch.diff))
-    }
-}
-
-#[test]
-fn faulty_oversize_fails_at_the_outcome() -> Result<(), String> {
-    let mismatch = mismatch_of(&FAULTY_OVERSIZE_V1)?;
-    if mismatch.diff.component == Component::Outcome && mismatch.diff.got.contains("SizeBound") {
-        Ok(())
-    } else {
-        Err(format!("{:?} {}", mismatch.salt_index, mismatch.diff))
+        Err("faulty J: the faulty energy differs from the vector energy".to_owned())
     }
 }
 

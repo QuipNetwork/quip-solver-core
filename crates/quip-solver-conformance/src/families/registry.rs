@@ -165,21 +165,29 @@ mod tests {
     }
 
     #[test]
-    fn parse_rejects_an_unknown_status() {
-        let err = parse_registry(&doc("draft", PIN));
-        assert_eq!(
-            err,
-            Err("registry[0].status: unknown status \"draft\"".to_owned())
-        );
-    }
-
-    #[test]
-    fn parse_rejects_a_short_pin() {
-        let err = parse_registry(&doc("research", &PIN[..62]));
-        assert_eq!(
-            err,
-            Err("registry[0].vectors_blake3: need 64 lowercase hex characters".to_owned())
-        );
+    fn parse_rejects_bad_fields() {
+        // (label, status, pin, error text)
+        let rows = [
+            (
+                "an unknown status",
+                "draft",
+                PIN,
+                "registry[0].status: unknown status \"draft\"",
+            ),
+            (
+                "a short pin",
+                "research",
+                &PIN[..62],
+                "registry[0].vectors_blake3: need 64 lowercase hex characters",
+            ),
+        ];
+        for (label, status, pin, text) in rows {
+            assert_eq!(
+                parse_registry(&doc(status, pin)),
+                Err(text.to_owned()),
+                "{label}"
+            );
+        }
     }
 
     #[test]

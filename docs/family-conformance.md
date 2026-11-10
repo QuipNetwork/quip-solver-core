@@ -189,7 +189,7 @@ The tests in step 4 are in `crates/quip-solver-core/tests/family_registry_declar
    The oracle computes the same value as `blake3(build.canonical_json(cases))`.
    The tests check the entry as follows:
    - `registry_entries_are_unique_and_valid` checks the order, the family id, the revision, the contract path, and the `name`.
-   - `registry_fixture_matches_schema` checks the entry shape and that `evidence` is present.
+   - `every_vectors_file_matches_the_schema` checks the entry shape of `registry.json` and that `evidence` is present.
    - `every_registered_revision_has_vectors` checks that each entry has cases and that every case in every registered vectors file has a registered `family_id` and `revision`.
    - `registered_vectors_are_frozen` checks the pin, and `changed_registered_case_fails_the_pin` shows that the pin can fail.
    - `status_does_not_change_the_descriptor_digest` checks the stored descriptor digests.
@@ -213,8 +213,8 @@ The tests in step 4 are in `crates/quip-solver-core/tests/family_registry_declar
    - `every_contract_has_every_fam_38_item` checks the headings, their order, and that no item is empty.
    - `contract_ids_and_revisions_match_the_registry` checks the title, `ID`, and `Revision`.
    - `contract_status_equals_the_registry_status` checks `Status`.
-   - `contracts_state_max_retries`, `contracts_declare_a_constraint_class`, `parameter_schemas_use_no_float_type`, and `parameter_schemas_list_tag_name_type_scale_bounds` check the items of their names.
-   - `adapted_families_are_hard_with_separate_ids` and `adapted_families_have_research_status` check an adapted family.
+   - `contracts_state_max_retries`, `contracts_declare_a_constraint_class`, and `parameter_schemas_list_tag_name_type_scale_bounds` check the items of their names. The last test also rejects a float type.
+   - `adapted_families_have_research_status` checks that an adapted family has the hard class and a separate `family_id`. It also checks the research status.
    - `quip_ids_in_vectors_and_contracts_are_registered` checks that the registry lists every `quip/*` id in a contract or a registered vectors file.
 3. Add a `ReferenceRevision` to `REFERENCE_REVISIONS` for every registered revision, including a revision that no solver lists.
    `contract_tables_agree_with_the_reference_contracts` fails for a registered revision without one.
@@ -242,7 +242,7 @@ Tests in `family_conformance.rs` keep this table equal to the contract.
 | `capabilities-exact-revisions-only` | FAM-07 | covered | host-only | `crates/quip-solver-core/tests/family_drive.rs::every_mode_passes_the_family_gate` (case `revision-plus-one`) |
 | `revision-vectors-frozen` | FAM-08 | covered | host-only | `crates/quip-solver-conformance/tests/family_vectors.rs::registered_vectors_are_frozen`, `crates/quip-solver-conformance/tests/family_vectors.rs::changed_registered_case_fails_the_pin` |
 | `status-change-keeps-descriptor-digest` | FAM-09 | covered | host-only | `crates/quip-solver-conformance/tests/family_registry.rs::status_does_not_change_the_descriptor_digest` |
-| `schema-has-no-float-type` | FAM-14 | covered | host-only | `crates/quip-solver-conformance/tests/family_registry.rs::parameter_schemas_use_no_float_type`, `crates/quip-solver-conformance/tests/family_registry.rs::a_float_schema_type_fails` |
+| `schema-has-no-float-type` | FAM-14 | covered | host-only | `crates/quip-solver-conformance/tests/family_registry.rs::parameter_schemas_list_tag_name_type_scale_bounds`, `crates/quip-solver-conformance/tests/family_registry.rs::invalid_schema_rows_fail` |
 | `schema-lists-tag-name-type-scale-bounds` | FAM-15 | covered | host-only | `crates/quip-solver-conformance/tests/family_registry.rs::parameter_schemas_list_tag_name_type_scale_bounds`, `crates/quip-solver-conformance/tests/family_registry.rs::contract_tables_agree_with_the_reference_contracts` |
 | `schema-holds-generator-inputs-only` | FAM-17 | review only | none | review: the Parameter schema item of each contract in `docs/families/` (FAM-17) |
 | `contract-lists-substream-labels` | FAM-22 | covered | host-only | `crates/quip-solver-conformance/tests/family_conformance.rs::no_vector_nonce_opens_an_unlisted_label` |
@@ -251,10 +251,10 @@ Tests in `family_conformance.rs` keep this table equal to the contract.
 | `verifier-rejects-overflow-salt-result` | FAM-27 | not covered | none | needs CO-2 and VAL-1 |
 | `generator-output-independent-of-host` | FAM-28 | covered | host-only | `crates/quip-solver-conformance/tests/family_conformance.rs::exported_instances_do_not_depend_on_thread_count` (thread count on one host) |
 | `contract-has-every-item` | FAM-38 | covered | host-only | `crates/quip-solver-conformance/tests/family_registry.rs::every_contract_has_every_fam_38_item`, `crates/quip-solver-conformance/tests/family_registry.rs::a_contract_missing_an_item_fails` |
-| `instance-within-declared-size-bounds` | FAM-38 | covered | host-only | `crates/quip-solver-conformance/tests/family_conformance.rs::generated_instances_stay_within_size_bounds`, `crates/quip-solver-conformance/tests/family_conformance.rs::faulty_oversize_fails_at_the_outcome` |
+| `instance-within-declared-size-bounds` | FAM-38 | covered | host-only | `crates/quip-solver-conformance/tests/family_conformance.rs::generated_instances_stay_within_size_bounds`, `crates/quip-solver-conformance/tests/family_conformance.rs::faulty_generators_fail_at_their_component` |
 | `contract-declares-constraint-class` | FAM-39 | covered | host-only | `crates/quip-solver-conformance/tests/family_registry.rs::contracts_declare_a_constraint_class`, `crates/quip-solver-conformance/tests/family_registry.rs::a_hard_contract_without_constraints_fails` |
 | `soft-defect-counter-diagnostic-only` | FAM-40 | review only | none | review: the Constraint class item of each `soft` contract (FAM-40) |
-| `adapted-families-hard-separate-ids` | FAM-41 | covered | host-only | `crates/quip-solver-conformance/tests/family_registry.rs::adapted_families_are_hard_with_separate_ids`, `crates/quip-solver-conformance/tests/family_registry.rs::an_adapted_soft_family_fails`, `crates/quip-solver-conformance/tests/family_registry.rs::an_adapted_family_sharing_an_original_id_fails` |
+| `adapted-families-hard-separate-ids` | FAM-41 | covered | host-only | `crates/quip-solver-conformance/tests/family_registry.rs::adapted_families_have_research_status`, `crates/quip-solver-conformance/tests/family_registry.rs::adapted_family_rule_violations_fail` |
 | `proto-existing-tags-unchanged` | FAM-44 | covered | host-only | `crates/quip-solver-conformance/tests/golden_wire.rs::canonical_encodings_match_the_fixture`, `crates/quip-solver-conformance/tests/golden_wire.rs::enum_numbers_match_the_fixture` |
 | `protocol-version-stays-2-with-families` | FAM-45 | covered | host-only | `crates/quip-solver-conformance/tests/golden_wire.rs::protocol_version_stays_two`, `crates/quip-solver-core/tests/family_drive.rs::every_mode_passes_the_family_gate` (case `hello-protocol-version-2`) |
 | `lease-admission-degree-bound-too-large` | FAM-47 | covered | host-only | `crates/quip-solver-core/tests/family_drive.rs::every_mode_passes_the_family_gate` (case `degree-bound-too-large`) |
@@ -279,7 +279,7 @@ Tests in `family_conformance.rs` keep this table equal to the contract.
 | `pin-failure-reasons-no-fallback` | FAM-75 | not covered | none | needs CO-2 |
 | `pin-limits-exceeded-size-bounds` | FAM-75 | not covered | none | needs CO-2 |
 | `research-family-never-in-pow-lease` | FAM-76 | not covered | none | needs CO-2 |
-| `adapted-families-research-status` | FAM-77 | covered | host-only | `crates/quip-solver-conformance/tests/family_registry.rs::adapted_families_have_research_status`, `crates/quip-solver-conformance/tests/family_registry.rs::an_adapted_family_outside_research_fails` |
+| `adapted-families-research-status` | FAM-77 | covered | host-only | `crates/quip-solver-conformance/tests/family_registry.rs::adapted_families_have_research_status`, `crates/quip-solver-conformance/tests/family_registry.rs::adapted_family_rule_violations_fail` |
 | `archived-revision-explicit-jobs-only` | FAM-78 | not covered | none | needs CO-2 |
 | `pow-descriptor-from-chain-state` | FAM-79 | not covered | none | needs VAL-2 |
 

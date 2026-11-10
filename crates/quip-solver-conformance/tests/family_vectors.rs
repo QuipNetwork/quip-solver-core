@@ -19,6 +19,7 @@ mod schema_check;
 
 use schema_check::{check_keywords, validate, validate_def};
 use serde_json::{json, Value};
+use std::sync::OnceLock;
 
 fn core() -> Result<Value, String> {
     serde_json::from_str(quip_solver_conformance::FAMILY_CORE).map_err(|e| e.to_string())
@@ -276,6 +277,21 @@ fn rejected_at(result: Result<(), String>, pointer: &str) -> Result<(), String> 
     }
 }
 
+/// Fails with the row label unless `result` is an error that contains `needle`, if given.
+fn rejected_naming(
+    label: &str,
+    result: &Result<(), String>,
+    needle: Option<&str>,
+) -> Result<(), String> {
+    match (result, needle) {
+        (Ok(()), _) => Err(format!("{label}: was accepted")),
+        (Err(e), Some(text)) if !e.contains(text) => {
+            Err(format!("{label}: error does not name {text}: {e}"))
+        }
+        (Err(_), _) => Ok(()),
+    }
+}
+
 fn digest(len: usize) -> String {
     "ab".repeat(len / 2)
 }
@@ -308,172 +324,179 @@ fn minimal_document_is_accepted() -> Result<(), String> {
     validate(&schema()?, &minimal_doc())
 }
 
-#[test]
-fn schema_revision_two_is_rejected() -> Result<(), String> {
-    let doc = with(minimal_doc(), "schema_revision", json!(2));
-    rejected_at(validate(&schema()?, &doc), "/schema_revision")
+/// Prefixes the error of one table row with the row label.
+fn labelled<T>(label: &str, result: Result<T, String>) -> Result<T, String> {
+    result.map_err(|e| format!("{label}: {e}"))
 }
 
 #[test]
-fn missing_schema_revision_is_rejected() -> Result<(), String> {
-    let doc = without(minimal_doc(), "schema_revision");
-    rejected_at(validate(&schema()?, &doc), "/schema_revision")
-}
-
-#[test]
-fn unknown_top_level_key_is_rejected() -> Result<(), String> {
-    rejected_at(
-        validate(&schema()?, &with(minimal_doc(), "extra", json!(1))),
-        "/extra",
-    )
-}
-
-#[test]
-fn unknown_provenance_is_rejected() -> Result<(), String> {
-    let doc = with(minimal_doc(), "provenance", json!("generated"));
-    rejected_at(validate(&schema()?, &doc), "/provenance")
-}
-
-#[test]
-fn unknown_case_key_is_rejected() -> Result<(), String> {
-    let valid = json!({"name": "r", "evidence": [], "revision": 1, "expected_code": null});
-    validate_def(&schema()?, "revision_case", &valid)?;
-    let with_note = with(valid, "note", json!("x"));
-    rejected_at(
-        validate_def(&schema()?, "revision_case", &with_note),
-        "/note",
-    )
-}
-
-#[test]
-fn uppercase_hex_is_rejected() -> Result<(), String> {
-    validate_def(
-        &schema()?,
-        "descriptor_case",
-        &descriptor_case("ab", &digest(64)),
-    )?;
-    rejected_at(
-        validate_def(
-            &schema()?,
-            "descriptor_case",
-            &descriptor_case("AB", &digest(64)),
+fn minimal_document_mutations_are_rejected() -> Result<(), String> {
+    let schema = schema()?;
+    let rows = [
+        (
+            "schema revision two",
+            with(minimal_doc(), "schema_revision", json!(2)),
+            "/schema_revision",
         ),
-        "/params_hex",
-    )
-}
-
-#[test]
-fn odd_length_hex_is_rejected() -> Result<(), String> {
-    rejected_at(
-        validate_def(
-            &schema()?,
-            "descriptor_case",
-            &descriptor_case("abc", &digest(64)),
+        (
+            "missing schema revision",
+            without(minimal_doc(), "schema_revision"),
+            "/schema_revision",
         ),
-        "/params_hex",
-    )
-}
-
-#[test]
-fn short_digest_is_rejected() -> Result<(), String> {
-    rejected_at(
-        validate_def(
-            &schema()?,
-            "descriptor_case",
-            &descriptor_case("ab", &digest(62)),
+        (
+            "unknown top-level key",
+            with(minimal_doc(), "extra", json!(1)),
+            "/extra",
         ),
-        "/descriptor_digest",
-    )
-}
-
-#[test]
-fn u64_as_json_integer_is_rejected() -> Result<(), String> {
-    validate_def(
-        &schema()?,
-        "lease_case",
-        &lease_case(&json!("5"), &json!("1")),
-    )?;
-    rejected_at(
-        validate_def(
-            &schema()?,
-            "lease_case",
-            &lease_case(&json!(5), &json!("1")),
+        (
+            "unknown provenance",
+            with(minimal_doc(), "provenance", json!("generated")),
+            "/provenance",
         ),
-        "/salt_start",
-    )
-}
-
-#[test]
-fn negative_decimal_is_rejected_for_u64s() -> Result<(), String> {
-    rejected_at(
-        validate_def(
-            &schema()?,
-            "lease_case",
-            &lease_case(&json!("5"), &json!("-1")),
-        ),
-        "/salt_count",
-    )
-}
-
-#[test]
-fn unsupported_keyword_in_schema_is_rejected() {
-    assert!(check_keywords(&json!({"type": "string", "format": "x"})).is_err());
-}
-
-#[test]
-fn unsupported_keyword_nested_in_schema_is_rejected() {
-    let in_properties = json!({"properties": {"a": {"format": "x"}}});
-    let in_items = json!({"items": {"uniqueItems": true}});
-    let in_defs = json!({"$defs": {"a": {"oneOf": []}}});
-    assert!(check_keywords(&in_properties).is_err());
-    assert!(check_keywords(&in_items).is_err());
-    assert!(check_keywords(&in_defs).is_err());
-}
-
-#[test]
-fn instance_defect_expected_code_must_be_fifteen() -> Result<(), String> {
-    let valid = json!({
-        "name": "d", "evidence": [], "instance": "i", "edges": [[1, 0]],
-        "rule": "FAM-32", "expected_code": 15
-    });
-    validate_def(&schema()?, "instance_defect_case", &valid)?;
-    for bad in [json!(14), json!(null)] {
-        let case = with(valid.clone(), "expected_code", bad);
-        rejected_at(
-            validate_def(&schema()?, "instance_defect_case", &case),
-            "/expected_code",
-        )?;
+    ];
+    for (label, doc, pointer) in &rows {
+        labelled(label, rejected_at(validate(&schema, doc), pointer))?;
     }
     Ok(())
 }
 
 #[test]
-fn nested_enum_mismatch_is_rejected() -> Result<(), String> {
-    let case = json!({"name": "f", "evidence": [], "family_id_hex": "ab", "context": "other", "expected_code": null});
-    rejected_at(
-        validate_def(&schema()?, "family_id_case", &case),
-        "/context",
-    )
+fn case_field_formats_are_rejected() -> Result<(), String> {
+    let schema = schema()?;
+    let revision_case = json!({"name": "r", "evidence": [], "revision": 1, "expected_code": null});
+    let defect_case = json!({
+        "name": "d", "evidence": [], "instance": "i", "edges": [[1, 0]],
+        "rule": "FAM-32", "expected_code": 15
+    });
+    let family_id_case = json!({"name": "f", "evidence": [], "family_id_hex": "ab", "context": "other", "expected_code": null});
+    // (label, definition, a valid case if the original test checked one, the bad case, pointer)
+    let rows = [
+        (
+            "unknown case key",
+            "revision_case",
+            Some(revision_case.clone()),
+            with(revision_case, "note", json!("x")),
+            "/note",
+        ),
+        (
+            "uppercase hex",
+            "descriptor_case",
+            Some(descriptor_case("ab", &digest(64))),
+            descriptor_case("AB", &digest(64)),
+            "/params_hex",
+        ),
+        (
+            "odd-length hex",
+            "descriptor_case",
+            None,
+            descriptor_case("abc", &digest(64)),
+            "/params_hex",
+        ),
+        (
+            "short digest",
+            "descriptor_case",
+            None,
+            descriptor_case("ab", &digest(62)),
+            "/descriptor_digest",
+        ),
+        (
+            "u64 as a JSON integer",
+            "lease_case",
+            Some(lease_case(&json!("5"), &json!("1"))),
+            lease_case(&json!(5), &json!("1")),
+            "/salt_start",
+        ),
+        (
+            "negative decimal u64",
+            "lease_case",
+            None,
+            lease_case(&json!("5"), &json!("-1")),
+            "/salt_count",
+        ),
+        (
+            "defect code fourteen",
+            "instance_defect_case",
+            Some(defect_case.clone()),
+            with(defect_case.clone(), "expected_code", json!(14)),
+            "/expected_code",
+        ),
+        (
+            "defect code null",
+            "instance_defect_case",
+            Some(defect_case.clone()),
+            with(defect_case, "expected_code", json!(null)),
+            "/expected_code",
+        ),
+        (
+            "nested enum mismatch",
+            "family_id_case",
+            None,
+            family_id_case,
+            "/context",
+        ),
+    ];
+    for (label, def, valid, bad, pointer) in &rows {
+        if let Some(valid) = valid {
+            labelled(label, validate_def(&schema, def, valid))?;
+        }
+        labelled(label, rejected_at(validate_def(&schema, def, bad), pointer))?;
+    }
+    Ok(())
 }
 
 #[test]
-fn unresolved_ref_is_rejected() {
+fn unsupported_schema_constructs_are_rejected() {
     let dangling = json!({"$defs": {}, "properties": {"a": {"$ref": "#/$defs/missing"}}});
-    assert!(check_keywords(&dangling).is_err());
-    assert!(validate(&dangling, &json!({"a": 1})).is_err());
+    let rows = [
+        (
+            "unsupported keyword",
+            json!({"type": "string", "format": "x"}),
+        ),
+        (
+            "unsupported keyword in properties",
+            json!({"properties": {"a": {"format": "x"}}}),
+        ),
+        (
+            "unsupported keyword in items",
+            json!({"items": {"uniqueItems": true}}),
+        ),
+        (
+            "unsupported keyword in defs",
+            json!({"$defs": {"a": {"oneOf": []}}}),
+        ),
+        ("unresolved ref", dangling.clone()),
+    ];
+    for (label, schema) in &rows {
+        assert!(check_keywords(schema).is_err(), "{label}: {schema}");
+    }
+    assert!(
+        validate(&dangling, &json!({"a": 1})).is_err(),
+        "unresolved ref: validate accepted a document through a dangling ref"
+    );
 }
 
 #[test]
-fn integer_above_i64_max_breaks_maximum() {
+fn numeric_bounds_hold_for_every_value_kind() {
     let bounded = json!({"type": "integer", "maximum": 5});
-    assert!(validate(&bounded, &json!(5)).is_ok());
-    assert!(validate(&bounded, &json!(u64::MAX)).is_err());
-}
-
-#[test]
-fn float_does_not_skip_bounds() {
-    assert!(validate(&json!({"maximum": 5}), &json!(1.5)).is_err());
-    assert!(validate(&json!({"type": "integer"}), &json!(1.0)).is_err());
+    let rows = [
+        ("integer at the maximum", bounded.clone(), json!(5), true),
+        ("u64 above the maximum", bounded, json!(u64::MAX), false),
+        (
+            "float above the maximum",
+            json!({"maximum": 5}),
+            json!(1.5),
+            false,
+        ),
+        (
+            "float for an integer type",
+            json!({"type": "integer"}),
+            json!(1.0),
+            false,
+        ),
+    ];
+    for (label, schema, value, ok) in &rows {
+        assert_eq!(validate(schema, value).is_ok(), *ok, "{label}");
+    }
 }
 
 /// Returns `doc` with the value at JSON pointer `pointer` replaced.
@@ -1329,20 +1352,6 @@ fn check_legacy(doc: &Value) -> Result<(), String> {
 }
 
 #[test]
-fn core_fixture_matches_schema() -> Result<(), String> {
-    validate(&schema()?, &core()?)?;
-    match core()?.get("provenance").and_then(Value::as_str) {
-        Some("specified") => Ok(()),
-        other => Err(format!("provenance is {other:?}, expected specified")),
-    }
-}
-
-#[test]
-fn core_case_names_are_unique() -> Result<(), String> {
-    check_names_unique(&core()?)
-}
-
-#[test]
 fn duplicate_case_name_is_detected() -> Result<(), String> {
     let doc = core()?;
     let first = doc
@@ -1354,26 +1363,6 @@ fn duplicate_case_name_is_detected() -> Result<(), String> {
         Err(_) => Ok(()),
         Ok(()) => Err("a duplicate name was accepted".to_owned()),
     }
-}
-
-#[test]
-fn family_id_cases_recompute() -> Result<(), String> {
-    check_family_ids(&core()?)
-}
-
-#[test]
-fn revision_cases_recompute() -> Result<(), String> {
-    check_revisions(&core()?)
-}
-
-#[test]
-fn solver_id_cases_recompute() -> Result<(), String> {
-    check_solver_ids(&core()?)
-}
-
-#[test]
-fn params_cases_recompute() -> Result<(), String> {
-    check_params(&core()?)
 }
 
 #[test]
@@ -1417,12 +1406,6 @@ fn digest_contexts_separate_empty_material() {
 }
 
 #[test]
-fn core_schema_revision_two_fails() -> Result<(), String> {
-    let doc = mutate(&core()?, "/schema_revision", json!(2));
-    rejected_at(validate(&schema()?, &doc), "/schema_revision")
-}
-
-#[test]
 fn wrong_descriptor_digest_fails() -> Result<(), String> {
     let doc = core()?;
     let good = doc
@@ -1435,44 +1418,6 @@ fn wrong_descriptor_digest_fails() -> Result<(), String> {
         Err(e) if e.contains("descriptor_digest") => Ok(()),
         Err(e) => Err(format!("error does not name descriptor_digest: {e}")),
         Ok(()) => Err("a wrong descriptor digest was accepted".to_owned()),
-    }
-}
-
-#[test]
-fn changed_params_byte_fails() -> Result<(), String> {
-    let doc = core()?;
-    let index = section(&doc, "params")?
-        .iter()
-        .position(|c| c.get("name").and_then(Value::as_str) == Some("spec-valid"))
-        .ok_or("no spec-valid params case")?;
-    let pointer = format!("/params/{index}/params_hex");
-    let good = doc
-        .pointer(&pointer)
-        .and_then(Value::as_str)
-        .ok_or("no params_hex")?;
-    let broken = mutate(&doc, &pointer, json!(flip_last_hex_digit(good)));
-    match check_params(&broken) {
-        Err(e) if e.contains("params_hex") => Ok(()),
-        Err(e) => Err(format!("error does not name params_hex: {e}")),
-        Ok(()) => Err("a changed params byte was accepted".to_owned()),
-    }
-}
-
-#[test]
-fn unknown_params_schema_is_an_error() -> Result<(), String> {
-    let doc = mutate(&core()?, "/params/0/revision", json!(99));
-    match check_params(&doc) {
-        Err(_) => Ok(()),
-        Ok(()) => Err("a params case without a schema was accepted".to_owned()),
-    }
-}
-
-#[test]
-fn params_values_must_match_decoded_values() -> Result<(), String> {
-    let doc = mutate(&core()?, "/params/0/values/n_layers", json!("3"));
-    match check_params(&doc) {
-        Err(_) => Ok(()),
-        Ok(()) => Err("wrong values were accepted".to_owned()),
     }
 }
 
@@ -1499,21 +1444,51 @@ fn layout_fault_wins_over_bounds_in_codec() -> Result<(), String> {
     }
 }
 
+#[test]
+fn changed_params_fixture_fails() -> Result<(), String> {
+    let doc = core()?;
+    let index = section(&doc, "params")?
+        .iter()
+        .position(|c| c.get("name").and_then(Value::as_str) == Some("spec-valid"))
+        .ok_or("no spec-valid params case")?;
+    let byte_pointer = format!("/params/{index}/params_hex");
+    let good = doc
+        .pointer(&byte_pointer)
+        .and_then(Value::as_str)
+        .ok_or("no params_hex")?;
+    // (label, pointer, new value, text the error must contain)
+    let rows = [
+        (
+            "changed params byte",
+            byte_pointer.as_str(),
+            json!(flip_last_hex_digit(good)),
+            Some("params_hex"),
+        ),
+        (
+            "unknown params schema",
+            "/params/0/revision",
+            json!(99),
+            None,
+        ),
+        (
+            "wrong decoded value",
+            "/params/0/values/n_layers",
+            json!("3"),
+            None,
+        ),
+        ("empty section", "/params", json!([]), Some("empty")),
+    ];
+    for (label, pointer, value, needle) in rows {
+        rejected_naming(label, &check_params(&mutate(&doc, pointer, value)), needle)?;
+    }
+    Ok(())
+}
+
 fn flip_last_hex_digit(hex: &str) -> String {
     let mut text = hex.to_owned();
     let last = text.pop();
     text.push(if last == Some('0') { '1' } else { '0' });
     text
-}
-
-#[test]
-fn empty_section_is_rejected() -> Result<(), String> {
-    let doc = mutate(&core()?, "/params", json!([]));
-    match check_params(&doc) {
-        Err(e) if e.contains("empty") => Ok(()),
-        Err(e) => Err(format!("unexpected error: {e}")),
-        Ok(()) => Err("an empty params section was accepted".to_owned()),
-    }
 }
 
 fn find_index(doc: &Value, section_name: &str, name: &str) -> Result<usize, String> {
@@ -1535,11 +1510,6 @@ fn expect_err(result: &Result<(), String>, what: &str) -> Result<(), String> {
     } else {
         Err(format!("{what} was accepted"))
     }
-}
-
-#[test]
-fn topology_order_digests_recompute() -> Result<(), String> {
-    check_topologies(&core()?)
 }
 
 #[test]
@@ -1588,21 +1558,6 @@ fn topology_digests_are_pairwise_distinct() -> Result<(), String> {
 }
 
 #[test]
-fn label_cases_recompute() -> Result<(), String> {
-    check_labels(&core()?)
-}
-
-#[test]
-fn stream_checkpoints_recompute() -> Result<(), String> {
-    check_streams(&core()?)
-}
-
-#[test]
-fn uniform_cases_recompute() -> Result<(), String> {
-    check_uniform(&core()?)
-}
-
-#[test]
 fn uniform_redraw_case_redraws() -> Result<(), String> {
     let doc = core()?;
     let case = section(&doc, "uniform")?
@@ -1618,16 +1573,6 @@ fn uniform_redraw_case_redraws() -> Result<(), String> {
     } else {
         Err(format!("first call used {used} words, expected a redraw"))
     }
-}
-
-#[test]
-fn shuffle_cases_recompute() -> Result<(), String> {
-    check_shuffle(&core()?)
-}
-
-#[test]
-fn lease_nonces_recompute() -> Result<(), String> {
-    check_leases(&core()?)
 }
 
 /// Point `sparse` at the file of another topology case, as a changed fixture would.
@@ -1647,36 +1592,32 @@ fn repoint_sparse(other: &str) -> Result<Value, String> {
 }
 
 #[test]
-fn reordered_topology_nodes_fails() -> Result<(), String> {
-    let broken = repoint_sparse("sparse-nodes-reordered")?;
-    expect_err(&check_topologies(&broken), "reordered topology nodes")
-}
-
-#[test]
-fn swapped_topology_edges_fails() -> Result<(), String> {
-    let broken = repoint_sparse("sparse-edges-reordered")?;
-    expect_err(&check_topologies(&broken), "swapped topology edges")
-}
-
-#[test]
-fn a_missing_topology_file_fails() -> Result<(), String> {
+fn changed_topology_reference_fails() -> Result<(), String> {
     let doc = core()?;
     let i = find_index(&doc, "topologies", "sparse")?;
-    let broken = mutate(
-        &doc,
-        &format!("/topologies/{i}/topology"),
-        json!("../topologies/absent.bin.gz"),
-    );
-    expect_err(&check_topologies(&broken), "a missing topology file")?;
-    let outside = mutate(
-        &doc,
-        &format!("/topologies/{i}/topology"),
-        json!("../families/core.json"),
-    );
-    expect_err(
-        &check_topologies(&outside),
-        "a reference outside topologies",
-    )
+    let pointer = format!("/topologies/{i}/topology");
+    let rows = [
+        (
+            "reordered topology nodes",
+            repoint_sparse("sparse-nodes-reordered")?,
+        ),
+        (
+            "swapped topology edges",
+            repoint_sparse("sparse-edges-reordered")?,
+        ),
+        (
+            "a missing topology file",
+            mutate(&doc, &pointer, json!("../topologies/absent.bin.gz")),
+        ),
+        (
+            "a reference outside topologies",
+            mutate(&doc, &pointer, json!("../families/core.json")),
+        ),
+    ];
+    for (label, broken) in &rows {
+        rejected_naming(label, &check_topologies(broken), None)?;
+    }
+    Ok(())
 }
 
 #[test]
@@ -1725,17 +1666,15 @@ fn instance_index(doc: &Value, name: &str) -> Result<usize, String> {
 }
 
 #[test]
-fn instances_rebuild_canonical_bytes() -> Result<(), String> {
-    check_instances(&core()?)
-}
-
-#[test]
-fn archived_instance_uses_zero_nonce() -> Result<(), String> {
+fn instance_variants_change_the_digest() -> Result<(), String> {
     let doc = core()?;
     let cases = section(&doc, "instances")?;
     let archived = cases
         .get(instance_index(&doc, "archived-zero-nonce")?)
         .ok_or("no archived case")?;
+    let changed = cases
+        .get(instance_index(&doc, "metadata-changed")?)
+        .ok_or("no metadata-changed case")?;
     let sparse = cases
         .get(instance_index(&doc, "sparse-default-order")?)
         .ok_or("no sparse case")?;
@@ -1746,21 +1685,42 @@ fn archived_instance_uses_zero_nonce() -> Result<(), String> {
     if instance_digest_of(archived)? == instance_digest_of(sparse)? {
         return Err("archived digest equals the sparse digest".to_owned());
     }
+    if instance_digest_of(changed)? == instance_digest_of(sparse)? {
+        return Err("metadata change did not change the digest".to_owned());
+    }
     Ok(())
 }
 
+/// Returns `doc` with the last hex digit of `field` flipped in the named instance case.
+fn with_flipped_instance_field(doc: &Value, name: &str, field: &str) -> Result<Value, String> {
+    let pointer = format!("/instances/{}/{field}", instance_index(doc, name)?);
+    let good = doc
+        .pointer(&pointer)
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("no {field}"))?;
+    Ok(mutate(doc, &pointer, json!(flip_last_hex_digit(good))))
+}
+
 #[test]
-fn metadata_change_changes_digest() -> Result<(), String> {
+fn changed_instance_field_fails() -> Result<(), String> {
     let doc = core()?;
-    let cases = section(&doc, "instances")?;
-    let changed = cases
-        .get(instance_index(&doc, "metadata-changed")?)
-        .ok_or("no metadata-changed case")?;
-    let sparse = cases
-        .get(instance_index(&doc, "sparse-default-order")?)
-        .ok_or("no sparse case")?;
-    if instance_digest_of(changed)? == instance_digest_of(sparse)? {
-        return Err("metadata change did not change the digest".to_owned());
+    // (label, case name, field)
+    let rows = [
+        (
+            "a changed canonical byte",
+            "sparse-default-order",
+            "canonical_hex",
+        ),
+        ("a wrong instance digest", "reverse-ten", "instance_digest"),
+        (
+            "a changed metadata byte",
+            "sparse-default-order",
+            "metadata_hex",
+        ),
+    ];
+    for (label, name, field) in rows {
+        let broken = labelled(label, with_flipped_instance_field(&doc, name, field))?;
+        rejected_naming(label, &check_instances(&broken), None)?;
     }
     Ok(())
 }
@@ -1789,21 +1749,6 @@ fn instance_witnesses_recompute() -> Result<(), String> {
     } else {
         Err(format!("witness mix {valid} valid, {invalid} invalid"))
     }
-}
-
-#[test]
-fn instance_defects_are_detected() -> Result<(), String> {
-    check_instance_defects(&core()?)
-}
-
-#[test]
-fn instance_bounds_recompute() -> Result<(), String> {
-    check_instance_bounds(&core()?)
-}
-
-#[test]
-fn metadata_cases_recompute() -> Result<(), String> {
-    check_metadata(&core()?)
 }
 
 #[test]
@@ -1839,86 +1784,6 @@ fn minimum_values_exceed_bounds_without_panic() -> Result<(), String> {
 }
 
 #[test]
-fn changed_canonical_byte_fails() -> Result<(), String> {
-    let doc = core()?;
-    let pointer = format!(
-        "/instances/{}/canonical_hex",
-        instance_index(&doc, "sparse-default-order")?
-    );
-    let good = doc
-        .pointer(&pointer)
-        .and_then(Value::as_str)
-        .ok_or("no canonical_hex")?;
-    let broken = mutate(&doc, &pointer, json!(flip_last_hex_digit(good)));
-    expect_err(&check_instances(&broken), "a changed canonical byte")
-}
-
-#[test]
-fn wrong_instance_digest_fails() -> Result<(), String> {
-    let doc = core()?;
-    let pointer = format!(
-        "/instances/{}/instance_digest",
-        instance_index(&doc, "reverse-ten")?
-    );
-    let good = doc
-        .pointer(&pointer)
-        .and_then(Value::as_str)
-        .ok_or("no instance_digest")?;
-    let broken = mutate(&doc, &pointer, json!(flip_last_hex_digit(good)));
-    expect_err(&check_instances(&broken), "a wrong instance digest")
-}
-
-#[test]
-fn changed_metadata_byte_fails() -> Result<(), String> {
-    let doc = core()?;
-    let pointer = format!(
-        "/instances/{}/metadata_hex",
-        instance_index(&doc, "sparse-default-order")?
-    );
-    let good = doc
-        .pointer(&pointer)
-        .and_then(Value::as_str)
-        .ok_or("no metadata_hex")?;
-    let broken = mutate(&doc, &pointer, json!(flip_last_hex_digit(good)));
-    expect_err(&check_instances(&broken), "a changed metadata byte")
-}
-
-#[test]
-fn code_table_matches_spec_and_wire() -> Result<(), String> {
-    check_codes(&core()?)
-}
-
-#[test]
-fn step_orders_match_spec() -> Result<(), String> {
-    check_orders(&core()?)
-}
-
-#[test]
-fn lease_admission_cases_recompute() -> Result<(), String> {
-    check_lease_admission(&core()?)
-}
-
-#[test]
-fn explicit_job_cases_recompute() -> Result<(), String> {
-    check_explicit_job(&core()?)
-}
-
-#[test]
-fn field_length_cases_recompute() -> Result<(), String> {
-    check_field_lengths(&core()?)
-}
-
-#[test]
-fn family_support_cases_recompute() -> Result<(), String> {
-    check_family_support(&core()?)
-}
-
-#[test]
-fn lease_code_cases_recompute() -> Result<(), String> {
-    check_lease_codes(&core()?)
-}
-
-#[test]
 fn size_bound_cases_recompute() -> Result<(), String> {
     let doc = core()?;
     check_size_bounds(&doc)?;
@@ -1939,41 +1804,11 @@ fn size_bound_cases_recompute() -> Result<(), String> {
 }
 
 #[test]
-fn every_provided_evidence_id_has_a_case() -> Result<(), String> {
-    check_evidence(&core()?, &[&core()?, &legacy_doc()?])
-}
-
-#[test]
 fn legacy_evidence_alone_is_not_enough() -> Result<(), String> {
     expect_err(
         &check_evidence(&core()?, &[&core()?]),
         "a core-only evidence check",
     )
-}
-
-#[test]
-fn legacy_fixture_matches_schema() -> Result<(), String> {
-    validate(&schema()?, &legacy_doc()?)?;
-    match legacy_doc()?.get("provenance").and_then(Value::as_str) {
-        Some("legacy-production") => Ok(()),
-        other => Err(format!(
-            "provenance is {other:?}, expected legacy-production"
-        )),
-    }
-}
-
-#[test]
-fn legacy_case_hashes_match_referenced_vectors() -> Result<(), String> {
-    for reference in section(&legacy_doc()?, "legacy_references")? {
-        let case = legacy::referenced_case(reference)?;
-        compare(
-            reference,
-            "case_blake3",
-            &legacy::case_blake3(&case)?,
-            &str_field(reference, "case_blake3")?.to_owned(),
-        )?;
-    }
-    Ok(())
 }
 
 #[test]
@@ -2142,15 +1977,20 @@ fn swapped_admission_order_fails() -> Result<(), String> {
 }
 
 #[test]
-fn changed_code_row_fails() -> Result<(), String> {
-    let doc = mutate(&core()?, "/codes/12/wire_admission", json!("MALFORMED"));
-    expect_err(&check_codes(&doc), "a changed wire mapping")
-}
-
-#[test]
-fn changed_wire_reason_number_fails() -> Result<(), String> {
-    let doc = mutate(&core()?, "/wire_reasons/2/value", json!(3));
-    expect_err(&check_codes(&doc), "a changed wire number")
+fn changed_code_table_fails() -> Result<(), String> {
+    let doc = core()?;
+    let rows = [
+        (
+            "a changed wire mapping",
+            "/codes/12/wire_admission",
+            json!("MALFORMED"),
+        ),
+        ("a changed wire number", "/wire_reasons/2/value", json!(3)),
+    ];
+    for (label, pointer, value) in rows {
+        rejected_naming(label, &check_codes(&mutate(&doc, pointer, value)), None)?;
+    }
+    Ok(())
 }
 
 #[test]
@@ -2172,22 +2012,40 @@ fn changed_support_claim_fails() -> Result<(), String> {
 }
 
 #[test]
-fn zero_limit_is_no_claim() {
+fn size_bound_code_cases() {
     let bounds = decisions::example_size_bounds(2, 100, 150, 4);
     assert_eq!(
-        decisions::size_bound_code(bounds, Some(0), Some(0), Some(0)),
-        None
+        decisions::example_size_bounds(u64::MAX, 2, 0, 0),
+        None,
+        "overflowing example bounds"
     );
-    assert_eq!(
-        decisions::size_bound_code(bounds, None, None, Some(4)),
-        Some(13)
-    );
-}
-
-#[test]
-fn size_bound_overflow_is_code_thirteen() {
-    assert_eq!(decisions::example_size_bounds(u64::MAX, 2, 0, 0), None);
-    assert_eq!(decisions::size_bound_code(None, None, None, None), Some(13));
+    // (label, bounds, node limit, edge limit, degree limit, code)
+    let rows = [
+        (
+            "zero limits make no claim",
+            bounds,
+            Some(0),
+            Some(0),
+            Some(0),
+            None,
+        ),
+        (
+            "a degree limit below the bound",
+            bounds,
+            None,
+            None,
+            Some(4),
+            Some(13),
+        ),
+        ("bounds that overflow", None, None, None, None, Some(13)),
+    ];
+    for (label, bounds, nodes, edges, degree, code) in rows {
+        assert_eq!(
+            decisions::size_bound_code(bounds, nodes, edges, degree),
+            code,
+            "{label}"
+        );
+    }
 }
 
 #[test]
@@ -2463,15 +2321,6 @@ fn check_layered_case(case: &Value, bounds: SizeBoundsOf) -> Result<(), String> 
     )
 }
 
-fn check_layered(doc: &Value) -> Result<(), String> {
-    validate(&schema()?, doc)?;
-    check_names_unique(doc)?;
-    for case in section(doc, "cases")? {
-        check_layered_case(case, layered_size_bounds)?;
-    }
-    Ok(())
-}
-
 /// Generate every slot of one case with the Rust construction and compare it
 /// with the Python port.
 fn check_layered_against_rust(case: &Value) -> Result<(), String> {
@@ -2555,33 +2404,6 @@ fn check_layered_against_rust(case: &Value) -> Result<(), String> {
 }
 
 #[test]
-fn layered_fixture_matches_schema() -> Result<(), String> {
-    validate(&schema()?, &layered_doc()?)?;
-    match layered_doc()?.get("provenance").and_then(Value::as_str) {
-        Some("test-construction") => {}
-        other => {
-            return Err(format!(
-                "provenance is {other:?}, expected test-construction"
-            ))
-        }
-    }
-    check_names_unique(&layered_doc()?)
-}
-
-#[test]
-fn layered_vectors_recompute() -> Result<(), String> {
-    check_layered(&layered_doc()?)
-}
-
-#[test]
-fn layered_vectors_match_the_rust_construction() -> Result<(), String> {
-    for case in section(&layered_doc()?, "cases")? {
-        check_layered_against_rust(case)?;
-    }
-    Ok(())
-}
-
-#[test]
 fn uniform_p_spec_skips_match_the_session_capture() -> Result<(), String> {
     let doc = layered_doc()?;
     let case = find_named(&doc, "cases", "uniform-p-spec-sparse")?;
@@ -2591,18 +2413,6 @@ fn uniform_p_spec_skips_match_the_session_capture() -> Result<(), String> {
     }
     skipped.sort_unstable();
     compare(case, "skipped slots", &skipped, &vec![0, 3, 9, 13])
-}
-
-#[test]
-fn changed_layered_coupling_fails() -> Result<(), String> {
-    let doc = layered_doc()?;
-    let pointer = "/cases/0/instances/0/j/0";
-    let was = doc
-        .pointer(pointer)
-        .and_then(Value::as_i64)
-        .ok_or("no coupling")?;
-    let broken = mutate(&doc, pointer, json!(was + 1000));
-    expect_err(&check_layered(&broken), "a changed coupling")
 }
 
 // ---- family registry (registry.json) ----
@@ -2649,20 +2459,6 @@ fn check_pin(
 }
 
 #[test]
-fn registry_fixture_matches_schema() -> Result<(), String> {
-    let doc = registry_doc()?;
-    validate(&schema()?, &doc)?;
-    match doc.get("provenance").and_then(Value::as_str) {
-        Some("specified") => {}
-        other => return Err(format!("provenance is {other:?}, expected specified")),
-    }
-    if doc.get("sources") != Some(&json!([])) {
-        return Err("sources must be empty: the registry is written by hand".to_owned());
-    }
-    check_names_unique(&doc)
-}
-
-#[test]
 fn registered_vectors_are_frozen() -> Result<(), String> {
     let registry = quip_solver_conformance::families::registry::parse_registry(
         quip_solver_conformance::FAMILY_REGISTRY,
@@ -2701,80 +2497,9 @@ fn changed_registered_case_fails_the_pin() -> Result<(), String> {
 
 // ---- ice structure vectors (ice_structure.json) ----
 
-#[test]
-fn ice_structure_fixture_matches_schema() -> Result<(), String> {
-    let doc: Value = serde_json::from_str(include_str!("../vectors/families/ice_structure.json"))
-        .map_err(|e| e.to_string())?;
-    validate(&schema()?, &doc)?;
-    match doc.get("provenance").and_then(Value::as_str) {
-        Some("specified") => {}
-        other => return Err(format!("provenance is {other:?}, expected specified")),
-    }
-    check_names_unique(&doc)?;
-    section(&doc, "structure").map(|_| ())?;
-    section(&doc, "live").map(|_| ())?;
-    section(&doc, "cases").map(|_| ())?;
-    Ok(())
-}
-
 fn ice_glass_doc() -> Result<Value, String> {
     serde_json::from_str(include_str!("../vectors/families/ice_structure.json"))
         .map_err(|e| e.to_string())
-}
-
-/// Recompute the digests, nonces, and instance bytes of every registered
-/// `quip/ice-glass` case with Rust code that does not call the construction.
-fn check_ice_glass(doc: &Value) -> Result<(), String> {
-    validate(&schema()?, doc)?;
-    for case in section(doc, "cases")? {
-        check_layered_case(case, ice_glass_size_bounds)?;
-    }
-    Ok(())
-}
-
-#[test]
-fn ice_glass_cases_recompute() -> Result<(), String> {
-    check_ice_glass(&ice_glass_doc()?)
-}
-
-#[test]
-fn ice_glass_cases_match_the_rust_construction() -> Result<(), String> {
-    for case in section(&ice_glass_doc()?, "cases")? {
-        check_layered_against_rust(case)?;
-    }
-    Ok(())
-}
-
-#[test]
-fn ice_glass_params_constants_match_the_vectors() -> Result<(), String> {
-    use quip_solver_conformance::families::ice::{P_ICE_ADJ_125, P_ICE_Z12_200};
-    let doc = ice_glass_doc()?;
-    let cases = section(&doc, "cases")?;
-    for (name, want) in [
-        ("ice-glass-adjacency-z12", P_ICE_ADJ_125),
-        ("ice-glass-zephyr-z12", P_ICE_Z12_200),
-    ] {
-        let case = find_named(&doc, "cases", name)?;
-        compare(
-            case,
-            "params_hex",
-            &str_field(case, "params_hex")?.to_owned(),
-            &codec::hex_encode(&want),
-        )?;
-    }
-    compare(&doc, "case count", &cases.len(), &4)
-}
-
-#[test]
-fn a_changed_ice_glass_coupling_fails_the_recompute() -> Result<(), String> {
-    let doc = ice_glass_doc()?;
-    let pointer = "/cases/0/instances/0/j/0";
-    let was = doc
-        .pointer(pointer)
-        .and_then(Value::as_i64)
-        .ok_or("no coupling")?;
-    let broken = mutate(&doc, pointer, json!(was + 1000));
-    expect_err(&check_ice_glass(&broken), "a changed coupling")
 }
 
 // ---- twisted ice dimer vectors (twisted_dimer.json) ----
@@ -2782,93 +2507,6 @@ fn a_changed_ice_glass_coupling_fails_the_recompute() -> Result<(), String> {
 fn twisted_doc() -> Result<Value, String> {
     serde_json::from_str(include_str!("../vectors/families/twisted_dimer.json"))
         .map_err(|e| e.to_string())
-}
-
-/// Recompute the digests, nonces, and instance bytes of every registered
-/// `quip/twisted-ice-dimer` case with Rust code that does not call the
-/// construction.
-fn check_twisted(doc: &Value) -> Result<(), String> {
-    validate(&schema()?, doc)?;
-    check_names_unique(doc)?;
-    for case in section(doc, "cases")? {
-        check_layered_case(case, ice_glass_size_bounds)?;
-    }
-    Ok(())
-}
-
-#[test]
-fn twisted_fixture_matches_schema() -> Result<(), String> {
-    let doc = twisted_doc()?;
-    validate(&schema()?, &doc)?;
-    match doc.get("provenance").and_then(Value::as_str) {
-        Some("specified") => {}
-        other => return Err(format!("provenance is {other:?}, expected specified")),
-    }
-    check_names_unique(&doc)?;
-    for name in ["cases", "recipes", "obstructions", "admission"] {
-        section(&doc, name).map(|_| ())?;
-    }
-    Ok(())
-}
-
-#[test]
-fn twisted_cases_recompute() -> Result<(), String> {
-    check_twisted(&twisted_doc()?)
-}
-
-#[test]
-fn twisted_cases_match_the_rust_construction() -> Result<(), String> {
-    for case in section(&twisted_doc()?, "cases")? {
-        check_layered_against_rust(case)?;
-    }
-    Ok(())
-}
-
-#[test]
-fn twisted_params_constants_match_the_vectors() -> Result<(), String> {
-    use quip_solver_conformance::families::twisted::{
-        P_TWISTED_ADJ_W45_P6, P_TWISTED_W1000, P_TWISTED_Z22_W62_P8,
-    };
-    let doc = twisted_doc()?;
-    for (section_name, name, want) in [
-        ("cases", "twisted-dimer-zephyr-z22", P_TWISTED_Z22_W62_P8),
-        (
-            "cases",
-            "twisted-dimer-adjacency-z22-sparse",
-            P_TWISTED_ADJ_W45_P6,
-        ),
-        (
-            "admission",
-            "weak-milli-1000-is-out-of-bounds",
-            P_TWISTED_W1000,
-        ),
-    ] {
-        let case = find_named(&doc, section_name, name)?;
-        compare(
-            case,
-            "params_hex",
-            &str_field(case, "params_hex")?.to_owned(),
-            &codec::hex_encode(&want),
-        )?;
-    }
-    compare(&doc, "case count", &section(&doc, "cases")?.len(), &5)
-}
-
-#[test]
-fn the_twisted_shortfall_case_skips_with_code_14() -> Result<(), String> {
-    let doc = twisted_doc()?;
-    let case = find_named(&doc, "cases", "twisted-dimer-shortfall")?;
-    let skipped = entries_of(case, "skipped")?;
-    compare(case, "a skipped salt exists", &skipped.is_empty(), &false)?;
-    for entry in skipped {
-        compare(
-            case,
-            "skip code",
-            &entry.get("skip_code"),
-            &Some(&json!(14)),
-        )?;
-    }
-    Ok(())
 }
 
 /// The nonce of one lease slot, derived from the lease fields.
@@ -3018,32 +2656,6 @@ fn twisted_recipes_match_the_rust_construction() -> Result<(), String> {
     Ok(())
 }
 
-#[test]
-fn twisted_recipes_match_the_rust_constants() -> Result<(), String> {
-    use ising_generators::descriptor::params_digest;
-    use ising_generators::ice::RECIPES;
-    let doc = twisted_doc()?;
-    let recipes = section(&doc, "recipes")?;
-    compare(&doc, "recipe count", &recipes.len(), &RECIPES.len())?;
-    for (recipe, want) in recipes.iter().zip(RECIPES) {
-        compare(recipe, "alias", &str_field(recipe, "alias")?, &want.alias)?;
-        compare(recipe, "cell", &str_field(recipe, "cell")?, &want.cell)?;
-        compare(
-            recipe,
-            "params_hex",
-            &str_field(recipe, "params_hex")?.to_owned(),
-            &codec::hex_encode(want.params),
-        )?;
-        compare(
-            recipe,
-            "params_digest",
-            &str_field(recipe, "params_digest")?.to_owned(),
-            &codec::hex_encode(&params_digest(want.params)),
-        )?;
-    }
-    Ok(())
-}
-
 /// An array of four-entry integer arrays, as rows of the diagnostic input.
 fn rows<T: TryFrom<i64>>(value: Option<&Value>) -> Result<Vec<[T; 4]>, String> {
     let bad = || "a row that is not four integers".to_owned();
@@ -3113,71 +2725,6 @@ fn twisted_obstructions_match_the_rust_diagnostic() -> Result<(), String> {
 }
 
 #[test]
-fn twisted_admission_codes_match_the_rust_admission() -> Result<(), String> {
-    use ising_generators::descriptor::{admit, params_digest, AdvertisedLimits};
-    use ising_generators::family::{admit_topology, BaseTopology};
-    use ising_generators::ice::TWISTED_DIMER_V1;
-    let doc = twisted_doc()?;
-    let contracts = [TWISTED_DIMER_V1];
-    for case in section(&doc, "admission")? {
-        let params = codec::hex_decode(str_field(case, "params_hex")?)?;
-        let (nodes, edges) = topology_inputs(object_field(case, "topology")?)?;
-        let topology = BaseTopology::new(nodes, &edges).map_err(|e| format!("{e:?}"))?;
-        let got = admit(
-            &contracts,
-            str_field(case, "family_id")?.as_bytes(),
-            u32_field(case, "revision")?,
-            &params,
-            &params_digest(&params),
-        )
-        .and_then(|admitted| {
-            admit_topology(
-                &admitted,
-                &topology,
-                topology.order_digest(),
-                &AdvertisedLimits {
-                    max_nodes: 0,
-                    max_edges: 0,
-                    max_degree: 0,
-                },
-            )
-        });
-        let got = got.err().map(ising_generators::Code::value);
-        compare(case, "admission code", &got, &expected_code(case)?)?;
-    }
-    Ok(())
-}
-
-#[test]
-fn a_changed_twisted_coupling_fails_the_recompute() -> Result<(), String> {
-    let doc = twisted_doc()?;
-    let pointer = "/cases/0/instances/0/j/0";
-    let was = doc
-        .pointer(pointer)
-        .and_then(Value::as_i64)
-        .ok_or("no coupling")?;
-    let broken = mutate(&doc, pointer, json!(was + 1000));
-    expect_err(&check_twisted(&broken), "a changed coupling")
-}
-
-#[test]
-fn a_changed_recipe_hash_fails_the_recompute() -> Result<(), String> {
-    let doc = twisted_doc()?;
-    let recipe = section(&doc, "recipes")?.first().ok_or("no recipe")?;
-    let was = str_field(
-        recipe.pointer("/salts/0").ok_or("no salt")?,
-        "canonical_blake3",
-    )?;
-    let broken = mutate(
-        &doc,
-        "/recipes/0/salts/0/canonical_blake3",
-        json!(flip_last_hex_digit(was)),
-    );
-    let recipe = section(&broken, "recipes")?.first().ok_or("no recipe")?;
-    expect_err(&check_twisted_recipe(recipe), "a changed recipe hash")
-}
-
-#[test]
 fn a_changed_obstruction_value_fails_the_check() -> Result<(), String> {
     let doc = twisted_doc()?;
     let pointer = "/obstructions/3/expected/frustrated_cycles";
@@ -3196,73 +2743,30 @@ fn charge_doc() -> Result<Value, String> {
         .map_err(|e| e.to_string())
 }
 
-/// Recompute the digests, nonces, and instance bytes of every registered
-/// `quip/charged-ice` case with Rust code that does not call the construction.
-fn check_charge(doc: &Value) -> Result<(), String> {
-    validate(&schema()?, doc)?;
-    check_names_unique(doc)?;
-    for case in section(doc, "cases")? {
-        check_layered_case(case, ice_glass_size_bounds)?;
-    }
-    Ok(())
-}
-
-#[test]
-fn charge_fixture_matches_schema() -> Result<(), String> {
-    let doc = charge_doc()?;
-    validate(&schema()?, &doc)?;
-    match doc.get("provenance").and_then(Value::as_str) {
-        Some("specified") => {}
-        other => return Err(format!("provenance is {other:?}, expected specified")),
-    }
-    check_names_unique(&doc)?;
-    for name in ["cases", "energies", "recipe", "admission"] {
-        section(&doc, name).map(|_| ())?;
-    }
-    Ok(())
-}
-
-#[test]
-fn charge_cases_recompute() -> Result<(), String> {
-    check_charge(&charge_doc()?)
-}
-
-#[test]
-fn charge_cases_match_the_rust_construction() -> Result<(), String> {
-    for case in section(&charge_doc()?, "cases")? {
-        check_layered_against_rust(case)?;
-    }
-    Ok(())
-}
-
-#[test]
-fn charge_params_constants_match_the_vectors() -> Result<(), String> {
-    use quip_solver_conformance::families::charge::{
-        P_CHARGED_A251, P_CHARGED_ADJ_A100_B45_C256, P_CHARGED_Z22_A250_B31_C128,
-    };
-    let doc = charge_doc()?;
-    for (section_name, name, want) in [
-        (
-            "cases",
-            "charged-ice-zephyr-z22",
-            P_CHARGED_Z22_A250_B31_C128,
-        ),
-        (
-            "cases",
-            "charged-ice-adjacency-z12",
-            P_CHARGED_ADJ_A100_B45_C256,
-        ),
-        ("admission", "scale-251-is-out-of-bounds", P_CHARGED_A251),
-    ] {
-        let case = find_named(&doc, section_name, name)?;
-        compare(
-            case,
-            "params_hex",
-            &str_field(case, "params_hex")?.to_owned(),
-            &codec::hex_encode(&want),
-        )?;
-    }
-    compare(&doc, "case count", &section(&doc, "cases")?.len(), &4)
+/// The values built from the salts of one recipe, kept for the whole test run. The
+/// build on the live topology is the slow step, and several tests need the same
+/// salts of the same recipe. `cells` has one cell for each recipe of the section,
+/// and a cell is filled by the first caller that asks for its recipe.
+fn built_once<T: Send + Sync>(
+    cells: &'static [OnceLock<Result<Vec<T>, String>>],
+    index: usize,
+    doc_fn: DocFn,
+    section_name: &str,
+    build: impl FnOnce(&Value) -> Result<Vec<T>, String>,
+) -> Result<&'static [T], String> {
+    let cell = cells
+        .get(index)
+        .ok_or_else(|| format!("{section_name}: no cache cell for recipe {index}"))?;
+    cell.get_or_init(|| {
+        let doc = doc_fn()?;
+        let recipe = section(&doc, section_name)?
+            .get(index)
+            .ok_or_else(|| format!("{section_name}: no recipe {index}"))?;
+        build(recipe)
+    })
+    .as_ref()
+    .map(Vec::as_slice)
+    .map_err(Clone::clone)
 }
 
 /// Build the instance of one lease slot of a case or recipe with the Rust
@@ -3430,11 +2934,34 @@ fn charge_counts(built: &ising_generators::instance::Instance) -> Result<(u64, u
     ))
 }
 
-/// Rebuild every salt of the recipe with the Rust construction and compare the
-/// hash and the counts.
-fn check_charge_recipe(recipe: &Value) -> Result<(), String> {
-    use ising_generators::descriptor::params_digest;
+/// The hash and the counts of one built salt of the charged-ice recipe.
+type ChargeSalt = (String, (u64, u64, u64));
+
+/// Every salt of recipe `index`, built with the Rust construction on the live topology.
+fn built_charge_salts(index: usize) -> Result<&'static [ChargeSalt], String> {
     use ising_generators::ice::CHARGED_ICE_V1;
+    static BUILT: [OnceLock<Result<Vec<ChargeSalt>, String>>; 1] = [const { OnceLock::new() }];
+    built_once(&BUILT, index, charge_doc, "recipe", |recipe| {
+        entries_of(recipe, "salts")?
+            .iter()
+            .map(|salt| {
+                let slot = u64_decimal(salt, "index")?;
+                with_ice_instance(CHARGED_ICE_V1, recipe, slot, |_, built| {
+                    let canonical = built.canonical_bytes().map_err(|e| e.to_string())?;
+                    Ok((
+                        blake3::hash(&canonical).to_hex().to_string(),
+                        charge_counts(built)?,
+                    ))
+                })
+            })
+            .collect()
+    })
+}
+
+/// Compare every salt of recipe `index` with the Rust construction: the hash and
+/// the counts.
+fn check_charge_recipe(recipe: &Value, index: usize) -> Result<(), String> {
+    use ising_generators::descriptor::params_digest;
     let params = codec::hex_decode(str_field(recipe, "params_hex")?)?;
     compare(
         recipe,
@@ -3449,7 +2976,8 @@ fn check_charge_recipe(recipe: &Value) -> Result<(), String> {
         &u64::try_from(salts.len()).map_err(|e| e.to_string())?,
         &u64_decimal(object_field(recipe, "lease")?, "salt_count")?,
     )?;
-    for salt in salts {
+    let built = built_charge_salts(index)?;
+    for (salt, (hash, counts)) in salts.iter().zip(built) {
         let slot = u64_decimal(salt, "index")?;
         compare(
             recipe,
@@ -3457,17 +2985,10 @@ fn check_charge_recipe(recipe: &Value) -> Result<(), String> {
             &lease_nonce(recipe, slot)?,
             &str_field(salt, "nonce")?.to_owned(),
         )?;
-        let (hash, counts) = with_ice_instance(CHARGED_ICE_V1, recipe, slot, |_, built| {
-            let canonical = built.canonical_bytes().map_err(|e| e.to_string())?;
-            Ok((
-                blake3::hash(&canonical).to_hex().to_string(),
-                charge_counts(built)?,
-            ))
-        })?;
         compare(
             recipe,
             "canonical_blake3",
-            &hash,
+            hash,
             &str_field(salt, "canonical_blake3")?.to_owned(),
         )?;
         let field = |key: &str| {
@@ -3485,91 +3006,10 @@ fn check_charge_recipe(recipe: &Value) -> Result<(), String> {
 #[test]
 fn charge_recipe_matches_the_rust_construction() -> Result<(), String> {
     let doc = charge_doc()?;
-    for recipe in section(&doc, "recipe")? {
-        check_charge_recipe(recipe)?;
+    for (index, recipe) in section(&doc, "recipe")?.iter().enumerate() {
+        check_charge_recipe(recipe, index)?;
     }
     Ok(())
-}
-
-#[test]
-fn charge_recipe_matches_the_rust_constant() -> Result<(), String> {
-    use ising_generators::descriptor::params_digest;
-    use ising_generators::ice::ICE_CHARGE_RECIPE;
-    let doc = charge_doc()?;
-    let recipes = section(&doc, "recipe")?;
-    compare(&doc, "recipe count", &recipes.len(), &1)?;
-    for recipe in recipes {
-        let want = ICE_CHARGE_RECIPE;
-        compare(recipe, "alias", &str_field(recipe, "alias")?, &want.alias)?;
-        compare(recipe, "cell", &str_field(recipe, "cell")?, &want.cell)?;
-        compare(
-            recipe,
-            "params_hex",
-            &str_field(recipe, "params_hex")?.to_owned(),
-            &codec::hex_encode(want.params),
-        )?;
-        compare(
-            recipe,
-            "params_digest",
-            &str_field(recipe, "params_digest")?.to_owned(),
-            &codec::hex_encode(&params_digest(want.params)),
-        )?;
-    }
-    Ok(())
-}
-
-#[test]
-fn charge_admission_codes_match_the_rust_admission() -> Result<(), String> {
-    use ising_generators::descriptor::{admit, params_digest, AdvertisedLimits};
-    use ising_generators::family::{admit_topology, BaseTopology};
-    use ising_generators::ice::CHARGED_ICE_V1;
-    let doc = charge_doc()?;
-    let contracts = [CHARGED_ICE_V1];
-    for case in section(&doc, "admission")? {
-        let params = codec::hex_decode(str_field(case, "params_hex")?)?;
-        let (nodes, edges) = topology_inputs(object_field(case, "topology")?)?;
-        let topology = BaseTopology::new(nodes, &edges).map_err(|e| format!("{e:?}"))?;
-        let got = admit(
-            &contracts,
-            str_field(case, "family_id")?.as_bytes(),
-            u32_field(case, "revision")?,
-            &params,
-            &params_digest(&params),
-        )
-        .and_then(|admitted| {
-            admit_topology(
-                &admitted,
-                &topology,
-                topology.order_digest(),
-                &AdvertisedLimits {
-                    max_nodes: 0,
-                    max_edges: 0,
-                    max_degree: 0,
-                },
-            )
-        });
-        let got = got.err().map(ising_generators::Code::value);
-        compare(case, "admission code", &got, &expected_code(case)?)?;
-        compare(case, "code is 9", &got, &Some(9))?;
-    }
-    compare(
-        &doc,
-        "admission count",
-        &section(&doc, "admission")?.len(),
-        &2,
-    )
-}
-
-#[test]
-fn a_changed_charge_coupling_fails_the_recompute() -> Result<(), String> {
-    let doc = charge_doc()?;
-    let pointer = "/cases/0/instances/0/j/0";
-    let was = doc
-        .pointer(pointer)
-        .and_then(Value::as_i64)
-        .ok_or("no coupling")?;
-    let broken = mutate(&doc, pointer, json!(was + 1000));
-    expect_err(&check_charge(&broken), "a changed coupling")
 }
 
 #[test]
@@ -3593,93 +3033,11 @@ fn a_changed_charge_energy_fails_the_check() -> Result<(), String> {
     expect_err(&check_charge_energies(&broken), "a changed defect count")
 }
 
-#[test]
-fn a_changed_charge_recipe_hash_fails_the_recompute() -> Result<(), String> {
-    let doc = charge_doc()?;
-    let recipe = section(&doc, "recipe")?.first().ok_or("no recipe")?;
-    let was = str_field(
-        recipe.pointer("/salts/0").ok_or("no salt")?,
-        "canonical_blake3",
-    )?;
-    let broken = mutate(
-        &doc,
-        "/recipe/0/salts/0/canonical_blake3",
-        json!(flip_last_hex_digit(was)),
-    );
-    let recipe = section(&broken, "recipe")?.first().ok_or("no recipe")?;
-    expect_err(&check_charge_recipe(recipe), "a changed recipe hash")
-}
-
 // ---- ice fields vectors (ice_fields.json) ----
 
 fn fields_doc() -> Result<Value, String> {
     serde_json::from_str(include_str!("../vectors/families/ice_fields.json"))
         .map_err(|e| e.to_string())
-}
-
-/// Recompute the digests, nonces, and instance bytes of every registered
-/// `quip/ice-fields` case with Rust code that does not call the construction.
-fn check_fields(doc: &Value) -> Result<(), String> {
-    validate(&schema()?, doc)?;
-    check_names_unique(doc)?;
-    for case in section(doc, "cases")? {
-        check_layered_case(case, ice_glass_size_bounds)?;
-    }
-    Ok(())
-}
-
-#[test]
-fn fields_fixture_matches_schema() -> Result<(), String> {
-    let doc = fields_doc()?;
-    validate(&schema()?, &doc)?;
-    match doc.get("provenance").and_then(Value::as_str) {
-        Some("specified") => {}
-        other => return Err(format!("provenance is {other:?}, expected specified")),
-    }
-    check_names_unique(&doc)?;
-    for name in ["cases", "selection", "field_recipes", "admission"] {
-        section(&doc, name).map(|_| ())?;
-    }
-    Ok(())
-}
-
-#[test]
-fn fields_cases_recompute() -> Result<(), String> {
-    check_fields(&fields_doc()?)
-}
-
-#[test]
-fn fields_cases_match_the_rust_construction() -> Result<(), String> {
-    for case in section(&fields_doc()?, "cases")? {
-        check_layered_against_rust(case)?;
-    }
-    Ok(())
-}
-
-#[test]
-fn fields_params_constants_match_the_vectors() -> Result<(), String> {
-    use quip_solver_conformance::families::fields::{
-        P_FIELDS_ADJ_G45_F1000_D16, P_FIELDS_F1001, P_FIELDS_Z22_G125_F500_D16,
-    };
-    let doc = fields_doc()?;
-    for (section_name, name, want) in [
-        ("cases", "ice-fields-zephyr-z22", P_FIELDS_Z22_G125_F500_D16),
-        (
-            "cases",
-            "ice-fields-adjacency-z22",
-            P_FIELDS_ADJ_G45_F1000_D16,
-        ),
-        ("admission", "field-1001-is-out-of-bounds", P_FIELDS_F1001),
-    ] {
-        let case = find_named(&doc, section_name, name)?;
-        compare(
-            case,
-            "params_hex",
-            &str_field(case, "params_hex")?.to_owned(),
-            &codec::hex_encode(&want),
-        )?;
-    }
-    compare(&doc, "case count", &section(&doc, "cases")?.len(), &6)
 }
 
 /// The dense positions and values of the nonzero fields of an instance.
@@ -3774,41 +3132,35 @@ fn fields_selection_matches_the_rust_construction() -> Result<(), String> {
     check_fields_selection(&fields_doc()?)
 }
 
-/// Every skipped slot of a shortfall case has code 14. The slot lists are
-/// compared with the Rust construction by `fields_cases_match_the_rust_construction`.
-fn check_shortfall_case(name: &str, every_slot: bool) -> Result<(), String> {
-    let doc = fields_doc()?;
-    let case = find_named(&doc, "cases", name)?;
-    let skipped = entries_of(case, "skipped")?;
-    let built = entries_of(case, "instances")?;
-    compare(case, "a skipped salt exists", &skipped.is_empty(), &false)?;
-    compare(case, "no built salt", &built.is_empty(), &every_slot)?;
-    for entry in skipped {
-        compare(
-            case,
-            "skip_code",
-            &entry.get("skip_code"),
-            &Some(&json!(14)),
-        )?;
-    }
-    Ok(())
-}
+/// The hash, the tile count, and the nonzero fields of one built salt of a fields recipe.
+type FieldsSalt = (String, u64, Vec<i64>);
 
-#[test]
-fn the_shortfall_case_skips_every_salt_with_code_14() -> Result<(), String> {
-    check_shortfall_case("ice-fields-shortfall", true)
-}
-
-#[test]
-fn the_mixed_shortfall_case_skips_some_salts_and_builds_others() -> Result<(), String> {
-    check_shortfall_case("ice-fields-shortfall-mixed", false)
-}
-
-/// Rebuild every salt of a recipe with the Rust construction and compare the
-/// hash and the counts.
-fn check_fields_recipe(recipe: &Value) -> Result<(), String> {
-    use ising_generators::descriptor::params_digest;
+/// Every salt of recipe `index`, built with the Rust construction on the live topology.
+fn built_fields_salts(index: usize) -> Result<&'static [FieldsSalt], String> {
     use ising_generators::ice::ICE_FIELDS_V1;
+    static BUILT: [OnceLock<Result<Vec<FieldsSalt>, String>>; 2] = [const { OnceLock::new() }; 2];
+    built_once(&BUILT, index, fields_doc, "field_recipes", |recipe| {
+        entries_of(recipe, "salts")?
+            .iter()
+            .map(|salt| {
+                let slot = u64_decimal(salt, "index")?;
+                with_ice_instance(ICE_FIELDS_V1, recipe, slot, |_, built| {
+                    let canonical = built.canonical_bytes().map_err(|e| e.to_string())?;
+                    Ok((
+                        blake3::hash(&canonical).to_hex().to_string(),
+                        tile_count(built)?,
+                        field_nodes(built).1,
+                    ))
+                })
+            })
+            .collect()
+    })
+}
+
+/// Compare every salt of recipe `index` with the Rust construction: the hash and
+/// the counts.
+fn check_fields_recipe(recipe: &Value, index: usize) -> Result<(), String> {
+    use ising_generators::descriptor::params_digest;
     let params = codec::hex_decode(str_field(recipe, "params_hex")?)?;
     compare(
         recipe,
@@ -3823,7 +3175,8 @@ fn check_fields_recipe(recipe: &Value) -> Result<(), String> {
         &u64::try_from(salts.len()).map_err(|e| e.to_string())?,
         &u64_decimal(object_field(recipe, "lease")?, "salt_count")?,
     )?;
-    for salt in salts {
+    let built = built_fields_salts(index)?;
+    for (salt, (hash, tiles, values)) in salts.iter().zip(built) {
         let slot = u64_decimal(salt, "index")?;
         compare(
             recipe,
@@ -3831,18 +3184,10 @@ fn check_fields_recipe(recipe: &Value) -> Result<(), String> {
             &lease_nonce(recipe, slot)?,
             &str_field(salt, "nonce")?.to_owned(),
         )?;
-        let (hash, tiles, values) = with_ice_instance(ICE_FIELDS_V1, recipe, slot, |_, built| {
-            let canonical = built.canonical_bytes().map_err(|e| e.to_string())?;
-            Ok((
-                blake3::hash(&canonical).to_hex().to_string(),
-                tile_count(built)?,
-                field_nodes(built).1,
-            ))
-        })?;
         compare(
             recipe,
             "canonical_blake3",
-            &hash,
+            hash,
             &str_field(salt, "canonical_blake3")?.to_owned(),
         )?;
         let field = |key: &str| {
@@ -3853,7 +3198,7 @@ fn check_fields_recipe(recipe: &Value) -> Result<(), String> {
         let count = |keep: fn(&i64) -> bool| {
             u64::try_from(values.iter().filter(|v| keep(v)).count()).map_err(|e| e.to_string())
         };
-        compare(recipe, "tiles", &tiles, &field("tiles")?)?;
+        compare(recipe, "tiles", tiles, &field("tiles")?)?;
         compare(
             recipe,
             "fields",
@@ -3879,94 +3224,10 @@ fn check_fields_recipe(recipe: &Value) -> Result<(), String> {
 #[test]
 fn fields_recipes_match_the_rust_construction() -> Result<(), String> {
     let doc = fields_doc()?;
-    for recipe in section(&doc, "field_recipes")? {
-        check_fields_recipe(recipe)?;
+    for (index, recipe) in section(&doc, "field_recipes")?.iter().enumerate() {
+        check_fields_recipe(recipe, index)?;
     }
     Ok(())
-}
-
-#[test]
-fn fields_recipes_match_the_rust_constants() -> Result<(), String> {
-    use ising_generators::descriptor::params_digest;
-    use ising_generators::ice::ICE_FIELDS_RECIPES;
-    let doc = fields_doc()?;
-    let recipes = section(&doc, "field_recipes")?;
-    compare(
-        &doc,
-        "recipe count",
-        &recipes.len(),
-        &ICE_FIELDS_RECIPES.len(),
-    )?;
-    for (recipe, want) in recipes.iter().zip(ICE_FIELDS_RECIPES) {
-        compare(recipe, "alias", &str_field(recipe, "alias")?, &want.alias)?;
-        compare(recipe, "cell", &str_field(recipe, "cell")?, &want.cell)?;
-        compare(
-            recipe,
-            "params_hex",
-            &str_field(recipe, "params_hex")?.to_owned(),
-            &codec::hex_encode(want.params),
-        )?;
-        compare(
-            recipe,
-            "params_digest",
-            &str_field(recipe, "params_digest")?.to_owned(),
-            &codec::hex_encode(&params_digest(want.params)),
-        )?;
-    }
-    Ok(())
-}
-
-#[test]
-fn fields_admission_codes_match_the_rust_admission() -> Result<(), String> {
-    use ising_generators::descriptor::{admit, params_digest, AdvertisedLimits};
-    use ising_generators::family::{admit_topology, BaseTopology};
-    use ising_generators::ice::ICE_FIELDS_V1;
-    let doc = fields_doc()?;
-    let contracts = [ICE_FIELDS_V1];
-    let mut codes = Vec::new();
-    for case in section(&doc, "admission")? {
-        let params = codec::hex_decode(str_field(case, "params_hex")?)?;
-        let (nodes, edges) = topology_inputs(object_field(case, "topology")?)?;
-        let topology = BaseTopology::new(nodes, &edges).map_err(|e| format!("{e:?}"))?;
-        let got = admit(
-            &contracts,
-            str_field(case, "family_id")?.as_bytes(),
-            u32_field(case, "revision")?,
-            &params,
-            &params_digest(&params),
-        )
-        .and_then(|admitted| {
-            admit_topology(
-                &admitted,
-                &topology,
-                topology.order_digest(),
-                &AdvertisedLimits {
-                    max_nodes: 0,
-                    max_edges: 0,
-                    max_degree: 0,
-                },
-            )
-        });
-        let got = got.err().map(ising_generators::Code::value);
-        compare(case, "admission code", &got, &expected_code(case)?)?;
-        codes.push(got);
-    }
-    compare(&doc, "codes 9 present", &codes.contains(&Some(9)), &true)?;
-    compare(&doc, "code 12 present", &codes.contains(&Some(12)), &true)?;
-    compare(&doc, "code 13 present", &codes.contains(&Some(13)), &true)?;
-    compare(&doc, "an admitted request", &codes.contains(&None), &true)
-}
-
-#[test]
-fn a_changed_fields_coupling_fails_the_recompute() -> Result<(), String> {
-    let doc = fields_doc()?;
-    let pointer = "/cases/0/instances/0/j/0";
-    let was = doc
-        .pointer(pointer)
-        .and_then(Value::as_i64)
-        .ok_or("no coupling")?;
-    let broken = mutate(&doc, pointer, json!(was + 1000));
-    expect_err(&check_fields(&broken), "a changed coupling")
 }
 
 #[test]
@@ -3988,92 +3249,11 @@ fn a_changed_fields_selection_fails_the_check() -> Result<(), String> {
     expect_err(&check_fields_selection(&broken), "a changed field node")
 }
 
-#[test]
-fn a_changed_fields_recipe_hash_fails_the_recompute() -> Result<(), String> {
-    let doc = fields_doc()?;
-    let recipe = section(&doc, "field_recipes")?.first().ok_or("no recipe")?;
-    let was = str_field(
-        recipe.pointer("/salts/0").ok_or("no salt")?,
-        "canonical_blake3",
-    )?;
-    let broken = mutate(
-        &doc,
-        "/field_recipes/0/salts/0/canonical_blake3",
-        json!(flip_last_hex_digit(was)),
-    );
-    let recipe = section(&broken, "field_recipes")?
-        .first()
-        .ok_or("no recipe")?;
-    expect_err(&check_fields_recipe(recipe), "a changed recipe hash")
-}
-
 // ---- two-commodity routing vectors (two_commodity.json) ----
 
 fn routing_doc() -> Result<Value, String> {
     serde_json::from_str(include_str!("../vectors/families/two_commodity.json"))
         .map_err(|e| e.to_string())
-}
-
-/// Recompute the digests, nonces, and instance bytes of every registered
-/// `quip/two-commodity-routing` case with Rust code that does not call the
-/// construction.
-fn check_routing(doc: &Value) -> Result<(), String> {
-    validate(&schema()?, doc)?;
-    check_names_unique(doc)?;
-    for case in section(doc, "cases")? {
-        check_layered_case(case, ice_glass_size_bounds)?;
-    }
-    Ok(())
-}
-
-#[test]
-fn routing_fixture_matches_schema() -> Result<(), String> {
-    let doc = routing_doc()?;
-    validate(&schema()?, &doc)?;
-    match doc.get("provenance").and_then(Value::as_str) {
-        Some("specified") => {}
-        other => return Err(format!("provenance is {other:?}, expected specified")),
-    }
-    check_names_unique(&doc)?;
-    for name in ["cases", "terminals", "routing_recipes", "admission"] {
-        section(&doc, name).map(|_| ())?;
-    }
-    Ok(())
-}
-
-#[test]
-fn routing_cases_recompute() -> Result<(), String> {
-    check_routing(&routing_doc()?)
-}
-
-#[test]
-fn routing_cases_match_the_rust_construction() -> Result<(), String> {
-    for case in section(&routing_doc()?, "cases")? {
-        check_layered_against_rust(case)?;
-    }
-    Ok(())
-}
-
-#[test]
-fn routing_params_constants_match_the_vectors() -> Result<(), String> {
-    use quip_solver_conformance::families::routing::{
-        P_ROUTING_D3, P_ROUTING_Z24_D4, P_ROUTING_Z34_D6,
-    };
-    let doc = routing_doc()?;
-    for (section_name, name, want) in [
-        ("cases", "routing-small", P_ROUTING_Z24_D4),
-        ("cases", "routing-retry", P_ROUTING_Z34_D6),
-        ("admission", "divisor-3-is-out-of-bounds", P_ROUTING_D3),
-    ] {
-        let case = find_named(&doc, section_name, name)?;
-        compare(
-            case,
-            "params_hex",
-            &str_field(case, "params_hex")?.to_owned(),
-            &codec::hex_encode(&want),
-        )?;
-    }
-    compare(&doc, "case count", &section(&doc, "cases")?.len(), &5)
 }
 
 /// The routing section of a built instance, decoded by hand from the kind 7
@@ -4351,29 +3531,6 @@ fn the_retry_case_has_a_salt_that_passes_after_a_failed_try() -> Result<(), Stri
 }
 
 #[test]
-fn the_no_instance_case_skips_every_salt_with_code_14() -> Result<(), String> {
-    let doc = routing_doc()?;
-    let case = find_named(&doc, "cases", "routing-no-instance")?;
-    compare(
-        case,
-        "no instance builds",
-        &entries_of(case, "instances")?.len(),
-        &0,
-    )?;
-    let skipped = entries_of(case, "skipped")?;
-    compare(case, "a skipped salt exists", &skipped.is_empty(), &false)?;
-    for entry in skipped {
-        compare(
-            case,
-            "skip_code",
-            &entry.get("skip_code"),
-            &Some(&json!(14)),
-        )?;
-    }
-    Ok(())
-}
-
-#[test]
 fn the_no_pairs_case_has_no_terminals() -> Result<(), String> {
     let doc = routing_doc()?;
     for entry in section(&doc, "terminals")? {
@@ -4386,11 +3543,40 @@ fn the_no_pairs_case_has_no_terminals() -> Result<(), String> {
     Ok(())
 }
 
-/// Rebuild every salt of a recipe with the Rust construction and compare the
-/// hash, the counts, the chain strength, and the try that passed.
-fn check_routing_recipe(recipe: &Value) -> Result<(), String> {
-    use ising_generators::descriptor::params_digest;
+/// One built salt of a routing recipe: the hash, the routing section, and the node ids.
+struct RoutingSalt {
+    hash: String,
+    meta: RoutingMeta,
+    native: Vec<u32>,
+}
+
+/// Every salt of recipe `index`, built with the Rust construction on the live topology.
+fn built_routing_salts(index: usize) -> Result<&'static [RoutingSalt], String> {
     use ising_generators::routing::ROUTING_V1;
+    static BUILT: [OnceLock<Result<Vec<RoutingSalt>, String>>; 1] = [const { OnceLock::new() }];
+    built_once(&BUILT, index, routing_doc, "routing_recipes", |recipe| {
+        entries_of(recipe, "salts")?
+            .iter()
+            .map(|salt| {
+                let slot = u64_decimal(salt, "index")?;
+                with_ice_instance(ROUTING_V1, recipe, slot, |params, built| {
+                    check_routing_metadata(params, built)?;
+                    let canonical = built.canonical_bytes().map_err(|e| e.to_string())?;
+                    Ok(RoutingSalt {
+                        hash: blake3::hash(&canonical).to_hex().to_string(),
+                        meta: routing_meta(built)?,
+                        native: built.node_ids().to_vec(),
+                    })
+                })
+            })
+            .collect()
+    })
+}
+
+/// Compare every salt of recipe `index` with the Rust construction: the hash, the
+/// counts, the chain strength, and the try that passed.
+fn check_routing_recipe(recipe: &Value, index: usize) -> Result<(), String> {
+    use ising_generators::descriptor::params_digest;
     let params = codec::hex_decode(str_field(recipe, "params_hex")?)?;
     compare(
         recipe,
@@ -4405,7 +3591,8 @@ fn check_routing_recipe(recipe: &Value) -> Result<(), String> {
         &u64::try_from(salts.len()).map_err(|e| e.to_string())?,
         &u64_decimal(object_field(recipe, "lease")?, "salt_count")?,
     )?;
-    for salt in salts {
+    let built = built_routing_salts(index)?;
+    for (salt, RoutingSalt { hash, meta, .. }) in salts.iter().zip(built) {
         let slot = u64_decimal(salt, "index")?;
         compare(
             recipe,
@@ -4413,18 +3600,10 @@ fn check_routing_recipe(recipe: &Value) -> Result<(), String> {
             &lease_nonce(recipe, slot)?,
             &str_field(salt, "nonce")?.to_owned(),
         )?;
-        let (hash, meta) = with_ice_instance(ROUTING_V1, recipe, slot, |params, built| {
-            check_routing_metadata(params, built)?;
-            let canonical = built.canonical_bytes().map_err(|e| e.to_string())?;
-            Ok((
-                blake3::hash(&canonical).to_hex().to_string(),
-                routing_meta(built)?,
-            ))
-        })?;
         compare(
             recipe,
             "canonical_blake3",
-            &hash,
+            hash,
             &str_field(salt, "canonical_blake3")?.to_owned(),
         )?;
         let field = |key: &str| {
@@ -4441,7 +3620,7 @@ fn check_routing_recipe(recipe: &Value) -> Result<(), String> {
             &u64::from(meta.strength),
             &field("strength")?,
         )?;
-        let replay = replay_terminals(recipe, slot, &meta, routing_divisor(&params)?)?;
+        let replay = replay_terminals(recipe, slot, meta, routing_divisor(&params)?)?;
         let (attempt, supply) = replay.ok_or("a salt that builds has a passing try")?;
         compare(recipe, "try", &attempt, &field("try")?)?;
         compare(recipe, "supply", &meta.supply, &supply)?;
@@ -4452,34 +3631,8 @@ fn check_routing_recipe(recipe: &Value) -> Result<(), String> {
 #[test]
 fn routing_recipes_match_the_rust_construction() -> Result<(), String> {
     let doc = routing_doc()?;
-    for recipe in section(&doc, "routing_recipes")? {
-        check_routing_recipe(recipe)?;
-    }
-    Ok(())
-}
-
-#[test]
-fn routing_recipes_match_the_rust_constants() -> Result<(), String> {
-    use ising_generators::descriptor::params_digest;
-    use ising_generators::routing::ROUTING_RECIPES;
-    let doc = routing_doc()?;
-    let recipes = section(&doc, "routing_recipes")?;
-    compare(&doc, "recipe count", &recipes.len(), &ROUTING_RECIPES.len())?;
-    for (recipe, want) in recipes.iter().zip(ROUTING_RECIPES) {
-        compare(recipe, "alias", &str_field(recipe, "alias")?, &want.alias)?;
-        compare(recipe, "cell", &str_field(recipe, "cell")?, &want.cell)?;
-        compare(
-            recipe,
-            "params_hex",
-            &str_field(recipe, "params_hex")?.to_owned(),
-            &codec::hex_encode(want.params),
-        )?;
-        compare(
-            recipe,
-            "params_digest",
-            &str_field(recipe, "params_digest")?.to_owned(),
-            &codec::hex_encode(&params_digest(want.params)),
-        )?;
+    for (index, recipe) in section(&doc, "routing_recipes")?.iter().enumerate() {
+        check_routing_recipe(recipe, index)?;
     }
     Ok(())
 }
@@ -4497,16 +3650,10 @@ fn research_template() -> Result<Value, String> {
 /// live topology equal the research template (D8). The instance spins map back
 /// to native ids through the node list of the instance.
 fn check_research_template(fixture: &Value) -> Result<(), String> {
-    use ising_generators::routing::ROUTING_V1;
-    let doc = routing_doc()?;
-    let recipe = section(&doc, "routing_recipes")?
+    let first = built_routing_salts(0)?
         .first()
-        .ok_or("no recipe")?;
-    let (cells, arcs, native) = with_ice_instance(ROUTING_V1, recipe, 0, |_, built| {
-        let meta = routing_meta(built)?;
-        let native = built.node_ids().to_vec();
-        Ok((meta.cells, meta.arcs, native))
-    })?;
+        .ok_or("no built routing salt")?;
+    let (cells, arcs, native) = (&first.meta.cells, &first.meta.arcs, &first.native);
     let id_at = |position: u32| -> Result<u64, String> {
         native
             .get(usize::try_from(position).map_err(|e| e.to_string())?)
@@ -4566,58 +3713,6 @@ fn a_changed_research_template_fails_the_parity_check() -> Result<(), String> {
 }
 
 #[test]
-fn routing_admission_codes_match_the_rust_admission() -> Result<(), String> {
-    use ising_generators::descriptor::{admit, params_digest, AdvertisedLimits};
-    use ising_generators::family::{admit_topology, BaseTopology};
-    use ising_generators::routing::ROUTING_V1;
-    let doc = routing_doc()?;
-    let contracts = [ROUTING_V1];
-    let mut codes = Vec::new();
-    for case in section(&doc, "admission")? {
-        let params = codec::hex_decode(str_field(case, "params_hex")?)?;
-        let (nodes, edges) = topology_inputs(object_field(case, "topology")?)?;
-        let topology = BaseTopology::new(nodes, &edges).map_err(|e| format!("{e:?}"))?;
-        let got = admit(
-            &contracts,
-            str_field(case, "family_id")?.as_bytes(),
-            u32_field(case, "revision")?,
-            &params,
-            &params_digest(&params),
-        )
-        .and_then(|admitted| {
-            admit_topology(
-                &admitted,
-                &topology,
-                topology.order_digest(),
-                &AdvertisedLimits {
-                    max_nodes: 0,
-                    max_edges: 0,
-                    max_degree: 0,
-                },
-            )
-        });
-        let got = got.err().map(ising_generators::Code::value);
-        compare(case, "admission code", &got, &expected_code(case)?)?;
-        codes.push(got);
-    }
-    compare(&doc, "codes 9 present", &codes.contains(&Some(9)), &true)?;
-    compare(&doc, "code 12 present", &codes.contains(&Some(12)), &true)?;
-    compare(&doc, "an admitted request", &codes.contains(&None), &true)
-}
-
-#[test]
-fn a_changed_routing_coupling_fails_the_recompute() -> Result<(), String> {
-    let doc = routing_doc()?;
-    let pointer = "/cases/0/instances/0/j/0";
-    let was = doc
-        .pointer(pointer)
-        .and_then(Value::as_i64)
-        .ok_or("no coupling")?;
-    let broken = mutate(&doc, pointer, json!(was + 4));
-    expect_err(&check_routing(&broken), "a changed coupling")
-}
-
-#[test]
 fn a_changed_routing_supply_fails_the_replay() -> Result<(), String> {
     let doc = routing_doc()?;
     let pointer = "/terminals/0/supply/0/0";
@@ -4630,27 +3725,6 @@ fn a_changed_routing_supply_fails_the_replay() -> Result<(), String> {
     let pointer = "/terminals/0/try";
     let broken = mutate(&doc, pointer, json!(4));
     expect_err(&check_routing_terminals(&broken), "a changed try")
-}
-
-#[test]
-fn a_changed_routing_recipe_hash_fails_the_recompute() -> Result<(), String> {
-    let doc = routing_doc()?;
-    let recipe = section(&doc, "routing_recipes")?
-        .first()
-        .ok_or("no recipe")?;
-    let was = str_field(
-        recipe.pointer("/salts/0").ok_or("no salt")?,
-        "canonical_blake3",
-    )?;
-    let broken = mutate(
-        &doc,
-        "/routing_recipes/0/salts/0/canonical_blake3",
-        json!(flip_last_hex_digit(was)),
-    );
-    let recipe = section(&broken, "routing_recipes")?
-        .first()
-        .ok_or("no recipe")?;
-    expect_err(&check_routing_recipe(recipe), "a changed recipe hash")
 }
 
 // ---- polariton static vectors (polariton.json) ----
@@ -4691,68 +3765,6 @@ fn polariton_size_bounds(
         .min(6)
         .min(n.saturating_sub(1));
     Ok(Some((n, e, d)))
-}
-
-/// Recompute the digests, nonces, and instance bytes of every registered
-/// `quip/polariton-static` case with Rust code that does not call the
-/// construction.
-fn check_polariton(doc: &Value) -> Result<(), String> {
-    validate(&schema()?, doc)?;
-    check_names_unique(doc)?;
-    for case in section(doc, "cases")? {
-        check_layered_case(case, polariton_size_bounds)?;
-    }
-    Ok(())
-}
-
-#[test]
-fn polariton_fixture_matches_schema() -> Result<(), String> {
-    let doc = polariton_doc()?;
-    validate(&schema()?, &doc)?;
-    match doc.get("provenance").and_then(Value::as_str) {
-        Some("specified") => {}
-        other => return Err(format!("provenance is {other:?}, expected specified")),
-    }
-    check_names_unique(&doc)?;
-    for name in ["cases", "witnesses", "polariton_recipes", "admission"] {
-        section(&doc, name).map(|_| ())?;
-    }
-    Ok(())
-}
-
-#[test]
-fn polariton_cases_recompute() -> Result<(), String> {
-    check_polariton(&polariton_doc()?)
-}
-
-#[test]
-fn polariton_cases_match_the_rust_construction() -> Result<(), String> {
-    for case in section(&polariton_doc()?, "cases")? {
-        check_layered_against_rust(case)?;
-    }
-    Ok(())
-}
-
-#[test]
-fn polariton_params_constants_match_the_vectors() -> Result<(), String> {
-    use quip_solver_conformance::families::polariton::{
-        P_POLARITON_SIDE1, P_POLARITON_Z24_L2_P0, P_POLARITON_Z34_L3_P2,
-    };
-    let doc = polariton_doc()?;
-    for (section_name, name, want) in [
-        ("cases", "polariton-l2", P_POLARITON_Z24_L2_P0),
-        ("cases", "polariton-l3", P_POLARITON_Z34_L3_P2),
-        ("admission", "side-1-is-out-of-bounds", P_POLARITON_SIDE1),
-    ] {
-        let case = find_named(&doc, section_name, name)?;
-        compare(
-            case,
-            "params_hex",
-            &str_field(case, "params_hex")?.to_owned(),
-            &codec::hex_encode(&want),
-        )?;
-    }
-    compare(&doc, "case count", &section(&doc, "cases")?.len(), &5)
 }
 
 /// The labels and the window of a built instance, decoded by hand from the
@@ -5079,11 +4091,39 @@ fn polariton_witnesses_match_the_rust_feasibility_and_observables() -> Result<()
     check_polariton_witnesses(&polariton_doc()?)
 }
 
-/// Rebuild every salt of a recipe with the Rust construction and compare the
-/// hash, the window, and the try that passed.
-fn check_polariton_recipe(recipe: &Value) -> Result<(), String> {
-    use ising_generators::descriptor::params_digest;
+/// The hash and the decoded metadata of one built salt of a polariton recipe.
+type PolaritonSalt = (String, PolaritonMeta);
+
+/// Every salt of recipe `index`, built with the Rust construction on the live topology.
+fn built_polariton_salts(index: usize) -> Result<&'static [PolaritonSalt], String> {
     use ising_generators::polariton::POLARITON_V1;
+    static BUILT: [OnceLock<Result<Vec<PolaritonSalt>, String>>; 3] =
+        [const { OnceLock::new() }; 3];
+    built_once(
+        &BUILT,
+        index,
+        polariton_doc,
+        "polariton_recipes",
+        |recipe| {
+            entries_of(recipe, "salts")?
+                .iter()
+                .map(|salt| {
+                    let slot = u64_decimal(salt, "index")?;
+                    with_ice_instance(POLARITON_V1, recipe, slot, |params, built| {
+                        let meta = check_polariton_metadata(params, built)?;
+                        let canonical = built.canonical_bytes().map_err(|e| e.to_string())?;
+                        Ok((blake3::hash(&canonical).to_hex().to_string(), meta))
+                    })
+                })
+                .collect()
+        },
+    )
+}
+
+/// Compare every salt of recipe `index` with the Rust construction: the hash, the
+/// window, and the try that passed.
+fn check_polariton_recipe(recipe: &Value, index: usize) -> Result<(), String> {
+    use ising_generators::descriptor::params_digest;
     let params = codec::hex_decode(str_field(recipe, "params_hex")?)?;
     compare(
         recipe,
@@ -5098,7 +4138,8 @@ fn check_polariton_recipe(recipe: &Value) -> Result<(), String> {
         &u64::try_from(salts.len()).map_err(|e| e.to_string())?,
         &u64_decimal(object_field(recipe, "lease")?, "salt_count")?,
     )?;
-    for salt in salts {
+    let built = built_polariton_salts(index)?;
+    for (salt, (hash, meta)) in salts.iter().zip(built) {
         let slot = u64_decimal(salt, "index")?;
         compare(
             recipe,
@@ -5106,15 +4147,10 @@ fn check_polariton_recipe(recipe: &Value) -> Result<(), String> {
             &lease_nonce(recipe, slot)?,
             &str_field(salt, "nonce")?.to_owned(),
         )?;
-        let (hash, meta) = with_ice_instance(POLARITON_V1, recipe, slot, |params, built| {
-            let meta = check_polariton_metadata(params, built)?;
-            let canonical = built.canonical_bytes().map_err(|e| e.to_string())?;
-            Ok((blake3::hash(&canonical).to_hex().to_string(), meta))
-        })?;
         compare(
             recipe,
             "canonical_blake3",
-            &hash,
+            hash,
             &str_field(salt, "canonical_blake3")?.to_owned(),
         )?;
         let window: Vec<u64> = u64_array(salt, "window")?;
@@ -5139,39 +4175,8 @@ fn check_polariton_recipe(recipe: &Value) -> Result<(), String> {
 #[test]
 fn polariton_recipes_match_the_rust_construction() -> Result<(), String> {
     let doc = polariton_doc()?;
-    for recipe in section(&doc, "polariton_recipes")? {
-        check_polariton_recipe(recipe)?;
-    }
-    Ok(())
-}
-
-#[test]
-fn polariton_recipes_match_the_rust_constants() -> Result<(), String> {
-    use ising_generators::descriptor::params_digest;
-    use ising_generators::polariton::POLARITON_RECIPES;
-    let doc = polariton_doc()?;
-    let recipes = section(&doc, "polariton_recipes")?;
-    compare(
-        &doc,
-        "recipe count",
-        &recipes.len(),
-        &POLARITON_RECIPES.len(),
-    )?;
-    for (recipe, want) in recipes.iter().zip(POLARITON_RECIPES) {
-        compare(recipe, "alias", &str_field(recipe, "alias")?, &want.alias)?;
-        compare(recipe, "cell", &str_field(recipe, "cell")?, &want.cell)?;
-        compare(
-            recipe,
-            "params_hex",
-            &str_field(recipe, "params_hex")?.to_owned(),
-            &codec::hex_encode(want.params),
-        )?;
-        compare(
-            recipe,
-            "params_digest",
-            &str_field(recipe, "params_digest")?.to_owned(),
-            &codec::hex_encode(&params_digest(want.params)),
-        )?;
+    for (index, recipe) in section(&doc, "polariton_recipes")?.iter().enumerate() {
+        check_polariton_recipe(recipe, index)?;
     }
     Ok(())
 }
@@ -5225,46 +4230,6 @@ fn the_polariton_windows_are_inside_the_cell_grid_and_the_dead_cell_moves_it() -
 }
 
 #[test]
-fn polariton_admission_codes_match_the_rust_admission() -> Result<(), String> {
-    use ising_generators::descriptor::{admit, params_digest, AdvertisedLimits};
-    use ising_generators::family::{admit_topology, BaseTopology};
-    use ising_generators::polariton::POLARITON_V1;
-    let doc = polariton_doc()?;
-    let contracts = [POLARITON_V1];
-    let mut codes = Vec::new();
-    for case in section(&doc, "admission")? {
-        let params = codec::hex_decode(str_field(case, "params_hex")?)?;
-        let (nodes, edges) = topology_inputs(object_field(case, "topology")?)?;
-        let topology = BaseTopology::new(nodes, &edges).map_err(|e| format!("{e:?}"))?;
-        let got = admit(
-            &contracts,
-            str_field(case, "family_id")?.as_bytes(),
-            u32_field(case, "revision")?,
-            &params,
-            &params_digest(&params),
-        )
-        .and_then(|admitted| {
-            admit_topology(
-                &admitted,
-                &topology,
-                topology.order_digest(),
-                &AdvertisedLimits {
-                    max_nodes: 0,
-                    max_edges: 0,
-                    max_degree: 0,
-                },
-            )
-        });
-        let got = got.err().map(ising_generators::Code::value);
-        compare(case, "admission code", &got, &expected_code(case)?)?;
-        codes.push(got);
-    }
-    compare(&doc, "codes 9 present", &codes.contains(&Some(9)), &true)?;
-    compare(&doc, "code 12 present", &codes.contains(&Some(12)), &true)?;
-    compare(&doc, "an admitted request", &codes.contains(&None), &true)
-}
-
-#[test]
 fn a_side_16_request_has_no_window_on_the_live_topology() -> Result<(), String> {
     use ising_generators::descriptor::{admit, params_digest, AdvertisedLimits};
     use ising_generators::family::{admit_topology, BaseTopology};
@@ -5303,18 +4268,6 @@ fn a_side_16_request_has_no_window_on_the_live_topology() -> Result<(), String> 
     .err()
     .map(ising_generators::Code::value);
     compare(&doc, "admission code", &got, &Some(12))
-}
-
-#[test]
-fn a_changed_polariton_coupling_fails_the_recompute() -> Result<(), String> {
-    let doc = polariton_doc()?;
-    let pointer = "/cases/0/instances/0/h/0";
-    let was = doc
-        .pointer(pointer)
-        .and_then(Value::as_i64)
-        .ok_or("no field")?;
-    let broken = mutate(&doc, pointer, json!(was + 4));
-    expect_err(&check_polariton(&broken), "a changed field")
 }
 
 #[test]
@@ -5461,34 +4414,13 @@ fn a_changed_polariton_try_fails_the_replay() -> Result<(), String> {
     let changed = section(&broken, "polariton_recipes")?
         .first()
         .ok_or("no recipe")?;
-    expect_err(&check_polariton_recipe(changed), "a changed try")?;
+    expect_err(&check_polariton_recipe(changed, 0), "a changed try")?;
     let broken = mutate(&doc, "/polariton_recipes/0/salts/0/window/0", json!(1));
     let changed = section(&broken, "polariton_recipes")?
         .first()
         .ok_or("no recipe")?;
-    expect_err(&check_polariton_recipe(changed), "a changed window")?;
-    check_polariton_recipe(recipe)
-}
-
-#[test]
-fn a_changed_polariton_recipe_hash_fails_the_recompute() -> Result<(), String> {
-    let doc = polariton_doc()?;
-    let recipe = section(&doc, "polariton_recipes")?
-        .first()
-        .ok_or("no recipe")?;
-    let was = str_field(
-        recipe.pointer("/salts/0").ok_or("no salt")?,
-        "canonical_blake3",
-    )?;
-    let broken = mutate(
-        &doc,
-        "/polariton_recipes/0/salts/0/canonical_blake3",
-        json!(flip_last_hex_digit(was)),
-    );
-    let recipe = section(&broken, "polariton_recipes")?
-        .first()
-        .ok_or("no recipe")?;
-    expect_err(&check_polariton_recipe(recipe), "a changed recipe hash")
+    expect_err(&check_polariton_recipe(changed, 0), "a changed window")?;
+    check_polariton_recipe(recipe, 0)
 }
 
 // ---- topology files (vectors/topologies/) ----
@@ -5749,6 +4681,568 @@ fn topology_reference_pattern_is_enforced() -> Result<(), String> {
         "../topologies/t-sparse.json",
     ] {
         expect_err(&validate_def(&schema, "topology_ref", &json!(bad)), bad)?;
+    }
+    Ok(())
+}
+
+// ---- tables that cover every family ----
+
+type DocFn = fn() -> Result<Value, String>;
+
+type RecipeCheck = fn(&Value, usize) -> Result<(), String>;
+
+/// The documents that use the layered case format. Each row has the family name,
+/// the document, the size bounds of its cases, the pointer of one coefficient
+/// that the recompute depends on, and the amount that changes it.
+const FAMILY_CASE_DOCS: [(&str, DocFn, SizeBoundsOf, &str, i64); 7] = [
+    (
+        "layered",
+        layered_doc,
+        layered_size_bounds,
+        "/cases/0/instances/0/j/0",
+        1000,
+    ),
+    (
+        "ice-glass",
+        ice_glass_doc,
+        ice_glass_size_bounds,
+        "/cases/0/instances/0/j/0",
+        1000,
+    ),
+    (
+        "twisted",
+        twisted_doc,
+        ice_glass_size_bounds,
+        "/cases/0/instances/0/j/0",
+        1000,
+    ),
+    (
+        "charge",
+        charge_doc,
+        ice_glass_size_bounds,
+        "/cases/0/instances/0/j/0",
+        1000,
+    ),
+    (
+        "fields",
+        fields_doc,
+        ice_glass_size_bounds,
+        "/cases/0/instances/0/j/0",
+        1000,
+    ),
+    (
+        "routing",
+        routing_doc,
+        ice_glass_size_bounds,
+        "/cases/0/instances/0/j/0",
+        1000,
+    ),
+    (
+        "polariton",
+        polariton_doc,
+        polariton_size_bounds,
+        "/cases/0/instances/0/h/0",
+        4,
+    ),
+];
+
+/// Recompute the digests, nonces, and instance bytes of every case of a document
+/// that uses the layered case format, with Rust code that does not call the
+/// construction.
+fn check_family_cases(doc: &Value, bounds: SizeBoundsOf) -> Result<(), String> {
+    validate(&schema()?, doc)?;
+    check_names_unique(doc)?;
+    for case in section(doc, "cases")? {
+        check_layered_case(case, bounds)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn every_vectors_file_matches_the_schema() -> Result<(), String> {
+    let schema = schema()?;
+    // (file label, document, provenance, sections that must not be empty, sources must be empty)
+    let rows: [(&str, DocFn, &str, &[&str], bool); 10] = [
+        ("core", core, "specified", &[], false),
+        ("legacy", legacy_doc, "legacy-production", &[], false),
+        ("layered", layered_doc, "test-construction", &[], false),
+        ("registry", registry_doc, "specified", &[], true),
+        (
+            "ice-glass",
+            ice_glass_doc,
+            "specified",
+            &["structure", "live", "cases"],
+            false,
+        ),
+        (
+            "twisted",
+            twisted_doc,
+            "specified",
+            &["cases", "recipes", "obstructions", "admission"],
+            false,
+        ),
+        (
+            "charge",
+            charge_doc,
+            "specified",
+            &["cases", "energies", "recipe", "admission"],
+            false,
+        ),
+        (
+            "fields",
+            fields_doc,
+            "specified",
+            &["cases", "selection", "field_recipes", "admission"],
+            false,
+        ),
+        (
+            "routing",
+            routing_doc,
+            "specified",
+            &["cases", "terminals", "routing_recipes", "admission"],
+            false,
+        ),
+        (
+            "polariton",
+            polariton_doc,
+            "specified",
+            &["cases", "witnesses", "polariton_recipes", "admission"],
+            false,
+        ),
+    ];
+    for (label, doc_fn, provenance, sections, sources_empty) in rows {
+        let doc = labelled(label, doc_fn())?;
+        labelled(label, validate(&schema, &doc))?;
+        let found = doc.get("provenance").and_then(Value::as_str);
+        if found != Some(provenance) {
+            return Err(format!(
+                "{label}: provenance is {found:?}, expected {provenance}"
+            ));
+        }
+        if sources_empty && doc.get("sources") != Some(&json!([])) {
+            return Err(format!(
+                "{label}: sources must be empty: the registry is written by hand"
+            ));
+        }
+        labelled(label, check_names_unique(&doc))?;
+        for name in sections {
+            labelled(label, section(&doc, name).map(|_| ()))?;
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn every_family_case_recomputes() -> Result<(), String> {
+    for (label, doc_fn, bounds, _, _) in FAMILY_CASE_DOCS {
+        let doc = labelled(label, doc_fn())?;
+        labelled(label, check_family_cases(&doc, bounds))?;
+    }
+    Ok(())
+}
+
+#[test]
+fn every_family_case_regenerates_in_rust() -> Result<(), String> {
+    for (label, doc_fn, _, _, _) in FAMILY_CASE_DOCS {
+        let doc = labelled(label, doc_fn())?;
+        for case in labelled(label, section(&doc, "cases"))? {
+            labelled(label, check_layered_against_rust(case))?;
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn a_changed_coefficient_fails_every_family_recompute() -> Result<(), String> {
+    for (label, doc_fn, bounds, pointer, delta) in FAMILY_CASE_DOCS {
+        let doc = labelled(label, doc_fn())?;
+        let was = doc
+            .pointer(pointer)
+            .and_then(Value::as_i64)
+            .ok_or_else(|| format!("{label}: no coefficient at {pointer}"))?;
+        let broken = mutate(&doc, pointer, json!(was + delta));
+        labelled(
+            label,
+            expect_err(
+                &check_family_cases(&broken, bounds),
+                "a changed coefficient",
+            ),
+        )?;
+    }
+    Ok(())
+}
+
+/// The parameter constants that the vectors files repeat.
+mod params_constants {
+    use super::DocFn;
+    use super::{charge_doc, fields_doc, ice_glass_doc, polariton_doc, routing_doc, twisted_doc};
+    use quip_solver_conformance::families::charge::{
+        P_CHARGED_A251, P_CHARGED_ADJ_A100_B45_C256, P_CHARGED_Z22_A250_B31_C128,
+    };
+    use quip_solver_conformance::families::fields::{
+        P_FIELDS_ADJ_G45_F1000_D16, P_FIELDS_F1001, P_FIELDS_Z22_G125_F500_D16,
+    };
+    use quip_solver_conformance::families::ice::{P_ICE_ADJ_125, P_ICE_Z12_200};
+    use quip_solver_conformance::families::polariton::{
+        P_POLARITON_SIDE1, P_POLARITON_Z24_L2_P0, P_POLARITON_Z34_L3_P2,
+    };
+    use quip_solver_conformance::families::routing::{
+        P_ROUTING_D3, P_ROUTING_Z24_D4, P_ROUTING_Z34_D6,
+    };
+    use quip_solver_conformance::families::twisted::{
+        P_TWISTED_ADJ_W45_P6, P_TWISTED_W1000, P_TWISTED_Z22_W62_P8,
+    };
+
+    /// (section, case name, constant)
+    type ParamsRow<'a> = (&'a str, &'a str, &'a [u8]);
+
+    /// (family name, document, constants, number of cases)
+    pub(super) const ROWS: [(&str, DocFn, &[ParamsRow<'_>], usize); 6] = [
+        (
+            "ice-glass",
+            ice_glass_doc,
+            &[
+                ("cases", "ice-glass-adjacency-z12", &P_ICE_ADJ_125),
+                ("cases", "ice-glass-zephyr-z12", &P_ICE_Z12_200),
+            ],
+            4,
+        ),
+        (
+            "twisted",
+            twisted_doc,
+            &[
+                ("cases", "twisted-dimer-zephyr-z22", &P_TWISTED_Z22_W62_P8),
+                (
+                    "cases",
+                    "twisted-dimer-adjacency-z22-sparse",
+                    &P_TWISTED_ADJ_W45_P6,
+                ),
+                (
+                    "admission",
+                    "weak-milli-1000-is-out-of-bounds",
+                    &P_TWISTED_W1000,
+                ),
+            ],
+            5,
+        ),
+        (
+            "charge",
+            charge_doc,
+            &[
+                (
+                    "cases",
+                    "charged-ice-zephyr-z22",
+                    &P_CHARGED_Z22_A250_B31_C128,
+                ),
+                (
+                    "cases",
+                    "charged-ice-adjacency-z12",
+                    &P_CHARGED_ADJ_A100_B45_C256,
+                ),
+                ("admission", "scale-251-is-out-of-bounds", &P_CHARGED_A251),
+            ],
+            4,
+        ),
+        (
+            "fields",
+            fields_doc,
+            &[
+                (
+                    "cases",
+                    "ice-fields-zephyr-z22",
+                    &P_FIELDS_Z22_G125_F500_D16,
+                ),
+                (
+                    "cases",
+                    "ice-fields-adjacency-z22",
+                    &P_FIELDS_ADJ_G45_F1000_D16,
+                ),
+                ("admission", "field-1001-is-out-of-bounds", &P_FIELDS_F1001),
+            ],
+            6,
+        ),
+        (
+            "routing",
+            routing_doc,
+            &[
+                ("cases", "routing-small", &P_ROUTING_Z24_D4),
+                ("cases", "routing-retry", &P_ROUTING_Z34_D6),
+                ("admission", "divisor-3-is-out-of-bounds", &P_ROUTING_D3),
+            ],
+            5,
+        ),
+        (
+            "polariton",
+            polariton_doc,
+            &[
+                ("cases", "polariton-l2", &P_POLARITON_Z24_L2_P0),
+                ("cases", "polariton-l3", &P_POLARITON_Z34_L3_P2),
+                ("admission", "side-1-is-out-of-bounds", &P_POLARITON_SIDE1),
+            ],
+            5,
+        ),
+    ];
+}
+
+#[test]
+fn params_constants_match_the_vectors() -> Result<(), String> {
+    for (label, doc_fn, params, count) in params_constants::ROWS {
+        let doc = labelled(label, doc_fn())?;
+        for (section_name, name, want) in params {
+            let case = labelled(label, find_named(&doc, section_name, name))?;
+            let got = labelled(label, str_field(case, "params_hex"))?.to_owned();
+            labelled(
+                label,
+                compare(case, "params_hex", &got, &codec::hex_encode(want)),
+            )?;
+        }
+        let cases = labelled(label, section(&doc, "cases"))?;
+        labelled(label, compare(&doc, "case count", &cases.len(), &count))?;
+    }
+    Ok(())
+}
+
+/// Compares one recipe of a vectors file with its Rust constant.
+fn check_recipe_constant(
+    recipe: &Value,
+    want: &ising_generators::ice::Recipe,
+) -> Result<(), String> {
+    use ising_generators::descriptor::params_digest;
+    compare(recipe, "alias", &str_field(recipe, "alias")?, &want.alias)?;
+    compare(recipe, "cell", &str_field(recipe, "cell")?, &want.cell)?;
+    compare(
+        recipe,
+        "params_hex",
+        &str_field(recipe, "params_hex")?.to_owned(),
+        &codec::hex_encode(want.params),
+    )?;
+    compare(
+        recipe,
+        "params_digest",
+        &str_field(recipe, "params_digest")?.to_owned(),
+        &codec::hex_encode(&params_digest(want.params)),
+    )
+}
+
+#[test]
+fn recipes_match_the_rust_constants() -> Result<(), String> {
+    use ising_generators::ice::{Recipe, ICE_CHARGE_RECIPE, ICE_FIELDS_RECIPES, RECIPES};
+    use ising_generators::polariton::POLARITON_RECIPES;
+    use ising_generators::routing::ROUTING_RECIPES;
+    let charge = [ICE_CHARGE_RECIPE];
+    // (family name, document, recipe section, constants)
+    let rows: [(&str, DocFn, &str, &[Recipe]); 5] = [
+        ("twisted", twisted_doc, "recipes", &RECIPES),
+        ("charge", charge_doc, "recipe", &charge),
+        ("fields", fields_doc, "field_recipes", &ICE_FIELDS_RECIPES),
+        ("routing", routing_doc, "routing_recipes", &ROUTING_RECIPES),
+        (
+            "polariton",
+            polariton_doc,
+            "polariton_recipes",
+            &POLARITON_RECIPES,
+        ),
+    ];
+    for (label, doc_fn, section_name, wants) in rows {
+        let doc = labelled(label, doc_fn())?;
+        let recipes = labelled(label, section(&doc, section_name))?;
+        labelled(
+            label,
+            compare(&doc, "recipe count", &recipes.len(), &wants.len()),
+        )?;
+        for (recipe, want) in recipes.iter().zip(wants) {
+            labelled(label, check_recipe_constant(recipe, want))?;
+        }
+    }
+    Ok(())
+}
+
+/// The code that the Rust admission gives for one admission case, or `None` when
+/// the request is admitted.
+fn admission_code_of(
+    case: &Value,
+    contract: &ising_generators::descriptor::Contract,
+) -> Result<Option<u8>, String> {
+    use ising_generators::descriptor::{admit, params_digest, AdvertisedLimits};
+    use ising_generators::family::{admit_topology, BaseTopology};
+    let params = codec::hex_decode(str_field(case, "params_hex")?)?;
+    let (nodes, edges) = topology_inputs(object_field(case, "topology")?)?;
+    let topology = BaseTopology::new(nodes, &edges).map_err(|e| format!("{e:?}"))?;
+    let got = admit(
+        std::slice::from_ref(contract),
+        str_field(case, "family_id")?.as_bytes(),
+        u32_field(case, "revision")?,
+        &params,
+        &params_digest(&params),
+    )
+    .and_then(|admitted| {
+        admit_topology(
+            &admitted,
+            &topology,
+            topology.order_digest(),
+            &AdvertisedLimits {
+                max_nodes: 0,
+                max_edges: 0,
+                max_degree: 0,
+            },
+        )
+    });
+    Ok(got.err().map(ising_generators::Code::value))
+}
+
+#[test]
+fn admission_codes_match_the_rust_admission() -> Result<(), String> {
+    use ising_generators::descriptor::Contract;
+    use ising_generators::ice::{CHARGED_ICE_V1, ICE_FIELDS_V1, TWISTED_DIMER_V1};
+    use ising_generators::polariton::POLARITON_V1;
+    use ising_generators::routing::ROUTING_V1;
+    // (family name, document, contract, codes that must appear, the one code every
+    // case must have, the number of cases)
+    type AdmissionRow<'a> = (
+        &'a str,
+        DocFn,
+        Contract,
+        &'a [Option<u8>],
+        Option<u8>,
+        Option<usize>,
+    );
+    let rows: [AdmissionRow<'_>; 5] = [
+        ("twisted", twisted_doc, TWISTED_DIMER_V1, &[], None, None),
+        ("charge", charge_doc, CHARGED_ICE_V1, &[], Some(9), Some(2)),
+        (
+            "fields",
+            fields_doc,
+            ICE_FIELDS_V1,
+            &[Some(9), Some(12), Some(13), None],
+            None,
+            None,
+        ),
+        (
+            "routing",
+            routing_doc,
+            ROUTING_V1,
+            &[Some(9), Some(12), None],
+            None,
+            None,
+        ),
+        (
+            "polariton",
+            polariton_doc,
+            POLARITON_V1,
+            &[Some(9), Some(12), None],
+            None,
+            None,
+        ),
+    ];
+    for (label, doc_fn, contract, required, every_code, count) in &rows {
+        let doc = labelled(label, doc_fn())?;
+        let cases = labelled(label, section(&doc, "admission"))?;
+        let mut codes = Vec::new();
+        for case in cases {
+            let got = labelled(label, admission_code_of(case, contract))?;
+            let want = labelled(label, expected_code(case))?;
+            labelled(label, compare(case, "admission code", &got, &want))?;
+            if let Some(every) = every_code {
+                labelled(label, compare(case, "every code", &got, &Some(*every)))?;
+            }
+            codes.push(got);
+        }
+        for code in *required {
+            if !codes.contains(code) {
+                return Err(format!(
+                    "{label}: code {code:?} is missing from the admission cases"
+                ));
+            }
+        }
+        if let Some(count) = count {
+            labelled(label, compare(&doc, "admission count", &cases.len(), count))?;
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn a_changed_recipe_hash_fails_every_recipe_check() -> Result<(), String> {
+    // (family name, document, recipe section, recipe check)
+    let rows: [(&str, DocFn, &str, RecipeCheck); 5] = [
+        ("twisted", twisted_doc, "recipes", |recipe, _| {
+            check_twisted_recipe(recipe)
+        }),
+        ("charge", charge_doc, "recipe", check_charge_recipe),
+        ("fields", fields_doc, "field_recipes", check_fields_recipe),
+        (
+            "routing",
+            routing_doc,
+            "routing_recipes",
+            check_routing_recipe,
+        ),
+        (
+            "polariton",
+            polariton_doc,
+            "polariton_recipes",
+            check_polariton_recipe,
+        ),
+    ];
+    for (label, doc_fn, section_name, check) in rows {
+        let doc = labelled(label, doc_fn())?;
+        let pointer = format!("/{section_name}/0/salts/0/canonical_blake3");
+        let was = doc
+            .pointer(&pointer)
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("{label}: no canonical_blake3 at {pointer}"))?;
+        let broken = mutate(&doc, &pointer, json!(flip_last_hex_digit(was)));
+        let recipe = labelled(label, section(&broken, section_name))?
+            .first()
+            .ok_or_else(|| format!("{label}: no recipe"))?;
+        labelled(
+            label,
+            expect_err(&check(recipe, 0), "a changed recipe hash"),
+        )?;
+    }
+    Ok(())
+}
+
+#[test]
+fn shortfall_cases_skip_with_code_14() -> Result<(), String> {
+    // (family name, document, case, whether no salt builds an instance, if the
+    // original test checked it)
+    let rows: [(&str, DocFn, &str, Option<bool>); 4] = [
+        ("twisted", twisted_doc, "twisted-dimer-shortfall", None),
+        ("fields", fields_doc, "ice-fields-shortfall", Some(true)),
+        (
+            "fields-mixed",
+            fields_doc,
+            "ice-fields-shortfall-mixed",
+            Some(false),
+        ),
+        ("routing", routing_doc, "routing-no-instance", Some(true)),
+    ];
+    for (label, doc_fn, name, every_slot) in rows {
+        let doc = labelled(label, doc_fn())?;
+        let case = labelled(label, find_named(&doc, "cases", name))?;
+        let skipped = labelled(label, entries_of(case, "skipped"))?;
+        labelled(
+            label,
+            compare(case, "a skipped salt exists", &skipped.is_empty(), &false),
+        )?;
+        if let Some(every_slot) = every_slot {
+            let built = labelled(label, entries_of(case, "instances"))?;
+            labelled(
+                label,
+                compare(case, "no built salt", &built.is_empty(), &every_slot),
+            )?;
+        }
+        for entry in skipped {
+            labelled(
+                label,
+                compare(
+                    case,
+                    "skip_code",
+                    &entry.get("skip_code"),
+                    &Some(&json!(14)),
+                ),
+            )?;
+        }
     }
     Ok(())
 }

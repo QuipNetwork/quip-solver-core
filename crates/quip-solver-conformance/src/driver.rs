@@ -1963,14 +1963,6 @@ mod tests {
         r
     }
 
-    #[test]
-    fn the_reference_report_is_conformant() {
-        // Guards the negative tests below: each of them mutates exactly one
-        // field, so this must pass or they prove nothing.
-        let r = conformant_report();
-        assert!(r.is_conformant(), "{r:?}");
-    }
-
     fn lease_report() -> DriverReport {
         let mut r = conformant_report();
         let caps = r.hello.as_mut().unwrap().capabilities.as_mut().unwrap();
@@ -1980,60 +1972,90 @@ mod tests {
     }
 
     #[test]
-    fn advertised_lease_requires_an_outcome() {
-        let r = lease_report();
-        assert!(!r.is_conformant());
-    }
-
-    #[test]
-    fn lease_requires_four_verified_results_done_and_refund() {
-        let mut r = lease_report();
-        r.lease = Some(LeaseOutcome {
+    fn lease_grading_follows_the_advertisement() {
+        let full = LeaseOutcome {
             results: 4,
             results_verified: 4,
             lease_done: Some((4, -1000)),
             credit_refunded: true,
-        });
-        assert!(r.is_conformant());
-        for bad in [
-            LeaseOutcome {
-                lease_done: Some((3, -1000)),
-                ..r.lease.clone().unwrap()
-            },
-            LeaseOutcome {
-                results: 3,
-                ..r.lease.clone().unwrap()
-            },
-            LeaseOutcome {
-                results_verified: 3,
-                ..r.lease.clone().unwrap()
-            },
-            LeaseOutcome {
-                lease_done: None,
-                ..r.lease.clone().unwrap()
-            },
-            LeaseOutcome {
-                credit_refunded: false,
-                ..r.lease.clone().unwrap()
-            },
-        ] {
-            let mut failed = r.clone();
-            failed.lease = Some(bad);
-            assert!(!failed.is_conformant());
+        };
+        // (label, whether the report advertises the lease generator, lease outcome,
+        // whether the report is conformant)
+        let rows = [
+            ("an advertised lease without an outcome", true, None, false),
+            ("a complete lease", true, Some(full.clone()), true),
+            (
+                "a lease done for three salts",
+                true,
+                Some(LeaseOutcome {
+                    lease_done: Some((3, -1000)),
+                    ..full.clone()
+                }),
+                false,
+            ),
+            (
+                "three results",
+                true,
+                Some(LeaseOutcome {
+                    results: 3,
+                    ..full.clone()
+                }),
+                false,
+            ),
+            (
+                "three verified results",
+                true,
+                Some(LeaseOutcome {
+                    results_verified: 3,
+                    ..full.clone()
+                }),
+                false,
+            ),
+            (
+                "no lease done",
+                true,
+                Some(LeaseOutcome {
+                    lease_done: None,
+                    ..full.clone()
+                }),
+                false,
+            ),
+            (
+                "no refund",
+                true,
+                Some(LeaseOutcome {
+                    credit_refunded: false,
+                    ..full
+                }),
+                false,
+            ),
+            (
+                "an unadvertised lease without an outcome",
+                false,
+                None,
+                true,
+            ),
+            (
+                "an unadvertised lease with an empty outcome",
+                false,
+                Some(LeaseOutcome {
+                    results: 0,
+                    results_verified: 0,
+                    lease_done: None,
+                    credit_refunded: false,
+                }),
+                true,
+            ),
+        ];
+        for (label, advertised, lease, conformant) in rows {
+            let mut r = if advertised {
+                lease_report()
+            } else {
+                conformant_report()
+            };
+            r.lease = lease;
+            assert_eq!(r.is_conformant(), conformant, "{label}: {r:?}");
         }
-    }
-
-    #[test]
-    fn unadvertised_lease_is_not_graded() {
-        let mut r = conformant_report();
-        assert!(r.is_conformant());
-        r.lease = Some(LeaseOutcome {
-            results: 0,
-            results_verified: 0,
-            lease_done: None,
-            credit_refunded: false,
-        });
-        assert!(r.is_conformant());
     }
 
     fn lease_result(index: u64) -> quip_proto::v1::Result {
@@ -2096,58 +2118,170 @@ mod tests {
         assert!(r.is_conformant());
     }
 
-    #[test]
-    fn lease_fold_rejects_duplicate_salts_and_bad_proofs() {
-        let mut o = SessionOutcome {
-            lease: Some(LeaseOutcome::default()),
-            ..Default::default()
-        };
-        fold(&mut o, miner_msg::Msg::Result(lease_result(0)));
-        fold(&mut o, miner_msg::Msg::Result(lease_result(0)));
+    /// The folds that route lease results. See `fold_routes_lease_traffic`.
+    fn fold_result_rows() -> [FoldRow; 4] {
+        let result_at = |index| miner_msg::Msg::Result(lease_result(index));
+        let mut wrong_job = lease_result(0);
+        wrong_job.job_id = b"wrong-lease".to_vec();
         let mut bad_nonce = lease_result(1);
         bad_nonce.nonce = vec![0; 32];
-        fold(&mut o, miner_msg::Msg::Result(bad_nonce));
         let mut bad_energy = lease_result(2);
-        bad_energy.solutions.first_mut().unwrap().energy_milli += 1;
-        fold(&mut o, miner_msg::Msg::Result(bad_energy));
-        let lease = o.lease.unwrap();
-        assert_eq!(lease.results, 4);
-        assert_eq!(lease.results_verified, 1);
+        if let Some(solution) = bad_energy.solutions.first_mut() {
+            solution.energy_milli += 1;
+        }
+        [
+            (
+                "duplicate salts and bad proofs",
+                Some(LeaseOutcome::default()),
+                vec![
+                    result_at(0),
+                    result_at(0),
+                    miner_msg::Msg::Result(bad_nonce),
+                    miner_msg::Msg::Result(bad_energy),
+                ],
+                Some(4),
+                Some(1),
+                None,
+                None,
+                false,
+            ),
+            (
+                "a result after completion",
+                Some(done_lease()),
+                vec![result_at(0)],
+                Some(1),
+                Some(0),
+                None,
+                None,
+                true,
+            ),
+            (
+                "a wrong job id during an active lease",
+                Some(LeaseOutcome::default()),
+                vec![miner_msg::Msg::Result(wrong_job)],
+                Some(0),
+                None,
+                Some(1),
+                None,
+                true,
+            ),
+            (
+                "an unsolicited lease result",
+                None,
+                vec![result_at(0)],
+                None,
+                None,
+                Some(1),
+                None,
+                true,
+            ),
+        ]
+    }
+
+    /// A lease that has its `LeaseDone` and no refund yet.
+    fn done_lease() -> LeaseOutcome {
+        LeaseOutcome {
+            lease_done: Some((4, -1000)),
+            ..Default::default()
+        }
+    }
+
+    /// The folds of one, two, and three refunds after the `LeaseDone`. Only the first
+    /// refund counts.
+    fn fold_refund_rows() -> [FoldRow; 3] {
+        let request = || miner_msg::Msg::JobRequest(quip_proto::v1::JobRequest { credits: 1 });
+        [
+            (
+                "the first refund",
+                Some(done_lease()),
+                vec![request()],
+                None,
+                None,
+                None,
+                Some(true),
+                false,
+            ),
+            (
+                "a second refund",
+                Some(done_lease()),
+                vec![request(), request()],
+                None,
+                None,
+                None,
+                Some(false),
+                false,
+            ),
+            (
+                "a third refund",
+                Some(done_lease()),
+                vec![request(), request(), request()],
+                None,
+                None,
+                None,
+                Some(false),
+                false,
+            ),
+        ]
     }
 
     #[test]
-    fn lease_fold_rejects_results_after_completion() {
-        let mut o = SessionOutcome {
-            lease: Some(LeaseOutcome {
-                lease_done: Some((4, -1000)),
+    fn fold_routes_lease_traffic() {
+        // Each row has the label, the lease at the start, the messages, the lease
+        // results, the verified lease results, the plain results, whether the credit
+        // is refunded, and whether the report that holds the outcome fails. `None`
+        // means the original test did not check it.
+        let rows = fold_result_rows().into_iter().chain(fold_refund_rows());
+        for (label, lease, messages, results, verified, plain, refunded, report_fails) in rows {
+            let had_lease = lease.is_some();
+            let mut o = SessionOutcome {
+                lease,
                 ..Default::default()
-            }),
-            ..Default::default()
-        };
-        fold(&mut o, miner_msg::Msg::Result(lease_result(0)));
-        let lease = o.lease.unwrap();
-        assert_eq!(lease.results, 1);
-        assert_eq!(lease.results_verified, 0);
-        let mut report = lease_report();
-        report.lease = Some(lease);
-        assert!(!report.is_conformant());
+            };
+            for message in messages {
+                fold(&mut o, message);
+            }
+            let outcome = o.lease.clone().unwrap_or_default();
+            if let Some(results) = results {
+                assert_eq!(outcome.results, results, "{label}: lease results");
+            }
+            if let Some(verified) = verified {
+                assert_eq!(
+                    outcome.results_verified, verified,
+                    "{label}: verified results"
+                );
+            }
+            if let Some(plain) = plain {
+                assert_eq!(o.results.len(), plain, "{label}: plain results");
+            }
+            if let Some(refunded) = refunded {
+                assert_eq!(
+                    outcome.credit_refunded, refunded,
+                    "{label}: credit refunded"
+                );
+            }
+            if report_fails {
+                let mut r = if had_lease {
+                    lease_report()
+                } else {
+                    conformant_report()
+                };
+                r.lease = o.lease;
+                r.results.extend(o.results);
+                assert!(!r.is_conformant(), "{label}: {r:?}");
+            }
+        }
     }
 
-    #[test]
-    fn lease_fold_rejects_wrong_job_id_during_active_lease() {
-        let mut o = SessionOutcome {
-            lease: Some(LeaseOutcome::default()),
-            ..Default::default()
-        };
-        let mut result = lease_result(0);
-        result.job_id = b"wrong-lease".to_vec();
-        fold(&mut o, miner_msg::Msg::Result(result));
-        assert_eq!(o.lease.as_ref().unwrap().results, 0);
-        assert_eq!(o.results.len(), 1);
-        let mut report = lease_report();
-        report.results.extend(o.results);
-        assert!(!report.is_conformant());
-    }
+    type FoldRow = (
+        &'static str,
+        Option<LeaseOutcome>,
+        Vec<miner_msg::Msg>,
+        Option<u32>,
+        Option<u32>,
+        Option<usize>,
+        Option<bool>,
+        bool,
+    );
 
     struct LeaseTrafficCoordinator(Mutex<Option<oneshot::Sender<SessionOutcome>>>);
     #[tonic::async_trait]
@@ -2350,34 +2484,6 @@ mod tests {
     }
 
     #[test]
-    fn unsolicited_lease_results_remain_unexpected_plain_results() {
-        let mut o = SessionOutcome::default();
-        fold(&mut o, miner_msg::Msg::Result(lease_result(0)));
-        assert_eq!(o.results.len(), 1);
-        let mut r = conformant_report();
-        r.results.extend(o.results);
-        assert!(!r.is_conformant());
-    }
-
-    #[test]
-    fn extra_lease_refunds_stay_invalid() {
-        let mut o = SessionOutcome {
-            lease: Some(LeaseOutcome {
-                lease_done: Some((4, -1000)),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-        for count in 1..=3 {
-            fold(
-                &mut o,
-                miner_msg::Msg::JobRequest(quip_proto::v1::JobRequest { credits: 1 }),
-            );
-            assert_eq!(o.lease.as_ref().unwrap().credit_refunded, count == 1);
-        }
-    }
-
-    #[test]
     fn under_asserted_report_is_not_conformant() {
         // Regression: handshake+exit alone used to green-light non-conformant miners.
         let mut r = bare_report();
@@ -2457,38 +2563,94 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_required_result_fails() {
-        let mut r = conformant_report();
-        r.results.retain(|x| x.job_id != b"job-sparse");
-        assert!(
-            !r.is_conformant(),
-            "the sparse-topology result is required: {r:?}"
-        );
-    }
-
-    #[test]
-    fn an_unexpected_result_fails() {
-        // A Result for the stale post-cancel job is exactly what the
-        // cancellation phase forbids.
-        let mut r = conformant_report();
-        r.results.push(result(b"job-stale", 500, Some(500)));
-        assert!(!r.results_conformant(), "job-stale must produce no Result");
-        assert!(!r.is_conformant(), "{r:?}");
-    }
-
-    #[test]
-    fn a_misreported_energy_fails() {
-        let mut r = conformant_report();
-        #[expect(
-            clippy::indexing_slicing,
-            reason = "conformant_report always has REQUIRED_RESULTS.len() results"
-        )]
-        {
+    fn each_single_field_defect_fails_conformance() {
+        type Damage = fn(&mut DriverReport);
+        type Verdict = fn(&DriverReport) -> bool;
+        // (label, defect, a verdict that must fail too, text the report must hold)
+        let rows: [(&str, Damage, Option<Verdict>, Option<&str>); 9] = [
+            (
+                "a missing required result",
+                |r| {
+                    r.results.retain(|x| x.job_id != b"job-sparse");
+                },
+                None,
+                None,
+            ),
+            // A Result for the stale post-cancel job is exactly what the
+            // cancellation phase forbids.
+            (
+                "an unexpected result",
+                |r| {
+                    r.results.push(result(b"job-stale", 500, Some(500)));
+                },
+                Some(DriverReport::results_conformant),
+                None,
+            ),
             // Same spins, a different claimed energy: the whole point of the gate.
-            r.results[0].solution_energies_milli = vec![-9_000];
+            (
+                "a misreported energy",
+                |r| {
+                    if let Some(first) = r.results.first_mut() {
+                        first.solution_energies_milli = vec![-9_000];
+                    }
+                },
+                Some(DriverReport::energies_rescore_clean),
+                None,
+            ),
+            // The SDK default of 64 sweeps, not the configured 512.
+            (
+                "ignoring backend_toml",
+                |r| {
+                    if let Some(first) = r.results.first_mut() {
+                        first.meta_sweeps = 64;
+                    }
+                },
+                Some(DriverReport::sweeps_honoured),
+                None,
+            ),
+            ("an unanswered ping", |r| r.ping_acked = false, None, None),
+            (
+                "an open terminal",
+                |r| r.terminal = Terminal::Open,
+                None,
+                None,
+            ),
+            (
+                "an empty-message terminal",
+                |r| {
+                    r.terminal = Terminal::EmptyMessage;
+                },
+                None,
+                None,
+            ),
+            (
+                "a transport terminal",
+                |r| {
+                    r.terminal = Terminal::Transport("Cancelled: peer went away".to_owned());
+                },
+                None,
+                None,
+            ),
+            (
+                "a timed-out phase",
+                |r| {
+                    r.timed_out_phases = vec!["ping->status".to_owned()];
+                },
+                None,
+                Some("ping->status"),
+            ),
+        ];
+        for (label, defect, verdict, text) in rows {
+            let mut r = conformant_report();
+            defect(&mut r);
+            assert!(!r.is_conformant(), "{label}: {r:?}");
+            if let Some(verdict) = verdict {
+                assert!(!verdict(&r), "{label}: the sub-verdict still passes");
+            }
+            if let Some(text) = text {
+                assert!(format!("{r:?}").contains(text), "{label}: not named");
+            }
         }
-        assert!(!r.energies_rescore_clean());
-        assert!(!r.is_conformant(), "{r:?}");
     }
 
     #[test]
@@ -2522,27 +2684,10 @@ mod tests {
     }
 
     #[test]
-    fn ignoring_backend_toml_fails() {
-        let mut r = conformant_report();
-        #[expect(
-            clippy::indexing_slicing,
-            reason = "conformant_report always has REQUIRED_RESULTS.len() results"
-        )]
-        {
-            r.results[0].meta_sweeps = 64; // the SDK default, not the configured 512
-        }
-        assert!(
-            !r.sweeps_honoured(),
-            "a solver that ignores Configure.backend_toml must fail"
-        );
-        assert!(!r.is_conformant(), "{r:?}");
-    }
-
-    #[test]
-    fn a_gibbs_solver_reporting_the_doubled_budget_is_conformant() {
-        // SPEC.md: the pin is a budget, and a gibbs solver runs — and reports
-        // — twice it. The driver must expect the doubled echo rather than
-        // fail the solver for following the spec.
+    fn gibbs_sweep_echo_must_be_doubled() {
+        // SPEC.md: the pin is a budget, and a gibbs solver runs, and reports,
+        // twice it. The driver must expect the doubled echo rather than fail the
+        // solver for following the spec.
         let mut r = conformant_report();
         if let Some(h) = r.hello.as_mut() {
             h.capabilities.as_mut().unwrap().algorithm = quip_proto::v1::Algorithm::Gibbs as i32;
@@ -2550,83 +2695,112 @@ mod tests {
         if let Some(c) = r.capabilities_received.as_mut() {
             c.algorithm = quip_proto::v1::Algorithm::Gibbs as i32;
         }
+        // The un-doubled echo means the solver skipped its own 2x rule.
+        assert!(!r.sweeps_honoured(), "the raw budget: {r:?}");
         for result in &mut r.results {
             result.meta_sweeps = CONFIGURED_SWEEPS * GIBBS_SWEEP_MULTIPLIER;
         }
-        assert!(r.is_conformant(), "{r:?}");
+        assert!(r.is_conformant(), "the doubled budget: {r:?}");
     }
 
     #[test]
-    fn a_gibbs_solver_echoing_the_raw_budget_fails() {
-        // The un-doubled echo means the solver skipped its own 2x rule.
-        let mut r = conformant_report();
-        if let Some(h) = r.hello.as_mut() {
-            h.capabilities.as_mut().unwrap().algorithm = quip_proto::v1::Algorithm::Gibbs as i32;
-        }
-        if let Some(c) = r.capabilities_received.as_mut() {
-            c.algorithm = quip_proto::v1::Algorithm::Gibbs as i32;
-        }
-        assert!(!r.sweeps_honoured(), "{r:?}");
-    }
-
-    #[test]
-    fn capabilities_must_agree_on_family_fields() {
-        let list = || {
+    fn capabilities_conformance_follows_the_mutations() {
+        type Edit = fn(&mut DriverReport);
+        fn list() -> Vec<FamilySupport> {
             vec![FamilySupport {
                 family_id: "quip/x".into(),
                 revisions: vec![1],
                 params_digests: vec![],
             }]
-        };
-        let mutations: [fn(&mut Capabilities, Vec<FamilySupport>); 3] = [
-            |c, _| c.solver_id = "abc".into(),
-            |c, l| c.generated_families = l,
-            |c, l| c.accepted_families = l,
-        ];
-        for mutate in mutations {
-            let mut differs = conformant_report();
-            if let Some(c) = differs.capabilities_received.as_mut() {
-                mutate(c, list());
-            }
-            assert!(!differs.capabilities_conformant(), "{differs:?}");
-
-            let mut agrees = conformant_report();
-            if let Some(c) = agrees.capabilities_received.as_mut() {
-                mutate(c, list());
-            }
-            if let Some(c) = agrees.hello.as_mut().and_then(|h| h.capabilities.as_mut()) {
-                mutate(c, list());
-            }
-            assert!(agrees.capabilities_conformant(), "{agrees:?}");
         }
-    }
-
-    #[test]
-    fn capabilities_must_match_the_hello_identity() {
-        let mut r = conformant_report();
-        r.capabilities_received = Some(caps("cuda"));
-        assert!(
-            !r.capabilities_conformant(),
-            "Capabilities.backend must agree with Hello.backend"
-        );
-
-        let mut missing = conformant_report();
-        missing.capabilities_received = None;
-        assert!(
-            !missing.capabilities_conformant(),
-            "GetCapabilities must be answered"
-        );
-
-        let mut no_hello = conformant_report();
-        no_hello.hello = None;
-        assert!(!no_hello.capabilities_conformant());
-    }
-
-    #[test]
-    fn an_unanswered_ping_fails() {
-        let mut r = conformant_report();
-        r.ping_acked = false;
-        assert!(!r.is_conformant(), "{r:?}");
+        // (label, edit of the conformant report, whether the capabilities are conformant)
+        let rows: [(&str, Edit, bool); 9] = [
+            (
+                "a solver id that differs",
+                |r| {
+                    if let Some(c) = r.capabilities_received.as_mut() {
+                        c.solver_id = "abc".into();
+                    }
+                },
+                false,
+            ),
+            (
+                "a solver id that agrees",
+                |r| {
+                    if let Some(c) = r.capabilities_received.as_mut() {
+                        c.solver_id = "abc".into();
+                    }
+                    if let Some(c) = r.hello.as_mut().and_then(|h| h.capabilities.as_mut()) {
+                        c.solver_id = "abc".into();
+                    }
+                },
+                true,
+            ),
+            (
+                "generated families that differ",
+                |r| {
+                    if let Some(c) = r.capabilities_received.as_mut() {
+                        c.generated_families = list();
+                    }
+                },
+                false,
+            ),
+            (
+                "generated families that agree",
+                |r| {
+                    if let Some(c) = r.capabilities_received.as_mut() {
+                        c.generated_families = list();
+                    }
+                    if let Some(c) = r.hello.as_mut().and_then(|h| h.capabilities.as_mut()) {
+                        c.generated_families = list();
+                    }
+                },
+                true,
+            ),
+            (
+                "accepted families that differ",
+                |r| {
+                    if let Some(c) = r.capabilities_received.as_mut() {
+                        c.accepted_families = list();
+                    }
+                },
+                false,
+            ),
+            (
+                "accepted families that agree",
+                |r| {
+                    if let Some(c) = r.capabilities_received.as_mut() {
+                        c.accepted_families = list();
+                    }
+                    if let Some(c) = r.hello.as_mut().and_then(|h| h.capabilities.as_mut()) {
+                        c.accepted_families = list();
+                    }
+                },
+                true,
+            ),
+            // Capabilities.backend must agree with Hello.backend.
+            (
+                "a backend that differs from the Hello",
+                |r| {
+                    r.capabilities_received = Some(caps("cuda"));
+                },
+                false,
+            ),
+            // GetCapabilities must be answered.
+            (
+                "no capabilities answer",
+                |r| {
+                    r.capabilities_received = None;
+                },
+                false,
+            ),
+            ("no Hello", |r| r.hello = None, false),
+        ];
+        for (label, edit, conformant) in rows {
+            let mut r = conformant_report();
+            edit(&mut r);
+            assert_eq!(r.capabilities_conformant(), conformant, "{label}: {r:?}");
+        }
     }
 
     #[test]
@@ -2668,24 +2842,72 @@ mod tests {
     }
 
     #[test]
-    fn the_terminal_condition_is_graded_and_distinguishable() {
-        for bad in [
-            Terminal::Open,
-            Terminal::EmptyMessage,
-            Terminal::Transport("Cancelled: peer went away".to_owned()),
-        ] {
-            let mut r = conformant_report();
-            r.terminal = bad.clone();
-            assert!(!r.is_conformant(), "terminal {bad:?} must fail");
+    fn close_verdicts_follow_the_exit_code() {
+        // The whole value of the pair is that the miner tells the two close points
+        // apart: "never accepted" and "accepted then lost" send an operator to
+        // different places, so each verdict must reject the other's code.
+        type Edit = fn(&mut DriverReport);
+        assert_ne!(EXIT_INTERNAL_FATAL, EXIT_TOKEN_REJECTED);
+        // (label, edit of the bare report, whether the close-after-welcome verdict
+        // passes, whether the close-before-welcome verdict passes)
+        let rows: [(&str, Edit, bool, bool); 5] = [
+            // Exit 0 is the failure these two verdicts exist to catch: `Shutdown`
+            // is the only clean end, so a stream that just stops must not report
+            // success.
+            ("a clean exit", |r| r.exit_code = 0, false, false),
+            (
+                "the exit code of a lost session",
+                |r| r.exit_code = EXIT_INTERNAL_FATAL,
+                true,
+                false,
+            ),
+            (
+                "the exit code of a rejected token",
+                |r| r.exit_code = EXIT_TOKEN_REJECTED,
+                false,
+                true,
+            ),
+            // The right exit code for the wrong reason is not conformance.
+            (
+                "no handshake",
+                |r| {
+                    r.handshake_ok = false;
+                    r.exit_code = EXIT_INTERNAL_FATAL;
+                },
+                false,
+                false,
+            ),
+            // No job was ever dispatched, so no result can be legitimate.
+            (
+                "a result",
+                |r| {
+                    r.exit_code = EXIT_INTERNAL_FATAL;
+                    r.results.push(ObservedResult {
+                        job_id: b"job-1".to_vec(),
+                        solution_energies_milli: vec![0],
+                        rescored_energies_milli: None,
+                        meta_present: false,
+                        meta_sweeps: 0,
+                    });
+                },
+                false,
+                false,
+            ),
+        ];
+        for (label, edit, after, before) in rows {
+            let mut r = bare_report();
+            edit(&mut r);
+            assert_eq!(
+                r.close_after_welcome_conformant(),
+                after,
+                "{label}: after the welcome"
+            );
+            assert_eq!(
+                r.close_before_welcome_conformant(),
+                before,
+                "{label}: before the welcome"
+            );
         }
-    }
-
-    #[test]
-    fn a_timed_out_phase_fails_and_is_named() {
-        let mut r = conformant_report();
-        r.timed_out_phases = vec!["ping->status".to_owned()];
-        assert!(!r.is_conformant());
-        assert!(format!("{r:?}").contains("ping->status"));
     }
 
     #[test]
@@ -2710,68 +2932,5 @@ mod tests {
         mismatched.exit_code = EXIT_CONFIG_INVALID;
         mismatched.fatal = Some((70, "internal".to_owned()));
         assert!(!mismatched.bad_welcome_conformant());
-    }
-
-    #[test]
-    fn a_vanished_coordinator_is_never_a_clean_exit() {
-        // Exit 0 is the failure these two verdicts exist to catch: `Shutdown`
-        // is the only clean end, so a stream that just stops must not report
-        // success.
-        let mut clean = bare_report();
-        clean.exit_code = 0;
-        assert!(
-            !clean.close_after_welcome_conformant(),
-            "a lost coordinator reported as success hides a cut-short session"
-        );
-        assert!(!clean.close_before_welcome_conformant());
-
-        let mut after = bare_report();
-        after.exit_code = EXIT_INTERNAL_FATAL;
-        assert!(after.close_after_welcome_conformant(), "{after:?}");
-
-        let mut before = bare_report();
-        before.exit_code = EXIT_TOKEN_REJECTED;
-        assert!(before.close_before_welcome_conformant(), "{before:?}");
-    }
-
-    #[test]
-    fn the_two_close_points_do_not_share_an_exit_code() {
-        // The whole value of the pair is that the miner tells them apart:
-        // "never accepted" and "accepted then lost" send an operator to
-        // different places, so each verdict must reject the other's code.
-        assert_ne!(EXIT_INTERNAL_FATAL, EXIT_TOKEN_REJECTED);
-
-        let mut swapped_after = bare_report();
-        swapped_after.exit_code = EXIT_TOKEN_REJECTED;
-        assert!(!swapped_after.close_after_welcome_conformant());
-
-        let mut swapped_before = bare_report();
-        swapped_before.exit_code = EXIT_INTERNAL_FATAL;
-        assert!(!swapped_before.close_before_welcome_conformant());
-    }
-
-    #[test]
-    fn a_close_verdict_needs_the_handshake_and_no_results() {
-        let mut no_hello = bare_report();
-        no_hello.handshake_ok = false;
-        no_hello.exit_code = EXIT_INTERNAL_FATAL;
-        assert!(
-            !no_hello.close_after_welcome_conformant(),
-            "the right exit code for the wrong reason is not conformance"
-        );
-
-        let mut with_result = bare_report();
-        with_result.exit_code = EXIT_INTERNAL_FATAL;
-        with_result.results.push(ObservedResult {
-            job_id: b"job-1".to_vec(),
-            solution_energies_milli: vec![0],
-            rescored_energies_milli: None,
-            meta_present: false,
-            meta_sweeps: 0,
-        });
-        assert!(
-            !with_result.close_after_welcome_conformant(),
-            "no job was ever dispatched, so no result can be legitimate"
-        );
     }
 }
