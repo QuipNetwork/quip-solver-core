@@ -42,6 +42,13 @@ ALGORITHM_NAMES: dict[int, str] = {
     miner_pb2.ALGORITHM_SAT: "sat",
     miner_pb2.ALGORITHM_GREEDY: "greedy",
     miner_pb2.ALGORITHM_PAIR_WORM: "pair-worm",
+    miner_pb2.ALGORITHM_WEIGHTED_DIMER: "weighted-dimer",
+    miner_pb2.ALGORITHM_FLOW: "flow",
+    miner_pb2.ALGORITHM_TILE_WORM: "tile-worm",
+    miner_pb2.ALGORITHM_GADGET_REPAIR: "gadget-repair",
+    miner_pb2.ALGORITHM_ROUTING: "routing",
+    miner_pb2.ALGORITHM_FLOW_LOOPS: "flow-loops",
+    miner_pb2.ALGORITHM_DIPOLAR: "dipolar",
 }
 
 # Configure zeros mean "use the SDK default". These match

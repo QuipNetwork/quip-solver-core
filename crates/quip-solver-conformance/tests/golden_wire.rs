@@ -339,7 +339,14 @@ fn enum_numbers_match_the_fixture() {
             Otsuka,
             Sat,
             Greedy,
-            PairWorm
+            PairWorm,
+            WeightedDimer,
+            Flow,
+            TileWorm,
+            GadgetRepair,
+            Routing,
+            FlowLoops,
+            Dipolar
         ]
     );
     pin_enum!(

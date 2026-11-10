@@ -9,10 +9,20 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- `miner.proto`: the enum value `ALGORITHM_PAIR_WORM` = 22, named `pair-worm`,
-  for a solver that runs a pair-aware worm descent on twisted ice with planted
-  pairs, such as a postprocess of supplied states. The Rust, Python, and
-  TypeScript bindings include it.
+- `miner.proto`: eight enum values for the CPU family solvers. Each CPU binary
+  declares its own algorithm. The Rust, Python, and TypeScript bindings include
+  them.
+
+  | Value | Number | Name | Solver |
+  | --- | --- | --- | --- |
+  | `ALGORITHM_PAIR_WORM` | 22 | `pair-worm` | pair-aware worm postprocess for twisted ice with planted pairs |
+  | `ALGORITHM_WEIGHTED_DIMER` | 23 | `weighted-dimer` | weighted-dimer sampler |
+  | `ALGORITHM_FLOW` | 24 | `flow` | constructive orientation and min-cost circulation baselines |
+  | `ALGORITHM_TILE_WORM` | 25 | `tile-worm` | tile-worm postprocess for charged and field ice |
+  | `ALGORITHM_GADGET_REPAIR` | 26 | `gadget-repair` | routing gadget-repair postprocess |
+  | `ALGORITHM_ROUTING` | 27 | `routing` | two-commodity routing attack |
+  | `ALGORITHM_FLOW_LOOPS` | 28 | `flow-loops` | constrained loop search for adapted P and F-static |
+  | `ALGORITHM_DIPOLAR` | 29 | `dipolar` | D-static string and loop search |
 
 ## 0.0.8
 

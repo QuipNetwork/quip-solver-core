@@ -113,6 +113,13 @@ export enum Algorithm {
   ALGORITHM_SAT = 20,
   ALGORITHM_GREEDY = 21,
   ALGORITHM_PAIR_WORM = 22,
+  ALGORITHM_WEIGHTED_DIMER = 23,
+  ALGORITHM_FLOW = 24,
+  ALGORITHM_TILE_WORM = 25,
+  ALGORITHM_GADGET_REPAIR = 26,
+  ALGORITHM_ROUTING = 27,
+  ALGORITHM_FLOW_LOOPS = 28,
+  ALGORITHM_DIPOLAR = 29,
   UNRECOGNIZED = -1,
 }
 
@@ -187,6 +194,27 @@ export function algorithmFromJSON(object: any): Algorithm {
     case 22:
     case "ALGORITHM_PAIR_WORM":
       return Algorithm.ALGORITHM_PAIR_WORM;
+    case 23:
+    case "ALGORITHM_WEIGHTED_DIMER":
+      return Algorithm.ALGORITHM_WEIGHTED_DIMER;
+    case 24:
+    case "ALGORITHM_FLOW":
+      return Algorithm.ALGORITHM_FLOW;
+    case 25:
+    case "ALGORITHM_TILE_WORM":
+      return Algorithm.ALGORITHM_TILE_WORM;
+    case 26:
+    case "ALGORITHM_GADGET_REPAIR":
+      return Algorithm.ALGORITHM_GADGET_REPAIR;
+    case 27:
+    case "ALGORITHM_ROUTING":
+      return Algorithm.ALGORITHM_ROUTING;
+    case 28:
+    case "ALGORITHM_FLOW_LOOPS":
+      return Algorithm.ALGORITHM_FLOW_LOOPS;
+    case 29:
+    case "ALGORITHM_DIPOLAR":
+      return Algorithm.ALGORITHM_DIPOLAR;
     case -1:
     case "UNRECOGNIZED":
     default:
@@ -242,6 +270,20 @@ export function algorithmToJSON(object: Algorithm): string {
       return "ALGORITHM_GREEDY";
     case Algorithm.ALGORITHM_PAIR_WORM:
       return "ALGORITHM_PAIR_WORM";
+    case Algorithm.ALGORITHM_WEIGHTED_DIMER:
+      return "ALGORITHM_WEIGHTED_DIMER";
+    case Algorithm.ALGORITHM_FLOW:
+      return "ALGORITHM_FLOW";
+    case Algorithm.ALGORITHM_TILE_WORM:
+      return "ALGORITHM_TILE_WORM";
+    case Algorithm.ALGORITHM_GADGET_REPAIR:
+      return "ALGORITHM_GADGET_REPAIR";
+    case Algorithm.ALGORITHM_ROUTING:
+      return "ALGORITHM_ROUTING";
+    case Algorithm.ALGORITHM_FLOW_LOOPS:
+      return "ALGORITHM_FLOW_LOOPS";
+    case Algorithm.ALGORITHM_DIPOLAR:
+      return "ALGORITHM_DIPOLAR";
     case Algorithm.UNRECOGNIZED:
     default:
       return "UNRECOGNIZED";
