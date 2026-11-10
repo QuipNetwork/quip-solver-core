@@ -36,8 +36,7 @@
 //! [`check_route`], is combinatorial evidence about a state and never changes
 //! feasibility.
 
-use alloc::collections::{BTreeMap, BTreeSet};
-use alloc::vec;
+use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
 use crate::descriptor::{Contract, FieldSpec, Params, SizeBounds, TopologyStats, Value, ValueType};
@@ -50,8 +49,8 @@ use crate::ice::build::{region, sections, Reader};
 use crate::instance::{Instance, InstanceLimits};
 use crate::native::{
     charges_payload, dense_links, incidence_payload, interior_vertices, is_zephyr_subgraph,
-    labels_of, on_border, parse_charges, parse_incidence, place, DenseLinks, Native, KIND_CHARGES,
-    KIND_INCIDENCE,
+    labels_of, link_spins, on_border, parse_charges, parse_incidence, place, DenseLinks, Energy,
+    Expansion, Native, KIND_CHARGES, KIND_INCIDENCE,
 };
 use crate::rng::shuffle;
 use crate::routing::unsigned;
@@ -394,99 +393,32 @@ struct Model<'a> {
     weight: i64,
 }
 
-/// The Ising form of the energy over the link positions.
-struct Energy {
-    h: Vec<i32>,
-    edges: Vec<(u32, u32)>,
-    j: Vec<i32>,
-    offset: i64,
-}
-
-/// The position of link `e` in the instance.
-fn position(positions: &[u32], e: u32) -> Option<u32> {
-    positions.get(usize::try_from(e).ok()?).copied()
-}
-
 /// The field, the table couplings, the charge penalty, and the pin penalty.
 /// `None` on an overflow, a position out of range, or a label count that is
 /// not one per vertex.
 fn energy(model: &Model<'_>, nodes: usize) -> Option<Energy> {
     let lattice = model.lattice;
-    if model.labels.len() != usize::try_from(lattice.vertex_count()).ok()? {
-        return None;
-    }
-    let weight = model.weight;
-    let mut h = vec![0i64; nodes];
-    let mut couplers: BTreeMap<(u32, u32), i64> = BTreeMap::new();
-    let mut offset = 0i64;
-    let mut add_field = |e: u32, value: i64| -> Option<()> {
-        let slot = h.get_mut(usize::try_from(position(model.positions, e)?).ok()?)?;
-        *slot = slot.checked_add(value)?;
-        Some(())
-    };
+    let mut sums = Expansion::new(nodes);
     for e in 0..lattice.link_count() {
         let field = match lattice.link(e)?.axis {
             Axis::X => model.field_x,
             Axis::Y => model.field_y,
         };
-        add_field(e, -i64::from(field))?;
+        sums.add_field(model.positions, e, -i64::from(field))?;
     }
     for entry in model.kept {
         let (pi, pj) = (
-            position(model.positions, entry.i)?,
-            position(model.positions, entry.j)?,
+            *model.positions.get(usize::try_from(entry.i).ok()?)?,
+            *model.positions.get(usize::try_from(entry.j).ok()?)?,
         );
-        let slot = couplers.entry((pi.min(pj), pi.max(pj))).or_insert(0);
-        *slot = slot.checked_add(i64::from(entry.q))?;
+        sums.add_coupling(pi, pj, i64::from(entry.q))?;
     }
-    for (v, label) in (0u32..).zip(model.labels) {
-        let Some(q) = label.map(i64::from) else {
-            continue;
-        };
-        let at = lattice.incident(v);
-        let degree = i64::try_from(at.len()).ok()?;
-        offset = offset.checked_add((weight / 2).checked_mul(degree.checked_add(q * q)?)?)?;
-        for (rank, &(e, inc_e)) in at.iter().enumerate() {
-            add_field(
-                e,
-                weight
-                    .checked_mul(q)?
-                    .checked_mul(i64::from(inc_e))?
-                    .checked_neg()?,
-            )?;
-            let pe = position(model.positions, e)?;
-            for &(f, inc_f) in at.get(rank.checked_add(1)?..)? {
-                let pf = position(model.positions, f)?;
-                let pair = weight
-                    .checked_mul(i64::from(inc_e))?
-                    .checked_mul(i64::from(inc_f))?;
-                let slot = couplers.entry((pe.min(pf), pe.max(pf))).or_insert(0);
-                *slot = slot.checked_add(pair)?;
-            }
-        }
-    }
+    sums.add_charge_penalty(lattice, model.positions, model.labels, model.weight)?;
     for &e in model.pins {
-        add_field(e, weight.checked_neg()?)?;
-        offset = offset.checked_add(weight)?;
+        sums.add_field(model.positions, e, model.weight.checked_neg()?)?;
+        sums.add_offset(model.weight)?;
     }
-    let mut edges = Vec::new();
-    let mut j = Vec::new();
-    for (&pair, &value) in &couplers {
-        if value != 0 {
-            edges.push(pair);
-            j.push(i32::try_from(value).ok()?);
-        }
-    }
-    let h = h
-        .into_iter()
-        .map(|value| i32::try_from(value).ok())
-        .collect::<Option<Vec<i32>>>()?;
-    Some(Energy {
-        h,
-        edges,
-        j,
-        offset,
-    })
+    sums.finish()
 }
 
 /// One draw of the request.
@@ -743,26 +675,13 @@ fn check_metadata(params: &Params<'_>, instance: &Instance) -> bool {
     parse(params, instance).is_some()
 }
 
-/// The spin of each link, in link order, from the spins of the instance
-/// nodes. `None` unless `spins` has one entry per instance node.
-fn link_spins(parsed: &Parsed, spins: &[i8], nodes: usize) -> Option<Vec<i8>> {
-    if spins.len() != nodes {
-        return None;
-    }
-    parsed
-        .positions
-        .iter()
-        .map(|&p| spins.get(usize::try_from(p).ok()?).copied())
-        .collect()
-}
-
 /// `true` when the metadata is valid, `spins` has one `+1` or `-1` entry per
 /// instance node, every label holds, and every pinned link has spin `+1`.
 fn feasible(params: &Params<'_>, instance: &Instance, spins: &[i8]) -> bool {
     let Some(parsed) = parse(params, instance) else {
         return false;
     };
-    let Some(links) = link_spins(&parsed, spins, instance.node_ids().len()) else {
+    let Some(links) = link_spins(&parsed.positions, spins, instance.node_ids().len()) else {
         return false;
     };
     let labels_hold = charges(&parsed.lattice, &links).is_some_and(|got| {
@@ -842,7 +761,7 @@ pub fn check_route(
     route: &[Vec<u32>],
 ) -> Result<(), RouteError> {
     let parsed = parse(params, instance).ok_or(RouteError::Metadata)?;
-    let links = link_spins(&parsed, spins, instance.node_ids().len())
+    let links = link_spins(&parsed.positions, spins, instance.node_ids().len())
         .filter(|links| links.iter().all(|&s| s == 1 || s == -1))
         .ok_or(RouteError::Spins)?;
     let lattice = &parsed.lattice;
@@ -949,7 +868,7 @@ pub fn defect_observables(
     spins: &[i8],
 ) -> Option<DefectObservables> {
     let parsed = parse(params, instance)?;
-    let links = link_spins(&parsed, spins, instance.node_ids().len())?;
+    let links = link_spins(&parsed.positions, spins, instance.node_ids().len())?;
     let got = charges(&parsed.lattice, &links)?;
     let mut violated_labels = 0u32;
     for (&q, label) in got.iter().zip(&parsed.labels) {
