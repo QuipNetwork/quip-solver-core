@@ -1,9 +1,12 @@
 //! `PyO3` bindings for the consensus primitives in `quip-protocol`.
 //!
 //! Exposes `quip_solver_core._core.scoring`, `quip_solver_core._core.wire`,
-//! and `quip_solver_core._core.ExitCode`. The package's `__init__` re-exports
-//! these, so `from quip_solver_core import scoring, wire` works. Because the
+//! `quip_solver_core._core.families`, and `quip_solver_core._core.ExitCode`.
+//! The package's `__init__` re-exports these, so
+//! `from quip_solver_core import scoring, wire` works. Because the
 //! math is the Rust source, the Python side cannot drift from it.
+
+mod families;
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -155,7 +158,7 @@ fn decode_spins_packed(b: Vec<u8>, num_spins: usize) -> PyResult<Vec<i8>> {
         .map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
-/// Python module `quip_solver_core._core`: scoring, wire, and `ExitCode`.
+/// Python module `quip_solver_core._core`: scoring, wire, families, and `ExitCode`.
 #[pymodule]
 fn _core(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     let scoring = PyModule::new(py, "scoring")?;
@@ -171,6 +174,8 @@ fn _core(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     wire.add_function(wrap_pyfunction!(encode_spins_packed, &wire)?)?;
     wire.add_function(wrap_pyfunction!(decode_spins_packed, &wire)?)?;
     m.add_submodule(&wire)?;
+
+    families::register(py, m)?;
 
     let exit_code = PyModule::new(py, "ExitCode")?;
     exit_code.add("CLEAN", 0u8)?;

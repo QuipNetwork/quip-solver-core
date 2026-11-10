@@ -980,6 +980,7 @@ dependencies = [
 name = "quip-protocol-py"
 version = "0.0.8"
 dependencies = [
+ "ising-generators",
  "pyo3",
  "quip-protocol",
 ]

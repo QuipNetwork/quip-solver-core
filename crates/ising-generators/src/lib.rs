@@ -28,6 +28,7 @@
 //!   witness identity under request-preserving symmetries.
 //! - `blob` (feature `blob`): the gzip varint topology file format.
 //! - [`instance`]: canonical instance bytes, limits, and metadata validation.
+//! - [`registry`]: the list of every family contract this crate implements.
 
 #![no_std]
 
@@ -47,6 +48,7 @@ pub mod instance;
 mod native;
 pub mod polariton;
 pub mod random;
+pub mod registry;
 pub mod rng;
 pub mod routing;
 pub mod square;

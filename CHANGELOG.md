@@ -5,14 +5,21 @@ This file documents changes to the Quip solver contract.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## 0.0.8
-
-The greedy algorithm value. `miner.proto` adds `ALGORITHM_GREEDY`, named
-`greedy`, for a greedy-descent postprocess solver. The test suite is smaller and
-faster. `protocol_version` stays 2, and the default features do not change.
+## Unreleased
 
 ### Added
 
+- The `families` module of the Python wheel. Import it with
+  `from quip_solver_core import families`. It builds the canonical instance of a
+  family lease from the topology and the nonce, so a Python miner produces the
+  same bytes as the Rust generator. The functions are `supported`,
+  `params_digest`, `admit`, `generate`, `validate_instance`, and `feasible`. The
+  `Instance` class holds the canonical fields with the integer milli
+  coefficients. Family faults raise `FamilyError` or one of its subclasses
+  `AdmissionError`, `SaltSkipped`, `InstanceInvalid`, and `GeneratorDefect`.
+  Each carries `code` and `name`.
+- `ising_generators::registry::CONTRACTS`, the list of every family contract
+  that the crate provides.
 - `quip/defects-static@1`, a registered family with status `research` and class
   `hard`. It selects a low physical energy square-ice state on the native layout
   of `quip/polariton-static`. Each link is a dipolar island at its midpoint, and
@@ -30,9 +37,6 @@ faster. `protocol_version` stays 2, and the default features do not change.
   sides 4, 6, 8, and 12 wait on a calibrated record. The contract is
   `docs/families/quip-defects-static-1.md`, the vectors are `defects.json`, and
   the Rust contract is `ising_generators::defects::DEFECTS_V1`.
-- `miner.proto`: the enum value `ALGORITHM_GREEDY` = 21, named `greedy`, for a
-  solver that runs a zero-temperature greedy descent, such as a postprocess of
-  supplied states. The Rust, Python, and TypeScript bindings include it.
 - `quip/flow-static@1`, a registered family with status `research` and class
   `hard`. It is the adapted active-flow task on the native layout of
   `quip/polariton-static`. One unit of flow runs along every link, each vertex has
@@ -50,6 +54,18 @@ faster. `protocol_version` stays 2, and the default features do not change.
   is `docs/families/quip-flow-static-1.md`, the vectors are `flow.json` with the
   sections `cases`, `flow_witnesses`, `networks`, `flow_recipes`, and
   `admission`, and the Rust contract is `ising_generators::flow::FLOW_V1`.
+
+## 0.0.8
+
+The greedy algorithm value. `miner.proto` adds `ALGORITHM_GREEDY`, named
+`greedy`, for a greedy-descent postprocess solver. The test suite is smaller and
+faster. `protocol_version` stays 2, and the default features do not change.
+
+### Added
+
+- `miner.proto`: the enum value `ALGORITHM_GREEDY` = 21, named `greedy`, for a
+  solver that runs a zero-temperature greedy descent, such as a postprocess of
+  supplied states. The Rust, Python, and TypeScript bindings include it.
 
 ### Changed
 

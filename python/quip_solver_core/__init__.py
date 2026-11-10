@@ -4,9 +4,28 @@ from quip_solver_core import (
     session,
 )  # handshake / config helpers (independent Python impl)
 from quip_solver_core._core import (
+    AdmissionError,
     ExitCode,
+    FamilyError,
+    GeneratorDefect,
+    InstanceInvalid,
+    SaltSkipped,
+    families,
     scoring,
     wire,
-)  # PyO3 bindings to quip-protocol
+)  # PyO3 bindings to quip-protocol and ising-generators
 
-__all__ = ["ExitCode", "miner_pb2", "miner_pb2_grpc", "scoring", "session", "wire"]
+__all__ = [
+    "AdmissionError",
+    "ExitCode",
+    "FamilyError",
+    "GeneratorDefect",
+    "InstanceInvalid",
+    "SaltSkipped",
+    "families",
+    "miner_pb2",
+    "miner_pb2_grpc",
+    "scoring",
+    "session",
+    "wire",
+]
