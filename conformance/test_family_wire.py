@@ -89,11 +89,12 @@ def test_unknown_enum_values():
 def test_new_enum_numbers():
     assert miner_pb2.GENERATOR_ALGORITHM_FAMILY_CHACHA8_V1 == 2
     assert miner_pb2.FAMILY_UNSUPPORTED == 10
+    assert miner_pb2.NO_SOLUTION == 11
 
 
 def test_wire_reasons_match_vectors():
     rows = json.loads(CORE_VECTORS.read_text())["wire_reasons"]
-    assert len(rows) == 11
+    assert len(rows) == 12
     for row in rows:
         assert miner_pb2.RejectReason.Value(row["reason"]) == row["value"]
     names = {row["reason"] for row in rows}
