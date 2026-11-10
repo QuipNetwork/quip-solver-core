@@ -2,7 +2,7 @@
 
 This contract describes the static defect family. The family is a `hard` research family. It selects a low physical energy square-ice state under requested charges, pins, and obstacles. The lattice is the open square-link lattice of side `L` on the native layout of `quip/polariton-static`. Each lattice vertex is the K4 of one Zephyr cell, and each link is one segment qubit that two neighbouring cells share.
 The Rust contract is `ising_generators::defects::DEFECTS_V1`.
-The vectors are the `cases` section of `crates/quip-solver-conformance/vectors/families/defects.json`. The same file holds the witnesses, routes, table, and admission sections.
+The vectors are the `cases` section of `crates/quip-solver-conformance/vectors/families/defects.json`. The same file holds the defect_witnesses, routes, table, and admission sections.
 The lattice, the link order, the incidence, and the direct charge follow `docs/square-links.md`. The dipolar table follows `docs/dipolar-numerics.md`.
 
 A static pattern shows no propagation, switching, or transport. The family has no research cohort and no registered recipe. A route in this family is combinatorial evidence about one state and makes no propagation claim.

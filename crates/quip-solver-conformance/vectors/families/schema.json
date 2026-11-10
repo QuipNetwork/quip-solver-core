@@ -338,6 +338,84 @@
       ],
       "type": "object"
     },
+    "defects_witness": {
+      "additionalProperties": false,
+      "properties": {
+        "case": {
+          "type": "string"
+        },
+        "charges": {
+          "items": {
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "dropped": {
+          "type": "integer"
+        },
+        "energy_milli": {
+          "type": "integer"
+        },
+        "evidence": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "feasible": {
+          "type": "boolean"
+        },
+        "index": {
+          "$ref": "#/$defs/u64s"
+        },
+        "name": {
+          "type": "string"
+        },
+        "physical_energy": {
+          "type": "integer"
+        },
+        "physical_status": {
+          "enum": [
+            "InsufficientPhysicalEvidence"
+          ]
+        },
+        "spins": {
+          "items": {
+            "enum": [
+              -1,
+              1
+            ]
+          },
+          "type": "array"
+        },
+        "truncation_bound": {
+          "$ref": "#/$defs/u64s"
+        },
+        "violated_labels": {
+          "type": "integer"
+        },
+        "violated_pins": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "case",
+        "charges",
+        "dropped",
+        "energy_milli",
+        "evidence",
+        "feasible",
+        "index",
+        "name",
+        "physical_energy",
+        "physical_status",
+        "spins",
+        "truncation_bound",
+        "violated_labels",
+        "violated_pins"
+      ],
+      "type": "object"
+    },
     "descriptor_case": {
       "additionalProperties": false,
       "properties": {
@@ -1941,6 +2019,66 @@
       ],
       "type": "object"
     },
+    "polariton_witness": {
+      "additionalProperties": false,
+      "properties": {
+        "case": {
+          "type": "string"
+        },
+        "charges": {
+          "items": {
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "energy_milli": {
+          "type": "integer"
+        },
+        "evidence": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "feasible": {
+          "type": "boolean"
+        },
+        "index": {
+          "$ref": "#/$defs/u64s"
+        },
+        "loss_milli": {
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "spins": {
+          "items": {
+            "enum": [
+              -1,
+              1
+            ]
+          },
+          "type": "array"
+        },
+        "violations": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name",
+        "evidence",
+        "case",
+        "index",
+        "spins",
+        "feasible",
+        "charges",
+        "violations",
+        "loss_milli",
+        "energy_milli"
+      ],
+      "type": "object"
+    },
     "registry_entry": {
       "additionalProperties": false,
       "properties": {
@@ -2373,84 +2511,6 @@
         "evidence",
         "solver_id_hex",
         "expected"
-      ],
-      "type": "object"
-    },
-    "state_witness": {
-      "additionalProperties": false,
-      "properties": {
-        "case": {
-          "type": "string"
-        },
-        "charges": {
-          "items": {
-            "type": "integer"
-          },
-          "type": "array"
-        },
-        "dropped": {
-          "type": "integer"
-        },
-        "energy_milli": {
-          "type": "integer"
-        },
-        "evidence": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "feasible": {
-          "type": "boolean"
-        },
-        "index": {
-          "$ref": "#/$defs/u64s"
-        },
-        "loss_milli": {
-          "type": "integer"
-        },
-        "name": {
-          "type": "string"
-        },
-        "physical_energy": {
-          "type": "integer"
-        },
-        "physical_status": {
-          "enum": [
-            "InsufficientPhysicalEvidence"
-          ]
-        },
-        "spins": {
-          "items": {
-            "enum": [
-              -1,
-              1
-            ]
-          },
-          "type": "array"
-        },
-        "truncation_bound": {
-          "$ref": "#/$defs/u64s"
-        },
-        "violated_labels": {
-          "type": "integer"
-        },
-        "violated_pins": {
-          "type": "integer"
-        },
-        "violations": {
-          "type": "integer"
-        }
-      },
-      "required": [
-        "name",
-        "evidence",
-        "case",
-        "index",
-        "spins",
-        "feasible",
-        "charges",
-        "energy_milli"
       ],
       "type": "object"
     },
@@ -2916,6 +2976,12 @@
       },
       "type": "array"
     },
+    "defect_witnesses": {
+      "items": {
+        "$ref": "#/$defs/defects_witness"
+      },
+      "type": "array"
+    },
     "descriptors": {
       "items": {
         "$ref": "#/$defs/descriptor_case"
@@ -3191,7 +3257,7 @@
     },
     "witnesses": {
       "items": {
-        "$ref": "#/$defs/state_witness"
+        "$ref": "#/$defs/polariton_witness"
       },
       "type": "array"
     }

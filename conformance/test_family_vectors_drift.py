@@ -102,7 +102,7 @@ def _registry_entry(name: str) -> dict:
         pytest.param(
             "quip/defects-static@1",
             _defects_doc,
-            ("cases", "witnesses", "routes", "table", "admission"),
+            ("cases", "defect_witnesses", "routes", "table", "admission"),
             id="defects",
         ),
         pytest.param(
@@ -502,10 +502,10 @@ def test_defects_routes_and_witnesses_cover_the_contract():
     for case in doc["cases"]:
         kinds = {
             w["name"].removeprefix(case["name"] + "-")
-            for w in doc["witnesses"]
+            for w in doc["defect_witnesses"]
             if w["case"] == case["name"]
         }
         assert kinds == {"feasible", "infeasible", "pin-violating"}
-    assert {w["physical_status"] for w in doc["witnesses"]} == {
+    assert {w["physical_status"] for w in doc["defect_witnesses"]} == {
         "InsufficientPhysicalEvidence"
     }

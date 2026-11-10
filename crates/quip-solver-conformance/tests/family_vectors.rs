@@ -4520,7 +4520,7 @@ fn defects_fixture_matches_schema() -> Result<(), String> {
         other => return Err(format!("provenance is {other:?}, expected specified")),
     }
     check_names_unique(&doc)?;
-    for name in ["cases", "witnesses", "routes", "table", "admission"] {
+    for name in ["cases", "defect_witnesses", "routes", "table", "admission"] {
         section(&doc, name).map(|_| ())?;
     }
     Ok(())
@@ -4899,7 +4899,7 @@ fn check_defects_witness(doc: &Value, witness: &Value) -> Result<bool, String> {
 /// energy above the feasible one.
 fn check_defects_witnesses(doc: &Value) -> Result<(), String> {
     let (mut feasible_count, mut infeasible_count) = (0usize, 0usize);
-    for witness in section(doc, "witnesses")? {
+    for witness in section(doc, "defect_witnesses")? {
         if check_defects_witness(doc, witness)? {
             feasible_count += 1;
         } else {
@@ -4911,7 +4911,11 @@ fn check_defects_witnesses(doc: &Value) -> Result<(), String> {
     compare(doc, "infeasible witnesses", &infeasible_count, &(2 * cases))?;
     for case in section(doc, "cases")? {
         let energy = |kind: &str| -> Result<i64, String> {
-            let witness = find_named(doc, "witnesses", &format!("{}-{kind}", case_name(case)))?;
+            let witness = find_named(
+                doc,
+                "defect_witnesses",
+                &format!("{}-{kind}", case_name(case)),
+            )?;
             witness
                 .get("energy_milli")
                 .and_then(Value::as_i64)
@@ -4936,7 +4940,7 @@ fn a_pin_violating_witness_breaks_no_label() -> Result<(), String> {
     for case in section(&doc, "cases")? {
         let witness = find_named(
             &doc,
-            "witnesses",
+            "defect_witnesses",
             &format!("{}-pin-violating", case_name(case)),
         )?;
         compare(
@@ -5238,13 +5242,13 @@ fn a_changed_defects_coupling_fails_the_recompute() -> Result<(), String> {
 fn a_changed_defects_witness_fails_the_check() -> Result<(), String> {
     let doc = defects_doc()?;
     for pointer in [
-        "/witnesses/0/feasible",
-        "/witnesses/1/feasible",
-        "/witnesses/1/physical_energy",
-        "/witnesses/1/violated_labels",
-        "/witnesses/2/violated_pins",
-        "/witnesses/1/energy_milli",
-        "/witnesses/1/dropped",
+        "/defect_witnesses/0/feasible",
+        "/defect_witnesses/1/feasible",
+        "/defect_witnesses/1/physical_energy",
+        "/defect_witnesses/1/violated_labels",
+        "/defect_witnesses/2/violated_pins",
+        "/defect_witnesses/1/energy_milli",
+        "/defect_witnesses/1/dropped",
     ] {
         let was = doc.pointer(pointer).ok_or("no value")?.clone();
         let changed = match was {
@@ -5255,19 +5259,19 @@ fn a_changed_defects_witness_fails_the_check() -> Result<(), String> {
         let broken = mutate(&doc, pointer, changed);
         expect_err(&check_defects_witnesses(&broken), pointer)?;
     }
-    let broken = mutate(&doc, "/witnesses/1/truncation_bound", json!("1"));
+    let broken = mutate(&doc, "/defect_witnesses/1/truncation_bound", json!("1"));
     expect_err(
         &check_defects_witnesses(&broken),
         "a changed truncation bound",
     )?;
     let spins = doc
-        .pointer("/witnesses/0/spins")
+        .pointer("/defect_witnesses/0/spins")
         .and_then(Value::as_array)
         .ok_or("no spins")?;
     let mut flipped = spins.clone();
     let first = flipped.first_mut().ok_or("no spin")?;
     *first = json!(-first.as_i64().ok_or("not an integer")?);
-    let broken = mutate(&doc, "/witnesses/0/spins", Value::Array(flipped));
+    let broken = mutate(&doc, "/defect_witnesses/0/spins", Value::Array(flipped));
     expect_err(&check_defects_witnesses(&broken), "a changed spin")
 }
 
