@@ -9,9 +9,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- `miner.proto`: the enum value `ALGORITHM_ICE_SAT` = 20, named `ice-sat`, for the
-  strong-layer SAT baseline on synthetic ice. The Rust, Python, and TypeScript
-  bindings include it.
+- `miner.proto`: the enum value `ALGORITHM_SAT` = 20, named `sat`, for a solver
+  that encodes the problem as Boolean satisfiability and runs a SAT solver. The
+  first is the strong-layer baseline on synthetic ice. The Rust, Python, and
+  TypeScript bindings include it.
 - `miner.proto`: the reject reason `NO_SOLUTION` = 11. A solver sends it when it
   ran and has no solution to report for the instance, such as an UNSAT verdict.
 - `SampleError::Declined(String)`, which maps to `NO_SOLUTION`. The session

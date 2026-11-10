@@ -337,7 +337,7 @@ fn enum_numbers_match_the_fixture() {
             Tedsb,
             External,
             Otsuka,
-            IceSat
+            Sat
         ]
     );
     pin_enum!(
