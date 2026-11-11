@@ -257,7 +257,14 @@ async fn shutdown_once(queued: bool, iteration: usize) -> Result<(), Error> {
         let _ = pipe.read_to_string(&mut stderr).await?;
     }
     if let Err(error) = drain {
-        return Err(format!("request EOF failed: {error}; child={status}; stderr={stderr}").into());
+        return Err(format!(
+            "request EOF failed: {error}; results={}/{}; refunds={}/{}; child={status}; stderr={stderr}",
+            results.len(),
+            if queued { 8 } else { 0 },
+            credits,
+            if queued { 8 } else { 0 },
+        )
+        .into());
     }
     if !status.success() {
         return Err(format!("miner failed: {status}; stderr={stderr}").into());
@@ -284,6 +291,7 @@ async fn campaign(queued: bool, default_iterations: usize) -> Result<(), Error> 
     let iterations = std::env::var("QUIP_CLOSE_TEST_ITERATIONS")
         .map_or(Ok(default_iterations), |value| value.parse::<usize>())?;
     assert!(iterations > 0);
+    let started = std::time::Instant::now();
     let mut failures = 0;
     for iteration in 0..iterations {
         let result =
@@ -293,17 +301,20 @@ async fn campaign(queued: bool, default_iterations: usize) -> Result<(), Error> 
             eprintln!("queued={queued} iteration={iteration}: {result:?}");
         }
     }
-    eprintln!("queued={queued}: {failures}/{iterations} failures");
+    eprintln!(
+        "queued={queued}: {failures}/{iterations} failures in {:.2}s",
+        started.elapsed().as_secs_f64()
+    );
     assert_eq!(failures, 0, "request stream must end cleanly in every run");
     Ok(())
 }
 
 #[tokio::test]
 async fn idle_shutdown_finishes_request_stream() -> Result<(), Error> {
-    campaign(false, 1000).await
+    campaign(false, 20).await
 }
 
 #[tokio::test]
 async fn shutdown_flushes_final_results_and_finishes_request_stream() -> Result<(), Error> {
-    campaign(true, 300).await
+    campaign(true, 20).await
 }

@@ -5,6 +5,14 @@ This file documents changes to the Quip solver contract.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Changed
+
+- The shutdown tests run 20 times each by default. Use
+  `QUIP_CLOSE_TEST_ITERATIONS` to set a larger count. Each test prints its run
+  time. Failed runs show the count of results and refunds received.
+
 ## 0.0.9
 
 The canonical problem families. The registry adds `quip/defects-static@1` and
