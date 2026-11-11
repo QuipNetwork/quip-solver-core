@@ -15,7 +15,8 @@ use crate::job::{
 };
 use crate::lease::{self, Expander, LeaseLink};
 use crate::{
-    CancelToken, Sampler, StreamJob, StreamOutcome, StreamResult, WarmStart, WarmStreamJob,
+    CancelToken, NativeTopology, Sampler, StreamJob, StreamOutcome, StreamResult, WarmStart,
+    WarmStreamJob,
 };
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
@@ -358,6 +359,15 @@ fn session_capabilities<S: Sampler<C>, C: Coefficient>(
     if caps.stream_width == 0 {
         caps.stream_width = u32::try_from(live_width).unwrap_or(u32::MAX);
     }
+    caps
+}
+
+/// `caps` with `native_topology_hash` set to the hash of the device's working
+/// graph, when the sampler reports one.
+fn with_native_hash(mut caps: Capabilities, native: Option<&NativeTopology>) -> Capabilities {
+    caps.native_topology_hash = native
+        .and_then(NativeTopology::hash)
+        .map(|hash| hash.to_vec());
     caps
 }
 
@@ -1069,7 +1079,14 @@ async fn run_session<S: Sampler<C>, C: Coefficient>(
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Resolve token before any network I/O so a missing QUIP_SESSION_TOKEN
     // always maps to exit 77 (never InternalFatal from a connect failure).
-    let hello = build_hello(miner_id, advertised_capabilities::<S, C>(id, families))?;
+    let native = sampler.native_topology();
+    let hello = build_hello(
+        miner_id,
+        with_native_hash(
+            advertised_capabilities::<S, C>(id, families),
+            native.as_ref(),
+        ),
+    )?;
 
     let (tx, rx) = mpsc::channel::<MinerMsg>(16);
     let (transport, outbound, sockets) = transport::TransportClose::new(rx);
@@ -1111,6 +1128,7 @@ async fn run_session<S: Sampler<C>, C: Coefficient>(
         id,
         families,
         sampler,
+        native.as_ref(),
         sweeps_per_beta,
         &mut shutdown_deadline,
     )
@@ -1133,7 +1151,7 @@ async fn run_session<S: Sampler<C>, C: Coefficient>(
     clippy::too_many_lines,
     clippy::too_many_arguments,
     reason = "single bidi session select-loop; splitting would obscure the control flow, \
-              and the shutdown deadline it reports back is the eighth argument"
+              and the shutdown deadline it reports back is the ninth argument"
 )]
 async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
     mut inbound: impl tokio_stream::Stream<Item = Result<CoordMsg, tonic::Status>> + Unpin,
@@ -1142,6 +1160,7 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
     id: &BackendIdentity,
     families: &FamilyTable,
     sampler: Arc<S>,
+    native: Option<&NativeTopology>,
     sweeps_per_beta: Option<usize>,
     // Set to the shutdown grace deadline once shutdown begins. The caller
     // waits for the transport to close within the same deadline.
@@ -1426,8 +1445,30 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
                     }
                 }
                 Some(coord_msg::Msg::Topology(t)) => {
-                    topology = Some(TopologyCache::from_proto(&t));
-                    lease_topology = Some(Arc::new(lease::LeaseTopology::new(&t, families)));
+                    let mut cache = TopologyCache::from_proto(&t);
+                    let mut lease_cache = lease::LeaseTopology::new(&t, families);
+                    if let Some(native) = native {
+                        let edges: Vec<(u32, u32)> = t.edges.as_ref().map_or_else(Vec::new, |e| {
+                            e.u.iter().copied().zip(e.v.iter().copied()).collect()
+                        });
+                        let fit = native.fit(&t.nodes, &edges);
+                        if !fit.hosted() {
+                            // Refusal replaces clamping: a clamped model is a
+                            // different problem, and its reads do not pool
+                            // with reads of the full one.
+                            tracing::error!(
+                                "the device lacks {} qubits and {} couplers of the session \
+                                 Topology; every lease and hash job on it is refused with \
+                                 TOPOLOGY_MISMATCH and nothing is clamped",
+                                fit.missing_nodes,
+                                fit.missing_edges
+                            );
+                            cache.mark_unfit();
+                            lease_cache.mark_unfit();
+                        }
+                    }
+                    topology = Some(cache);
+                    lease_topology = Some(Arc::new(lease_cache));
                 }
                 Some(coord_msg::Msg::SetTarget(s)) => {
                     let _ = target_tx.send_replace(Some(SessionTarget::from_proto(&s)));
@@ -1687,8 +1728,9 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
                     // the open device resolves.
                     if ctrl_tx
                         .send(
-                            miner(miner_msg::Msg::Capabilities(session_capabilities::<S, C>(
-                                id, families, width,
+                            miner(miner_msg::Msg::Capabilities(with_native_hash(
+                                session_capabilities::<S, C>(id, families, width),
+                                native,
                             )))
                             .into(),
                         )
@@ -2293,6 +2335,7 @@ mod tests {
             &families,
             sampler,
             None,
+            None,
             &mut shutdown_deadline,
         );
         let coordinator = async move {
@@ -2471,6 +2514,7 @@ mod tests {
             &families,
             sampler,
             None,
+            None,
             &mut shutdown_deadline,
         );
         let coordinator = async move {
@@ -2586,6 +2630,7 @@ mod tests {
             &identity,
             &families,
             sampler,
+            None,
             None,
             &mut shutdown_deadline,
         );

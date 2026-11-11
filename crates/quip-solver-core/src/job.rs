@@ -40,6 +40,16 @@ pub(crate) struct TopologyCache {
 }
 
 impl TopologyCache {
+    /// Record that the device lacks a qubit or a coupler of this topology.
+    /// Every job that names it is then rejected with `TOPOLOGY_MISMATCH`, so
+    /// the device never samples a clamped version of the model. A `Topology`
+    /// that did not validate keeps its own reason.
+    pub(crate) fn mark_unfit(&mut self) {
+        if self.invalid.is_none() {
+            self.invalid = Some(RejectReason::TopologyMismatch);
+        }
+    }
+
     /// Build from a `Topology` message. Node ids map to their received-order
     /// position; edges keep received order (the consensus `j`-zip invariant).
     ///
@@ -1296,6 +1306,37 @@ mod tests {
         }
         let ising = edges_job(1).ising.unwrap();
         assert!(parse_ising::<f64>(&ising, 100, 100, None).is_ok());
+    }
+
+    /// A cache whose `Topology` names a qubit or a coupler the device lacks
+    /// rejects every job that names it, instead of clamping the lost part. A
+    /// malformed `Topology` keeps its own reason.
+    #[test]
+    fn an_unfit_cache_rejects_its_hash_jobs_with_topology_mismatch() {
+        let rows = [
+            (
+                "unfit",
+                topology(vec![0, 1], vec![0], vec![1]),
+                vec![1000, 1000],
+                RejectReason::TopologyMismatch,
+            ),
+            (
+                "malformed and unfit",
+                topology(vec![0, 1, 1], vec![0], vec![1]),
+                vec![1000, 1000, 1000],
+                RejectReason::Malformed,
+            ),
+        ];
+        for (label, topo, h, expected) in rows {
+            let mut cache = TopologyCache::from_proto(&topo);
+            cache.mark_unfit();
+            let ising = hash_job(vec![7; 32], &h, &[1000]);
+            assert_eq!(
+                parse_ising::<f64>(&ising, 100_000, 1_000_000, Some(&cache)).err(),
+                Some(expected),
+                "{label}"
+            );
+        }
     }
 
     /// Every row names a hash job and the cache it runs against, if any.

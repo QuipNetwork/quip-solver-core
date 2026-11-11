@@ -23,6 +23,7 @@ mod lease;
 pub mod limits;
 pub mod logging;
 mod session;
+mod topology;
 
 pub use cli::CommonArgs;
 pub use csr::CsrGraph;
@@ -35,6 +36,7 @@ pub use session::{
     capabilities, capabilities_for, run, run_code, BackendIdentity, OpenError,
     EXACT_COEFFICIENTS_FEATURE, INITIAL_SPINS_FEATURE, LINEAR_SCHEDULE_FEATURE,
 };
+pub use topology::{NativeTopology, TopologyFit};
 
 /// Family descriptors, canonical instances, `ChaCha8` streams, and nonce
 /// derivation.
@@ -391,6 +393,19 @@ pub trait Sampler<C: Coefficient = f64>: Send + Sync + 'static {
         Self: Sized,
     {
         families::Declaration::GENERIC
+    }
+
+    /// The working graph of the device in native ids, or `None` for a backend
+    /// without a fixed graph, such as a CPU. The session reads it once, after
+    /// the device opens. It advertises the graph's hash as
+    /// `Capabilities.native_topology_hash` in Hello and in the
+    /// `GetCapabilities` reply, and it refuses every lease and every hash job
+    /// on a `Topology` that names a qubit or a coupler the graph lacks with
+    /// `TOPOLOGY_MISMATCH`, so the device never anneals a clamped model.
+    /// `--capabilities` runs with the device closed and carries no hash.
+    /// Default `None`: no hash, and every `Topology` fits.
+    fn native_topology(&self) -> Option<NativeTopology> {
+        None
     }
 
     /// Current utilization for Status messages. `0.0` when no governor.

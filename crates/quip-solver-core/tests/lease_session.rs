@@ -54,6 +54,8 @@ struct Session {
     dir: std::path::PathBuf,
     gate: std::sync::Arc<tokio::net::UnixListener>,
     logs: std::sync::Arc<(std::sync::Mutex<Vec<String>>, tokio::sync::Notify)>,
+    /// `Capabilities.native_topology_hash` of the Hello.
+    native_hash: Option<Vec<u8>>,
 }
 
 #[expect(
@@ -109,6 +111,13 @@ impl Session {
         Self::start_mode(zero, gated, None).await
     }
     async fn start_mode(zero: bool, gated: bool, mode: Option<&str>) -> Self {
+        Self::start_full(zero, gated, mode, None).await
+    }
+    /// The default binary with a mock device whose working graph is `native`.
+    async fn start_native(native: &str) -> Self {
+        Self::start_full(false, false, None, Some(native)).await
+    }
+    async fn start_full(zero: bool, gated: bool, mode: Option<&str>, native: Option<&str>) -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let bin = default_binary();
         let dir = std::path::PathBuf::from(format!(
@@ -156,6 +165,9 @@ impl Session {
         if gated {
             let _ = command.arg("--gate").arg(gate_path);
         }
+        if let Some(native) = native {
+            let _ = command.args(["--native", native]);
+        }
         let mut child = command.spawn().unwrap();
         let logs = capture_stderr(&mut child);
         let (inbound, tx) = tokio::time::timeout(Duration::from_secs(30), link_rx)
@@ -170,11 +182,13 @@ impl Session {
             dir,
             gate,
             logs,
+            native_hash: None,
         };
         let miner_msg::Msg::Hello(hello) = s.recv().await else {
             panic!("expected Hello")
         };
         let caps = hello.capabilities.unwrap();
+        s.native_hash.clone_from(&caps.native_topology_hash);
         assert_eq!(caps.protocol_version, 2);
         assert!(caps
             .supported_kinds
@@ -824,6 +838,91 @@ async fn plain_id_equal_to_an_old_salt_id_keeps_its_metadata_and_credit() {
     assert_eq!((plain, winners, done, refunds), (1, 2, 1, 2));
     s.finish().await;
     releases.abort();
+}
+
+/// The FAM-19 digest of a graph in canonical order, which is what a device
+/// advertises as `native_topology_hash`.
+#[expect(clippy::unwrap_used, reason = "the fixture graph is small")]
+fn native_hash(nodes: &[u32], edges: &[(u32, u32)]) -> Vec<u8> {
+    ising_generators::descriptor::topology_order_digest(nodes, edges)
+        .unwrap()
+        .to_vec()
+}
+
+/// A plain job that names the cached topology by hash.
+fn hash_job(id: u8) -> wire::Job {
+    wire::Job {
+        job_id: vec![id],
+        kind: wire::JobKind::IsingSample as i32,
+        ising: Some(wire::IsingProblem {
+            graph: Some(wire::ising_problem::Graph::TopologyHash(vec![7; 32])),
+            encoding: wire::CoefficientEncoding::I32 as i32,
+            scale: 1000,
+            h: quip_protocol::wire::encode_i32_le(&[1000, 1000]),
+            j: quip_protocol::wire::encode_i32_le(&[1000]),
+            num_reads: 1,
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+/// A device whose working graph hosts the session topology advertises the
+/// graph's hash and serves leases and hash jobs on it.
+#[tokio::test]
+async fn a_native_graph_that_hosts_the_topology_serves_it_and_advertises_its_hash() {
+    let mut s = Session::start_native("hosts").await;
+    assert_eq!(s.native_hash, Some(native_hash(&[10, 20], &[(10, 20)])));
+    s.send(coord_msg::Msg::GetCapabilities(wire::GetCapabilities {}))
+        .await;
+    let miner_msg::Msg::Capabilities(caps) = s.recv().await else {
+        panic!("expected Capabilities")
+    };
+    assert_eq!(caps.native_topology_hash, s.native_hash);
+    s.setup(i64::MAX).await;
+    s.send(coord_msg::Msg::Job(job(2))).await;
+    first(&mut s).await;
+    first(&mut s).await;
+    assert!(matches!(s.recv().await, miner_msg::Msg::LeaseDone(d) if d.salts_done == 2));
+    s.refund().await;
+    s.send(coord_msg::Msg::Job(hash_job(1))).await;
+    assert!(matches!(s.recv().await, miner_msg::Msg::Result(r) if r.job_id == vec![1]));
+    s.refund().await;
+    s.finish().await;
+}
+
+/// A device whose working graph lost a qubit of the session topology refuses
+/// every lease and hash job on that topology with `TOPOLOGY_MISMATCH`, in
+/// place of clamping the lost qubit. Inline jobs still run.
+#[tokio::test]
+async fn a_native_graph_that_lacks_a_qubit_refuses_the_topology_instead_of_clamping() {
+    let mut s = Session::start_native("lacks").await;
+    assert_eq!(s.native_hash, Some(native_hash(&[10, 30], &[(10, 30)])));
+    s.setup(i64::MAX).await;
+    s.wait_for_log("lacks 1 qubits and 0 couplers").await;
+    let mismatch = wire::RejectReason::TopologyMismatch as i32;
+    s.send(coord_msg::Msg::Job(job(5))).await;
+    assert!(matches!(s.recv().await, miner_msg::Msg::Reject(r) if r.reason == mismatch));
+    s.refund().await;
+    s.send(coord_msg::Msg::Job(hash_job(1))).await;
+    assert!(matches!(s.recv().await, miner_msg::Msg::Reject(r) if r.reason == mismatch));
+    s.refund().await;
+    s.send(coord_msg::Msg::Job(wire::Job {
+        job_id: vec![2],
+        kind: wire::JobKind::IsingSample as i32,
+        ising: Some(wire::IsingProblem {
+            encoding: wire::CoefficientEncoding::I32 as i32,
+            scale: 1000,
+            h: quip_protocol::wire::encode_i32_le(&[1000]),
+            num_reads: 1,
+            ..Default::default()
+        }),
+        ..Default::default()
+    }))
+    .await;
+    assert!(matches!(s.recv().await, miner_msg::Msg::Result(r) if r.job_id == vec![2]));
+    s.refund().await;
+    s.finish().await;
 }
 
 fn local_binary() -> std::path::PathBuf {
