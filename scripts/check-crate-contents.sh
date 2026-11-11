@@ -43,7 +43,10 @@ require() {
     shift 3
     local name
     for name in "$@"; do
-        if printf '%s\n' "$contents" | grep -Fxq "$root/$name"; then
+        # A here-string, not a pipe. grep -q exits at the first match, and a
+        # writer still in a pipe then dies of SIGPIPE, which pipefail reports
+        # as a missing file.
+        if grep -Fxq -- "$root/$name" <<<"$contents"; then
             echo "  ok      $name"
         else
             echo "  MISSING $name (not in $crate)" >&2
