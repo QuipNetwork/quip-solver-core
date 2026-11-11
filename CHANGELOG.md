@@ -5,30 +5,14 @@ This file documents changes to the Quip solver contract.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## 0.0.10
+## 0.0.11-rc1
 
-The CPU family algorithm values and a session shutdown fix. `miner.proto`
-adds eight `Algorithm` values for the CPU family solvers. The miner now waits
-for the HTTP/2 connection to write its final frames before the session returns.
-If the miner cannot confirm the close, it exits 70. `protocol_version` stays 2.
-The default features do not change.
+Structured generators build from the registered chip graph, and a solver that
+reports its native working graph refuses a topology that the graph does not
+host. The session now fills `Capabilities.native_topology_hash`, a field that
+`miner.proto` already defines. `protocol_version` stays 2.
 
 ### Added
-
-- `miner.proto`: eight enum values for the CPU family solvers. Each CPU binary
-  declares its own algorithm. The Rust, Python, and TypeScript bindings include
-  them.
-
-  | Value | Number | Name | Solver |
-  | --- | --- | --- | --- |
-  | `ALGORITHM_PAIR_WORM` | 22 | `pair-worm` | pair-aware worm postprocess for twisted ice with planted pairs |
-  | `ALGORITHM_WEIGHTED_DIMER` | 23 | `weighted-dimer` | weighted-dimer sampler |
-  | `ALGORITHM_FLOW` | 24 | `flow` | constructive orientation and min-cost circulation baselines |
-  | `ALGORITHM_TILE_WORM` | 25 | `tile-worm` | tile-worm postprocess for charged and field ice |
-  | `ALGORITHM_GADGET_REPAIR` | 26 | `gadget-repair` | routing gadget-repair postprocess |
-  | `ALGORITHM_ROUTING` | 27 | `routing` | two-commodity routing attack |
-  | `ALGORITHM_FLOW_LOOPS` | 28 | `flow-loops` | constrained loop search for adapted P and F-static |
-  | `ALGORITHM_DIPOLAR` | 29 | `dipolar` | D-static string and loop search |
 
 - `Sampler::native_topology`, a defaulted method that returns the working graph
   of the device as a `NativeTopology`, or `None` for a backend without a fixed
@@ -62,6 +46,31 @@ The default features do not change.
   construction itself did not change, and the vectors are the same.
   `docs/topology-format.md` describes the one step that refreshes the
   registered topology after a chip change.
+
+## 0.0.10
+
+The CPU family algorithm values and a session shutdown fix. `miner.proto`
+adds eight `Algorithm` values for the CPU family solvers. The miner now waits
+for the HTTP/2 connection to write its final frames before the session returns.
+If the miner cannot confirm the close, it exits 70. `protocol_version` stays 2.
+The default features do not change.
+
+### Added
+
+- `miner.proto`: eight enum values for the CPU family solvers. Each CPU binary
+  declares its own algorithm. The Rust, Python, and TypeScript bindings include
+  them.
+
+  | Value | Number | Name | Solver |
+  | --- | --- | --- | --- |
+  | `ALGORITHM_PAIR_WORM` | 22 | `pair-worm` | pair-aware worm postprocess for twisted ice with planted pairs |
+  | `ALGORITHM_WEIGHTED_DIMER` | 23 | `weighted-dimer` | weighted-dimer sampler |
+  | `ALGORITHM_FLOW` | 24 | `flow` | constructive orientation and min-cost circulation baselines |
+  | `ALGORITHM_TILE_WORM` | 25 | `tile-worm` | tile-worm postprocess for charged and field ice |
+  | `ALGORITHM_GADGET_REPAIR` | 26 | `gadget-repair` | routing gadget-repair postprocess |
+  | `ALGORITHM_ROUTING` | 27 | `routing` | two-commodity routing attack |
+  | `ALGORITHM_FLOW_LOOPS` | 28 | `flow-loops` | constrained loop search for adapted P and F-static |
+  | `ALGORITHM_DIPOLAR` | 29 | `dipolar` | D-static string and loop search |
 
 ### Fixed
 
