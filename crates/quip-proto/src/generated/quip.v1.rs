@@ -518,6 +518,14 @@ pub enum Algorithm {
     Otsuka = 19,
     Sat = 20,
     Greedy = 21,
+    PairWorm = 22,
+    WeightedDimer = 23,
+    Flow = 24,
+    TileWorm = 25,
+    GadgetRepair = 26,
+    Routing = 27,
+    FlowLoops = 28,
+    Dipolar = 29,
 }
 impl Algorithm {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -548,6 +556,14 @@ impl Algorithm {
             Self::Otsuka => "ALGORITHM_OTSUKA",
             Self::Sat => "ALGORITHM_SAT",
             Self::Greedy => "ALGORITHM_GREEDY",
+            Self::PairWorm => "ALGORITHM_PAIR_WORM",
+            Self::WeightedDimer => "ALGORITHM_WEIGHTED_DIMER",
+            Self::Flow => "ALGORITHM_FLOW",
+            Self::TileWorm => "ALGORITHM_TILE_WORM",
+            Self::GadgetRepair => "ALGORITHM_GADGET_REPAIR",
+            Self::Routing => "ALGORITHM_ROUTING",
+            Self::FlowLoops => "ALGORITHM_FLOW_LOOPS",
+            Self::Dipolar => "ALGORITHM_DIPOLAR",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -575,6 +591,14 @@ impl Algorithm {
             "ALGORITHM_OTSUKA" => Some(Self::Otsuka),
             "ALGORITHM_SAT" => Some(Self::Sat),
             "ALGORITHM_GREEDY" => Some(Self::Greedy),
+            "ALGORITHM_PAIR_WORM" => Some(Self::PairWorm),
+            "ALGORITHM_WEIGHTED_DIMER" => Some(Self::WeightedDimer),
+            "ALGORITHM_FLOW" => Some(Self::Flow),
+            "ALGORITHM_TILE_WORM" => Some(Self::TileWorm),
+            "ALGORITHM_GADGET_REPAIR" => Some(Self::GadgetRepair),
+            "ALGORITHM_ROUTING" => Some(Self::Routing),
+            "ALGORITHM_FLOW_LOOPS" => Some(Self::FlowLoops),
+            "ALGORITHM_DIPOLAR" => Some(Self::Dipolar),
             _ => None,
         }
     }

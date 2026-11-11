@@ -338,7 +338,15 @@ fn enum_numbers_match_the_fixture() {
             External,
             Otsuka,
             Sat,
-            Greedy
+            Greedy,
+            PairWorm,
+            WeightedDimer,
+            Flow,
+            TileWorm,
+            GadgetRepair,
+            Routing,
+            FlowLoops,
+            Dipolar
         ]
     );
     pin_enum!(

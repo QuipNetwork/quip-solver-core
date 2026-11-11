@@ -175,6 +175,14 @@ const ALGORITHM_NAMES: &[(Algorithm, &str)] = &[
     (Algorithm::Otsuka, "otsuka"),
     (Algorithm::Sat, "sat"),
     (Algorithm::Greedy, "greedy"),
+    (Algorithm::PairWorm, "pair-worm"),
+    (Algorithm::WeightedDimer, "weighted-dimer"),
+    (Algorithm::Flow, "flow"),
+    (Algorithm::TileWorm, "tile-worm"),
+    (Algorithm::GadgetRepair, "gadget-repair"),
+    (Algorithm::Routing, "routing"),
+    (Algorithm::FlowLoops, "flow-loops"),
+    (Algorithm::Dipolar, "dipolar"),
 ];
 /// Stable lowercase name for a wire identity.
 #[must_use]

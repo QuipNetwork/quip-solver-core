@@ -79,6 +79,14 @@ const ALGORITHM_NAMES = {
   [Algorithm.ALGORITHM_OTSUKA]: "otsuka",
   [Algorithm.ALGORITHM_SAT]: "sat",
   [Algorithm.ALGORITHM_GREEDY]: "greedy",
+  [Algorithm.ALGORITHM_PAIR_WORM]: "pair-worm",
+  [Algorithm.ALGORITHM_WEIGHTED_DIMER]: "weighted-dimer",
+  [Algorithm.ALGORITHM_FLOW]: "flow",
+  [Algorithm.ALGORITHM_TILE_WORM]: "tile-worm",
+  [Algorithm.ALGORITHM_GADGET_REPAIR]: "gadget-repair",
+  [Algorithm.ALGORITHM_ROUTING]: "routing",
+  [Algorithm.ALGORITHM_FLOW_LOOPS]: "flow-loops",
+  [Algorithm.ALGORITHM_DIPOLAR]: "dipolar",
   [Algorithm.UNRECOGNIZED]: "unspecified",
 };
 // Mirrors the Rust session loop's DEFAULT_NUM_SWEEPS in quip-solver-core.
