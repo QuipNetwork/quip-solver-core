@@ -93,6 +93,14 @@ The command-line output keeps lowercase names through the fixed map in `quip_pro
 | `otsuka` | `Algorithm::Otsuka` |
 | `sat` | `Algorithm::Sat` |
 | `greedy` | `Algorithm::Greedy` |
+| `pair-worm` | `Algorithm::PairWorm` |
+| `weighted-dimer` | `Algorithm::WeightedDimer` |
+| `flow` | `Algorithm::Flow` |
+| `tile-worm` | `Algorithm::TileWorm` |
+| `gadget-repair` | `Algorithm::GadgetRepair` |
+| `routing` | `Algorithm::Routing` |
+| `flow-loops` | `Algorithm::FlowLoops` |
+| `dipolar` | `Algorithm::Dipolar` |
 
 Replace old `backend` labels `test` and `narrow` with `Backend::Mock`.
 Split `cuda-sa` into `Backend::Cuda` and `Algorithm::Sa`.
