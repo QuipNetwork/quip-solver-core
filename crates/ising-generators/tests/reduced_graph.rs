@@ -18,7 +18,10 @@ use ising_generators::instance::Instance;
 
 #[path = "common/admit.rs"]
 mod admit;
-#[expect(dead_code, reason = "this test uses only the live topology loader")]
+#[expect(
+    dead_code,
+    reason = "this test uses only the live topology loader and hex"
+)]
 mod common;
 #[path = "common/lattice.rs"]
 mod lattice;
@@ -28,7 +31,7 @@ mod nonce;
 mod size_bounds;
 
 use admit::admitted;
-use common::live_topology;
+use common::{hex, live_topology};
 use lattice::lattice_topology;
 use nonce::nonce_of;
 use size_bounds::bounds;
@@ -162,61 +165,62 @@ fn assert_hosted(what: &str, instance: &Instance, graph: &BaseTopology) {
     }
 }
 
-/// The live z(12, 4) graph minus a drift of the shape seen on 2026-11-11:
-/// 15 lost qubits and 2 lost couplers between live qubits, one of them a
-/// tile coupler of the stale instance. The exact live drift list is not in
-/// the repository, so the lost set is cut from the stale instance of the
-/// first recipe: every tile that the drift breaks must disappear.
+/// The qubits that `Advantage2_system1` lost between the research snapshot of
+/// 2026-09-21 (`zephyr-z12t4-live.bin.gz`) and its working graph of
+/// 2026-11-11 (`graph_id=01b03fc8dc`). The chip gained no qubit.
+const LOST_QUBITS: [u32; 15] = [
+    417, 453, 1198, 1297, 1408, 1409, 1414, 2223, 2282, 3027, 4284, 4536, 4602, 4656, 4668,
+];
+
+/// The couplers between two live qubits that the chip lost in the same span.
+/// The chip gained no coupler.
+const LOST_COUPLERS: [(u32, u32); 2] = [(1210, 4446), (2356, 3335)];
+
+/// The FAM-19 order digest of the 2026-11-11 working graph, nodes ascending
+/// and couplers `(min, max)` ascending, as read from SAPI.
+const WORKING_GRAPH_DIGEST: &str =
+    "fa704fa0dffcabf819ba482f8e7cc50129d91975365e2883e1e17b68976b0956";
+
+/// The 2026-09-21 snapshot minus the drift above is the 2026-11-11 working
+/// graph, and every recipe builds on it. The stale instance used the lost
+/// part, so the reduction is what the test exercises.
 #[test]
-fn twisted_dimer_recipes_build_on_the_reduced_live_graph() {
-    let what = "reduced live graph";
-    let live = live_topology();
-    let stale = build(what, RECIPES[0].params, live, nonce_of(1));
+fn twisted_dimer_recipes_build_on_the_2026_11_11_working_graph() {
+    let what = "2026-11-11 working graph";
+    let snapshot = live_topology();
+    let lost_nodes: BTreeSet<u32> = LOST_QUBITS.into_iter().collect();
+    let lost_edges: BTreeSet<(u32, u32)> = LOST_COUPLERS.into_iter().collect();
+    let working = without(snapshot, &lost_nodes, &lost_edges);
+    assert_eq!(working.node_ids().len(), 4560, "{what}: qubits");
+    assert_eq!(working.edges().len(), 41205, "{what}: couplers");
+    assert_eq!(
+        hex(working.order_digest()),
+        WORKING_GRAPH_DIGEST,
+        "{what}: the reduction is the SAPI working graph"
+    );
+
+    let stale = build(what, RECIPES[0].params, snapshot, nonce_of(1));
     let stale_tiles = tiles_of(what, &stale);
-    let step = stale_tiles.len() / 15;
-    let lost_nodes: BTreeSet<u32> = (0..15).map(|k| stale_tiles[k * step][0]).collect();
-    assert_eq!(lost_nodes.len(), 15, "fifteen distinct lost qubits");
-    let alive = |tile: &[u32; 4]| tile.iter().all(|q| !lost_nodes.contains(q));
-    let broken_tile = stale_tiles
-        .iter()
-        .find(|tile| alive(tile))
-        .expect("a tile with four live qubits");
-    let ids = live.node_ids();
-    let weak = live
-        .edges()
-        .iter()
-        .map(|&(u, v)| key(ids[u as usize], ids[v as usize]))
-        .find(|&(a, b)| {
-            !lost_nodes.contains(&a)
-                && !lost_nodes.contains(&b)
-                && !stale_tiles
-                    .iter()
-                    .any(|tile| tile.contains(&a) && tile.contains(&b))
-        })
-        .expect("a weak coupler between live qubits");
-    let lost_edges: BTreeSet<(u32, u32)> = [key(broken_tile[0], broken_tile[1]), weak]
-        .into_iter()
-        .collect();
-    let reduced = without(live, &lost_nodes, &lost_edges);
-    assert_eq!(reduced.node_ids().len(), live.node_ids().len() - 15);
-    assert!(reduced.edges().len() + 2 < live.edges().len());
+    assert!(
+        stale_tiles
+            .iter()
+            .any(|tile| tile.iter().any(|q| lost_nodes.contains(q))),
+        "{what}: the stale instance has a tile on a lost qubit"
+    );
 
     for recipe in RECIPES {
         let what = recipe.alias;
-        let instance = build(what, recipe.params, &reduced, nonce_of(1));
-        assert_hosted(what, &instance, &reduced);
+        let instance = build(what, recipe.params, &working, nonce_of(1));
+        assert_hosted(what, &instance, &working);
         let tiles = tiles_of(what, &instance);
         assert!(!tiles.is_empty(), "{what}: tiles");
         assert!(
-            !tiles
+            tiles
                 .iter()
-                .any(|tile| tile.contains(&broken_tile[0]) && tile.contains(&broken_tile[1])),
-            "{what}: the tile with the lost coupler is gone"
+                .all(|tile| tile.iter().all(|q| !lost_nodes.contains(q))),
+            "{what}: no tile on a lost qubit"
         );
     }
-    // The stale instance did use the lost part, so the reduction mattered.
-    assert!(stale_tiles.iter().any(|tile| !alive(tile)));
-    assert!(stale_tiles.contains(broken_tile));
 }
 
 /// A tile that lost one of its four qubits is not a tile: no candidate and no

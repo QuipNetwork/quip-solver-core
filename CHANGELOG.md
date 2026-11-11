@@ -39,9 +39,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `session.topology_fit(native_nodes, native_edges, nodes, edges)`, so a Python
   miner advertises the same hash and applies the same refusal as a Rust solver,
   and `families.topology_order_digest(nodes, edges)`, the FAM-19 digest.
-- Tests that build the twisted-ice-dimer recipes on the live z(12, 4) topology
-  minus 15 qubits and 2 couplers, and check that every tile, pair, and edge of
-  the output exists on the reduced graph. Tests that a tile with one lost
+- Tests that build the twisted-ice-dimer recipes on the Advantage2_system1
+  working graph of 2026-11-11, which is the 2026-09-21 snapshot minus the 15
+  qubits and 2 couplers that the chip lost, and check that every tile, pair, and
+  edge of the output exists on that graph. Tests that a tile with one lost
   qubit or one lost coupler is not a tile, and that a pair needs both qubits
   and their coupler.
 
