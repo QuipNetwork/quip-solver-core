@@ -11,6 +11,7 @@ workflow:
     - if: $CI_COMMIT_BRANCH
 
 stages:
+  - toolchain
   - test
   - validate
   - smoke
@@ -30,6 +31,7 @@ stages:
   - notes
 
 variables:
+  TOOLCHAIN_CACHE_IMAGE: $CI_REGISTRY_IMAGE/ci-toolchain-buildcache
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
   # Must match the protoc that generated npm/src/generated. See the wasm job.
@@ -124,6 +126,57 @@ include:
           echo "expected node ${NODE_MAJOR}.x, got ${HAVE}" >&2
           exit 1
       fi
+
+# ---------------------------------------------------------------------------
+# CI toolchain image.
+#
+# Built from .gitlab/ci-toolchain.Dockerfile with kaniko. Runs automatically
+# when that file changes, on a branch or a merge request pipeline, and is
+# manual otherwise. It never runs on a tag pipeline: a tag pins the image its
+# commit already references. Nothing needs this job, and a manual job with
+# allow_failure does not hold up the stages behind it.
+#
+# After a rebuild, copy the digest printed at the end of the log into
+# TOOLCHAIN_IMAGE.
+# ---------------------------------------------------------------------------
+build-toolchain-image:
+  stage: toolchain
+  needs: []
+  tags: [linux, amd64]
+  # The -debug image has the shell that before_script needs.
+  image:
+    name: ghcr.io/osscontainertools/kaniko:v1.29.1-debug@sha256:ebc38a988e5aa1aaea99240e931aeeeff9d8e6bb5a0bd0e00eaf79973bf0a773
+    entrypoint: [""]
+  rules:
+    - if: $CI_COMMIT_TAG
+      when: never
+    - if: $CI_COMMIT_BRANCH || $CI_PIPELINE_SOURCE == "merge_request_event"
+      changes:
+        - .gitlab/ci-toolchain.Dockerfile
+    - if: $CI_COMMIT_BRANCH || $CI_PIPELINE_SOURCE == "merge_request_event"
+      when: manual
+      allow_failure: true
+  timeout: 60m
+  before_script:
+    - mkdir -p /kaniko/.docker
+    - |
+      printf '{"auths":{"%s":{"auth":"%s"}}}\n' \
+        "$CI_REGISTRY" \
+        "$(printf '%s:%s' "$CI_REGISTRY_USER" "$CI_REGISTRY_PASSWORD" | base64 | tr -d '\n')" \
+        > /kaniko/.docker/config.json
+    # The Dockerfile copies nothing, so the build context is empty.
+    - mkdir -p /tmp/toolchain-context
+  script:
+    - |
+      /kaniko/executor \
+        --context /tmp/toolchain-context \
+        --dockerfile "$CI_PROJECT_DIR/.gitlab/ci-toolchain.Dockerfile" \
+        --destination "$CI_REGISTRY_IMAGE/ci-toolchain:latest" \
+        --destination "$CI_REGISTRY_IMAGE/ci-toolchain:$CI_COMMIT_SHORT_SHA" \
+        --cache=true \
+        --cache-repo "$TOOLCHAIN_CACHE_IMAGE" \
+        --digest-file=/tmp/digest
+    - echo "Pushed $CI_REGISTRY_IMAGE/ci-toolchain@$(cat /tmp/digest)"
 
 # The contract must build with no device present. That is the test for what
 # belongs in this repository: anything needing special hardware to build
