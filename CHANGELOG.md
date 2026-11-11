@@ -15,15 +15,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   stream and the release of the socket. The wait ends at the shutdown grace
   deadline, but it lasts at least 500 ms, so a sampler that uses up the grace
   window does not cause a false failure. A clean session exits 70 when the wait
-  ends before both signals arrive, or when a socket write, flush, or shutdown
-  fails. Stream resets and HTTP/2 protocol errors from the coordinator stay
+  ends before both signals arrive, when a socket read, write, flush, or
+  shutdown fails, or when the connection releases the socket without a clean
+  shutdown. Stream resets and HTTP/2 protocol errors from the coordinator stay
   undetected.
-
-### Changed
-
-- The shutdown tests run 20 times each by default. Use
-  `QUIP_CLOSE_TEST_ITERATIONS` to set a larger count. Each test prints its run
-  time. Failed runs show the count of results and refunds received.
 
 ## 0.0.9
 
