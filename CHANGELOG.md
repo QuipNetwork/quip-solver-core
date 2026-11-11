@@ -5,12 +5,14 @@ This file documents changes to the Quip solver contract.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## 0.0.11-rc1
+## 0.0.11
 
 Structured generators build from the registered chip graph, and a solver that
 reports its native working graph refuses a topology that the graph does not
 host. The session now fills `Capabilities.native_topology_hash`, a field that
-`miner.proto` already defines. `protocol_version` stays 2.
+`miner.proto` already defines. `protocol_version` stays 2. The legacy draw,
+`GENERATOR_ALGORITHM_BLAKE3_CHACHA8_V1`, does not change, so runtime 119
+validators verify the same proofs.
 
 ### Added
 
