@@ -24,14 +24,37 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   | `ALGORITHM_FLOW_LOOPS` | 28 | `flow-loops` | constrained loop search for adapted P and F-static |
   | `ALGORITHM_DIPOLAR` | 29 | `dipolar` | D-static string and loop search |
 
-## 0.0.8
+## 0.0.9
 
-The greedy algorithm value. `miner.proto` adds `ALGORITHM_GREEDY`, named
-`greedy`, for a greedy-descent postprocess solver. The test suite is smaller and
-faster. `protocol_version` stays 2, and the default features do not change.
+The canonical problem families. The registry adds `quip/defects-static@1` and
+`quip/flow-static@1` with status `research`. The Python wheel adds the
+`families` module, which builds the same canonical instance bytes as the Rust
+generator. The release checks now fail when a crate or the wheel lacks a family
+file. `docs/family-release.md` lists every family revision with its vector pin.
+`protocol_version` stays 2, and the default features do not change.
 
 ### Added
 
+- `scripts/check-crate-contents.sh` and `scripts/check-wheel-families.sh`, and
+  `docs/family-release.md`. `make check-crate-publish` now fails when the
+  `ising-generators` tarball lacks a family source file, when the
+  `quip-solver-conformance` tarball lacks a registered vector file, or when a
+  crate is over the crates.io limit of 10 MiB. `make check-python-dist` now
+  fails when the wheel lacks the `families` module or lists a set of families
+  that differs from the registry. The release document lists every family
+  revision with its vector pin, the package versions, the upgrade order, and
+  the version 2 negotiation.
+- The `families` module of the Python wheel. Import it with
+  `from quip_solver_core import families`. It builds the canonical instance of a
+  family lease from the topology and the nonce, so a Python miner produces the
+  same bytes as the Rust generator. The functions are `supported`,
+  `params_digest`, `admit`, `generate`, `validate_instance`, and `feasible`. The
+  `Instance` class holds the canonical fields with the integer milli
+  coefficients. Family faults raise `FamilyError` or one of its subclasses
+  `AdmissionError`, `SaltSkipped`, `InstanceInvalid`, and `GeneratorDefect`.
+  Each carries `code` and `name`.
+- `ising_generators::registry::CONTRACTS`, the list of every family contract
+  that the crate provides.
 - `quip/defects-static@1`, a registered family with status `research` and class
   `hard`. It selects a low physical energy square-ice state on the native layout
   of `quip/polariton-static`. Each link is a dipolar island at its midpoint, and
@@ -49,9 +72,6 @@ faster. `protocol_version` stays 2, and the default features do not change.
   sides 4, 6, 8, and 12 wait on a calibrated record. The contract is
   `docs/families/quip-defects-static-1.md`, the vectors are `defects.json`, and
   the Rust contract is `ising_generators::defects::DEFECTS_V1`.
-- `miner.proto`: the enum value `ALGORITHM_GREEDY` = 21, named `greedy`, for a
-  solver that runs a zero-temperature greedy descent, such as a postprocess of
-  supplied states. The Rust, Python, and TypeScript bindings include it.
 - `quip/flow-static@1`, a registered family with status `research` and class
   `hard`. It is the adapted active-flow task on the native layout of
   `quip/polariton-static`. One unit of flow runs along every link, each vertex has
@@ -69,6 +89,18 @@ faster. `protocol_version` stays 2, and the default features do not change.
   is `docs/families/quip-flow-static-1.md`, the vectors are `flow.json` with the
   sections `cases`, `flow_witnesses`, `networks`, `flow_recipes`, and
   `admission`, and the Rust contract is `ising_generators::flow::FLOW_V1`.
+
+## 0.0.8
+
+The greedy algorithm value. `miner.proto` adds `ALGORITHM_GREEDY`, named
+`greedy`, for a greedy-descent postprocess solver. The test suite is smaller and
+faster. `protocol_version` stays 2, and the default features do not change.
+
+### Added
+
+- `miner.proto`: the enum value `ALGORITHM_GREEDY` = 21, named `greedy`, for a
+  solver that runs a zero-temperature greedy descent, such as a postprocess of
+  supplied states. The Rust, Python, and TypeScript bindings include it.
 
 ### Changed
 

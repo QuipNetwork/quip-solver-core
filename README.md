@@ -9,11 +9,12 @@ The Python wheel and npm package carry consensus primitives and generated gRPC s
 Python and TypeScript solvers provide their own session loops.
 
 The full contract is in [SPEC.md](SPEC.md).
-[CHANGELOG.md](CHANGELOG.md) lists the 0.0.8 changes.
+[CHANGELOG.md](CHANGELOG.md) lists the 0.0.9 changes.
 [MIGRATING.md](MIGRATING.md) covers solver API changes.
 Releases from `0.0.2-rc3` require protocol version 2.
 Update the coordinator and solvers together using the
 [coordinator upgrade guide](docs/coordinator-upgrade-v2.md).
+The [family release](docs/family-release.md) lists the families, the package versions, and the upgrade order of the release.
 The [miner hardware guide](docs/miner-side-generation.md) describes how a GPU or other device draws lease problems.
 The [topology file format](docs/topology-format.md) defines the `.bin.gz` files that hold the family vectors topologies.
 
@@ -26,7 +27,7 @@ The [topology file format](docs/topology-format.md) defines the `.bin.gz` files 
 | `quip-protocol` | Wire codec, energy and diversity scoring, handshake, ChaCha8 draw |
 | `ising-generators` | Family descriptors, canonical instances, ChaCha8 streams, and nonce derivation, `no_std` |
 | `quip-solver-conformance` | Golden vectors and the scripted session driver |
-| `quip-protocol-py` | PyO3 bindings exposing `quip-protocol` scoring and wire primitives to Python |
+| `quip-protocol-py` | PyO3 bindings exposing `quip-protocol` scoring and wire primitives and the family generator to Python |
 | `quip-protocol-wasm` | WebAssembly bindings behind the npm package |
 | `quip-solver-c` | C binary interface over the session loop, shipped as a release artifact |
 
@@ -39,10 +40,10 @@ artifact, because a C consumer wants the compiled object and the header.
 
 ```toml
 [dependencies]
-quip-solver-core = "0.0.8"
+quip-solver-core = "0.0.9"
 
 [dev-dependencies]
-quip-solver-conformance = "0.0.8"
+quip-solver-conformance = "0.0.9"
 ```
 
 One dependency is enough. `quip-solver-core` re-exports `quip_proto` and
@@ -60,6 +61,10 @@ The Rust example shows this choice.
 ```sh
 pip install quip-solver-core
 ```
+
+The wheel exposes `scoring`, `wire`, and `families`. The `families` module
+builds the canonical instance of a family lease with `families.generate`. It
+takes the descriptor, the topology as node and edge lists, and the nonce.
 
 ### Node packages
 
