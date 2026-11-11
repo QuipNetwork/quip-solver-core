@@ -180,6 +180,16 @@ Topology admission then applies these checks in this order. The first failure de
 After these checks, the size bounds give code 13 for a degree of more than 32 and for any other bound that the topology breaks.
 An admitted request with `pairs` equal to `floor(n / 2)` can still give code 14 for a salt. Code 14 is a generation result and not an admission result.
 
+### Response to a changed topology
+
+The generator takes the registered topology as its input. That input is the node ids and the edges of the base topology in registration order, the same input that the legacy draw reads. The construction finds the tiles and the pair matching on that topology, and the remaining edges get the weak couplings. No step assumes a fixed chip. When a chip loses qubits or couplers, refresh the registered topology as [Topology file format](../topology-format.md#refresh-after-a-chip-change) describes. The construction then builds from the new topology without a change to this contract.
+
+- A tile needs its four nodes and its six edges on the topology. A tile with a lost node or a lost edge is not a tile. The tile count scales with the topology: the free tiles plus the maximum matching over the candidate tiles that exist.
+- A pair needs both nodes and their edge on the topology. The pair count stays at `pairs` and does not scale with the topology, because the pair count sets the difficulty of a cell. Admission accepts `pairs` up to `floor(n / 2)`. A salt whose walk finds fewer than `pairs` disjoint non-tile edges gives code 14, and the miner skips the salt.
+- The weak-coupler count scales with the topology: the edge count minus 6 times the tile count minus `pairs`.
+
+An instance records the topology order digest of its base topology (FAM-19), and a lease carries the same digest (FAM-49). The solver refuses a lease whose digest differs from the digest of its cached topology (FAM-50). A solver with a native working graph also refuses a cached topology that names a node or an edge the graph lacks (FAM-47, step 4). Refusal replaces clamping: a model with a clamped node or a dropped edge is a different problem, and its reads do not pool with reads of the full model.
+
 ## Size bounds
 
 The size bounds are the base topology itself:

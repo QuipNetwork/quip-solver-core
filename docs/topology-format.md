@@ -111,6 +111,19 @@ The exit codes are:
 | 1    | The input file or the JSON is not valid, or the blob breaks a rule of this format |
 | 2    | The command line is not valid |
 
+## Refresh after a chip change
+
+When a chip loses qubits or couplers, one step refreshes the registered topology. Every structured family builds its tiles, pairs, and weak couplers from the topology that a lease carries, so no family file changes.
+
+1. Read the live graph from the device: the qubits and the couplers in native ids.
+2. Write the graph as an explicit JSON topology, with the nodes ascending and the edges `[min, max]` ascending.
+3. Run `quip-topology encode live.json topology.bin.gz`.
+4. Register the nodes and the edges of the file. The topology order digest of that registration is the digest that every family lease carries (FAM-19, FAM-49).
+
+A solver with a native working graph refuses a `Topology` that names a qubit or a coupler the graph lacks, with `TOPOLOGY_MISMATCH`. Until you refresh the registration, that solver gets no lease on the stale topology.
+
+The file `zephyr-z12t4-live.bin.gz` in `vectors/topologies` is the research snapshot of 2026-09-21. The vectors pin it as archived research data, and a refresh of the registered topology does not rewrite it.
+
 ## Library entry points
 
 The Rust crate `ising-generators` has the module `ising_generators::blob` behind the `blob` feature. The feature needs no standard library. The module has these public items.
