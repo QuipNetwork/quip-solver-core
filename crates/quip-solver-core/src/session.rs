@@ -35,8 +35,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 use tokio::sync::{mpsc, watch, Semaphore};
-use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::{Endpoint, Uri};
+
+mod transport;
 
 /// Static backend metadata advertised in capabilities and Hello.
 #[derive(Clone, Copy, Debug)]
@@ -1070,6 +1071,8 @@ async fn run_session<S: Sampler<C>, C: Coefficient>(
     // always maps to exit 77 (never InternalFatal from a connect failure).
     let hello = build_hello(miner_id, advertised_capabilities::<S, C>(id, families))?;
 
+    let (tx, rx) = mpsc::channel::<MinerMsg>(16);
+    let (transport, outbound, sockets) = transport::TransportClose::new(rx);
     let path = uri.strip_prefix("unix://").unwrap_or(uri).to_string();
     let channel = Endpoint::try_from("http://[::]:50051")? // dummy authority for UDS
         // The keepalive the read loop's comment below assumes. It has to be
@@ -1088,19 +1091,20 @@ async fn run_session<S: Sampler<C>, C: Coefficient>(
         .keep_alive_while_idle(true)
         .connect_with_connector(tower::service_fn(move |_: Uri| {
             let p = path.clone();
+            let sockets = sockets.clone();
             async move {
                 let s = tokio::net::UnixStream::connect(p).await?;
-                Ok::<_, std::io::Error>(hyper_util::rt::TokioIo::new(s))
+                Ok::<_, std::io::Error>(hyper_util::rt::TokioIo::new(sockets.wrap(s)))
             }
         }))
         .await?;
     let mut client = MinerServiceClient::new(channel);
 
-    let (tx, rx) = mpsc::channel::<MinerMsg>(16);
     tx.send(miner(miner_msg::Msg::Hello(hello))).await?;
 
-    let inbound = client.session(ReceiverStream::new(rx)).await?.into_inner();
-    run_connected_session(
+    let inbound = client.session(outbound).await?.into_inner();
+    let mut shutdown_deadline = None;
+    let result = run_connected_session(
         inbound,
         tx,
         miner_id,
@@ -1108,13 +1112,28 @@ async fn run_session<S: Sampler<C>, C: Coefficient>(
         families,
         sampler,
         sweeps_per_beta,
+        &mut shutdown_deadline,
     )
-    .await
+    .await;
+    // The writer, the sampler, and the inbound drain are done, but Hyper's
+    // connection task may still hold the final request frames. `run_code`
+    // drops the runtime when this returns, which used to kill that task with
+    // the frames unwritten. Dropping the last channel handle lets tonic drop
+    // Hyper's request sender, so the connection closes once the request ends.
+    drop(client);
+    match shutdown_deadline {
+        Some(deadline) => transport.finish(result, deadline).await,
+        // The session failed before shutdown began, so it has no deadline to
+        // wait within and its error already decides the exit code.
+        None => result,
+    }
 }
 
 #[expect(
     clippy::too_many_lines,
-    reason = "single bidi session select-loop; splitting would obscure the control flow"
+    clippy::too_many_arguments,
+    reason = "single bidi session select-loop; splitting would obscure the control flow, \
+              and the shutdown deadline it reports back is the eighth argument"
 )]
 async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
     mut inbound: impl tokio_stream::Stream<Item = Result<CoordMsg, tonic::Status>> + Unpin,
@@ -1124,6 +1143,9 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
     families: &FamilyTable,
     sampler: Arc<S>,
     sweeps_per_beta: Option<usize>,
+    // Set to the shutdown grace deadline once shutdown begins. The caller
+    // waits for the transport to close within the same deadline.
+    shutdown_deadline: &mut Option<tokio::time::Instant>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use tokio_stream::StreamExt as _;
 
@@ -1707,6 +1729,7 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
     }
     let grace = Duration::from_millis(grace_ms);
     let deadline = tokio::time::Instant::now() + grace;
+    *shutdown_deadline = Some(deadline);
     // Lease sinks, monitors, and expanders read this value as their close deadline.
     // Teardown below keeps the full grace deadline.
     let _ = shutdown_tx.send_replace(Some(lease::ShutdownDeadlines {
@@ -2032,6 +2055,7 @@ pub fn run<S: Sampler<C>, C: Coefficient>(
 mod tests {
     use super::*;
     use crate::families::Declaration;
+    use tokio_stream::wrappers::ReceiverStream;
 
     #[test]
     #[expect(
@@ -2260,6 +2284,7 @@ mod tests {
         let (out, mut replies) = mpsc::channel(8);
         let identity = test_identity();
         let families = generic_table();
+        let mut shutdown_deadline = None;
         let session = run_connected_session(
             ReceiverStream::new(incoming),
             out,
@@ -2268,6 +2293,7 @@ mod tests {
             &families,
             sampler,
             None,
+            &mut shutdown_deadline,
         );
         let coordinator = async move {
             let send = |msg| input.send(Ok(CoordMsg { msg: Some(msg) }));
@@ -2418,6 +2444,10 @@ mod tests {
     /// lanes past the first half sit idle (measured on an RTX 2070: 4.64 lease
     /// salts/s against 7.90 plain jobs/s from the same binary).
     #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the session and its scripted coordinator read best side by side"
+    )]
     async fn lease_salts_fill_the_same_prefetch_depth_as_plain_jobs() {
         let width = 4;
         let seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -2432,6 +2462,7 @@ mod tests {
         let drain = tokio::spawn(async move { while replies.recv().await.is_some() {} });
         let identity = test_identity();
         let families = generic_table();
+        let mut shutdown_deadline = None;
         let session = run_connected_session(
             ReceiverStream::new(incoming),
             out,
@@ -2440,6 +2471,7 @@ mod tests {
             &families,
             sampler,
             None,
+            &mut shutdown_deadline,
         );
         let coordinator = async move {
             let send = |msg| input.send(Ok(CoordMsg { msg: Some(msg) }));
@@ -2546,6 +2578,7 @@ mod tests {
         let sampler = Arc::new(Sampled(StdMutex::new(Some(sampled_tx))));
         let identity = test_identity();
         let families = generic_table();
+        let mut shutdown_deadline = None;
         let session = run_connected_session(
             ReceiverStream::new(incoming),
             out,
@@ -2554,6 +2587,7 @@ mod tests {
             &families,
             sampler,
             None,
+            &mut shutdown_deadline,
         );
         let coordinator = async move {
             let send = |msg| input.send(Ok(CoordMsg { msg: Some(msg) }));

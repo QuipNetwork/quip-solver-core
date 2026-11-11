@@ -1087,6 +1087,8 @@ async fn local_shutdown_closes_an_unreturned_worker_at_grace_deadline() {
             .is_none()
     );
     s.tx = mpsc::channel(1).0;
+    // The blocked worker uses up the grace window. The transport close floor
+    // still lets the miner confirm delivery, so the exit stays clean.
     assert!(
         tokio::time::timeout(Duration::from_secs(10), s.child.wait())
             .await
@@ -1119,6 +1121,8 @@ async fn shutdown_reports_a_lease_whose_salt_never_returns() {
     // The sampler thread blocks on the gate. Closing it lets the process exit.
     drop(held);
     s.tx = mpsc::channel(1).0;
+    // The sampler returns after the grace deadline. The transport close
+    // floor still lets the miner confirm delivery, so the exit stays clean.
     assert!(
         tokio::time::timeout(Duration::from_secs(10), s.child.wait())
             .await

@@ -24,6 +24,19 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   | `ALGORITHM_FLOW_LOOPS` | 28 | `flow-loops` | constrained loop search for adapted P and F-static |
   | `ALGORITHM_DIPOLAR` | 29 | `dipolar` | D-static string and loop search |
 
+### Fixed
+
+- Session shutdown no longer drops the final results and refunds. The runtime
+  used to stop before the HTTP/2 connection wrote the last request frames, and
+  the process still exited 0. Now the miner waits for the end of the request
+  stream and the release of the socket. The wait ends at the shutdown grace
+  deadline, but it lasts at least 500 ms, so a sampler that uses up the grace
+  window does not cause a false failure. A clean session exits 70 when the wait
+  ends before both signals arrive, when a socket read, write, flush, or
+  shutdown fails, or when the connection releases the socket without a clean
+  shutdown. Stream resets and HTTP/2 protocol errors from the coordinator stay
+  undetected.
+
 ## 0.0.9
 
 The canonical problem families. The registry adds `quip/defects-static@1` and
