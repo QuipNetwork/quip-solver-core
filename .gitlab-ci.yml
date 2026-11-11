@@ -99,7 +99,6 @@ build-toolchain-image:
       /kaniko/executor \
         --context /tmp/toolchain-context \
         --dockerfile "$CI_PROJECT_DIR/.gitlab/ci-toolchain.Dockerfile" \
-        --destination "$CI_REGISTRY_IMAGE/ci-toolchain:latest" \
         --destination "$CI_REGISTRY_IMAGE/ci-toolchain:$CI_COMMIT_SHORT_SHA" \
         --cache=true \
         --cache-repo "$TOOLCHAIN_CACHE_IMAGE" \
