@@ -32,7 +32,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   graph with the qubits ascending and the couplers `(min, max)` ascending.
   When a `Topology` names a qubit or a coupler that the graph lacks, the
   session logs the two counts and refuses every lease and every `topology_hash`
-  job on that topology with `TOPOLOGY_MISMATCH`, in place of a clamped model.
+  job on that topology with `TOPOLOGY_MISMATCH`. A sampler that reports no
+  native graph skips the check, so a miner that clamps keeps doing so.
   Inline jobs are not affected. `--capabilities` runs with the device closed
   and carries no hash.
 - The Python wheel: `session.native_topology_hash(nodes, edges)` and

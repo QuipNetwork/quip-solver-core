@@ -614,7 +614,7 @@ The first failure wins, and no step draws a random word.
    - `salt_start + salt_count` overflows `u64` (`LeaseError::CounterOverflow` from `LeaseSpec::new` in `crates/quip-protocol/src/lease.rs`).
    - The session maps each of these errors to `MALFORMED` (`prepare` in `crates/quip-solver-core/src/lease.rs`). [Generated jobs](../SPEC.md#generated-jobs) in the solver contract states the same rules.
 3. Codes 1 to 10, in ascending order.
-4. The `topology_hash` check that exists today. A hash that differs from the cached `Topology.hash` gives `TOPOLOGY_MISMATCH`. A solver with a native working graph gives `TOPOLOGY_MISMATCH` here also when the cached `Topology` names a qubit or a coupler that the graph lacks. The solver never clamps the missing part.
+4. The `topology_hash` check that exists today. A hash that differs from the cached `Topology.hash` gives `TOPOLOGY_MISMATCH`. A solver with a native working graph gives `TOPOLOGY_MISMATCH` here also when the cached `Topology` names a qubit or a coupler that the graph lacks. A solver that reports no native working graph skips this check and handles a missing part itself.
 5. Codes 11, 12, and the admission part of code 13, in ascending order.
 
 The advertised limits of a family lease are exactly `max_nodes`, `max_edges`, and `max_degree`, `Capabilities` fields 4, 5, and 14.

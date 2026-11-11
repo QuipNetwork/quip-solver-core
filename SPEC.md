@@ -252,7 +252,7 @@ Its nodes and edges keep chain registration order, with native node identifiers 
 An absent topology produces `TOPOLOGY_MISSING`. A different cached hash produces `TOPOLOGY_MISMATCH`.
 A solver that has a native working graph compares each `Topology` with that graph when the message arrives.
 When the `Topology` names a qubit or a coupler that the graph lacks, every lease and every `topology_hash` job on it gets `TOPOLOGY_MISMATCH`.
-The solver never clamps the missing part, because a clamped model is a different problem.
+Without a native working graph, the solver skips this check and may clamp a missing part itself.
 An inline job is not affected.
 An absent target or zero `SetTarget.max_proof_solutions` produces `TARGET_MISSING`.
 That limit must equal the runtime's `QuantumPowMaxSolutions`, which is 32 on 2026-09-23.

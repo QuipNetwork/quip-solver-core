@@ -188,7 +188,7 @@ The generator takes the registered topology as its input. That input is the node
 - A pair needs both nodes and their edge on the topology. The pair count stays at `pairs` and does not scale with the topology, because the pair count sets the difficulty of a cell. Admission accepts `pairs` up to `floor(n / 2)`. A salt whose walk finds fewer than `pairs` disjoint non-tile edges gives code 14, and the miner skips the salt.
 - The weak-coupler count scales with the topology: the edge count minus 6 times the tile count minus `pairs`.
 
-An instance records the topology order digest of its base topology (FAM-19), and a lease carries the same digest (FAM-49). The solver refuses a lease whose digest differs from the digest of its cached topology (FAM-50). A solver with a native working graph also refuses a cached topology that names a node or an edge the graph lacks (FAM-47, step 4). Refusal replaces clamping: a model with a clamped node or a dropped edge is a different problem, and its reads do not pool with reads of the full model.
+An instance records the topology order digest of its base topology (FAM-19), and a lease carries the same digest (FAM-49). The solver refuses a lease whose digest differs from the digest of its cached topology (FAM-50). A solver with a native working graph also refuses a cached topology that names a node or an edge the graph lacks (FAM-47, step 4). A solver that reports no native working graph skips that check and may clamp a missing part itself.
 
 ## Size bounds
 
