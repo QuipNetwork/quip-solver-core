@@ -9,6 +9,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `scripts/check-crate-contents.sh` and `scripts/check-wheel-families.sh`, and
+  `docs/family-release.md`. `make check-crate-publish` now fails when the
+  `ising-generators` tarball lacks a family source file, when the
+  `quip-solver-conformance` tarball lacks a registered vector file, or when a
+  crate is over the crates.io limit of 10 MiB. `make check-python-dist` now
+  fails when the wheel lacks the `families` module or lists a set of families
+  that differs from the registry. The release document lists every family
+  revision with its vector pin, the package versions, the upgrade order, and
+  the version 2 negotiation.
 - The `families` module of the Python wheel. Import it with
   `from quip_solver_core import families`. It builds the canonical instance of a
   family lease from the topology and the nonce, so a Python miner produces the

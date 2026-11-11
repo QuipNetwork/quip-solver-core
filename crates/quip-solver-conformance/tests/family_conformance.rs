@@ -12,14 +12,16 @@ use ising_generators::family::{
 };
 use ising_generators::instance::Instance;
 use ising_generators::random::derive_nonce;
+use ising_generators::registry::CONTRACTS;
 use quip_protocol::lease::salt_with_counter;
 use quip_solver_conformance::families::layered::{RESTRICTED_V1, UNIFORM_V1};
+use quip_solver_conformance::families::registry::{parse_registry, Status};
 use quip_solver_conformance::families::{
     check_case, compare, drive_miner_family, export_instances, first_diff, parse_vector_cases,
     CaseMismatch, Component, Expected, ExpectedSalt, VectorCase,
 };
 use quip_solver_conformance::solve::CaseOutcome;
-use quip_solver_conformance::FAMILY_LAYERED;
+use quip_solver_conformance::{FAMILY_LAYERED, FAMILY_REGISTRY};
 
 /// 2 layers, field -1500.
 const P_SPEC: &str = "01010002000000020002000400000024faffff";
@@ -236,6 +238,57 @@ fn reference_layered_passes_every_vector_case() -> Result<(), String> {
     for case in cases()? {
         check_case(&contract_of(&case)?, &case)
             .map_err(|m| format!("{}: {:?} {}", case.name, m.salt_index, m.diff))?;
+    }
+    Ok(())
+}
+
+/// The contract of a released revision. The `vectors/*` constructions belong to
+/// the conformance crate. Every other family comes from the generator crate.
+fn released_contract(family_id: &str, revision: u32) -> Option<Contract> {
+    [UNIFORM_V1, RESTRICTED_V1]
+        .into_iter()
+        .chain(CONTRACTS.iter().copied())
+        .find(|c| c.family_id == family_id && c.revision == revision)
+}
+
+/// The vector cases of one registry entry. A vectors file can hold the cases of
+/// more than one revision, so only the cases of the entry count.
+fn cases_of_entry(
+    family_id: &str,
+    revision: u32,
+    vectors: &str,
+) -> Result<Vec<VectorCase>, String> {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let text =
+        std::fs::read_to_string(root.join(vectors)).map_err(|e| format!("{vectors}: {e}"))?;
+    Ok(parse_vector_cases(&text)?
+        .into_iter()
+        .filter(|case| case.family_id == family_id && case.revision == revision)
+        .collect())
+}
+
+#[test]
+fn every_released_family_passes_its_vector_cases() -> Result<(), String> {
+    let released: Vec<_> = parse_registry(FAMILY_REGISTRY)?
+        .into_iter()
+        .filter(|entry| entry.status != Status::Archived)
+        .collect();
+    if released.is_empty() {
+        return Err("the registry lists no released family".to_owned());
+    }
+    for entry in released {
+        let name = format!("{}@{}", entry.family_id, entry.revision);
+        let contract = released_contract(&entry.family_id, entry.revision)
+            .ok_or_else(|| format!("{name}: no contract"))?;
+        let cases = cases_of_entry(&entry.family_id, entry.revision, &entry.vectors)?;
+        if cases.is_empty() {
+            return Err(format!("{name}: no vector cases in {}", entry.vectors));
+        }
+        for case in &cases {
+            check_case(&contract, case).map_err(|m| {
+                format!("{name}: case {}: {:?} {}", case.name, m.salt_index, m.diff)
+            })?;
+        }
     }
     Ok(())
 }
