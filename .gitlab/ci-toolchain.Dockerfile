@@ -106,7 +106,8 @@ RUN export RUSTUP_TOOLCHAIN=1.97.1 \
     && cargo install wasm-pack --version "${WASM_PACK_VERSION}" --locked \
     && rm -rf "${CARGO_HOME}/registry" "${CARGO_HOME}/git"
 
-# Fail the image build here, not in a CI job.
+# Fail the image build here, not in a CI job. sed rather than head, because head
+# closes the pipe early and pipefail turns the resulting SIGPIPE into a failure.
 RUN rustc --version && cargo --version && cargo clippy --version \
     && cargo fmt --version && rustup target list --installed \
     && wasm-pack --version && protoc --version \
@@ -115,5 +116,5 @@ RUN rustc --version && cargo --version && cargo clippy --version \
     && maturin --version && twine --version \
     && python -m grpc_tools.protoc --version && ruff --version \
     && shellcheck --version && shfmt --version \
-    && make --version | head -n1 && g++ --version | head -n1 \
-    && jq --version && curl --version | head -n1 && unzip -v | head -n1
+    && make --version | sed -n 1p && g++ --version | sed -n 1p \
+    && jq --version && curl --version | sed -n 1p && unzip -v | sed -n 1p
