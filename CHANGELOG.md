@@ -7,6 +7,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
 
+### Fixed
+
+- Session shutdown no longer drops the final results and refunds. The runtime
+  used to stop before the HTTP/2 connection wrote the last request frames, and
+  the process still exited 0. Now the miner waits, within the shutdown grace
+  deadline, for the end of the request stream and the release of the socket.
+  A clean session exits 70 when the wait passes the deadline or a socket write,
+  flush, or shutdown fails, and so does a session whose sampler returns after
+  the grace window. Stream resets and HTTP/2 protocol errors from the
+  coordinator stay undetected.
+
 ### Changed
 
 - The shutdown tests run 20 times each by default. Use
