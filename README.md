@@ -100,6 +100,32 @@ Exit code 0 means conformant. With `--family`, a revision that the solver
 lists in `generated_families` but the driver cannot drive fails the gate. The
 driver spawns any executable, so this works for a solver in any language.
 
+## Build toolchain image
+
+CI jobs on linux/amd64 run on a prebuilt image, so no job installs system
+packages or toolchains at run time. `.gitlab/ci-toolchain.Dockerfile` defines
+it. The image holds the Rust toolchain from `rust-toolchain.toml` with clippy,
+rustfmt, and the `wasm32-unknown-unknown` target, plus protoc, Node.js 24, npm,
+wasm-pack, shellcheck, shfmt, and a Python virtual environment in `/opt/venv`.
+The environment holds maturin, twine, grpcio-tools, and ruff. The Dockerfile
+carries every version pin and checksum. Repository source, npm packages, and the
+cargo registry stay out of the image.
+
+The `build-toolchain-image` job builds the image with kaniko. It runs
+automatically on a branch or merge request pipeline that changes the
+Dockerfile. It never runs on a tag pipeline.
+
+Jobs reference the image by digest in `TOOLCHAIN_IMAGE` in `.gitlab-ci.yml`. A
+rebuild does not change what jobs run until you update that digest. To change
+the toolchain:
+
+1. Edit the Dockerfile and push. The job builds the image.
+2. Copy the digest from the end of the job log into `TOOLCHAIN_IMAGE`.
+
+Run the job by hand when a pinned tool changes without a Dockerfile edit. Run it
+to pick up a security update to the Debian packages, or to
+rebuild after the registry deletes the image.
+
 ## Licence
 
 Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).

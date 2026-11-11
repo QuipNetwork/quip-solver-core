@@ -11,6 +11,7 @@ workflow:
     - if: $CI_COMMIT_BRANCH
 
 stages:
+  - toolchain
   - test
   - validate
   - smoke
@@ -30,27 +31,14 @@ stages:
   - notes
 
 variables:
+  TOOLCHAIN_CACHE_IMAGE: $CI_REGISTRY_IMAGE/ci-toolchain-buildcache
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
-  # Must match the protoc that generated npm/src/generated. See the wasm job.
-  PROTOC_VERSION: "35.1"
-  # sha256 of protoc-35.1-linux-x86_64.zip, as published in the GitHub release
-  # asset digest for tag v35.1 and confirmed against the downloaded file. Bump
-  # it together with PROTOC_VERSION; the release page carries the new digest.
-  PROTOC_SHA256: "6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7"
-  # wasm-pack is installed from crates.io at a pinned version rather than
-  # through the upstream `curl | sh` installer, which resolves whatever release
-  # is current at pipeline time and is not checksummed.
-  WASM_PACK_VERSION: "0.15.0"
-  # The nodesource channel, asserted after install so a silent channel change
-  # cannot leave an unexpected major on PATH.
-  NODE_MAJOR: "24"
-  # shfmt for the lint job. Pinned because a shfmt release can change the
-  # formatting it considers canonical, which would fail the lint job on
-  # untouched files. The sha256 is the GitHub release asset digest for
-  # v3.13.1, confirmed against the downloaded binary.
-  SHFMT_VERSION: "3.13.1"
-  SHFMT_SHA256: "fb096c5d1ac6beabbdbaa2874d025badb03ee07929f0c9ff67563ce8c75398b1"
+  # The toolchain image the jobs below run on, pinned by digest. The Dockerfile
+  # carries the pins for protoc, Node.js, shfmt, wasm-pack, and the Python
+  # tools. After a rebuild, copy the digest printed by build-toolchain-image
+  # here.
+  TOOLCHAIN_IMAGE: $CI_REGISTRY_IMAGE/ci-toolchain@sha256:58231b76b4f7c7795bc3e1306bc9521fbc31332af4e5d57fd413ea8f617337f6
   # uv fetches the Python interpreter for the macOS wheel job. Pinned by URL
   # rather than the floating installer, so an upstream release cannot land
   # mid-pipeline. Not checksummed, unlike protoc and shfmt above: astral.sh
@@ -62,82 +50,68 @@ include:
     ref: v1.2.0
     file: templates/dependency-gate.yml
 
+# Every job below that builds or tests on linux/amd64 extends this, so none of
+# them installs system packages or toolchains at run time.
+.toolchain:
+  image: $TOOLCHAIN_IMAGE
+
 # ---------------------------------------------------------------------------
-# Shared setup fragments.
+# CI toolchain image.
 #
-# Referenced with `!reference` rather than YAML anchors so a job can compose
-# several of them inside one before_script, which anchors cannot do.
+# Built from .gitlab/ci-toolchain.Dockerfile with kaniko. Runs automatically
+# when that file changes, on a branch or a merge request pipeline, and is
+# manual otherwise. It never runs on a tag pipeline: a tag pins the image its
+# commit already references. Nothing needs this job, and a manual job with
+# allow_failure does not hold up the stages behind it.
+#
+# After a rebuild, copy the digest printed at the end of the log into
+# TOOLCHAIN_IMAGE.
 # ---------------------------------------------------------------------------
-
-# Pin protoc rather than taking the distro package. ts-proto stamps the protoc
-# version into the generated header, so an unpinned compiler trips the stub
-# drift guard on the version line alone. Bump PROTOC_VERSION and regenerate
-# npm/src/generated together, the same way the Python guard pins grpcio-tools.
-.setup-protoc:
-  script:
-    - apt-get update && apt-get install -y --no-install-recommends curl unzip make
-    - curl -fsSLo /tmp/protoc.zip https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-x86_64.zip
-    # Verify before unzipping. protoc generates the wire types every artifact
-    # in this repository is built from, so a substituted compiler would be
-    # signed and published by the release jobs downstream.
-    - echo "${PROTOC_SHA256}  /tmp/protoc.zip" | sha256sum -c -
-    - unzip -q -o /tmp/protoc.zip -d /usr/local
-    - protoc --version
-
-# Adds the wasm32 target without letting rustup re-sync the whole toolchain.
-#
-# rust-toolchain.toml pins a channel and names clippy and rustfmt. The rust
-# image already ships both, so a plain `rustup target add` triggers a channel
-# sync that tries to reinstall rustfmt and dies on `detected conflict:
-# bin/cargo-fmt`. RUSTUP_TOOLCHAIN pins the already-installed toolchain and
-# makes rustup ignore the file, so only the missing target is fetched.
-.setup-wasm:
-  script:
-    - export RUSTUP_TOOLCHAIN=1.97.1
-    - rustup target add wasm32-unknown-unknown
-    # `cargo install` at a pinned version, not the upstream `curl | sh`
-    # installer. The installer is unversioned and unchecksummed, so it fetched
-    # whatever release was current when the pipeline ran, and a pipe to sh hides
-    # a download failure behind sh's exit status. --locked builds wasm-pack
-    # against its own committed lock file.
-    - cargo install wasm-pack --version "${WASM_PACK_VERSION}" --locked
-    - wasm-pack --version
-
-.setup-node:
-  script:
-    # One block with pipefail, because `curl ... | bash -` reports only bash's
-    # status. bash reading an empty stdin exits 0, so a failed or truncated
-    # download left the pipeline believing the repository had been added and
-    # failed later, somewhere unrelated.
+build-toolchain-image:
+  stage: toolchain
+  needs: []
+  tags: [linux, amd64]
+  # The -debug image has the shell that before_script needs.
+  image:
+    name: ghcr.io/osscontainertools/kaniko:v1.29.1-debug@sha256:ebc38a988e5aa1aaea99240e931aeeeff9d8e6bb5a0bd0e00eaf79973bf0a773
+    entrypoint: [""]
+  rules:
+    - if: $CI_COMMIT_TAG
+      when: never
+    - if: $CI_COMMIT_BRANCH || $CI_PIPELINE_SOURCE == "merge_request_event"
+      changes:
+        - .gitlab/ci-toolchain.Dockerfile
+    - if: $CI_COMMIT_BRANCH || $CI_PIPELINE_SOURCE == "merge_request_event"
+      when: manual
+      allow_failure: true
+  timeout: 60m
+  before_script:
+    - mkdir -p /kaniko/.docker
     - |
-      set -euo pipefail
-      curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash -
-    - apt-get install -y --no-install-recommends nodejs
-    - node --version
-    # Assert the major rather than printing it. The nodesource script is what
-    # chooses the version, so this is the only place that can catch it
-    # installing something other than what the jobs below assume.
+      printf '{"auths":{"%s":{"auth":"%s"}}}\n' \
+        "$CI_REGISTRY" \
+        "$(printf '%s:%s' "$CI_REGISTRY_USER" "$CI_REGISTRY_PASSWORD" | base64 | tr -d '\n')" \
+        > /kaniko/.docker/config.json
+    # The Dockerfile copies nothing, so the build context is empty.
+    - mkdir -p /tmp/toolchain-context
+  script:
     - |
-      set -euo pipefail
-      HAVE="$(node --version)"
-      if [ "${HAVE%%.*}" != "v${NODE_MAJOR}" ]; then
-          echo "expected node ${NODE_MAJOR}.x, got ${HAVE}" >&2
-          exit 1
-      fi
+      /kaniko/executor \
+        --context /tmp/toolchain-context \
+        --dockerfile "$CI_PROJECT_DIR/.gitlab/ci-toolchain.Dockerfile" \
+        --destination "$CI_REGISTRY_IMAGE/ci-toolchain:$CI_COMMIT_SHORT_SHA" \
+        --cache=true \
+        --cache-repo "$TOOLCHAIN_CACHE_IMAGE" \
+        --digest-file=/tmp/digest
+    - echo "Pushed $CI_REGISTRY_IMAGE/ci-toolchain@$(cat /tmp/digest)"
 
 # The contract must build with no device present. That is the test for what
 # belongs in this repository: anything needing special hardware to build
 # belongs in a solver repository instead.
 rust:
   stage: test
-  image: rust:1.97.1
+  extends: .toolchain
   tags: [linux, amd64]
-  before_script:
-    # make, because the script below calls the Makefile. python3, because
-    # `make test` clippy-checks quip-protocol-py and the pyo3 build script
-    # probes an interpreter even for a check-only build.
-    - apt-get update && apt-get install -y --no-install-recommends protobuf-compiler make python3
-    - rustup component add clippy rustfmt
   script:
     # `make test`, not the commands inline. They used to be copied here and had
     # drifted: the Makefile excluded quip-protocol-wasm from clippy and test
@@ -153,56 +127,27 @@ rust:
 # runs `make test`.
 lint:
   stage: test
-  image: python:3.11
+  extends: .toolchain
   tags: [linux, amd64]
-  before_script:
-    - apt-get update && apt-get install -y --no-install-recommends make shellcheck
-    # shfmt is not packaged in bookworm at a version worth pinning to, so it
-    # comes from the upstream release, checksummed the same way protoc is.
-    # Pinned: ruff's default rule set grows between minors, so an unpinned
-    # install turns upstream releases into red pipelines. Bump deliberately
-    # and fix the new findings in the same change.
-    - pip install --quiet ruff==0.16.2
-    - |
-      set -euo pipefail
-      curl -fsSLo /usr/local/bin/shfmt \
-        "https://github.com/mvdan/sh/releases/download/v${SHFMT_VERSION}/shfmt_v${SHFMT_VERSION}_linux_amd64"
-      echo "${SHFMT_SHA256}  /usr/local/bin/shfmt" | sha256sum -c -
-      chmod +x /usr/local/bin/shfmt
-    - shfmt --version
   script:
     - make lint
 
 docs:
   stage: test
-  image: rust:1.97.1
+  extends: .toolchain
   tags: [linux, amd64]
-  before_script:
-    - apt-get update && apt-get install -y --no-install-recommends protobuf-compiler
   script:
     - RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace --exclude quip-protocol-py
 
 conformance:
   stage: test
-  image: python:3.11
+  extends: .toolchain
   tags: [linux, amd64]
   before_script:
-    - apt-get update && apt-get install -y --no-install-recommends protobuf-compiler
-    - python -m venv .venv
-    - . .venv/bin/activate
-    # Pin grpcio-tools so the stub drift guard stays deterministic. The
-    # checked-in python/quip/v1/*_pb2.py were generated with 1.82.1 (protoc
-    # gencode 7.35.0). A newer grpcio-tools stamps a different gencode version
-    # and trips the diff. Bump this pin and regenerate the stubs together.
-    - pip install maturin "grpcio-tools==1.82.1"
-    # Download, then run. Piping the installer into sh reports only sh's exit
-    # status, and sh reading an empty stdin exits 0, so a failed download left
-    # this job continuing without a Rust toolchain.
-    - |
-      set -euo pipefail
-      curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/rustup-init.sh
-      sh /tmp/rustup-init.sh -y --profile minimal
-    - . "$HOME/.cargo/env"
+    # maturin installs into the virtual environment named by VIRTUAL_ENV. The
+    # image puts /opt/venv on PATH but does not activate it. The image pins
+    # grpcio-tools, which keeps the stub drift guard below deterministic.
+    - export VIRTUAL_ENV=/opt/venv
     - maturin develop -E dev
   script:
     # Proto and stub drift guard: regenerate from the normative .proto and fail
@@ -225,12 +170,8 @@ conformance:
 # an energy score would be rejected by the network, so this is a release gate.
 wasm:
   stage: test
-  image: rust:1.97.1
+  extends: .toolchain
   tags: [linux, amd64]
-  before_script:
-    - !reference [.setup-protoc, script]
-    - !reference [.setup-node, script]
-    - !reference [.setup-wasm, script]
   script:
     - cd npm
     - npm ci
@@ -273,10 +214,7 @@ wasm:
 # of after publication. This is also what lets the smoke test run before the
 # version exists on crates.io.
 smoke:rust:
-  extends: .smoke
-  image: rust:1.97.1
-  before_script:
-    - !reference [.setup-protoc, script]
+  extends: [.smoke, .toolchain]
   script:
     - mkdir -p /opt/pkg && for f in target/package/*.crate; do tar xzf "$f" -C /opt/pkg; done
     - ls /opt/pkg
@@ -298,10 +236,7 @@ smoke:rust:
 # target/ is never on the include or link path, so a header that does not match
 # the shipped object fails here.
 smoke:cpp:
-  extends: .smoke
-  image: rust:1.97.1
-  before_script:
-    - apt-get update && apt-get install -y --no-install-recommends g++ make
+  extends: [.smoke, .toolchain]
   script:
     - mkdir -p /opt/clib && tar xzf quip-solver-clib-*.tar.gz -C /opt/clib
     - ls -R /opt/clib
@@ -327,14 +262,11 @@ smoke:python:
 # Installs the packed tarball into a clean project. The example resolves
 # @quip.network/quip-solver-core from node_modules, not from npm/ in this tree.
 smoke:typescript:
-  extends: .smoke
-  # The rust image plus node, not the node image: quip-solver-drive is built on
-  # rust:1.97.1 and links glibc 2.39, which node:24 does not carry. The npm
+  # The toolchain image, not the node image: quip-solver-drive is built on the
+  # rust image and links glibc 2.39, which node:24 does not carry. The npm
   # package is still installed from the packed tarball, so the isolation that
   # matters is unaffected.
-  image: rust:1.97.1
-  before_script:
-    - !reference [.setup-node, script]
+  extends: [.smoke, .toolchain]
   script:
     - mkdir -p /opt/ts && cp -r examples/typescript/src examples/typescript/tsconfig.json examples/typescript/package.json /opt/ts/
     - cd /opt/ts
@@ -406,9 +338,7 @@ smoke:typescript:
 # that published nothing.
 release:tag-guard:
   stage: validate
-  # python:3.11 because the runners already cache it for the lint and
-  # conformance jobs. The script is two echoes and an exit.
-  image: python:3.11
+  extends: .toolchain
   tags: [linux, amd64]
   rules:
     - if: $CI_COMMIT_TAG && $CI_COMMIT_TAG !~ /^v\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?$/
@@ -427,7 +357,7 @@ release:tag-guard:
 # the real thing instead of a rebuild.
 release:validate:
   stage: validate
-  image: rust:1.97.1
+  extends: .toolchain
   tags: [linux, amd64]
   # No `rules:` on purpose. See the header: the dry run always runs.
   #
@@ -448,17 +378,6 @@ release:validate:
   # Without this GitLab downloads every prior stage's artifacts by default.
   dependencies: []
   timeout: 60m
-  before_script:
-    - !reference [.setup-protoc, script]
-    - !reference [.setup-node, script]
-    - apt-get install -y --no-install-recommends python3 python3-venv python3-pip
-    # A virtual environment rather than --break-system-packages: pip cannot
-    # uninstall Debian's `packaging` (no RECORD file), so installing twine into
-    # the system interpreter fails outright.
-    - python3 -m venv /opt/buildenv
-    - export PATH="/opt/buildenv/bin:$PATH"
-    - pip install --quiet maturin twine
-    - !reference [.setup-wasm, script]
   script:
     # The C library tarball carries the tag in its name on a tag pipeline, and
     # the short SHA otherwise, so a branch artifact is never mistaken for a
@@ -591,7 +510,7 @@ wheel:macos-arm64:
 
 release:crates:
   stage: crates
-  image: rust:1.97.1
+  extends: .toolchain
   tags: [linux, amd64]
   <<: *on-release-tag
   # Depends on the other two registries, not only on the gates. This is the
@@ -617,9 +536,6 @@ release:crates:
     CRATES_IO_ID_TOKEN:
       aud: crates.io
   timeout: 30m
-  before_script:
-    - !reference [.setup-protoc, script]
-    - apt-get install -y --no-install-recommends jq
   script:
     # Exchange the GitLab OIDC token for a 30-minute crates.io token.
     #
@@ -636,12 +552,11 @@ release:crates:
 
 release:pypi:
   stage: pypi
-  # A plain Python image, because this job no longer builds anything. It
-  # promotes the wheel and sdist release:validate built and smoke:python
-  # installed and ran. Rebuilding here would have uploaded artifacts that no
-  # smoke test ever exercised, from a `:latest` image that could differ from the
-  # one the gate used, which is the same mistake release:clib already avoids.
-  image: python:3.11
+  # This job builds nothing. It promotes the wheel and sdist release:validate
+  # built and smoke:python installed and ran. Rebuilding here would have
+  # uploaded artifacts that no smoke test ever exercised, which is the same
+  # mistake release:clib already avoids. The toolchain image supplies twine.
+  extends: .toolchain
   tags: [linux, amd64]
   <<: *on-release-tag
   # Waits for npm, the one registry whose publish can still be undone.
@@ -670,7 +585,6 @@ release:pypi:
       aud: pypi
   timeout: 30m
   script:
-    - python3 -m pip install --disable-pip-version-check twine
     # The wheel and sdist arrive as release:validate's artifacts. Nothing here
     # writes to dist/python, so what is uploaded is byte for byte what
     # smoke:python installed and ran the sample solver against.
@@ -713,9 +627,7 @@ release:pypi:
 
 release:npm:
   stage: release
-  # Kept on the rust image only because .setup-node expects a Debian base with
-  # curl already present. Nothing in this job compiles Rust any more.
-  image: rust:1.97.1
+  extends: .toolchain
   tags: [linux, amd64]
   <<: *on-release-tag
   needs:
@@ -740,12 +652,6 @@ release:npm:
     SIGSTORE_ID_TOKEN:
       aud: sigstore
   timeout: 30m
-  before_script:
-    # No protoc and no wasm toolchain. This job publishes the tarball
-    # release:validate packed, so it builds nothing and needs only node and npm.
-    - !reference [.setup-node, script]
-    # 11.5.1 is the floor for OIDC trusted publishing.
-    - npm install -g npm@latest
   script:
     # Preflight, because npm reports a rejected or missing OIDC token as
     # ENEEDAUTH: "You need to authorize this machine using `npm login`". That
@@ -834,7 +740,7 @@ release:npm:
 # would attach an object no smoke test ever exercised.
 release:clib:
   stage: release
-  image: rust:1.97.1
+  extends: .toolchain
   tags: [linux, amd64]
   <<: *on-release-tag
   needs:
