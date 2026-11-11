@@ -5,7 +5,13 @@ This file documents changes to the Quip solver contract.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## 0.0.10
+
+The CPU family algorithm values and a session shutdown fix. `miner.proto`
+adds eight `Algorithm` values for the CPU family solvers. The miner now waits
+for the HTTP/2 connection to write its final frames before the session returns.
+If the miner cannot confirm the close, it exits 70. `protocol_version` stays 2.
+The default features do not change.
 
 ### Added
 
