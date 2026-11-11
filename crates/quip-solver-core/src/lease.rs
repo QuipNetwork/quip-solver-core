@@ -366,8 +366,16 @@ pub(crate) struct LeaseTopology {
     pub(crate) view: Result<Arc<TopologyView>, RejectReason>,
     /// Built only when the declaration lists a generated family.
     pub(crate) family: Option<Result<Arc<BaseTopology>, RejectReason>>,
+    /// `Err(TopologyMismatch)` when the device lacks a qubit or a coupler of
+    /// this topology, so no lease on it is drawn.
+    pub(crate) fit: Result<(), RejectReason>,
 }
 impl LeaseTopology {
+    /// Record that the device lacks part of this topology.
+    pub(crate) fn mark_unfit(&mut self) {
+        self.fit = Err(RejectReason::TopologyMismatch);
+    }
+
     pub(crate) fn new(t: &Topology, families: &FamilyTable) -> Self {
         let family = (!families.generated().is_empty()).then(|| {
             let (u, v) = t
@@ -388,6 +396,7 @@ impl LeaseTopology {
                 .map(Arc::new)
                 .map_err(|_| RejectReason::Malformed),
             family,
+            fit: Ok(()),
         }
     }
 }
@@ -497,6 +506,7 @@ pub(crate) fn prepare(
         return Err(RejectReason::TopologyMismatch);
     }
     let topology = cached.view.as_ref().map_err(|reason| *reason)?;
+    cached.fit?;
     let family = if let Some((contract, admitted)) = descriptor {
         let base = match &cached.family {
             Some(Ok(base)) => Arc::clone(base),
@@ -1818,6 +1828,12 @@ mod family_tests {
         reordered_edges.swap(0, 1);
         let reordered = wire_topology(&sparse_nodes, &reordered_edges);
         let invalid = Arc::new(LeaseTopology::new(&wire_topology(&[1, 1], &[]), &families));
+        let mut unfit = LeaseTopology::new(&sparse(), &families);
+        unfit.mark_unfit();
+        let unfit = Arc::new(unfit);
+        let mut invalid_unfit = LeaseTopology::new(&wire_topology(&[1, 1], &[]), &families);
+        invalid_unfit.mark_unfit();
+        let invalid_unfit = Arc::new(invalid_unfit);
         let reordered_digest = digest_of(&reordered);
         let doubled_digest = digest_of(&doubled);
         // Most rows mutate the base lease on the cached `T_SPARSE` with a target.
@@ -1950,6 +1966,30 @@ mod family_tests {
                     "invalid cached topology",
                     RejectReason::Malformed,
                     Box::new(|_| {}),
+                )
+            },
+            Case {
+                topology: Some(&unfit),
+                ..row(
+                    "the native graph lacks part of the topology",
+                    RejectReason::TopologyMismatch,
+                    Box::new(|_| {}),
+                )
+            },
+            Case {
+                topology: Some(&invalid_unfit),
+                ..row(
+                    "invalid beats unfit",
+                    RejectReason::Malformed,
+                    Box::new(|_| {}),
+                )
+            },
+            Case {
+                topology: Some(&unfit),
+                ..row(
+                    "a wrong hash on an unfit topology",
+                    RejectReason::TopologyMismatch,
+                    Box::new(|j| generator(j).topology_hash = vec![9; 32]),
                 )
             },
             row(

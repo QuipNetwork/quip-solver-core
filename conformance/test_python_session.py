@@ -1,4 +1,5 @@
 import pytest
+from family_oracle.digests import topology_order_digest
 from quip.v1 import miner_pb2
 from quip_solver_core import session
 from quip_solver_core._core import ExitCode
@@ -138,3 +139,25 @@ def test_session_exit_codes_match_core():
     assert session.EXIT_ENV_INCOMPATIBLE == ExitCode.ENV_INCOMPATIBLE == 69
     assert session.EXIT_INTERNAL_FATAL == ExitCode.INTERNAL_FATAL == 70
     assert session.EXIT_TOKEN_REJECTED == ExitCode.TOKEN_REJECTED == 77
+
+
+def test_native_topology_hash_is_the_order_digest_of_the_sorted_graph():
+    h = session.native_topology_hash([30, 10, 20], [(30, 20), (10, 20)])
+    assert h == topology_order_digest([10, 20, 30], [(10, 20), (20, 30)])
+    assert h != session.native_topology_hash([10, 20, 30], [(10, 20)])
+
+
+def test_topology_fit_counts_lost_qubits_and_couplers_between_live_qubits():
+    native_nodes, native_edges = [10, 30, 40], [(10, 30)]
+    # Qubit 20 is lost with its two couplers; coupler 30-40 is lost on its own.
+    fit = session.topology_fit(
+        native_nodes,
+        native_edges,
+        [10, 20, 30, 40],
+        [(10, 20), (20, 30), (10, 30), (40, 30)],
+    )
+    assert fit == (1, 1)
+    assert session.topology_fit(native_nodes, native_edges, [10, 30], [(30, 10)]) == (
+        0,
+        0,
+    )

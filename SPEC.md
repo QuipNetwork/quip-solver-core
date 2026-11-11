@@ -250,6 +250,10 @@ Each value is `allowed[next_u32 % allowed.len()]`.
 `Topology` carries both `allowed_h_milli` and `allowed_j_milli`.
 Its nodes and edges keep chain registration order, with native node identifiers as edge endpoints.
 An absent topology produces `TOPOLOGY_MISSING`. A different cached hash produces `TOPOLOGY_MISMATCH`.
+A solver that has a native working graph compares each `Topology` with that graph when the message arrives.
+When the `Topology` names a qubit or a coupler that the graph lacks, every lease and every `topology_hash` job on it gets `TOPOLOGY_MISMATCH`.
+Without a native working graph, the solver skips this check and may clamp a missing part itself.
+An inline job is not affected.
 An absent target or zero `SetTarget.max_proof_solutions` produces `TARGET_MISSING`.
 That limit must equal the runtime's `QuantumPowMaxSolutions`, which is 32 on 2026-09-23.
 
@@ -452,7 +456,7 @@ Use `Backend::Cpu` and `Algorithm::Sa` for a CPU simulated annealer.
 The [migration name table](MIGRATING.md#identity-names) lists all supported names.
 The fixed map in `quip_protocol::session` keeps command-line identity strings lowercase.
 
-The fifteen defaulted methods are:
+The sixteen defaulted methods are:
 
 | Method | Default |
 |---|---|
@@ -471,6 +475,7 @@ The fifteen defaulted methods are:
 | `sample_family` | Ignores the `FamilyContext` and calls `sample_warm` for a seeded job and `sample` for a cold one. |
 | `sample_lease` | Returns `DeviceFault` if called without an override. |
 | `declaration` | `Declaration::GENERIC`: no `solver_id` and no family listed. |
+| `native_topology` | `None`. No native graph, so the session advertises no `native_topology_hash` and every `Topology` fits. |
 
 A `Declaration` holds a `solver_id` and two lists of `FamilyClaim`, `generated` and `accepted`.
 A `FamilyClaim` names one or more contracts of the same family, one for each revision, and an optional `only_params` list of canonical parameter bytes.
@@ -487,6 +492,15 @@ A backend that overrides `sample_stream` must also override `sample_stream_warm`
 `section(kind)` returns the payload of one metadata section from the validated region.
 `FamilySource` is `Lease { salt_index }` or `ExplicitJob`.
 Only the session builds a `FamilyContext`.
+
+A backend with a fixed working graph, such as a QPU, returns it from `native_topology` as a `NativeTopology`.
+`NativeTopology::new(nodes, edges)` takes the qubits and the couplers in native ids, in any order.
+`hash()` is the FAM-19 topology order digest of the graph with the qubits ascending and the couplers `(min, max)` ascending.
+The session reads the graph once, after the device opens.
+It advertises the hash as `Capabilities.native_topology_hash` in `Hello` and in the `GetCapabilities` reply.
+`fit(nodes, edges)` counts the qubits of a `Topology` that the graph lacks, and the couplers between two live qubits that it lacks.
+When a `Topology` does not fit, the session logs the two counts and refuses every lease and `topology_hash` job on it with `TOPOLOGY_MISMATCH`.
+C solvers have no native graph.
 
 `sample_family` reports the energy of the graph without the offset.
 The session adds the offset for a lease salt (FAM-52) and never for an explicit job (FAM-64).
@@ -742,7 +756,9 @@ The fields are:
 - `encodings`
 - `generators`
 - `nativeTopologyHash`. Omit it when unset. The value is standard base64
-  because protobuf JSON maps `bytes` that way.
+  because protobuf JSON maps `bytes` that way. `--capabilities` never sets it,
+  because it runs with the device closed. The session sets it from
+  `Sampler::native_topology`.
 - `maxDegree`, `maxLocalFieldMilli`, and `exactResolutionMilli`. Omit each
   when unset. A set `0` is printed.
 - `solverId`, `generatedFamilies`, and `acceptedFamilies`. Omit each when empty.
@@ -776,8 +792,9 @@ The Python and TypeScript examples advertise only `ISING_SAMPLE` and `I32`, with
 such as a lane count derived from a GPU's multiprocessor count.
 `--capabilities` answers with the device closed, so `0` is the honest static
 answer. The in-session `Capabilities` reply comes from a session that holds
-the device open, and carries the live width instead. This is the one field
-where the two answers can differ.
+the device open, and carries the live width instead. `nativeTopologyHash`
+follows the same rule: the session sets it when the sampler reports a native
+graph. These are the two fields where the two answers can differ.
 `solverId`, `generatedFamilies`, and `acceptedFamilies` come from `Sampler::declaration`.
 They never differ between `Hello` and the `GetCapabilities` reply.
 A binary with an invalid declaration exits 70 before it prints any capabilities.

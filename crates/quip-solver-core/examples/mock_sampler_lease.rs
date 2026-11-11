@@ -5,16 +5,22 @@
 use clap::Parser;
 use quip_protocol::scoring::energy_from_milli;
 use quip_solver_core::{
-    run, BackendIdentity, CommonArgs, IsingGraph, SampleError, SampleParams, Sampler, SamplerResult,
+    run, BackendIdentity, CommonArgs, IsingGraph, NativeTopology, SampleError, SampleParams,
+    Sampler, SamplerResult,
 };
 use std::process::ExitCode;
 
 struct MockSampler {
     zero: bool,
     gate: Option<std::path::PathBuf>,
+    native: Option<NativeTopology>,
 }
 
 impl Sampler<quip_solver_core::coefficient::Milli> for MockSampler {
+    fn native_topology(&self) -> Option<NativeTopology> {
+        self.native.clone()
+    }
+
     fn sample(
         &self,
         graph: &IsingGraph<quip_solver_core::coefficient::Milli>,
@@ -54,6 +60,10 @@ struct Cli {
     zero: bool,
     #[arg(long)]
     gate: Option<std::path::PathBuf>,
+    /// The working graph the mock device reports: `hosts` is the test
+    /// topology (qubits 10 and 20, coupler 10-20), `lacks` has lost qubit 20.
+    #[arg(long)]
+    native: Option<String>,
 }
 
 fn main() -> ExitCode {
@@ -78,9 +88,20 @@ fn main() -> ExitCode {
         },
         &cli.common,
         || {
+            let native = match cli.native.as_deref() {
+                Some("hosts") => Some(NativeTopology::new(vec![10, 20], vec![(10, 20)])),
+                Some("lacks") => Some(NativeTopology::new(vec![10, 30], vec![(10, 30)])),
+                Some(other) => {
+                    return Err(quip_solver_core::OpenError(format!(
+                        "unknown native graph {other}"
+                    )))
+                }
+                None => None,
+            };
             Ok(MockSampler {
                 zero: cli.zero,
                 gate: cli.gate,
+                native,
             })
         },
     )

@@ -5,6 +5,48 @@ This file documents changes to the Quip solver contract.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.0.11-rc1
+
+Structured generators build from the registered chip graph, and a solver that
+reports its native working graph refuses a topology that the graph does not
+host. The session now fills `Capabilities.native_topology_hash`, a field that
+`miner.proto` already defines. `protocol_version` stays 2.
+
+### Added
+
+- `Sampler::native_topology`, a defaulted method that returns the working graph
+  of the device as a `NativeTopology`, or `None` for a backend without a fixed
+  graph. The session reads it once after the device opens. It advertises the
+  graph's hash as `Capabilities.native_topology_hash` in `Hello` and in the
+  `GetCapabilities` reply. The hash is the FAM-19 topology order digest of the
+  graph with the qubits ascending and the couplers `(min, max)` ascending.
+  When a `Topology` names a qubit or a coupler that the graph lacks, the
+  session logs the two counts and refuses every lease and every `topology_hash`
+  job on that topology with `TOPOLOGY_MISMATCH`. A sampler that reports no
+  native graph skips the check, so a miner that clamps keeps doing so.
+  Inline jobs are not affected. `--capabilities` runs with the device closed
+  and carries no hash.
+- The Python wheel: `session.native_topology_hash(nodes, edges)` and
+  `session.topology_fit(native_nodes, native_edges, nodes, edges)`, so a Python
+  miner advertises the same hash and applies the same refusal as a Rust solver,
+  and `families.topology_order_digest(nodes, edges)`, the FAM-19 digest.
+- Tests that build the twisted-ice-dimer recipes on the Advantage2_system1
+  working graph of 2026-11-11, which is the 2026-09-21 snapshot minus the 15
+  qubits and 2 couplers that the chip lost, and check that every tile, pair, and
+  edge of the output exists on that graph. Tests that a tile with one lost
+  qubit or one lost coupler is not a tile, and that a pair needs both qubits
+  and their coupler.
+
+### Changed
+
+- The `quip/twisted-ice-dimer@1` contract states how the construction responds
+  to a smaller topology. The tile count and the weak-coupler count scale with
+  the topology. The pair count stays fixed at `pairs`, with the admission bound
+  `floor(n / 2)` and code 14 for a salt whose walk falls short. The
+  construction itself did not change, and the vectors are the same.
+  `docs/topology-format.md` describes the one step that refreshes the
+  registered topology after a chip change.
+
 ## 0.0.10
 
 The CPU family algorithm values and a session shutdown fix. `miner.proto`
