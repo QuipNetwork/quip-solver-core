@@ -29,6 +29,16 @@ use tokio::time::{timeout_at, Instant};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::Stream;
 
+/// The least time the close wait gets after it starts, even when the grace
+/// deadline has already passed.
+///
+/// The grace deadline bounds the sampler. A slow sampler can use it up before
+/// the connection is allowed to close, and the coordinator may still receive
+/// every message within a few milliseconds after that. Without this floor,
+/// such a delivery became a false exit 70. With it, the worst-case exit is
+/// still bounded at the grace window plus this floor.
+const CLOSE_FLOOR: std::time::Duration = std::time::Duration::from_millis(500);
+
 #[derive(Default)]
 struct SocketState {
     /// Sockets that are open. Hyper releases a socket when its connection task ends.
@@ -179,7 +189,8 @@ impl TransportClose {
         )
     }
 
-    /// Wait until `deadline` for the body end and the socket release.
+    /// Wait for the body end and the socket release, until `deadline` or
+    /// [`CLOSE_FLOOR`] after the call, whichever is later.
     ///
     /// Call this after every handle on the channel is dropped, so the
     /// connection can close. A clean `result` becomes exit 70 when either
@@ -190,6 +201,7 @@ impl TransportClose {
         result: Result<(), Box<dyn std::error::Error>>,
         deadline: Instant,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        let deadline = deadline.max(Instant::now() + CLOSE_FLOOR);
         let step_failure = match timeout_at(deadline, self.body_ended).await {
             Err(_) => Some("the request body did not end within the shutdown deadline"),
             Ok(Err(_)) => Some("the request body was dropped before its end"),
@@ -308,16 +320,38 @@ mod tests {
         let start = Instant::now();
         let grace = Duration::from_millis(50);
         let result = tokio::time::timeout(
-            grace + Duration::from_millis(250),
+            CLOSE_FLOOR + Duration::from_millis(250),
             close.finish(Ok(()), start + grace),
         )
         .await
-        .expect("transport close overran its deadline");
-        assert!(start.elapsed() >= grace);
+        .expect("transport close overran its deadline plus the floor");
+        assert!(start.elapsed() >= CLOSE_FLOOR);
         let (code, text) = exit_of(result);
         assert_eq!(code, ExitCode::InternalFatal);
         assert!(text.contains("connection was not released"), "{text}");
         drop(socket);
+    }
+
+    #[tokio::test]
+    async fn release_after_a_spent_deadline_is_clean_within_the_floor() {
+        let (tx, rx) = mpsc::channel(1);
+        let (close, mut body, observer) = TransportClose::new(rx);
+        let (socket, _peer) = UnixStream::pair().unwrap();
+        let socket = observer.wrap(socket);
+        drop(observer);
+        drop(tx);
+        assert!(body.next().await.is_none());
+        // A slow sampler used up the grace window. The connection closes
+        // shortly after the wait starts, which the floor still accepts.
+        let release = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            drop(socket);
+        });
+        close
+            .finish(Ok(()), Instant::now() - Duration::from_millis(1))
+            .await
+            .unwrap();
+        release.await.unwrap();
     }
 
     #[tokio::test]

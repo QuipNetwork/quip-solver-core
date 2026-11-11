@@ -1087,16 +1087,14 @@ async fn local_shutdown_closes_an_unreturned_worker_at_grace_deadline() {
             .is_none()
     );
     s.tx = mpsc::channel(1).0;
-    // The blocked worker uses up the grace window, so the miner cannot confirm
-    // the transport close within the shutdown deadline. That exits 70, even
-    // though this coordinator saw every message.
-    assert_eq!(
+    // The blocked worker uses up the grace window. The transport close floor
+    // still lets the miner confirm delivery, so the exit stays clean.
+    assert!(
         tokio::time::timeout(Duration::from_secs(10), s.child.wait())
             .await
             .unwrap()
             .unwrap()
-            .code(),
-        Some(70)
+            .success()
     );
 }
 
@@ -1123,15 +1121,14 @@ async fn shutdown_reports_a_lease_whose_salt_never_returns() {
     // The sampler thread blocks on the gate. Closing it lets the process exit.
     drop(held);
     s.tx = mpsc::channel(1).0;
-    // The sampler returns after the grace deadline, so the transport close
-    // cannot be confirmed within it. That exits 70.
-    assert_eq!(
+    // The sampler returns after the grace deadline. The transport close
+    // floor still lets the miner confirm delivery, so the exit stays clean.
+    assert!(
         tokio::time::timeout(Duration::from_secs(10), s.child.wait())
             .await
             .unwrap()
             .unwrap()
-            .code(),
-        Some(70)
+            .success()
     );
 }
 /// A family descriptor naming a family this solver does not generate.
