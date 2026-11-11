@@ -10,7 +10,7 @@ use ising_generators::family::{self, BaseTopology, Defect, SaltFault};
 use ising_generators::instance::{self, InstanceLimits, InstanceParts};
 use ising_generators::registry::CONTRACTS;
 use ising_generators::Code;
-use pyo3::exceptions::{PyMemoryError, PyValueError};
+use pyo3::exceptions::{PyMemoryError, PyOverflowError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 use pyo3::{create_exception, wrap_pyfunction, PyTypeInfo};
@@ -186,6 +186,27 @@ fn supported() -> Vec<(&'static str, u32)> {
 #[pyfunction]
 fn params_digest<'py>(py: Python<'py>, params: &[u8]) -> Bound<'py, PyBytes> {
     digest_bytes(py, &descriptor::params_digest(params))
+}
+
+/// The BLAKE3 topology order digest of `nodes` and `edges` in the given order
+/// (FAM-19).
+///
+/// # Errors
+///
+/// `OverflowError` when a count is above `u32::MAX`.
+#[pyfunction]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "the Python signature is the API, and PyO3 extracts owned lists"
+)]
+fn topology_order_digest(
+    py: Python<'_>,
+    nodes: Vec<u32>,
+    edges: Vec<(u32, u32)>,
+) -> PyResult<Bound<'_, PyBytes>> {
+    let digest = descriptor::topology_order_digest(&nodes, &edges)
+        .ok_or_else(|| PyOverflowError::new_err("a count is above u32::MAX"))?;
+    Ok(digest_bytes(py, &digest))
 }
 
 /// Check a descriptor.
@@ -386,6 +407,7 @@ pub(crate) fn register(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> 
     let families = PyModule::new(py, "families")?;
     families.add_function(wrap_pyfunction!(supported, &families)?)?;
     families.add_function(wrap_pyfunction!(params_digest, &families)?)?;
+    families.add_function(wrap_pyfunction!(topology_order_digest, &families)?)?;
     families.add_function(wrap_pyfunction!(admit_descriptor, &families)?)?;
     families.add_function(wrap_pyfunction!(generate, &families)?)?;
     families.add_function(wrap_pyfunction!(validate_instance, &families)?)?;

@@ -1,7 +1,10 @@
 import os
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
 from quip.v1 import miner_pb2
+
+from quip_solver_core._core import families
 
 # Protocol version this SDK speaks. Welcome.protocol_version must equal this.
 PROTOCOL_VERSION = 2
@@ -105,6 +108,47 @@ def build_hello(miner_id: str, capabilities: miner_pb2.Capabilities) -> miner_pb
         session_token=token,
         capabilities=capabilities,
     )
+
+
+def native_topology_hash(
+    nodes: Iterable[int], edges: Iterable[tuple[int, int]]
+) -> bytes:
+    """The hash of a device's working graph for ``Capabilities.native_topology_hash``.
+
+    It is the FAM-19 topology order digest of the graph with the qubits
+    ascending and the couplers ``(min, max)`` ascending, the value the Rust
+    session advertises for ``Sampler::native_topology``.
+    """
+    sorted_nodes = sorted({int(n) for n in nodes})
+    sorted_edges = sorted(
+        {(min(int(u), int(v)), max(int(u), int(v))) for u, v in edges}
+    )
+    return families.topology_order_digest(sorted_nodes, sorted_edges)
+
+
+def topology_fit(
+    native_nodes: Iterable[int],
+    native_edges: Iterable[tuple[int, int]],
+    nodes: Sequence[int],
+    edges: Iterable[tuple[int, int]],
+) -> tuple[int, int]:
+    """How a session ``Topology`` fits on the device's working graph.
+
+    Returns ``(missing_nodes, missing_edges)``: the qubits of the topology
+    that the device lacks, and the couplers between two live qubits that it
+    lacks. A coupler at a missing qubit counts under the qubit only. A miner
+    refuses every lease and hash job on a topology that does not fit, with
+    ``TOPOLOGY_MISMATCH``, in place of clamping the lost part.
+    """
+    live = {int(n) for n in native_nodes}
+    couplers = {(min(int(u), int(v)), max(int(u), int(v))) for u, v in native_edges}
+    missing_nodes = sum(1 for n in nodes if int(n) not in live)
+    missing_edges = 0
+    for u, v in edges:
+        u, v = int(u), int(v)
+        if u in live and v in live and (min(u, v), max(u, v)) not in couplers:
+            missing_edges += 1
+    return missing_nodes, missing_edges
 
 
 def check_welcome(welcome: miner_pb2.Welcome) -> None:
