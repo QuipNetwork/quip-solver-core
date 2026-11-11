@@ -5,7 +5,14 @@ This file documents changes to the Quip solver contract.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## 0.0.9
+
+The canonical problem families. The registry adds `quip/defects-static@1` and
+`quip/flow-static@1` with status `research`. The Python wheel adds the
+`families` module, which builds the same canonical instance bytes as the Rust
+generator. The release checks now fail when a crate or the wheel lacks a family
+file. `docs/family-release.md` lists every family revision with its vector pin.
+`protocol_version` stays 2, and the default features do not change.
 
 ### Added
 
