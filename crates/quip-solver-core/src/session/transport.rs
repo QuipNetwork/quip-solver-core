@@ -6,13 +6,24 @@
 //! results and refunds while the process exited Clean. [`TransportClose`]
 //! closes that gap with two signals that need no Hyper internals:
 //!
-//! 1. The request body yielded its end. Hyper polled it to `None`, so the final
-//!    DATA frame and `END_STREAM` were handed to the HTTP/2 layer.
+//! 1. The request body yielded its end. The outbound channel is closed and
+//!    drained. The encoder may still hold the last messages, and point 2 is
+//!    what confirms that they were written. This signal turns a body that
+//!    Hyper dropped early, for example after a peer reset, into exit 70.
 //! 2. Every socket was released. Hyper's connection task owns the socket and
 //!    drops it only when the task ends, which is after the graceful close and
 //!    `poll_shutdown`. The queued frames were written by then.
 //!
-//! The socket wrapper also records the first write, flush, or shutdown error.
+//! The socket wrapper also records the first read, write, flush, or shutdown
+//! error, and a socket released before a clean shutdown. HTTP/2 shuts the
+//! socket down on every clean close, so a release without that shutdown means
+//! the connection ended on an error that Hyper discarded, such as a read reset
+//! or a keepalive timeout.
+//!
+//! Accepted tradeoff: a coordinator that closes a live connection while a
+//! miner `WINDOW_UPDATE` or `PING` acknowledgement is still unread in its socket
+//! can give a false exit 70. The clean flow does not do this, because the
+//! miner closes the connection first.
 //!
 //! Accepted residual risk: Hyper discards stream resets and HTTP/2 protocol
 //! errors from the peer, so this module does not detect them. A peer that
@@ -43,7 +54,7 @@ const CLOSE_FLOOR: std::time::Duration = std::time::Duration::from_millis(500);
 struct SocketState {
     /// Sockets that are open. Hyper releases a socket when its connection task ends.
     open: usize,
-    /// The first write, flush, or shutdown error on any socket.
+    /// The first socket error, or a socket released before a clean shutdown.
     first_error: Option<String>,
 }
 
@@ -57,6 +68,7 @@ impl SocketObserver {
         ObservedSocket {
             socket,
             observer: self.clone(),
+            shut_down: false,
             #[cfg(test)]
             fail_shutdown: false,
         }
@@ -73,12 +85,25 @@ impl SocketObserver {
             });
         }
     }
+
+    /// Count a socket as released. One update, so a waiter that sees the
+    /// release also sees the error that came with it.
+    fn release(&self, shut_down: bool) {
+        self.0.send_modify(|state| {
+            state.open -= 1;
+            if !shut_down && state.first_error.is_none() {
+                state.first_error = Some("socket released before a clean shutdown".to_owned());
+            }
+        });
+    }
 }
 
-/// A `UnixStream` that reports write errors and its own release.
+/// A `UnixStream` that reports its I/O errors and its own release.
 pub(super) struct ObservedSocket {
     socket: UnixStream,
     observer: SocketObserver,
+    /// Set when `poll_shutdown` succeeds.
+    shut_down: bool,
     /// Test hook: make `poll_shutdown` fail as a broken socket would.
     #[cfg(test)]
     fail_shutdown: bool,
@@ -90,7 +115,9 @@ impl AsyncRead for ObservedSocket {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.socket).poll_read(cx, buf)
+        let result = Pin::new(&mut self.socket).poll_read(cx, buf);
+        self.observer.record("read", &result);
+        result
     }
 }
 
@@ -135,13 +162,16 @@ impl AsyncWrite for ObservedSocket {
         #[cfg(not(test))]
         let result = Pin::new(&mut self.socket).poll_shutdown(cx);
         self.observer.record("shutdown", &result);
+        if let Poll::Ready(Ok(())) = result {
+            self.shut_down = true;
+        }
         result
     }
 }
 
 impl Drop for ObservedSocket {
     fn drop(&mut self) {
-        self.observer.0.send_modify(|state| state.open -= 1);
+        self.observer.release(self.shut_down);
     }
 }
 
@@ -236,7 +266,7 @@ mod tests {
     use super::super::map_err_to_exit;
     use super::*;
     use std::time::Duration;
-    use tokio::io::AsyncWriteExt as _;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tokio_stream::StreamExt as _;
 
     fn exit_of(result: Result<(), Box<dyn std::error::Error>>) -> (ExitCode, String) {
@@ -308,6 +338,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn read_error_after_an_unread_peer_close_is_internal_fatal() {
+        let (tx, rx) = mpsc::channel(1);
+        let (close, mut body, observer) = TransportClose::new(rx);
+        let (socket, peer) = UnixStream::pair().unwrap();
+        let mut socket = observer.wrap(socket);
+        drop(observer);
+        drop(tx);
+        assert!(body.next().await.is_none());
+        // The peer closes with the final frames unread. Linux then resets the
+        // connection, and the next read fails.
+        socket.write_all(b"final frames").await.unwrap();
+        drop(peer);
+        let mut buf = [0u8; 16];
+        assert!(socket.read(&mut buf).await.is_err());
+        drop(socket);
+        let result = close
+            .finish(Ok(()), Instant::now() + Duration::from_secs(1))
+            .await;
+        let (code, text) = exit_of(result);
+        assert_eq!(code, ExitCode::InternalFatal);
+        assert!(text.contains("socket read failed"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn release_without_a_shutdown_is_internal_fatal() {
+        let (tx, rx) = mpsc::channel(1);
+        let (close, mut body, observer) = TransportClose::new(rx);
+        let (socket, _peer) = UnixStream::pair().unwrap();
+        drop(observer.wrap(socket));
+        drop(observer);
+        drop(tx);
+        assert!(body.next().await.is_none());
+        let result = close
+            .finish(Ok(()), Instant::now() + Duration::from_secs(1))
+            .await;
+        let (code, text) = exit_of(result);
+        assert_eq!(code, ExitCode::InternalFatal);
+        assert!(text.contains("released before a clean shutdown"), "{text}");
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn unreleased_connection_is_internal_fatal_at_the_deadline() {
         let (tx, rx) = mpsc::channel(1);
         let (close, mut body, observer) = TransportClose::new(rx);
@@ -332,12 +403,12 @@ mod tests {
         drop(socket);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn release_after_a_spent_deadline_is_clean_within_the_floor() {
         let (tx, rx) = mpsc::channel(1);
         let (close, mut body, observer) = TransportClose::new(rx);
         let (socket, _peer) = UnixStream::pair().unwrap();
-        let socket = observer.wrap(socket);
+        let mut socket = observer.wrap(socket);
         drop(observer);
         drop(tx);
         assert!(body.next().await.is_none());
@@ -345,6 +416,7 @@ mod tests {
         // shortly after the wait starts, which the floor still accepts.
         let release = tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(50)).await;
+            socket.shutdown().await.unwrap();
             drop(socket);
         });
         close
@@ -354,7 +426,7 @@ mod tests {
         release.await.unwrap();
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn unpolled_body_is_internal_fatal_at_the_deadline() {
         let (tx, rx) = mpsc::channel(1);
         let (close, _body, observer) = TransportClose::new(rx);
