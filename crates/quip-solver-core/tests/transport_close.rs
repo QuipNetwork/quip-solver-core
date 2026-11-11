@@ -198,11 +198,14 @@ async fn prepare(
 }
 
 async fn shutdown_once(queued: bool, iteration: usize) -> Result<(), Error> {
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/transport-close")
-        .join(format!("{}-{queued}-{iteration}", std::process::id()));
+    // A Unix socket path must fit in `sun_path` (108 bytes on Linux), so the
+    // socket lives under the short system temporary directory, not the checkout.
+    let dir = std::env::temp_dir().join(format!(
+        "qtc-{}-{}-{iteration}",
+        std::process::id(),
+        u8::from(queued)
+    ));
     std::fs::create_dir_all(&dir)?;
-    let dir = dir.canonicalize()?;
     let socket = dir.join("s");
     let listener = tokio::net::UnixListener::bind(&socket)?;
     let (link_tx, link_rx) = oneshot::channel();
@@ -283,6 +286,10 @@ async fn shutdown_once(queued: bool, iteration: usize) -> Result<(), Error> {
     Ok(())
 }
 
+/// Run `default_iterations` shutdowns, or `QUIP_CLOSE_TEST_ITERATIONS` when it
+/// is set, so that a longer campaign needs no code change. The campaign prints
+/// its run time, and each failed run prints the count of results and refunds
+/// that the coordinator received.
 #[expect(
     clippy::print_stderr,
     reason = "report every failure and the campaign totals"
