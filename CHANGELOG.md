@@ -5,7 +5,7 @@ This file documents changes to the Quip solver contract.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## 0.0.13-rc1
+## 0.0.13
 
 A Python solver can check an explicit family job with the wheel alone.
 `protocol_version` stays 2, and no digest changes.
