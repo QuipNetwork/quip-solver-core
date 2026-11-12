@@ -5,6 +5,20 @@ This file documents changes to the Quip solver contract.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.0.13-rc1
+
+A Python solver can check an explicit family job with the wheel alone.
+`protocol_version` stays 2, and no digest changes.
+
+### Added
+
+- `families.descriptor_digest(family_id, revision, params, params_digest)`
+  gives the FAM-18 descriptor digest of a descriptor. It runs the same code 3
+  to 9 checks as `families.admit`. A `FamilyBinding` carries no descriptor
+  digest, so a solver computes it with this function and passes the result to
+  `families.validate_instance` (FAM-68). The solver needs no BLAKE3 code of
+  its own.
+
 ## 0.0.12
 
 The Python wheel gives the lease salts, the nonce of a salt, and the legacy

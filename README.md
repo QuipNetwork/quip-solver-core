@@ -9,7 +9,7 @@ The Python wheel and npm package carry consensus primitives and generated gRPC s
 Python and TypeScript solvers provide their own session loops.
 
 The full contract is in [SPEC.md](SPEC.md).
-[CHANGELOG.md](CHANGELOG.md) lists the 0.0.12 changes.
+[CHANGELOG.md](CHANGELOG.md) lists the 0.0.13-rc1 changes.
 [MIGRATING.md](MIGRATING.md) covers solver API changes.
 Releases from `0.0.2-rc3` require protocol version 2.
 Update the coordinator and solvers together using the
@@ -40,10 +40,10 @@ artifact, because a C consumer wants the compiled object and the header.
 
 ```toml
 [dependencies]
-quip-solver-core = "0.0.12"
+quip-solver-core = "0.0.13-rc1"
 
 [dev-dependencies]
-quip-solver-conformance = "0.0.12"
+quip-solver-conformance = "0.0.13-rc1"
 ```
 
 One dependency is enough. `quip-solver-core` re-exports `quip_proto` and
@@ -65,6 +65,9 @@ pip install quip-solver-core
 The wheel exposes `scoring`, `wire`, `families`, and `lease`. The `families` module
 builds the canonical instance of a family lease with `families.generate`. It
 takes the descriptor, the topology as node and edge lists, and the nonce.
+`families.validate_instance` checks an explicit instance. For an explicit
+family job, compute its `descriptor_digest` argument with
+`families.descriptor_digest`, because the job does not carry that digest.
 
 The `lease` module gives the salts and nonces of a lease. `lease.Lease` takes
 the serialized `IsingProblemGenerator` and checks it. Its `salt`, `nonce`,
