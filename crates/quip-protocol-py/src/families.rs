@@ -226,6 +226,26 @@ fn admit_descriptor(
     admit(py, family_id, revision, params, params_digest).map(|_| ())
 }
 
+/// The descriptor digest of an admitted descriptor (FAM-18).
+///
+/// An explicit family job carries no descriptor digest, so the solver computes
+/// it from `FamilyBinding.family` (FAM-68) and passes it to `validate_instance`.
+///
+/// # Errors
+///
+/// `AdmissionError` with a code from 3 to 9.
+#[pyfunction]
+fn descriptor_digest<'py>(
+    py: Python<'py>,
+    family_id: &str,
+    revision: u32,
+    params: &[u8],
+    params_digest: &[u8],
+) -> PyResult<Bound<'py, PyBytes>> {
+    let admitted = admit(py, family_id, revision, params, params_digest)?;
+    Ok(digest_bytes(py, &admitted.descriptor().digest()))
+}
+
 /// Build the canonical instance of `nonce` on the topology `nodes` and `edges`.
 ///
 /// `edges` holds native node ids in registration order. A limit of 0 makes
@@ -409,6 +429,7 @@ pub(crate) fn register(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> 
     families.add_function(wrap_pyfunction!(params_digest, &families)?)?;
     families.add_function(wrap_pyfunction!(topology_order_digest, &families)?)?;
     families.add_function(wrap_pyfunction!(admit_descriptor, &families)?)?;
+    families.add_function(wrap_pyfunction!(descriptor_digest, &families)?)?;
     families.add_function(wrap_pyfunction!(generate, &families)?)?;
     families.add_function(wrap_pyfunction!(validate_instance, &families)?)?;
     families.add_function(wrap_pyfunction!(feasible, &families)?)?;

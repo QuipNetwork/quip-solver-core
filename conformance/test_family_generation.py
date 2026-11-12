@@ -206,6 +206,37 @@ def test_admit_reports_descriptor_codes():
         assert (caught.value.code, caught.value.name) == (code, name)
 
 
+def _descriptor_digest(case: dict) -> bytes:
+    return families.descriptor_digest(
+        case["family_id"],
+        case["revision"],
+        bytes.fromhex(case["params_hex"]),
+        bytes.fromhex(case["params_digest"]),
+    )
+
+
+@pytest.mark.parametrize(("case", "inst"), _instances())
+def test_descriptor_digest_matches_the_generated_instance(case, inst):
+    generated = _generate(case, bytes.fromhex(inst["nonce"]))
+    assert _descriptor_digest(case) == generated.descriptor_digest
+    assert generated.descriptor_digest.hex() == case["descriptor_digest"]
+
+
+def test_an_explicit_job_validates_with_the_computed_descriptor_digest():
+    # A FamilyBinding carries no descriptor digest (FAM-68).
+    case = _load("ice_charge")["cases"][0]
+    inst = case["instances"][0]
+    args = _validate_args(case, inst, descriptor_digest=_descriptor_digest(case))
+    assert families.validate_instance(**args).digest.hex() == inst["instance_digest"]
+
+
+def test_descriptor_digest_reports_descriptor_codes():
+    params = bytes.fromhex(_load("ice_charge")["cases"][0]["params_hex"])
+    with pytest.raises(AdmissionError) as caught:
+        families.descriptor_digest("quip/charged-ice", 1, params, bytes(32))
+    assert (caught.value.code, caught.value.name) == (8, "ParamsDigestMismatch")
+
+
 def test_advertised_limits_give_code_13():
     case = _load("ice_charge")["cases"][0]
     inst = case["instances"][0]
