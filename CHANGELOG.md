@@ -5,7 +5,7 @@ This file documents changes to the Quip solver contract.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## 0.0.12-rc1
+## 0.0.12
 
 The Python wheel gives the lease salts, the nonce of a salt, and the legacy
 draw. A Python miner can now run lease jobs without its own copy of that code.
