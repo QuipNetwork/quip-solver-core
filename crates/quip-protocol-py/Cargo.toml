@@ -16,6 +16,10 @@ crate-type = ["cdylib"]
 
 [dependencies]
 quip-protocol = { workspace = true }
+# Already in the tree through quip-protocol's default `session` feature. The
+# lease binding decodes IsingProblemGenerator with them.
+quip-proto = { workspace = true }
+prost = { workspace = true }
 ising-generators = { workspace = true }
 pyo3 = { version = "0.29", features = ["abi3-py311", "extension-module"] }
 
