@@ -58,19 +58,28 @@ include:
 # ---------------------------------------------------------------------------
 # CI toolchain image.
 #
-# Built from .gitlab/ci-toolchain.Dockerfile with kaniko. Runs automatically
-# when that file changes, on a branch or a merge request pipeline, and is
-# manual otherwise. It never runs on a tag pipeline: a tag pins the image its
-# commit already references. Nothing needs this job, and a manual job with
-# allow_failure does not hold up the stages behind it.
+# Built from .gitlab/ci-toolchain.Dockerfile with kaniko. A branch pipeline
+# runs it automatically when the branch's Dockerfile differs from main, and
+# offers it by hand otherwise. A merge request pipeline always offers it by hand: GitLab compares
+# a merge request with its target branch, so an automatic rule would rebuild
+# on every pipeline until the merge, each time with a new digest. The workflow
+# rules stop branch pipelines once a merge request is open, which is why the
+# merge request pipeline still needs the manual job. It never runs on a tag
+# pipeline: a tag pins the image its commit already references. Nothing needs
+# this job, and a manual job with allow_failure does not hold up the stages
+# behind it.
 #
-# After a rebuild, copy the digest printed at the end of the log into
-# TOOLCHAIN_IMAGE.
+# After a rebuild, copy the TOOLCHAIN_IMAGE line printed at the end of the log
+# into the variables block.
+#
+# The amd64 hosts bind-mount GPU firmware into /lib, so kaniko cannot replace
+# /lib with the base image's merged-usr symlink. It ignores /lib, and the shim
+# keeps the ELF interpreter reachable for each RUN, as in quip-solver-cpu.
 # ---------------------------------------------------------------------------
 build-toolchain-image:
   stage: toolchain
   needs: []
-  tags: [linux, amd64]
+  tags: [docker, amd64]
   # The -debug image has the shell that before_script needs.
   image:
     name: ghcr.io/osscontainertools/kaniko:v1.29.1-debug@sha256:ebc38a988e5aa1aaea99240e931aeeeff9d8e6bb5a0bd0e00eaf79973bf0a773
@@ -78,14 +87,19 @@ build-toolchain-image:
   rules:
     - if: $CI_COMMIT_TAG
       when: never
-    - if: $CI_COMMIT_BRANCH || $CI_PIPELINE_SOURCE == "merge_request_event"
+    # compare_to, because GitLab treats `changes:` as true in the first
+    # pipeline of a new branch, which would rebuild on every new branch.
+    - if: $CI_COMMIT_BRANCH
       changes:
-        - .gitlab/ci-toolchain.Dockerfile
+        paths:
+          - .gitlab/ci-toolchain.Dockerfile
+        compare_to: refs/heads/main
     - if: $CI_COMMIT_BRANCH || $CI_PIPELINE_SOURCE == "merge_request_event"
       when: manual
       allow_failure: true
   timeout: 60m
   before_script:
+    - mkdir -p /lib && ln -sfn /usr/lib/x86_64-linux-gnu /lib/x86_64-linux-gnu
     - mkdir -p /kaniko/.docker
     - |
       printf '{"auths":{"%s":{"auth":"%s"}}}\n' \
@@ -100,10 +114,11 @@ build-toolchain-image:
         --context /tmp/toolchain-context \
         --dockerfile "$CI_PROJECT_DIR/.gitlab/ci-toolchain.Dockerfile" \
         --destination "$CI_REGISTRY_IMAGE/ci-toolchain:$CI_COMMIT_SHORT_SHA" \
+        --ignore-path=/lib \
         --cache=true \
         --cache-repo "$TOOLCHAIN_CACHE_IMAGE" \
         --digest-file=/tmp/digest
-    - echo "Pushed $CI_REGISTRY_IMAGE/ci-toolchain@$(cat /tmp/digest)"
+    - echo "TOOLCHAIN_IMAGE=$CI_REGISTRY_IMAGE/ci-toolchain@$(cat /tmp/digest)"
 
 # The contract must build with no device present. That is the test for what
 # belongs in this repository: anything needing special hardware to build

@@ -112,15 +112,18 @@ carries every version pin and checksum. Repository source, npm packages, and the
 cargo registry stay out of the image.
 
 The `build-toolchain-image` job builds the image with kaniko. It runs
-automatically on a branch or merge request pipeline that changes the
-Dockerfile. It never runs on a tag pipeline.
+automatically on a branch pipeline whose Dockerfile differs from `main`. In a merge
+request pipeline, you start it by hand. It never runs on a tag pipeline.
 
 Jobs reference the image by digest in `TOOLCHAIN_IMAGE` in `.gitlab-ci.yml`. A
 rebuild does not change what jobs run until you update that digest. To change
 the toolchain:
 
-1. Edit the Dockerfile and push. The job builds the image.
-2. Copy the digest from the end of the job log into `TOOLCHAIN_IMAGE`.
+1. Edit the Dockerfile and push. A branch pipeline builds the image. If the
+   branch has an open merge request, start the job in the merge request
+   pipeline.
+2. Copy the `TOOLCHAIN_IMAGE=` line from the end of the job log into
+   `.gitlab-ci.yml`.
 
 Run the job by hand when a pinned tool changes without a Dockerfile edit. Run it
 to pick up a security update to the Debian packages, or to
