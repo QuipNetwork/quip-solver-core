@@ -38,6 +38,7 @@ mod digest;
 
 #[cfg(feature = "blob")]
 pub mod blob;
+pub mod codec;
 pub mod defects;
 pub mod descriptor;
 pub mod dipolar;

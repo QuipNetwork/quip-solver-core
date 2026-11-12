@@ -31,6 +31,8 @@
 //! [`flow_network`] exposes the labels, the links, the targets, and the costs
 //! for a min-cost circulation baseline. The module has no solver.
 
+pub(crate) mod codec;
+
 use alloc::vec;
 use alloc::vec::Vec;
 use core::num::NonZeroU32;

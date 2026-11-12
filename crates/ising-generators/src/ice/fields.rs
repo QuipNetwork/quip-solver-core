@@ -7,6 +7,8 @@
 //! metadata. A verifier cannot check the field sign, because a drawn sign
 //! times the gauge can be either sign.
 
+pub(crate) mod codec;
+
 use alloc::vec;
 use alloc::vec::Vec;
 use core::num::NonZeroU32;

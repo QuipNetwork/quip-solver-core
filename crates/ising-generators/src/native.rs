@@ -10,6 +10,16 @@
 //! the most cells keep a K4. The window is the first block of `(L + 1)^2` alive
 //! cells, in order of `c0`, then `r0`.
 
+#[expect(
+    clippy::allow_attributes,
+    reason = "the staged scaffold needs an allowance that remains valid when adapters use all helpers"
+)]
+#[allow(
+    dead_code,
+    reason = "shared forest helpers are consumed incrementally by family adapters"
+)]
+pub(crate) mod codec;
+
 use alloc::collections::BTreeMap;
 use alloc::vec;
 use alloc::vec::Vec;

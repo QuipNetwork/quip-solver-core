@@ -15,6 +15,8 @@
 //! observables are the direct charges, the number of violated labels, and the
 //! charge loss.
 
+pub(crate) mod codec;
+
 use alloc::vec::Vec;
 
 use crate::descriptor::{Contract, FieldSpec, Params, SizeBounds, TopologyStats, ValueType};
