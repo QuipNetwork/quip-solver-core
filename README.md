@@ -112,7 +112,7 @@ carries every version pin and checksum. Repository source, npm packages, and the
 cargo registry stay out of the image.
 
 The `build-toolchain-image` job builds the image with kaniko. It runs
-automatically on a branch pipeline that changes the Dockerfile. In a merge
+automatically on a branch pipeline whose Dockerfile differs from `main`. In a merge
 request pipeline, you start it by hand. It never runs on a tag pipeline.
 
 Jobs reference the image by digest in `TOOLCHAIN_IMAGE` in `.gitlab-ci.yml`. A

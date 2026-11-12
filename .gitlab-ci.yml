@@ -59,8 +59,8 @@ include:
 # CI toolchain image.
 #
 # Built from .gitlab/ci-toolchain.Dockerfile with kaniko. A branch pipeline
-# runs it automatically when a push changes that file, and offers it by hand
-# otherwise. A merge request pipeline always offers it by hand: GitLab compares
+# runs it automatically when the branch's Dockerfile differs from main, and
+# offers it by hand otherwise. A merge request pipeline always offers it by hand: GitLab compares
 # a merge request with its target branch, so an automatic rule would rebuild
 # on every pipeline until the merge, each time with a new digest. The workflow
 # rules stop branch pipelines once a merge request is open, which is why the
@@ -87,9 +87,13 @@ build-toolchain-image:
   rules:
     - if: $CI_COMMIT_TAG
       when: never
+    # compare_to, because GitLab treats `changes:` as true in the first
+    # pipeline of a new branch, which would rebuild on every new branch.
     - if: $CI_COMMIT_BRANCH
       changes:
-        - .gitlab/ci-toolchain.Dockerfile
+        paths:
+          - .gitlab/ci-toolchain.Dockerfile
+        compare_to: refs/heads/main
     - if: $CI_COMMIT_BRANCH || $CI_PIPELINE_SOURCE == "merge_request_event"
       when: manual
       allow_failure: true
