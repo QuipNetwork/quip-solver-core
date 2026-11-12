@@ -5,6 +5,26 @@ This file documents changes to the Quip solver contract.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.0.12-rc1
+
+The Python wheel gives the lease salts, the nonce of a salt, and the legacy
+draw. A Python miner can now run lease jobs without its own copy of that code.
+`protocol_version` stays 2. The nonce formula and the legacy draw,
+`GENERATOR_ALGORITHM_BLAKE3_CHACHA8_V1`, do not change.
+
+### Added
+
+- The `quip_solver_core.lease` module, a binding to `quip_protocol::lease`.
+  `lease.Lease` takes a serialized `IsingProblemGenerator` and checks it with
+  `LeaseSpec::from_proto`. Its `salt`, `nonce`, and `index_of` methods give
+  the values that the Rust session computes. `lease.derive_nonce` gives
+  `BLAKE3(last_proof || miner || salt)`. `lease.draw` gives the legacy `h` and
+  `j` milli values of a nonce on a topology given as node and edge lists.
+- `quip_solver_core.LeaseError`, a `ValueError` with a stable `name` for each
+  lease, topology, and draw fault.
+- `conformance/test_lease.py` compares the Python salts, nonces, and draws
+  with `golden_lease.json` and `golden_vectors.json`.
+
 ## 0.0.11
 
 Structured generators build from the registered chip graph, and a solver that

@@ -9,7 +9,7 @@ The Python wheel and npm package carry consensus primitives and generated gRPC s
 Python and TypeScript solvers provide their own session loops.
 
 The full contract is in [SPEC.md](SPEC.md).
-[CHANGELOG.md](CHANGELOG.md) lists the 0.0.11 changes.
+[CHANGELOG.md](CHANGELOG.md) lists the 0.0.12-rc1 changes.
 [MIGRATING.md](MIGRATING.md) covers solver API changes.
 Releases from `0.0.2-rc3` require protocol version 2.
 Update the coordinator and solvers together using the
@@ -40,10 +40,10 @@ artifact, because a C consumer wants the compiled object and the header.
 
 ```toml
 [dependencies]
-quip-solver-core = "0.0.11"
+quip-solver-core = "0.0.12-rc1"
 
 [dev-dependencies]
-quip-solver-conformance = "0.0.11"
+quip-solver-conformance = "0.0.12-rc1"
 ```
 
 One dependency is enough. `quip-solver-core` re-exports `quip_proto` and
@@ -62,9 +62,17 @@ The Rust example shows this choice.
 pip install quip-solver-core
 ```
 
-The wheel exposes `scoring`, `wire`, and `families`. The `families` module
+The wheel exposes `scoring`, `wire`, `families`, and `lease`. The `families` module
 builds the canonical instance of a family lease with `families.generate`. It
 takes the descriptor, the topology as node and edge lists, and the nonce.
+
+The `lease` module gives the salts and nonces of a lease. `lease.Lease` takes
+the serialized `IsingProblemGenerator` and checks it. Its `salt`, `nonce`,
+and `index_of` methods give the values that the Rust session and the chain
+compute. `lease.derive_nonce` gives the nonce of one salt. `lease.draw` gives
+the `GENERATOR_ALGORITHM_BLAKE3_CHACHA8_V1` fields and couplings of a nonce.
+It takes the topology as node and edge lists. A fault raises `LeaseError`. Its
+`name` attribute holds a stable name for the fault.
 
 ### Node packages
 
