@@ -2273,3 +2273,13 @@ def test_flow_witness_states_have_a_lower_objective_and_a_higher_energy():
     assert flow.encoded_energy(inst, states["infeasible"]) > flow.encoded_energy(
         inst, states["feasible"]
     )
+
+
+def test_codec_dispatch_covers_registered_families():
+    from family_oracle.codecs import FAMILIES, module
+
+    assert len(FAMILIES) == 8
+    for family in FAMILIES:
+        codec = module(family, 1)
+        for operation in ("encode", "decode", "encode_instance", "decode_instance"):
+            assert callable(getattr(codec, operation))

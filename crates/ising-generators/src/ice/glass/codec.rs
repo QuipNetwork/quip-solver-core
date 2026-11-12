@@ -97,17 +97,6 @@ pub(crate) fn encode_instance(
     Ok(out)
 }
 
-// Borrow the column before shared read_column, whose minimality check is eager.
-// This keeps descriptor and structural errors ahead of nonminimal widths.
-fn position(data: &[u8], index: usize, width: u8) -> Result<u32, CodecError> {
-    let mut value = 0;
-    for bit in 0..usize::from(width) {
-        let at = index * usize::from(width) + bit;
-        value |= u32::from((data.get(at / 8).ok_or(CodecError::Length)? >> (at % 8)) & 1) << bit;
-    }
-    Ok(value)
-}
-
 pub(crate) fn decode_instance(
     _params: &Params<'_>,
     descriptor_digest: &[u8; 32],
@@ -119,24 +108,14 @@ pub(crate) fn decode_instance(
     let count = word(bytes, at)? as usize;
     let size = metadata_len(n, count)?;
     let column = bytes.get(at + 4..).ok_or(CodecError::Length)?;
-    let width = *column.first().ok_or(CodecError::Length)?;
-    if width > 32 {
-        return Err(CodecError::InvalidSymbol);
-    }
-    let bits = count
-        .checked_mul(4)
-        .and_then(|c| c.checked_mul(usize::from(width)))
-        .ok_or(CodecError::BoundsExceeded)?;
-    let end = 1 + bits.div_ceil(8);
-    let data = column.get(1..end).ok_or(CodecError::Length)?;
-    check_bit_array(data, bits)?;
+    let (positions, end) = read_column(column, count * 4)?;
     let gauge = column.get(end..).ok_or(CodecError::Length)?;
     check_bit_array(gauge, n)?;
     if prefix.descriptor_digest() != descriptor_digest {
         return Err(CodecError::DescriptorMismatch);
     }
     for i in 0..count * 4 {
-        if position(data, i, width)? as usize >= n {
+        if positions.get(i)? as usize >= n {
             return Err(CodecError::InvalidInstance);
         }
     }
@@ -156,7 +135,7 @@ pub(crate) fn decode_instance(
             .to_le_bytes(),
     );
     for i in 0..count * 4 {
-        metadata.extend_from_slice(&position(data, i, width)?.to_le_bytes());
+        metadata.extend_from_slice(&positions.get(i)?.to_le_bytes());
     }
     metadata.extend_from_slice(&[2, 0]);
     metadata.extend_from_slice(
@@ -173,6 +152,6 @@ pub(crate) fn decode_instance(
         metadata.push((gauge.get(i / 8).ok_or(CodecError::Length)? >> (i % 8)) & 1);
     }
     let instance = decode_prefix(&prefix, metadata, &super::LIMITS, &[1, 2])?;
-    let _ = read_column(column, count * 4)?;
+    positions.minimal()?;
     Ok(instance)
 }

@@ -166,32 +166,6 @@ pub(crate) fn encode_instance(
     Ok(output)
 }
 
-// Borrow and inspect the metadata column before calling the frozen reader, which
-// checks minimality too early for the descriptor/structure error priority.
-struct Positions<'a> {
-    bytes: &'a [u8],
-    width: usize,
-}
-impl Positions<'_> {
-    fn get(&self, index: usize) -> Result<u32, CodecError> {
-        let mut value = 0;
-        for bit in 0..self.width {
-            let at = index * self.width + bit;
-            value |= u32::from((self.bytes.get(at / 8).ok_or(CodecError::Length)? >> (at % 8)) & 1)
-                << bit;
-        }
-        Ok(value)
-    }
-    fn tile(&self, i: usize) -> Result<[u32; 4], CodecError> {
-        Ok([
-            self.get(4 * i)?,
-            self.get(4 * i + 1)?,
-            self.get(4 * i + 2)?,
-            self.get(4 * i + 3)?,
-        ])
-    }
-}
-
 pub(crate) fn decode_instance(
     _params: &Params<'_>,
     descriptor_digest: &[u8; 32],
@@ -202,17 +176,11 @@ pub(crate) fn decode_instance(
     let count = u32_at(bytes, start)? as usize;
     let expanded = metadata_len(count)?;
     let column_start = start + 4;
-    let width = usize::from(*bytes.get(column_start).ok_or(CodecError::Length)?);
-    if width > 32 {
-        return Err(CodecError::InvalidSymbol);
-    }
-    let bits = 4 * count * width;
-    let end = column_start + 1 + bits.div_ceil(8);
-    let positions = Positions {
-        bytes: bytes.get(column_start + 1..end).ok_or(CodecError::Length)?,
-        width,
-    };
-    check_bit_array(positions.bytes, bits)?;
+    let (positions, used) = read_column(
+        bytes.get(column_start..).ok_or(CodecError::Length)?,
+        4 * count,
+    )?;
+    let end = column_start + used;
     let gauge_end = end + (4 * count).div_ceil(8);
     let gauge_bytes = bytes.get(end..gauge_end).ok_or(CodecError::Length)?;
     check_bit_array(gauge_bytes, 4 * count)?;
@@ -229,7 +197,12 @@ pub(crate) fn decode_instance(
     }
     let mut previous = None;
     for i in 0..count {
-        let tile = positions.tile(i)?;
+        let tile = [
+            positions.get(4 * i)?,
+            positions.get(4 * i + 1)?,
+            positions.get(4 * i + 2)?,
+            positions.get(4 * i + 3)?,
+        ];
         check_tile(tile, previous, prefix.node_count())?;
         previous = Some(tile);
     }
@@ -277,9 +250,6 @@ pub(crate) fn decode_instance(
         }
     }
     let instance = decode_prefix(&prefix, metadata, &super::LIMITS, &[1, 2, 6])?;
-    let (_, _) = read_column(
-        bytes.get(column_start..end).ok_or(CodecError::Length)?,
-        4 * count,
-    )?;
+    positions.minimal()?;
     Ok(instance)
 }

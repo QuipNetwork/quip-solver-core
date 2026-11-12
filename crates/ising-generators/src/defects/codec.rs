@@ -4,8 +4,7 @@ use crate::{
     codec::{
         bits::{BitReader, BitWriter},
         instance::{
-            check_bit_array, decode_prefix, encode_prefix, preflight_prefix, read_column,
-            write_column,
+            decode_prefix, encode_prefix, preflight_prefix, read_column, write_column, Column,
         },
         CodecError, WitnessCodec,
     },
@@ -233,40 +232,10 @@ pub(crate) fn encode_instance(
     }
     Ok(out)
 }
-// Borrow columns without checking minimality until descriptor and structural checks finish.
-// The shared read_column currently checks minimality eagerly.
-struct Column<'a> {
-    bytes: &'a [u8],
-    count: usize,
-    width: u8,
-}
-impl Column<'_> {
-    fn get(&self, index: usize) -> Result<u32, CodecError> {
-        let mut v = 0;
-        for bit in 0..usize::from(self.width) {
-            let at = index * usize::from(self.width) + bit;
-            v |= u32::from((self.bytes.get(1 + at / 8).ok_or(CodecError::Length)? >> (at % 8)) & 1)
-                << bit;
-        }
-        Ok(v)
-    }
-    fn minimal(&self) -> Result<(), CodecError> {
-        read_column(self.bytes, self.count).map(|_| ())
-    }
-}
 fn column<'a>(r: &mut Reader<'a>, count: usize) -> Result<Column<'a>, CodecError> {
-    let width = *r.rest().first().ok_or(CodecError::Length)?;
-    if width > 32 {
-        return Err(CodecError::InvalidSymbol);
-    }
-    let bits = count * usize::from(width);
-    let bytes = take(r, 1 + bits.div_ceil(8))?;
-    check_bit_array(bytes.get(1..).ok_or(CodecError::Length)?, bits)?;
-    Ok(Column {
-        bytes,
-        count,
-        width,
-    })
+    let (column, used) = read_column(r.rest(), count)?;
+    let _ = take(r, used)?;
+    Ok(column)
 }
 fn counted_column<'a>(r: &mut Reader<'a>, bound: usize) -> Result<Column<'a>, CodecError> {
     let n = usize::from(u16le(r)?);
@@ -337,9 +306,6 @@ pub(crate) fn decode_instance(
     permutation((0..n).map(|i| positions.get(i)), n)?;
     check_ranges((0..obstacles.count).map(|i| obstacles.get(i)), vertices)?;
     check_ranges((0..pins.count).map(|i| pins.get(i)), n)?;
-    for col in [&positions, &obstacles, &pins] {
-        col.minimal()?;
-    }
     let mut metadata = reserve(expanded)?;
     metadata.extend_from_slice(&3u16.to_le_bytes());
     let mut payload = reserve(expanded)?;
@@ -373,7 +339,11 @@ pub(crate) fn decode_instance(
         append_column(&mut payload, col)?;
     }
     section(&mut metadata, 8, &payload)?;
-    decode_prefix(&prefix, metadata, &LIMITS, &[4, 5, 8])
+    let instance = decode_prefix(&prefix, metadata, &LIMITS, &[4, 5, 8])?;
+    for col in [&positions, &obstacles, &pins] {
+        col.minimal()?;
+    }
+    Ok(instance)
 }
 
 #[cfg(test)]

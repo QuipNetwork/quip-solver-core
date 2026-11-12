@@ -4,24 +4,7 @@ use alloc::vec::Vec;
 use core::fmt;
 
 pub(crate) mod bits;
-// These shared modules are frozen while family adapters land independently.
-#[expect(
-    clippy::allow_attributes,
-    reason = "the staged scaffold needs an allowance that remains valid when adapters use all helpers"
-)]
-#[allow(
-    dead_code,
-    reason = "shared block helpers are consumed incrementally by family adapters"
-)]
 pub(crate) mod blocks;
-#[expect(
-    clippy::allow_attributes,
-    reason = "the staged scaffold needs an allowance that remains valid when adapters use all helpers"
-)]
-#[allow(
-    dead_code,
-    reason = "shared instance helpers are consumed incrementally by family adapters"
-)]
 pub(crate) mod instance;
 
 /// A compact codec failure, independent of the protocol FAM codes.

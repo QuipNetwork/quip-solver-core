@@ -6239,3 +6239,50 @@ fn shortfall_cases_skip_with_code_14() -> Result<(), String> {
     }
     Ok(())
 }
+
+#[test]
+#[expect(clippy::panic_in_result_fn, reason = "pin mismatch must fail the test")]
+fn compact_codec_pins() -> Result<(), String> {
+    for (text, pin) in [
+        (
+            include_str!("../vectors/families/codecs/twisted.json"),
+            "77bac98967b9204c123f206d5bd4b169e97f9910f15cbb2789ee030f105b797a",
+        ),
+        (
+            include_str!("../vectors/families/codecs/glass.json"),
+            "274428b8ca5e9a08b6a6400d76a7bfb2511ad0605cad31d00fbce0b066dd115b",
+        ),
+        (
+            include_str!("../vectors/families/codecs/fields.json"),
+            "ce58422963bd553a2083be21c0add75e87d6612bcc33e727d844ff20c7d9e242",
+        ),
+        (
+            include_str!("../vectors/families/codecs/polariton.json"),
+            "bd4e577a002500b3e37b4b6f6ff837177d0715c46941b02677f99294953e4862",
+        ),
+        (
+            include_str!("../vectors/families/codecs/charge.json"),
+            "9e660d28d4eb50ef38e9d44fce4456edafa00a8243c799bb8e2b44cabd4bbcf8",
+        ),
+        (
+            include_str!("../vectors/families/codecs/defects.json"),
+            "62ddbc13aa277f26cda68345424e1db5588032ce557829c668707888c3c2c43f",
+        ),
+        (
+            include_str!("../vectors/families/codecs/routing.json"),
+            "ea3aec4296ded8d39684e984adfae368da4cdb64fbf29efa67f1fb62c7439804",
+        ),
+        (
+            include_str!("../vectors/families/codecs/flow.json"),
+            "ce9398cb85e6698f4d43b32cb75d20f9418d2f889e2372f71bd562798c8a3543",
+        ),
+    ] {
+        let doc: Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
+        let cases = doc.get("cases").ok_or("missing cases")?;
+        assert_eq!(legacy::case_blake3(cases)?, pin);
+    }
+    Ok(())
+}
+
+#[path = "../../ising-generators/tests/codec_vectors.rs"]
+mod compact_codecs;

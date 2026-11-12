@@ -5,8 +5,7 @@ use crate::{
         bits::{BitReader, BitWriter},
         filled,
         instance::{
-            check_bit_array, decode_prefix, encode_prefix, preflight_prefix, read_column,
-            write_column,
+            decode_prefix, encode_prefix, preflight_prefix, read_column, write_column, Column,
         },
         CodecError, WitnessCodec,
     },
@@ -150,20 +149,10 @@ pub(crate) fn decode_instance(
             return Err(CodecError::InvalidSymbol);
         }
     }
-    // Preflight separately because the frozen reader checks minimality eagerly.
-    let column = data.get(end..).ok_or(CodecError::Length)?;
-    let width_bits = *column.first().ok_or(CodecError::Length)?;
-    if width_bits > 32 {
-        return Err(CodecError::InvalidSymbol);
-    }
-    let position_bits = config
-        .native
-        .links()
-        .checked_mul(usize::from(width_bits))
-        .ok_or(CodecError::BoundsExceeded)?;
-    let used = 1 + position_bits.div_ceil(8);
-    let packed = column.get(1..used).ok_or(CodecError::Length)?;
-    check_bit_array(packed, position_bits)?;
+    let (positions, used) = read_column(
+        data.get(end..).ok_or(CodecError::Length)?,
+        config.native.links(),
+    )?;
     if end + used != data.len() {
         return Err(CodecError::Length);
     }
@@ -176,7 +165,7 @@ pub(crate) fn decode_instance(
     window(config, c, r)?;
     let mut seen = filled(config.native.links(), false)?;
     for i in 0..config.native.links() {
-        let position = position_at(packed, width_bits, i)?;
+        let position = positions.get(i)?;
         let slot = seen
             .get_mut(position as usize)
             .ok_or(CodecError::InvalidInstance)?;
@@ -189,11 +178,10 @@ pub(crate) fn decode_instance(
         data.get(4..end).ok_or(CodecError::Length)?,
         c,
         r,
-        packed,
-        width_bits,
+        &positions,
     )?;
     let instance = decode_prefix(&prefix, metadata, &LIMITS, POLARITON_V1.metadata_kinds)?;
-    let _ = read_column(column, config.native.links())?;
+    positions.minimal()?;
     Ok(instance)
 }
 fn rebuild_metadata(
@@ -201,8 +189,7 @@ fn rebuild_metadata(
     labels: &[u8],
     c: u16,
     r: u16,
-    packed: &[u8],
-    width_bits: u8,
+    positions: &Column<'_>,
 ) -> Result<Vec<u8>, CodecError> {
     let (width, vertices, metadata_size) = sizes(config)?;
     let mut metadata = Vec::new();
@@ -238,17 +225,7 @@ fn rebuild_metadata(
     metadata.extend_from_slice(&c.to_le_bytes());
     metadata.extend_from_slice(&r.to_le_bytes());
     for i in 0..config.native.links() {
-        metadata.extend_from_slice(&position_at(packed, width_bits, i)?.to_le_bytes());
+        metadata.extend_from_slice(&positions.get(i)?.to_le_bytes());
     }
     Ok(metadata)
-}
-
-fn position_at(packed: &[u8], width: u8, index: usize) -> Result<u32, CodecError> {
-    let mut position = 0u32;
-    for bit in 0..usize::from(width) {
-        let at = index * usize::from(width) + bit;
-        position |=
-            u32::from((packed.get(at / 8).ok_or(CodecError::Length)? >> (at % 8)) & 1) << bit;
-    }
-    Ok(position)
 }

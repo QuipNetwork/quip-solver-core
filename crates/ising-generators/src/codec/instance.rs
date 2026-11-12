@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 
 pub(crate) struct Column<'a> {
     data: &'a [u8],
-    count: usize,
+    pub(crate) count: usize,
     width: u8,
 }
 impl Column<'_> {
@@ -25,7 +25,7 @@ impl Column<'_> {
         }
         Ok(value)
     }
-    fn minimal(&self) -> Result<(), CodecError> {
+    pub(crate) fn minimal(&self) -> Result<(), CodecError> {
         let mut max = 0;
         for i in 0..self.count {
             max |= self.get(i)?;
@@ -36,7 +36,7 @@ impl Column<'_> {
         Ok(())
     }
 }
-fn column(data: &[u8], count: usize) -> Result<(Column<'_>, usize), CodecError> {
+pub(crate) fn read_column(data: &[u8], count: usize) -> Result<(Column<'_>, usize), CodecError> {
     let width = *data.first().ok_or(CodecError::Length)?;
     if width > 32 {
         return Err(CodecError::InvalidSymbol);
@@ -57,11 +57,6 @@ fn column(data: &[u8], count: usize) -> Result<(Column<'_>, usize), CodecError> 
         },
         end,
     ))
-}
-pub(crate) fn read_column(data: &[u8], count: usize) -> Result<(Column<'_>, usize), CodecError> {
-    let (col, end) = column(data, count)?;
-    col.minimal()?;
-    Ok((col, end))
 }
 pub(crate) fn write_column(values: &[u32], out: &mut Vec<u8>) -> Result<(), CodecError> {
     let max = values.iter().copied().max().unwrap_or(0);
@@ -173,7 +168,7 @@ fn palette<'a>(
             return Err(CodecError::BoundsExceeded);
         }
     }
-    let (ranks, len) = column(data.get(end..).ok_or(CodecError::Length)?, count)?;
+    let (ranks, len) = read_column(data.get(end..).ok_or(CodecError::Length)?, count)?;
     for i in 0..count {
         if ranks.get(i)? as usize >= k {
             return Err(CodecError::InvalidSymbol);
@@ -260,9 +255,6 @@ impl InstancePrefix<'_> {
     pub(crate) fn node_count(&self) -> usize {
         self.n
     }
-    pub(crate) fn edge_count(&self) -> usize {
-        self.e
-    }
     pub(crate) fn metadata_start(&self) -> usize {
         self.metadata_start
     }
@@ -348,9 +340,9 @@ pub(crate) fn preflight_prefix<'a>(
     let head = bytes.get(..112).ok_or(CodecError::Length)?;
     let _ = canonical_len(n, e, limits.max_metadata() as usize)?;
     let mut at = 112;
-    let (ids, len) = column(bytes.get(at..).ok_or(CodecError::Length)?, n)?;
+    let (ids, len) = read_column(bytes.get(at..).ok_or(CodecError::Length)?, n)?;
     at += len;
-    let (endpoints, len) = column(
+    let (endpoints, len) = read_column(
         bytes.get(at..).ok_or(CodecError::Length)?,
         e.checked_mul(2).ok_or(CodecError::BoundsExceeded)?,
     )?;
@@ -450,6 +442,14 @@ pub(crate) fn decode_prefix(
 mod tests {
     use super::*;
     #[test]
+    fn borrowed_column_defers_minimality() {
+        let (column, used) = read_column(&[1, 0], 1).expect("valid wire");
+        assert_eq!(used, 2);
+        assert_eq!(column.get(0), Ok(0));
+        assert_eq!(column.minimal(), Err(CodecError::NonCanonical));
+    }
+
+    #[test]
     fn column_widths_and_padding() -> Result<(), CodecError> {
         for values in [&[][..], &[0, 0], &[0, 1], &[0, 1 << 30], &[0, u32::MAX]] {
             let mut bytes = Vec::new();
@@ -461,7 +461,7 @@ mod tests {
             }
         }
         assert!(matches!(
-            read_column(&[1, 0], 1),
+            read_column(&[1, 0], 1).and_then(|(col, _)| col.minimal()),
             Err(CodecError::NonCanonical)
         ));
         assert!(matches!(
@@ -537,7 +537,7 @@ mod tests {
             let bytes = encode_prefix(&instance)?;
             let prefix = preflight_prefix(&bytes, &InstanceLimits::FAM_37)?;
             assert_eq!(prefix.node_count(), 4);
-            assert_eq!(prefix.edge_count(), 2);
+            assert_eq!(prefix.e, 2);
             assert_eq!(prefix.metadata_start(), bytes.len());
             assert_eq!(prefix.descriptor_digest(), &[1; 32]);
             let decoded = decode_prefix(&prefix, alloc::vec![0, 0], &InstanceLimits::FAM_37, &[])?;

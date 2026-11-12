@@ -7,7 +7,7 @@ use crate::{
         filled,
         instance::{
             check_bit_array, decode_prefix, encode_prefix, preflight_prefix, read_column,
-            write_column,
+            write_column, Column,
         },
         CodecError, WitnessCodec,
     },
@@ -161,49 +161,6 @@ pub(crate) fn encode_instance(
     Ok(out)
 }
 
-// The frozen shared reader checks minimality immediately. Borrow the wire column
-// first so descriptor and structure faults retain priority over minimality.
-struct DeferredColumn<'a> {
-    bytes: &'a [u8],
-    count: usize,
-    width: usize,
-}
-impl<'a> DeferredColumn<'a> {
-    fn read(bytes: &'a [u8], count: usize) -> Result<(Self, usize), CodecError> {
-        let width = usize::from(*bytes.first().ok_or(CodecError::Length)?);
-        if width > 32 {
-            return Err(CodecError::InvalidSymbol);
-        }
-        let bits = count.checked_mul(width).ok_or(CodecError::BoundsExceeded)?;
-        let end = bits.checked_add(7).ok_or(CodecError::BoundsExceeded)? / 8 + 1;
-        let bytes = bytes.get(..end).ok_or(CodecError::Length)?;
-        check_bit_array(bytes.get(1..).ok_or(CodecError::Length)?, bits)?;
-        Ok((
-            Self {
-                bytes,
-                count,
-                width,
-            },
-            end,
-        ))
-    }
-    fn get(&self, index: usize) -> Result<u32, CodecError> {
-        if index >= self.count {
-            return Err(CodecError::Length);
-        }
-        let mut value = 0;
-        for bit in 0..self.width {
-            let at = index * self.width + bit;
-            value |=
-                u32::from((self.bytes.get(1 + at / 8).ok_or(CodecError::Length)? >> (at % 8)) & 1)
-                    << bit;
-        }
-        Ok(value)
-    }
-    fn minimal(&self) -> Result<(), CodecError> {
-        read_column(self.bytes, self.count).map(|_| ())
-    }
-}
 pub(crate) fn decode_instance(
     _params: &Params<'_>,
     descriptor_digest: &[u8; 32],
@@ -214,8 +171,7 @@ pub(crate) fn decode_instance(
     let cells = word(bytes, at)?;
     let _ = expanded(cells, 0)?;
     at += 4;
-    let (coordinates, len) =
-        DeferredColumn::read(bytes.get(at..).ok_or(CodecError::Length)?, cells * 2)?;
+    let (coordinates, len) = read_column(bytes.get(at..).ok_or(CodecError::Length)?, cells * 2)?;
     at += len;
     let supply_len = (cells * 4).div_ceil(8);
     let supply = bytes.get(at..at + supply_len).ok_or(CodecError::Length)?;
@@ -233,10 +189,9 @@ pub(crate) fn decode_instance(
         return Err(CodecError::BoundsExceeded);
     }
     at += 4;
-    let (positions, len) =
-        DeferredColumn::read(bytes.get(at..).ok_or(CodecError::Length)?, arcs * 5)?;
+    let (positions, len) = read_column(bytes.get(at..).ok_or(CodecError::Length)?, arcs * 5)?;
     at += len;
-    let (costs, len) = DeferredColumn::read(bytes.get(at..).ok_or(CodecError::Length)?, arcs * 2)?;
+    let (costs, len) = read_column(bytes.get(at..).ok_or(CodecError::Length)?, arcs * 2)?;
     at += len;
     let strength = take::<2>(bytes, at)?;
     if at + 2 != bytes.len() {
@@ -315,9 +270,9 @@ fn validate_columns(
     cells: usize,
     arcs: usize,
     nodes: usize,
-    coordinates: &DeferredColumn<'_>,
-    positions: &DeferredColumn<'_>,
-    costs: &DeferredColumn<'_>,
+    coordinates: &Column<'_>,
+    positions: &Column<'_>,
+    costs: &Column<'_>,
 ) -> Result<(), CodecError> {
     if arcs * 3 != nodes {
         return Err(CodecError::InvalidInstance);

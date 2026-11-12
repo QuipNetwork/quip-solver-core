@@ -174,8 +174,6 @@ def decode_instance(params: bytes, data: bytes) -> dict:
     for column, bound in ((obstacles, vertices), (pins, n)):
         if any(column.get(i) >= bound for i in range(column.count)):
             raise CodecError("invalid_instance")
-    for column in (positions, obstacles, pins):
-        column.minimal()
     labels = bytearray()
     cursor = iter(ranks)
     for v in range(vertices):
@@ -190,7 +188,10 @@ def decode_instance(params: bytes, data: bytes) -> dict:
         struct.pack("<HI", kind, len(payload)) + payload
         for kind, payload in ((4, charges), (5, incidence), (8, rest))
     )
-    return decode_prefix(prefix, metadata, LIMITS, (4, 5, 8))
+    instance = decode_prefix(prefix, metadata, LIMITS, (4, 5, 8))
+    for column in (positions, obstacles, pins):
+        column.minimal()
+    return instance
 
 
 def _forest(instance):

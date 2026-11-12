@@ -192,29 +192,6 @@ fn section(out: &mut Vec<u8>, kind: u16, len: usize) -> Result<(), CodecError> {
     Ok(())
 }
 
-// The frozen reader checks minimality immediately. Borrow raw columns first so
-// descriptor and structural errors retain their specified priority.
-fn column_bytes(data: &[u8], count: usize) -> Result<(&[u8], usize), CodecError> {
-    let width = usize::from(*data.first().ok_or(CodecError::Length)?);
-    if width > 32 {
-        return Err(CodecError::InvalidSymbol);
-    }
-    let bits = count.checked_mul(width).ok_or(CodecError::BoundsExceeded)?;
-    let end = 1 + bits.div_ceil(8);
-    check_bit_array(data.get(1..end).ok_or(CodecError::Length)?, bits)?;
-    Ok((data.get(..end).ok_or(CodecError::Length)?, end))
-}
-fn column_value(data: &[u8], index: usize) -> Result<u32, CodecError> {
-    let width = usize::from(*data.first().ok_or(CodecError::Length)?);
-    let mut value = 0;
-    for bit in 0..width {
-        let at = index * width + bit;
-        value |=
-            u32::from((data.get(1 + at / 8).ok_or(CodecError::Length)? >> (at % 8)) & 1) << bit;
-    }
-    Ok(value)
-}
-
 pub(crate) fn decode_instance(
     params: &Params<'_>,
     descriptor_digest: &[u8; 32],
@@ -238,14 +215,14 @@ pub(crate) fn decode_instance(
     let end = 4 + bits.div_ceil(8);
     let signs = data.get(4..end).ok_or(CodecError::Length)?;
     check_bit_array(signs, bits)?;
-    let (positions, used) = column_bytes(data.get(end..).ok_or(CodecError::Length)?, n)?;
+    let (positions, used) = read_column(data.get(end..).ok_or(CodecError::Length)?, n)?;
     let at = end + used;
     let weight: [u8; 8] = take(data, at)?;
     let at = at + 8;
     let end = at + n.div_ceil(8);
     let targets = data.get(at..end).ok_or(CodecError::Length)?;
     check_bit_array(targets, n)?;
-    let (costs, used) = column_bytes(data.get(end..).ok_or(CodecError::Length)?, n)?;
+    let (costs, used) = read_column(data.get(end..).ok_or(CodecError::Length)?, n)?;
     if end + used != data.len() {
         return Err(CodecError::Length);
     }
@@ -256,7 +233,7 @@ pub(crate) fn decode_instance(
         return Err(CodecError::InvalidInstance);
     }
     origin(config, c0, r0)?;
-    permutation(n, |i| column_value(positions, i))?;
+    permutation(n, |i| positions.get(i))?;
     // All metadata lengths, signs, and positions are checked before the first allocation.
     let mut metadata = Vec::new();
     metadata
@@ -281,14 +258,14 @@ pub(crate) fn decode_instance(
     metadata.extend_from_slice(&c0.to_le_bytes());
     metadata.extend_from_slice(&r0.to_le_bytes());
     for i in 0..n {
-        metadata.extend_from_slice(&column_value(positions, i)?.to_le_bytes());
+        metadata.extend_from_slice(&positions.get(i)?.to_le_bytes());
     }
     section(&mut metadata, KIND_FLOW, 8 + 5 * n)?;
     metadata.extend_from_slice(&weight);
     let mut reader = BitReader::new(targets, n)?;
     for i in 0..n {
         metadata.push(if reader.read(1)? == 1 { 1 } else { 255 });
-        metadata.extend_from_slice(&column_value(costs, i)?.to_le_bytes());
+        metadata.extend_from_slice(&costs.get(i)?.to_le_bytes());
     }
     let instance = decode_prefix(
         &prefix,
@@ -296,8 +273,8 @@ pub(crate) fn decode_instance(
         &LIMITS,
         &[KIND_CHARGES, KIND_INCIDENCE, KIND_FLOW],
     )?;
-    let _ = read_column(positions, n)?;
-    let _ = read_column(costs, n)?;
+    positions.minimal()?;
+    costs.minimal()?;
     Ok(instance)
 }
 

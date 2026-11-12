@@ -175,54 +175,6 @@ pub(crate) fn encode_instance(
     Ok(out)
 }
 
-// The frozen read_column checks minimality immediately. Borrow the wire here
-// so complete preflight, descriptor, and structural checks can precede it.
-struct WireColumn<'a> {
-    bytes: &'a [u8],
-    width: usize,
-    count: usize,
-}
-impl<'a> WireColumn<'a> {
-    fn read(bytes: &'a [u8], count: usize) -> Result<(Self, usize), CodecError> {
-        let width = usize::from(*bytes.first().ok_or(CodecError::Length)?);
-        if width > 32 {
-            return Err(CodecError::InvalidSymbol);
-        }
-        let bits = count.checked_mul(width).ok_or(CodecError::BoundsExceeded)?;
-        let end = bits
-            .div_ceil(8)
-            .checked_add(1)
-            .ok_or(CodecError::BoundsExceeded)?;
-        let wire = bytes.get(..end).ok_or(CodecError::Length)?;
-        check_bit_array(wire.get(1..).ok_or(CodecError::Length)?, bits)?;
-        Ok((
-            Self {
-                bytes: wire,
-                width,
-                count,
-            },
-            end,
-        ))
-    }
-    fn get(&self, index: usize) -> Result<u32, CodecError> {
-        if index >= self.count {
-            return Err(CodecError::Length);
-        }
-        let mut value = 0;
-        for bit in 0..self.width {
-            let at = index * self.width + bit;
-            value |=
-                u32::from((self.bytes.get(1 + at / 8).ok_or(CodecError::Length)? >> (at % 8)) & 1)
-                    << bit;
-        }
-        Ok(value)
-    }
-    fn minimal(&self) -> Result<(), CodecError> {
-        let _ = read_column(self.bytes, self.count)?;
-        Ok(())
-    }
-}
-
 fn section(out: &mut Vec<u8>, kind: u16, len: usize, count: usize) -> Result<(), CodecError> {
     out.extend_from_slice(&kind.to_le_bytes());
     out.extend_from_slice(
@@ -248,7 +200,7 @@ pub(crate) fn decode_instance(
     let t = u32_at(bytes, at)? as usize;
     let _ = metadata_size(t, 0)?;
     at += 4;
-    let (tiles, len) = WireColumn::read(bytes.get(at..).ok_or(CodecError::Length)?, 4 * t)?;
+    let (tiles, len) = read_column(bytes.get(at..).ok_or(CodecError::Length)?, 4 * t)?;
     at += len;
     let end = at + (4 * t).div_ceil(8);
     let gauges = bytes.get(at..end).ok_or(CodecError::Length)?;
@@ -257,7 +209,7 @@ pub(crate) fn decode_instance(
     let d = u32_at(bytes, at)? as usize;
     let size = metadata_size(t, d)?;
     at += 4;
-    let (pairs, len) = WireColumn::read(bytes.get(at..).ok_or(CodecError::Length)?, 2 * d)?;
+    let (pairs, len) = read_column(bytes.get(at..).ok_or(CodecError::Length)?, 2 * d)?;
     if at + len != bytes.len() {
         return Err(CodecError::Length);
     }

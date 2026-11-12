@@ -3,6 +3,7 @@
 //! Every function is a thin call into `ising-generators`, so the instance
 //! bytes a Python miner builds are the bytes Rust builds. Family faults raise
 //! a subclass of [`FamilyError`] with `code` and `name` attributes (FAM-42).
+//! Compact codec faults raise [`CodecError`] with a stable `name` and no FAM code.
 //! A wrong Python argument type stays a `TypeError`.
 
 use ising_generators::descriptor::{self, AdvertisedLimits};
@@ -422,6 +423,97 @@ fn feasible(
     Ok(family::feasible(&admitted, &instance.inner, &spins))
 }
 
+create_exception!(
+    quip_solver_core,
+    CodecError,
+    PyValueError,
+    "A compact codec failure with a stable `name` attribute."
+);
+
+fn codec_error(py: Python<'_>, error: ising_generators::codec::CodecError) -> PyErr {
+    if error == ising_generators::codec::CodecError::Allocation {
+        return PyMemoryError::new_err(error.to_string());
+    }
+    let err = CodecError::new_err(error.to_string());
+    if let Err(error) = err.value(py).setattr("name", error.name()) {
+        return error;
+    }
+    err
+}
+
+/// Encode a structurally valid instance with admitted descriptor context.
+#[pyfunction]
+fn encode_instance<'py>(
+    py: Python<'py>,
+    family_id: &str,
+    revision: u32,
+    params: &[u8],
+    params_digest: &[u8],
+    instance: &Instance,
+) -> PyResult<Bound<'py, PyBytes>> {
+    let admitted = admit(py, family_id, revision, params, params_digest)?;
+    let bytes = ising_generators::registry::encode_instance(&admitted, &instance.inner)
+        .map_err(|error| codec_error(py, error))?;
+    Ok(PyBytes::new(py, &bytes))
+}
+
+/// Decode compact bytes. Family validation remains a separate operation.
+#[pyfunction]
+fn decode_instance(
+    py: Python<'_>,
+    family_id: &str,
+    revision: u32,
+    params: &[u8],
+    params_digest: &[u8],
+    data: &[u8],
+) -> PyResult<Instance> {
+    let admitted = admit(py, family_id, revision, params, params_digest)?;
+    ising_generators::registry::decode_instance(&admitted, data)
+        .map(|inner| Instance { inner })
+        .map_err(|error| codec_error(py, error))
+}
+
+/// Encode exact instance-order spins using a prepared family codec.
+#[pyfunction]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "PyO3 extracts an owned list of spins"
+)]
+fn encode_witness<'py>(
+    py: Python<'py>,
+    family_id: &str,
+    revision: u32,
+    params: &[u8],
+    params_digest: &[u8],
+    instance: &Instance,
+    spins: Vec<i8>,
+) -> PyResult<Bound<'py, PyBytes>> {
+    let admitted = admit(py, family_id, revision, params, params_digest)?;
+    let codec = ising_generators::registry::prepare_witness_codec(&admitted, &instance.inner)
+        .map_err(|error| codec_error(py, error))?;
+    let bytes = codec
+        .encode(&spins)
+        .map_err(|error| codec_error(py, error))?;
+    Ok(PyBytes::new(py, &bytes))
+}
+
+/// Borrow the witness payload until the core length and padding checks finish.
+#[pyfunction]
+fn decode_witness(
+    py: Python<'_>,
+    family_id: &str,
+    revision: u32,
+    params: &[u8],
+    params_digest: &[u8],
+    instance: &Instance,
+    data: &[u8],
+) -> PyResult<Vec<i8>> {
+    let admitted = admit(py, family_id, revision, params, params_digest)?;
+    let codec = ising_generators::registry::prepare_witness_codec(&admitted, &instance.inner)
+        .map_err(|error| codec_error(py, error))?;
+    codec.decode(data).map_err(|error| codec_error(py, error))
+}
+
 /// Register the `families` submodule and the exception classes.
 pub(crate) fn register(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     let families = PyModule::new(py, "families")?;
@@ -433,7 +525,12 @@ pub(crate) fn register(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> 
     families.add_function(wrap_pyfunction!(generate, &families)?)?;
     families.add_function(wrap_pyfunction!(validate_instance, &families)?)?;
     families.add_function(wrap_pyfunction!(feasible, &families)?)?;
+    families.add_function(wrap_pyfunction!(encode_instance, &families)?)?;
+    families.add_function(wrap_pyfunction!(decode_instance, &families)?)?;
+    families.add_function(wrap_pyfunction!(encode_witness, &families)?)?;
+    families.add_function(wrap_pyfunction!(decode_witness, &families)?)?;
     families.add_class::<Instance>()?;
+    m.add("CodecError", py.get_type::<CodecError>())?;
     m.add_submodule(&families)?;
 
     let base = py.get_type::<FamilyError>();

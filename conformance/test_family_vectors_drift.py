@@ -587,3 +587,37 @@ def test_flow_contract_states_the_numbers_of_the_vectors():
         assert number in text
     assert "`l12` needs a window without dead qubits" in text
     assert "passes `check_metadata`" in text
+
+
+CODEC_PINS = {
+    "twisted": "77bac98967b9204c123f206d5bd4b169e97f9910f15cbb2789ee030f105b797a",
+    "glass": "274428b8ca5e9a08b6a6400d76a7bfb2511ad0605cad31d00fbce0b066dd115b",
+    "fields": "ce58422963bd553a2083be21c0add75e87d6612bcc33e727d844ff20c7d9e242",
+    "polariton": "bd4e577a002500b3e37b4b6f6ff837177d0715c46941b02677f99294953e4862",
+    "charge": "9e660d28d4eb50ef38e9d44fce4456edafa00a8243c799bb8e2b44cabd4bbcf8",
+    "defects": "62ddbc13aa277f26cda68345424e1db5588032ce557829c668707888c3c2c43f",
+    "routing": "ea3aec4296ded8d39684e984adfae368da4cdb64fbf29efa67f1fb62c7439804",
+    "flow": "ce9398cb85e6698f4d43b32cb75d20f9418d2f889e2372f71bd562798c8a3543",
+}
+
+
+@pytest.mark.parametrize("slug,pin", CODEC_PINS.items())
+def test_codec_vector_pin_and_mutation(slug, pin):
+    from family_oracle.codec_vectors import document
+
+    path = build.FAMILIES_DIR / "codecs" / f"{slug}.json"
+    stored = json.loads(path.read_text())
+    assert stored == document(slug)
+    encoded = build.canonical_json(stored["cases"]).encode("ascii")
+    assert blake3.blake3(encoded).hexdigest() == pin == stored["cases_blake3"]
+    changed = json.loads(encoded)
+    row = changed[0]
+    key = next(
+        key for key in ("compact_instance", "compact_hex", "compact") if key in row
+    )
+    wire = bytearray.fromhex(row[key])
+    wire[0] ^= 1
+    row[key] = wire.hex()
+    assert (
+        blake3.blake3(build.canonical_json(changed).encode("ascii")).hexdigest() != pin
+    )

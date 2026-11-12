@@ -233,3 +233,11 @@ Add the matching oracle code, then regenerate and commit the file with the reaso
 - The FAM-37 limits on node count, edge count, and metadata size are not built as instances. The `size_bounds` statistics cover the counts.
 - ChaCha8 checkpoints stop at word 1002.
 - The four deferred evidence ids in the coverage table have no vectors.
+
+## Compact codec evidence
+
+The solver and validator conformance tests consume the same eight files under `vectors/families/codecs/`.
+Each family file retains its independent oracle, local source manifest, and separate cases digest.
+Rust and Python independently pin these digests without adding FAM or SC-2 traceability identifiers.
+The global oracle writer delegates codec files to the local family writers.
+See [compact instance and witness codecs](witness-codecs.md) for wire layouts, errors, bindings, and measured sizes.
