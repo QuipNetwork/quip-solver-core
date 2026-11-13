@@ -1489,7 +1489,14 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
                             Arc::clone(&jobs_done),
                         ) {
                             Ok((state, params)) => {
-                                if S::generates_locally() {
+                                // A family the binary did not declare is
+                                // generated on the default session path, even
+                                // for a binary that expands leases locally.
+                                let local = S::generates_locally()
+                                    && state.family_contract().is_none_or(|c| {
+                                        families.declares_generated(c.family_id, c.revision)
+                                    });
+                                if local {
                                     let retire_by =
                                         tokio::time::Instant::now() + LEASE_RETIRE_GRACE;
                                     loop {
@@ -2840,7 +2847,7 @@ mod tests {
         });
         assert_eq!(
             hex,
-            "1a020103206428c801320973747265616d696e6738024001520201065a010160076801"
+            "1a020103206428c801320973747265616d696e6738024001520201065a020102600768019201150a10717569702f636861726765642d6963651201019201180a13717569702f646566656374732d7374617469631201019201150a10717569702f666c6f772d7374617469631201019201140a0f717569702f6963652d6669656c64731201019201130a0e717569702f6963652d676c61737312010192011a0a15717569702f706f6c617269746f6e2d73746174696312010192011b0a16717569702f747769737465642d6963652d64696d657212010192011f0a1a717569702f74776f2d636f6d6d6f646974792d726f7574696e67120101"
         );
     }
 
@@ -3606,6 +3613,7 @@ mod tests {
         use crate::ising_generators::descriptor::{params_digest, Contract, Params};
         use crate::ising_generators::family::{BaseTopology, Construction, InstanceBody, Streams};
         use crate::ising_generators::instance::{Instance, InstanceLimits};
+        use crate::ising_generators::registry::CONTRACTS;
         use crate::ising_generators::Code;
         use quip_solver_conformance::families::layered::{example_size_bounds, UNIFORM_FIELD};
         use std::sync::atomic::AtomicBool;
@@ -3720,8 +3728,10 @@ mod tests {
         fn family_fields_reach_capabilities_and_its_json() {
             let caps = caps_of::<Full>();
             let digest = params_digest(&ZERO_FIELD_PARAMS);
+            let registered = CONTRACTS.len();
             assert_eq!(caps.solver_id, "quip-mock/families");
-            assert_eq!(caps.generated_families.len(), 1);
+            // The declared entry first, then one default entry per registered family.
+            assert_eq!(caps.generated_families.len(), 1 + registered);
             assert_eq!(
                 caps.generated_families[0].family_id,
                 "vectors/uniform-field"
@@ -3734,12 +3744,12 @@ mod tests {
             let v = json_of(&caps);
             assert_eq!(v["solverId"], "quip-mock/families");
             assert_eq!(
-                v["generatedFamilies"],
-                serde_json::json!([{
+                v["generatedFamilies"][0],
+                serde_json::json!({
                     "familyId": "vectors/uniform-field",
                     "revisions": [1],
                     "paramsDigests": [STANDARD.encode(digest)],
-                }])
+                })
             );
             assert_eq!(
                 v["acceptedFamilies"],
@@ -3747,17 +3757,24 @@ mod tests {
             );
 
             let generic = json_of(&caps_of::<Generic>());
-            for key in ["solverId", "generatedFamilies", "acceptedFamilies"] {
+            for key in ["solverId", "acceptedFamilies"] {
                 assert!(generic.get(key).is_none(), "{key} present in generic JSON");
             }
+            assert_eq!(
+                generic["generatedFamilies"].as_array().map(Vec::len),
+                Some(registered),
+                "the default path lists every registered family"
+            );
         }
 
         #[test]
         fn generators_list_the_family_algorithm_iff_generated() {
             let legacy = GeneratorAlgorithm::Blake3Chacha8V1 as i32;
             let family = GeneratorAlgorithm::FamilyChacha8V1 as i32;
-            assert_eq!(caps_of::<Generic>().generators, [legacy]);
-            assert_eq!(caps_of::<AcceptOnly>().generators, [legacy]);
+            // The default session path generates every registered family, so
+            // every binary lists the family algorithm.
+            assert_eq!(caps_of::<Generic>().generators, [legacy, family]);
+            assert_eq!(caps_of::<AcceptOnly>().generators, [legacy, family]);
             assert_eq!(caps_of::<Full>().generators, [legacy, family]);
         }
 

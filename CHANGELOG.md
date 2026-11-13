@@ -5,6 +5,21 @@ This file documents changes to the Quip solver contract.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.0.15
+
+### Changed
+
+- The default session path generates every registered family revision for every
+  binary. A sampler that declares no family now lists all eight canonical
+  revision-1 families in `generated_families`. It also lists
+  `FAMILY_CHACHA8_V1` in `generators`. The session regenerates each lease salt's instance and hands the
+  sampler the plain graph, so a generic sampler such as simulated annealing mines
+  a family topology. A declared claim for a family replaces the default for that
+  family, and only a declared family reaches a binary's local lease path.
+- The family gate skips every case of a listed revision when no reference params
+  set admits and the binary's own advertised limits refuse at least one with
+  code 13. It used to fail `supported-revision`.
+
 ## 0.0.14
 
 ### Added

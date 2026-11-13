@@ -198,6 +198,10 @@ pub(crate) struct LeaseState {
     progress: Mutex<Progress>,
 }
 impl LeaseState {
+    /// The contract of a family lease, or `None` for a legacy lease.
+    pub(crate) fn family_contract(&self) -> Option<&'static Contract> {
+        self.lease.family().map(FamilyLease::contract)
+    }
     fn progress(&self) -> MutexGuard<'_, Progress> {
         self.progress.lock().unwrap_or_else(|err| {
             tracing::error!("lease progress lock poisoned; recovering counters");
@@ -2034,7 +2038,9 @@ mod family_tests {
             "max_reads is last"
         );
         let generic_cache = Arc::new(LeaseTopology::new(&sparse(), &generic));
-        assert!(generic_cache.family.is_none());
+        // The default path generates every registered family, so even the
+        // generic table caches the base topology for family admission.
+        assert!(generic_cache.family.is_some());
         assert_eq!(
             run_prepare(&job, Some(&generic_cache), Some(&TARGET), &generic, 512).map(|_| ()),
             Err(RejectReason::FamilyUnsupported),

@@ -20,6 +20,7 @@ use quip_solver_core::ising_generators::family::{
 };
 use quip_solver_core::ising_generators::instance::Instance;
 use quip_solver_core::ising_generators::instance::InstanceLimits;
+use quip_solver_core::ising_generators::registry::CONTRACTS;
 use quip_solver_core::ising_generators::Code;
 use quip_solver_core::{
     capabilities_for, BackendIdentity, IsingGraph, SampleError, SampleParams, Sampler,
@@ -118,6 +119,22 @@ fn entry(family_id: &str, revisions: &[u32], digests: &[[u8; 32]]) -> FamilySupp
     }
 }
 
+/// The entries the default session path adds for every registered family a
+/// declaration does not name, in registry order.
+fn registered() -> Vec<FamilySupport> {
+    CONTRACTS
+        .iter()
+        .map(|c| entry(c.family_id, &[c.revision], &[]))
+        .collect()
+}
+
+/// `declared` followed by every registered default entry.
+fn with_registered(declared: &[FamilySupport]) -> Vec<FamilySupport> {
+    let mut all = declared.to_vec();
+    all.extend(registered());
+    all
+}
+
 fn table_of(decl: &Declaration) -> Result<FamilyTable, String> {
     decl.validate().map_err(|e| format!("{e:?}"))
 }
@@ -154,14 +171,22 @@ static NON_ASCII_LABEL: Construction = labelled(&["caf\u{e9}"]);
 static REPEATED_LABEL: Construction = labelled(&["salt", "salt"]);
 static LONGEST_LABEL: Construction = labelled(&["abcdefghijklmnopqrstuvwxyzabcdef", "a"]);
 
+/// The generic declaration claims nothing itself, and the default session
+/// path generates every registered family for it.
 #[test]
-fn the_generic_declaration_lists_nothing() -> Result<(), String> {
+fn the_generic_declaration_generates_every_registered_family() -> Result<(), String> {
     let table = table_of(&Declaration::GENERIC)?;
     if !table.solver_id().is_empty()
-        || !table.generated().is_empty()
+        || table.generated() != registered()
         || !table.accepted().is_empty()
     {
-        return Err(format!("generic table is not empty: {table:?}"));
+        return Err(format!("generic table differs: {table:?}"));
+    }
+    if CONTRACTS
+        .iter()
+        .any(|c| table.declares_generated(c.family_id, c.revision))
+    {
+        return Err("a default entry counts as declared".to_owned());
     }
     Ok(())
 }
@@ -173,8 +198,9 @@ fn a_restricted_declaration_becomes_wire_entries() -> Result<(), String> {
     let table = table_of(&declaration(GENERATED, ACCEPTED))?;
     let digest = params_digest(&ZERO_FIELD_PARAMS);
     if table.solver_id() != "quip-mock/families"
-        || table.generated() != [entry("vectors/uniform-field", &[1], &[digest])]
+        || table.generated() != with_registered(&[entry("vectors/uniform-field", &[1], &[digest])])
         || table.accepted() != [entry("vectors/uniform-field", &[1], &[])]
+        || !table.declares_generated("vectors/uniform-field", 1)
     {
         return Err(format!("wire entries differ: {table:?}"));
     }
@@ -412,11 +438,11 @@ fn valid_declarations_are_accepted() {
         .expect("zero-field restriction fits both revisions");
     assert_eq!(
         table.generated(),
-        [entry(
+        with_registered(&[entry(
             "vectors/uniform-field",
             &[1, 2],
             &[params_digest(&ZERO_FIELD_PARAMS)]
-        )]
+        )])
     );
     assert!(declaration(GOOD, &[]).validate().is_ok());
 }
@@ -522,11 +548,11 @@ fn capabilities_follow_the_declaration() -> Result<(), String> {
     let id = identity();
     let generic = capabilities_for::<Generic, f64>(&id).map_err(|e| e.to_string())?;
     if !generic.solver_id.is_empty()
-        || !generic.generated_families.is_empty()
+        || generic.generated_families != registered()
         || !generic.accepted_families.is_empty()
-        || generic.generators != [LEGACY]
+        || generic.generators != [LEGACY, FAMILY]
     {
-        return Err(format!("generic advertises families: {generic:?}"));
+        return Err(format!("generic capabilities differ: {generic:?}"));
     }
     let table = table_of(&Restricted::declaration())?;
     let restricted = capabilities_for::<Restricted, f64>(&id).map_err(|e| e.to_string())?;
@@ -647,17 +673,23 @@ async fn cli_and_session_capabilities_agree() -> Result<(), String> {
     }
     let v = cli_json()?;
     let digest = STANDARD.encode(params_digest(&ZERO_FIELD_PARAMS));
+    let mut generated = vec![serde_json::json!({
+        "familyId": "vectors/uniform-field",
+        "revisions": [1],
+        "paramsDigests": [digest]
+    })];
+    generated.extend(
+        registered()
+            .iter()
+            .map(|e| serde_json::json!({"familyId": e.family_id, "revisions": e.revisions})),
+    );
     let expected = serde_json::json!({
         "generators": [
             "GENERATOR_ALGORITHM_BLAKE3_CHACHA8_V1",
             "GENERATOR_ALGORITHM_FAMILY_CHACHA8_V1"
         ],
         "solverId": "quip-mock/families",
-        "generatedFamilies": [{
-            "familyId": "vectors/uniform-field",
-            "revisions": [1],
-            "paramsDigests": [digest]
-        }],
+        "generatedFamilies": generated,
         "acceptedFamilies": [{"familyId": "vectors/uniform-field", "revisions": [1]}]
     });
     for (key, want) in expected.as_object().ok_or("expected is not an object")? {

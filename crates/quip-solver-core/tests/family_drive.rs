@@ -14,6 +14,20 @@ const RESTRICTED: &str = "vectors/restricted-field@1";
 const UNIFORM_NO_RESTRICTED: &str = "no reference params set gives code 10 (P_SPEC gives admitted, P_L2_F0 gives admitted, P_L3_F0 gives code 13)";
 const RESTRICTED_NO_DEGREE: &str = "no reference params set gives code 13 (P_SPEC gives admitted, P_L2_F0 gives code 10, P_L3_F0 gives code 10)";
 const LISTS_FAMILIES: &str = "the binary lists generated families";
+const TOO_SMALL: &str = "the advertised limits are too small for this revision";
+
+/// The registered revisions the default session path generates for every
+/// binary, in `ising_generators::registry::CONTRACTS` order.
+const REGISTERED: [&str; 8] = [
+    "quip/charged-ice@1",
+    "quip/defects-static@1",
+    "quip/flow-static@1",
+    "quip/ice-fields@1",
+    "quip/ice-glass@1",
+    "quip/polariton-static@1",
+    "quip/twisted-ice-dimer@1",
+    "quip/two-commodity-routing@1",
+];
 
 /// An expected case: name, subject, and `Some(reason)` for a skip or `None`
 /// for a pass.
@@ -125,11 +139,18 @@ fn family_binary_cases() -> Vec<Expected> {
 type Got = (String, Option<String>, Option<String>);
 
 /// Assert the report holds exactly `expected`, in order, with the pinned
-/// skip reasons. A failed case shows as `FAILED: why`.
+/// skip reasons, apart from the cases of the [`REGISTERED`] revisions, which
+/// each test checks on its own. A failed case shows as `FAILED: why`.
 fn assert_cases(label: &str, report: &FamilyReport, expected: &[Expected]) {
     let got: Vec<Got> = report
         .cases
         .iter()
+        .filter(|case| {
+            !case
+                .subject
+                .as_deref()
+                .is_some_and(|s| REGISTERED.contains(&s))
+        })
         .map(|case| {
             let note = match &case.outcome {
                 CaseOutcome::Passed => None,
@@ -173,6 +194,17 @@ async fn every_mode_passes_the_family_gate() {
     for (mode, report) in [("default", default), ("local", local), ("aware", aware)] {
         assert!(report.is_conformant(), "{mode}: {}", report.summary());
         assert_cases(mode, &report, &family_binary_cases());
+        // `max_degree` 4 holds no Zephyr lattice, so the gate skips every
+        // registered revision that the default path lists for this binary.
+        for subject in REGISTERED {
+            for name in REVISION_CASES {
+                let outcome = report.outcome(name, Some(subject));
+                assert!(
+                    matches!(outcome, Some(CaseOutcome::Skipped(why)) if why.starts_with(TOO_SMALL)),
+                    "{mode} {name} {subject}: {outcome:?}"
+                );
+            }
+        }
     }
 }
 
@@ -204,8 +236,11 @@ async fn an_ice_binary_passes_the_family_gate_on_the_topology_of_each_revision()
     }
 }
 
+/// A binary that declares no family still generates every registered
+/// revision on the default session path, and its plain sampler solves each
+/// regenerated instance.
 #[tokio::test]
-async fn a_generic_binary_is_not_asked_to_generate() {
+async fn a_generic_binary_generates_every_registered_family() {
     let bin = example_bin("mock_sampler_lease")
         .to_string_lossy()
         .into_owned();
@@ -213,6 +248,14 @@ async fn a_generic_binary_is_not_asked_to_generate() {
     let report = drive_miner_family(&bin, &[], &format!("unix://{socket}")).await;
     assert!(report.is_conformant(), "{}", report.summary());
     assert_cases("generic binary", &report, &generic_binary_cases());
+    for subject in REGISTERED {
+        assert_eq!(
+            report.outcome("supported-revision", Some(subject)),
+            Some(&CaseOutcome::Passed),
+            "{subject}\n{}",
+            report.summary()
+        );
+    }
 }
 
 #[test]
@@ -239,12 +282,12 @@ fn generic_binary_cases() -> Vec<Expected> {
         ("hello-protocol-version-2", None, None),
         ("generators-list-family-iff-generated", None, None),
         ("session-setup", None, None),
-        ("no-generated-families-rejects-family-lease", None, None),
         (
-            "unknown-family",
+            "no-generated-families-rejects-family-lease",
             None,
-            Some("the binary lists no generated families"),
+            Some(LISTS_FAMILIES),
         ),
+        ("unknown-family", None, None),
         ("credit-ledger-balanced", None, None),
         ("clean-exit", None, None),
     ]

@@ -1138,10 +1138,24 @@ fn unavailable_cases(has_reference: bool, why: &str) -> Vec<(&'static str, CaseO
     cases
 }
 
+/// Every case of a revision skipped for `why`.
+fn skipped_cases(why: &str) -> Vec<(&'static str, CaseOutcome)> {
+    REVISION_CASES
+        .iter()
+        .map(|name| (*name, CaseOutcome::Skipped(why.to_owned())))
+        .collect()
+}
+
 /// The supported lease of a listed subject, or the cases to record when the
 /// gate cannot drive it. A listed revision that the gate cannot drive fails
 /// `supported-revision` (FAM-57). The other cases of a revision with a
 /// reference are skipped with the same reason.
+///
+/// When no reference params set admits and at least one is refused with code
+/// 13 under the binary's own advertised limits, the binary is too small for
+/// the revision. Refusing such a lease is correct (FAM-47), so every case of
+/// the revision is skipped instead. The default session path lists every
+/// registered revision, including those a binary's limits cannot hold.
 fn select_supported<'r>(
     caps: &Capabilities,
     subject: &str,
@@ -1158,6 +1172,7 @@ fn select_supported<'r>(
     };
     let contract = reference.contract;
     let mut tried = Vec::new();
+    let mut too_large = false;
     for params in reference.params {
         let lease = FamilyLease::new(
             contract.family_id,
@@ -1169,16 +1184,23 @@ fn select_supported<'r>(
         if admission.is_ok() {
             return Ok((lease, reference));
         }
+        too_large |= matches!(admission, Err(Code::BoundsExceeded));
         tried.push(format!(
             "{} gives {}",
             params_name(params),
             show_admission(&admission)
         ));
     }
-    Err(cases_for(format!(
+    let why = format!(
         "no reference params set admits under the advertised limits ({})",
         tried.join(", ")
-    )))
+    );
+    if too_large {
+        return Err(skipped_cases(&format!(
+            "the advertised limits are too small for this revision: {why}"
+        )));
+    }
+    Err(cases_for(why))
 }
 
 /// The ten per-revision cases of one subject, built from its supported lease.
@@ -2474,19 +2496,6 @@ mod tests {
         // case list has ten cases, whether the other cases skip with the reason)
         let rows = [
             (
-                "no params set admits",
-                Capabilities {
-                    max_nodes: 1,
-                    ..mock_caps()
-                },
-                uniform,
-                uniform_reference(),
-                "no reference params set admits under the advertised limits \
-                 (P_SPEC gives code 13, P_L2_F0 gives code 13, P_L3_F0 gives code 13)",
-                true,
-                true,
-            ),
-            (
                 "T_SPARSE without ice tiles",
                 ice_caps,
                 "quip/ice-glass@1",
@@ -2517,6 +2526,21 @@ mod tests {
             ),
         ];
         let topology = t_sparse(false);
+        // Limits too small for every params set skip the revision: refusing
+        // the lease is correct (FAM-47), and the default path lists it anyway.
+        let tiny = Capabilities {
+            max_nodes: 1,
+            ..mock_caps()
+        };
+        let cases = select_supported(&tiny, uniform, Some(uniform_reference()), &topology)
+            .expect_err("no params set admits");
+        let why = "the advertised limits are too small for this revision: \
+                   no reference params set admits under the advertised limits \
+                   (P_SPEC gives code 13, P_L2_F0 gives code 13, P_L3_F0 gives code 13)";
+        assert_eq!(cases.len(), 10);
+        for (_, outcome) in &cases {
+            assert_eq!(outcome, &CaseOutcome::Skipped(why.to_owned()));
+        }
         for (label, caps, subject, reference, why, ten_cases, rest_skipped) in rows {
             let selected = select_supported(&caps, subject, Some(reference), &topology);
             assert!(selected.is_err(), "{label}: the gate accepted the revision");

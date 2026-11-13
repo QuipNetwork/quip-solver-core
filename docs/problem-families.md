@@ -717,6 +717,12 @@ A solver that does not list a revision in `accepted_families` is a generic solve
 
 **FAM-57.** A solver must list a revision in `generated_families` only after that revision passes SC-7 conformance on that solver.
 
+The Rust SDK (`quip-solver-core`) generates every revision of `ising_generators::registry::CONTRACTS` on its default session path for every binary.
+The session regenerates the canonical instance of each salt and hands the sampler the plain graph.
+So every SDK binary is a generated-family solver for those revisions, whatever its sampler.
+The default path passes SC-7 conformance on a binary that declares no family (`a_generic_binary_generates_every_registered_family` in `crates/quip-solver-core/tests/family_drive.rs`).
+A binary that expands a family on its own local path still declares that family, and only a declared family reaches the local path.
+
 **FAM-58.** A solver must list `GENERATOR_ALGORITHM_FAMILY_CHACHA8_V1` in `generators` if and only if `generated_families` is not empty.
 
 **FAM-59.** A revision with status `archived` may appear in `accepted_families`.
