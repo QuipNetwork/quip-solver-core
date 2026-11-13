@@ -207,7 +207,15 @@ fn polariton_rejects_infeasible_and_padding() {
     assert_eq!(witness_codec.decode(&data), Err(CodecError::Padding));
     assert_eq!(witness_codec.decode(&[0; 3]), Err(CodecError::Length));
     for len in 0..=witness_codec.max_encoded_len() + 2 {
-        let _ = witness_codec.decode(&vec![0; len]);
+        let zeros = vec![0; len];
+        match witness_codec.decode(&zeros) {
+            Ok(spins) => {
+                assert_eq!(len, data.len());
+                assert_eq!(witness_codec.encode(&spins).expect("re-encode"), zeros);
+            }
+            Err(error) if len != data.len() => assert_eq!(error, CodecError::Length),
+            Err(_) => {}
+        }
     }
 }
 
