@@ -5,6 +5,15 @@ This file documents changes to the Quip solver contract.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.0.14
+
+### Added
+
+- Lossless compact instance codecs and exact witness codecs for all eight canonical revision-1 families.
+- Python `families.encode_instance`, `decode_instance`, `encode_witness`, and `decode_witness` exports.
+- Python `CodecError(ValueError)` with stable error names. Descriptor failures still raise `AdmissionError`.
+- Independent codec vectors and reproducible instance and witness size measurements.
+
 ## 0.0.13
 
 A Python solver can check an explicit family job with the wheel alone.

@@ -36,6 +36,8 @@
 //! [`check_route`], is combinatorial evidence about a state and never changes
 //! feasibility.
 
+pub(crate) mod codec;
+
 use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 

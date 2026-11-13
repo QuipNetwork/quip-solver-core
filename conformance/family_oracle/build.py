@@ -852,6 +852,14 @@ def targets() -> dict[Path, bytes]:
         FLOW_PATH: render(build_flow()),
         INDEX_PATH: render(build_topology_index()),
     }
+    from .codec_vectors import FAMILIES, document
+
+    texts.update(
+        {
+            FAMILIES_DIR / "codecs" / f"{family}.json": render(document(family))
+            for family in FAMILIES
+        }
+    )
     return {
         **{path: text.encode() for path, text in texts.items()},
         **topology_blobs(),

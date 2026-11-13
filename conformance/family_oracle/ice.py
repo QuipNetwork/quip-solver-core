@@ -390,22 +390,24 @@ def select(
             free.append(tile)
             continue
         e, f = spine
-        l, r = (left_at[e], right_at[f]) if e in left_at else (left_at[f], right_at[e])
-        tile_of[(l, r)] = tile
+        left_index, r = (
+            (left_at[e], right_at[f]) if e in left_at else (left_at[f], right_at[e])
+        )
+        tile_of[(left_index, r)] = tile
     adj: list[list[int]] = [[] for _ in left]
-    for l, r in tile_of:
-        adj[l].append(r)
+    for left_index, r in tile_of:
+        adj[left_index].append(r)
     for row in adj:
         row.sort(key=lambda r: rank[r])
     match: list[int | None] = [None] * len(right)
 
-    def attempt(l: int, visited: list[bool]) -> bool:
-        for r in adj[l]:
+    def attempt(left_index: int, visited: list[bool]) -> bool:
+        for r in adj[left_index]:
             if not visited[r]:
                 visited[r] = True
                 owner = match[r]
                 if owner is None or attempt(owner, visited):
-                    match[r] = l
+                    match[r] = left_index
                     return True
         return False
 
@@ -415,11 +417,15 @@ def select(
     saved = sys.getrecursionlimit()
     sys.setrecursionlimit(max(saved, len(left) + 1000))
     try:
-        for l in left_order:
-            attempt(l, [False] * len(right))
+        for left_index in left_order:
+            attempt(left_index, [False] * len(right))
     finally:
         sys.setrecursionlimit(saved)
-    chosen = free + [tile_of[(l, r)] for r, l in enumerate(match) if l is not None]
+    chosen = free + [
+        tile_of[(left_index, r)]
+        for r, left_index in enumerate(match)
+        if left_index is not None
+    ]
     return sorted(chosen)
 
 

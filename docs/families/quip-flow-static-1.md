@@ -195,6 +195,16 @@ A witness is valid only when it meets every feasibility constraint, at any energ
 
 The Rust hook is the `feasible` field of `ising_generators::flow::FLOW`. The wiring of `feasible` into result verification (FAM-53) is a separate change, so the coordinator does not call the hook yet.
 
+### Instance encoding
+
+The lossless [compact instance layout](../witness-codecs.md#instance-wire-layout) preserves canonical bytes and requires admitted descriptor context.
+Decompression checks structure. Family validation remains separate.
+
+### Witness encoding
+
+The [compact witness layout](../witness-codecs.md#witness-wire-layout) preserves exact instance-order spins.
+Hard families require feasible witnesses. Soft families preserve constraint violations through canonical fallback mode.
+
 ## Bounds
 
 | Quantity | At most |

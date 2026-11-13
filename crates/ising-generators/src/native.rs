@@ -10,6 +10,8 @@
 //! the most cells keep a K4. The window is the first block of `(L + 1)^2` alive
 //! cells, in order of `c0`, then `r0`.
 
+pub(crate) mod codec;
+
 use alloc::collections::BTreeMap;
 use alloc::vec;
 use alloc::vec::Vec;

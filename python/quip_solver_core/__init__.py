@@ -5,6 +5,7 @@ from quip_solver_core import (
 )  # handshake / config helpers (independent Python impl)
 from quip_solver_core._core import (
     AdmissionError,
+    CodecError,
     ExitCode,
     FamilyError,
     GeneratorDefect,
@@ -19,6 +20,7 @@ from quip_solver_core._core import (
 
 __all__ = [
     "AdmissionError",
+    "CodecError",
     "ExitCode",
     "FamilyError",
     "GeneratorDefect",

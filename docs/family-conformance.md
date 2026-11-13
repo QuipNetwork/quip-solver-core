@@ -293,3 +293,11 @@ It cannot see the instance a local generator built, so condition 2 checks bytes 
 `quip-namespace-registry-only` checks the ids that claim a family.
 The SC-2 vectors use `quip/*` ids as abstract identifiers, and the check does not apply to them.
 Two rows are `review only`. A reviewer reads the contract item that each row names, because no test can judge it.
+
+## Compact codec evidence
+
+The solver and validator conformance tests consume the same eight files under `vectors/families/codecs/`.
+Each family file retains its independent oracle, local source manifest, and separate cases digest.
+Rust and Python independently pin these digests without adding FAM or SC-2 traceability identifiers.
+The global oracle writer delegates codec files to the local family writers.
+See [compact instance and witness codecs](witness-codecs.md) for wire layouts, errors, bindings, and measured sizes.

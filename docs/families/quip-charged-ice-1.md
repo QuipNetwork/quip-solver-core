@@ -165,6 +165,16 @@ The values `A` and `b` in these rules come from the parameters. A nonzero `h` wh
 
 This family has no feasibility constraints. Every spin assignment is a valid answer.
 
+### Instance encoding
+
+The lossless [compact instance layout](../witness-codecs.md#instance-wire-layout) preserves canonical bytes and requires admitted descriptor context.
+Decompression checks structure. Family validation remains separate.
+
+### Witness encoding
+
+The [compact witness layout](../witness-codecs.md#witness-wire-layout) preserves exact instance-order spins.
+Hard families require feasible witnesses. Soft families preserve constraint violations through canonical fallback mode.
+
 ## Bounds
 
 | Quantity | At most |

@@ -6,6 +6,8 @@
 //! magnitude `glass_milli`, then hides the structure with a random gauge. The
 //! metadata lets a verifier recover the tiles and the gauge.
 
+pub(crate) mod codec;
+
 use alloc::collections::BTreeSet;
 use alloc::vec;
 use alloc::vec::Vec;
