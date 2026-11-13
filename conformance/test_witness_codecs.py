@@ -190,8 +190,8 @@ def test_wheel_descriptor_mismatch_and_borrowed_instance(core):
 
 
 def test_defects_structure_precedes_metadata_minimality(core):
-    from family_oracle.codec_common import encode_column, preflight_prefix, read_column
     from family_oracle import codec_defects
+    from family_oracle.codec_common import encode_column, preflight_prefix, read_column
 
     case = next(c for c in CASES if c["slug"] == "defects")
     compact = case["compact"]

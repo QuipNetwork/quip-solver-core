@@ -5,13 +5,11 @@ import struct
 from itertools import combinations
 
 import pytest
-
+from family_oracle import codec_glass as codec
+from family_oracle import glass
+from family_oracle.build import _ice_glass_params
 from family_oracle.codec_common import CodecError, preflight_prefix
 from family_oracle.glass import metadata
-
-
-from family_oracle import codec_glass as codec, glass
-from family_oracle.build import _ice_glass_params
 
 
 def test_roundtrip():
@@ -153,9 +151,10 @@ def test_wider_image_and_schema_rejection():
 
 
 def test_golden_cases():
-    from family_oracle.codec_vectors import document
     import json
     from pathlib import Path
+
+    from family_oracle.codec_vectors import document
 
     path = (
         Path(__file__).resolve().parents[1]
@@ -169,19 +168,19 @@ def test_empty_metadata_image_and_width_minimality():
 
     params, instance = sample()
     for n in (0, 1, 8):
-        instance = dict(
-            descriptor_digest=descriptor_digest(
+        instance = {
+            "descriptor_digest": descriptor_digest(
                 b"quip/ice-glass", 1, params_digest(params)
             ),
-            topology_order_digest=bytes(32),
-            nonce=bytes(32),
-            node_ids=list(range(n)),
-            edges=[],
-            h=[0] * n,
-            j=[],
-            offset_milli=0,
-            metadata=metadata([], [1] * n),
-        )
+            "topology_order_digest": bytes(32),
+            "nonce": bytes(32),
+            "node_ids": list(range(n)),
+            "edges": [],
+            "h": [0] * n,
+            "j": [],
+            "offset_milli": 0,
+            "metadata": metadata([], [1] * n),
+        }
         compact = codec.encode_instance(params, instance)
         assert (
             codec.encode_instance(params, codec.decode_instance(params, compact))

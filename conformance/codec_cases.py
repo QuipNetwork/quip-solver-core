@@ -52,16 +52,16 @@ def cases():
                     "malformed",
                     default=[],
                 )
-            yield dict(
-                family=family,
-                slug=slug,
-                name=name,
-                params=bytes.fromhex(pick(row, "params_hex", "params")),
-                canonical=bytes.fromhex(pick(row, "canonical_hex", "canonical")),
-                compact=bytes.fromhex(
+            yield {
+                "family": family,
+                "slug": slug,
+                "name": name,
+                "params": bytes.fromhex(pick(row, "params_hex", "params")),
+                "canonical": bytes.fromhex(pick(row, "canonical_hex", "canonical")),
+                "compact": bytes.fromhex(
                     pick(row, "compact_instance", "compact_hex", "compact")
                 ),
-                valid=valid,
-                bad_witness=bad_witness,
-                bad_instance=bad_instance,
-            )
+                "valid": valid,
+                "bad_witness": bad_witness,
+                "bad_instance": bad_instance,
+            }

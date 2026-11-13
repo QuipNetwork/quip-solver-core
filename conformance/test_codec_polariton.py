@@ -3,12 +3,11 @@
 import random
 
 import pytest
-
 from family_oracle import codec_polariton as codec
 from family_oracle import polariton
 from family_oracle.build import _polariton_params
-from family_oracle.ice import lattice
 from family_oracle.codec_common import CodecError
+from family_oracle.ice import lattice
 
 
 @pytest.fixture

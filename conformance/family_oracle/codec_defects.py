@@ -16,7 +16,13 @@ from .digests import descriptor_digest, params_digest
 from .params import DEFECTS, decode_params
 from .polariton import Lattice
 
-LIMITS = dict(nodes=24, edges=96, coefficient=189328, offset=1318296, metadata=254)
+LIMITS = {
+    "nodes": 24,
+    "edges": 96,
+    "coefficient": 189328,
+    "offset": 1318296,
+    "metadata": 254,
+}
 
 
 def _params(params):
@@ -278,7 +284,7 @@ def malformed_instances(params, instance, compact):
     rows = []
 
     def add(data, error):
-        rows.append(dict(data=bytes(data).hex(), error=error))
+        rows.append({"data": bytes(data).hex(), "error": error})
 
     add(compact + b"\0", "length")
     add(compact[:-1], "length")
@@ -368,24 +374,24 @@ def cases() -> list[dict]:
             witness = encode(instance, spins)
             bits = len(_forest(instance)[-1])
             bad_witnesses = [
-                dict(data=(witness + b"\0").hex(), error="length"),
-                dict(data=witness[:-1].hex(), error="length"),
+                {"data": (witness + b"\0").hex(), "error": "length"},
+                {"data": witness[:-1].hex(), "error": "length"},
             ]
             for bit in range(bits, 8 * len(witness)):
                 bad = bytearray(witness)
                 bad[bit // 8] |= 1 << (bit % 8)
-                bad_witnesses.append(dict(data=bad.hex(), error="padding"))
+                bad_witnesses.append({"data": bad.hex(), "error": "padding"})
             rows.append(
-                dict(
-                    name=f"{name}-{index}",
-                    params=params.hex(),
-                    canonical=instance["canonical"].hex(),
-                    compact=compact.hex(),
-                    spins=spins,
-                    witness=witness.hex(),
-                    witness_bits=bits,
-                    invalid_instances=malformed_instances(params, instance, compact),
-                    invalid_witnesses=bad_witnesses,
-                )
+                {
+                    "name": f"{name}-{index}",
+                    "params": params.hex(),
+                    "canonical": instance["canonical"].hex(),
+                    "compact": compact.hex(),
+                    "spins": spins,
+                    "witness": witness.hex(),
+                    "witness_bits": bits,
+                    "invalid_instances": malformed_instances(params, instance, compact),
+                    "invalid_witnesses": bad_witnesses,
+                }
             )
     return rows

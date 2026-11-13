@@ -4,10 +4,10 @@ import random
 import struct
 
 import pytest
-from family_oracle.codec_common import CodecError, preflight_prefix
-
-from family_oracle import charge, codec_charge as codec
+from family_oracle import charge
+from family_oracle import codec_charge as codec
 from family_oracle.build import _charge_params
+from family_oracle.codec_common import CodecError, preflight_prefix
 
 
 def fixture():
@@ -117,12 +117,12 @@ def test_malformed_and_golden():
 def test_overlap_and_rank_tables():
     for q, masks in codec.MASKS.items():
         for sign in (-1, 1):
-            inst = dict(
-                node_ids=list(range(7)),
-                metadata=charge.metadata(
+            inst = {
+                "node_ids": list(range(7)),
+                "metadata": charge.metadata(
                     [(0, 1, 2, 3), (3, 4, 5, 6)], [[sign] * 4, [1] * 4], [q, 0]
                 ),
-            )
+            }
             for mask in range(128):
                 spins = [1 if mask & (1 << i) else -1 for i in range(7)]
                 data = codec.encode(inst, spins)
@@ -203,15 +203,15 @@ def test_existing_family_fixtures():
     for row in document["cases"]:
         params = bytes.fromhex(row["params_hex"])
         for item in row["instances"]:
-            instance = dict(
-                node_ids=[int(v) for v in item["node_ids"]],
-                edges=[tuple(map(int, e)) for e in item["edges"]],
-                h=[int(v) for v in item["h"]],
-                j=[int(v) for v in item["j"]],
-                offset_milli=int(item["offset_milli"]),
-                metadata=bytes.fromhex(item["metadata_hex"]),
-                canonical=bytes.fromhex(item["canonical_hex"]),
-            )
+            instance = {
+                "node_ids": [int(v) for v in item["node_ids"]],
+                "edges": [tuple(map(int, e)) for e in item["edges"]],
+                "h": [int(v) for v in item["h"]],
+                "j": [int(v) for v in item["j"]],
+                "offset_milli": int(item["offset_milli"]),
+                "metadata": bytes.fromhex(item["metadata_hex"]),
+                "canonical": bytes.fromhex(item["canonical_hex"]),
+            }
             data = codec.encode_instance(params, instance)
             decoded = codec.decode_instance(params, data)
             assert decoded["canonical"] == instance["canonical"]

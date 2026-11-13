@@ -15,13 +15,13 @@ from .codec_common import (
 from .digests import descriptor_digest, params_digest
 from .params import POLARITON, decode_params
 
-LIMITS = dict(
-    nodes=131072,
-    edges=2097152,
-    coefficient=1000,
-    offset=1099511627776,
-    metadata=1048576,
-)
+LIMITS = {
+    "nodes": 131072,
+    "edges": 2097152,
+    "coefficient": 1000,
+    "offset": 1099511627776,
+    "metadata": 1048576,
+}
 
 
 def _side(params):
@@ -210,24 +210,24 @@ def cases() -> list[dict]:
             compact = encode_instance(params, instance)
             witness = encode(instance, good)
             rows.append(
-                dict(
-                    name=f"l{side}-reverse-{reverse}",
-                    params=params.hex(),
-                    canonical=instance["canonical"].hex(),
-                    compact_instance=compact.hex(),
-                    spins=good,
-                    witness=witness.hex(),
-                    negative_witness=[
-                        dict(bytes=(witness + b"\x00").hex(), error="length"),
-                        dict(spins=bad, error="infeasible"),
+                {
+                    "name": f"l{side}-reverse-{reverse}",
+                    "params": params.hex(),
+                    "canonical": instance["canonical"].hex(),
+                    "compact_instance": compact.hex(),
+                    "spins": good,
+                    "witness": witness.hex(),
+                    "negative_witness": [
+                        {"bytes": (witness + b"\x00").hex(), "error": "length"},
+                        {"spins": bad, "error": "infeasible"},
                     ],
-                    negative_instance=[
-                        dict(bytes=(compact + b"\x00").hex(), error="length"),
-                        dict(
-                            bytes=(bytes([compact[0] ^ 1]) + compact[1:]).hex(),
-                            error="descriptor_mismatch",
-                        ),
+                    "negative_instance": [
+                        {"bytes": (compact + b"\x00").hex(), "error": "length"},
+                        {
+                            "bytes": (bytes([compact[0] ^ 1]) + compact[1:]).hex(),
+                            "error": "descriptor_mismatch",
+                        },
                     ],
-                )
+                }
             )
     return rows

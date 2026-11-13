@@ -4,17 +4,13 @@ import random
 import struct
 
 import pytest
-
-from family_oracle.build import _three_k4
+from family_oracle import codec_fields as codec
+from family_oracle.build import _fields_params, _three_k4
 from family_oracle.codec_common import CodecError, encode_column, preflight_prefix
+from family_oracle.digests import descriptor_digest, params_digest
 from family_oracle.fields import generate
 from family_oracle.glass import metadata
 from family_oracle.instance import canonical_bytes
-
-
-from family_oracle import codec_fields as codec
-from family_oracle.build import _fields_params
-from family_oracle.digests import descriptor_digest, params_digest
 
 
 def fixture():
@@ -218,8 +214,14 @@ def test_independent_vectors():
         for w in row["witnesses"]:
             assert codec.encode(instance, w["spins"]).hex() == w["compact_hex"]
         for key, decoder in (
-            ("malformed_instances", lambda d: codec.decode_instance(params, d)),
-            ("malformed_witnesses", lambda d: codec.decode(instance, d)),
+            (
+                "malformed_instances",
+                lambda d, params=params: codec.decode_instance(params, d),
+            ),
+            (
+                "malformed_witnesses",
+                lambda d, instance=instance: codec.decode(instance, d),
+            ),
         ):
             for bad in row[key]:
                 with pytest.raises(CodecError, match=f"^{bad['error']}$"):

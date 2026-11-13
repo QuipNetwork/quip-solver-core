@@ -1,22 +1,27 @@
 """Independent charged ice compact witness and instance codecs."""
 
+import itertools
 import struct
 
 from . import charge
 from .codec_common import (
     CodecError,
     check_bit_array,
+    decode_prefix,
     encode_column,
     encode_prefix,
     preflight_prefix,
-    decode_prefix,
     read_column,
 )
 from .digests import descriptor_digest, params_digest
 
-LIMITS = dict(
-    nodes=131072, edges=2097152, coefficient=1000, offset=1073741824, metadata=8388608
-)
+LIMITS = {
+    "nodes": 131072,
+    "edges": 2097152,
+    "coefficient": 1000,
+    "offset": 1073741824,
+    "metadata": 8388608,
+}
 MASKS = {0: [3, 5, 6, 9, 10, 12], 2: [7, 11, 13, 14], -2: [1, 2, 4, 8]}
 
 
@@ -53,7 +58,7 @@ def _tiles(tiles, n, error):
     previous = None
     for tile in tiles:
         if (
-            any(a >= b for a, b in zip(tile, tile[1:]))
+            any(a >= b for a, b in itertools.pairwise(tile))
             or tile[-1] >= n
             or (previous is not None and previous >= tile)
         ):
@@ -235,38 +240,40 @@ def cases() -> list[dict]:
             witnesses = []
             for mask in range(16):
                 spins = [1 if mask & (1 << i) else -1 for i in range(n)]
-                witnesses.append(dict(spins=spins, compact=encode(inst, spins).hex()))
+                witnesses.append({"spins": spins, "compact": encode(inst, spins).hex()})
             spins = [-1] * n
             blocks, _ = _blocks(inst)
             for tile, gauge, q in blocks:
                 for i, (p, g) in enumerate(zip(tile, gauge, strict=True)):
                     spins[p] = g * (2 * ((MASKS[q][0] >> i) & 1) - 1)
             witnesses.append(
-                dict(spins=spins.copy(), compact=encode(inst, spins).hex())
+                {"spins": spins.copy(), "compact": encode(inst, spins).hex()}
             )
             spins[0] *= -1
-            witnesses.append(dict(spins=spins, compact=encode(inst, spins).hex()))
+            witnesses.append({"spins": spins, "compact": encode(inst, spins).hex()})
             malformed = []
             for payload in (b"", compact[:-1], compact + b"\0", compact[:-1] + b"\x03"):
                 try:
                     decode_instance(params, payload)
                 except CodecError as error:
-                    malformed.append(dict(compact=payload.hex(), error=error.name))
+                    malformed.append({"compact": payload.hex(), "error": error.name})
             bad_witnesses = []
             for payload in (b"", b"\x80", b"\x00\x00", b"\x0e", b"\x0f"):
                 try:
                     decode(inst, payload)
                 except CodecError as error:
-                    bad_witnesses.append(dict(compact=payload.hex(), error=error.name))
+                    bad_witnesses.append(
+                        {"compact": payload.hex(), "error": error.name}
+                    )
             rows.append(
-                dict(
-                    name=f"charge-{chance}-{seed}",
-                    params=params.hex(),
-                    canonical=inst["canonical"].hex(),
-                    compact=compact.hex(),
-                    witnesses=witnesses,
-                    malformed=malformed,
-                    bad_witnesses=bad_witnesses,
-                )
+                {
+                    "name": f"charge-{chance}-{seed}",
+                    "params": params.hex(),
+                    "canonical": inst["canonical"].hex(),
+                    "compact": compact.hex(),
+                    "witnesses": witnesses,
+                    "malformed": malformed,
+                    "bad_witnesses": bad_witnesses,
+                }
             )
     return rows

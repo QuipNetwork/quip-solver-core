@@ -14,13 +14,13 @@ from .codec_common import (
 from .digests import descriptor_digest, params_digest
 from .routing import metadata as make_metadata
 
-LIMITS = dict(
-    nodes=131072,
-    edges=2097152,
-    coefficient=1000,
-    offset=1099511627776,
-    metadata=1048576,
-)
+LIMITS = {
+    "nodes": 131072,
+    "edges": 2097152,
+    "coefficient": 1000,
+    "offset": 1099511627776,
+    "metadata": 1048576,
+}
 PARAMS = bytes.fromhex("010100020000000200020001000000040300020000002000")
 
 
@@ -204,7 +204,8 @@ def decode_instance(params: bytes, data: bytes) -> dict:
     ]
     _structure(prefix.node_count, cell_records, records)
     arc_records = [
-        dict(tail=a[0], head=a[1], x1=a[2], chain=a[3:5], cost=a[5:]) for a in records
+        {"tail": a[0], "head": a[1], "x1": a[2], "chain": a[3:5], "cost": a[5:]}
+        for a in records
     ]
     metadata = make_metadata(cell_records, supplies, arc_records, strength)
     instance = decode_prefix(prefix, metadata, LIMITS, (7,))
@@ -214,9 +215,9 @@ def decode_instance(params: bytes, data: bytes) -> dict:
 
 
 def cases() -> list[dict]:
+    from .ice import lattice
     from .instance import canonical_bytes
     from .routing import generate
-    from .ice import lattice
 
     nodes, edges = lattice(2, 4)
     code, instance = generate(
@@ -225,22 +226,22 @@ def cases() -> list[dict]:
     if code or instance is None:
         raise ValueError("routing golden construction failed")
     instances = [("generated", instance)]
-    wider: dict = dict(
-        descriptor_digest=_descriptor(PARAMS),
-        topology_order_digest=bytes(range(32)),
-        nonce=bytes(32),
-        node_ids=[9, 3, 7],
-        edges=[(0, 2)],
-        h=[-999, 0, 999],
-        j=[-1],
-        offset_milli=-123,
-        metadata=make_metadata(
+    wider: dict = {
+        "descriptor_digest": _descriptor(PARAMS),
+        "topology_order_digest": bytes(range(32)),
+        "nonce": bytes(32),
+        "node_ids": [9, 3, 7],
+        "edges": [(0, 2)],
+        "h": [-999, 0, 999],
+        "j": [-1],
+        "offset_milli": -123,
+        "metadata": make_metadata(
             [(65535, 0), (0, 2)],
             [[-1, 1], [0, 0]],
-            [dict(tail=0, head=1, x1=2, chain=[0, 1], cost=[0, 65535])],
+            [{"tail": 0, "head": 1, "x1": 2, "chain": [0, 1], "cost": [0, 65535]}],
             65535,
         ),
-    )
+    }
     wider["canonical"] = canonical_bytes(**wider)
     instances.append(("wider", wider))
     result = []
@@ -257,12 +258,12 @@ def cases() -> list[dict]:
                 spins[arcs[0][3]] = 1
             payload = encode(instance, spins)
             witnesses.append(
-                dict(
-                    name=label,
-                    spins=spins,
-                    compact=payload.hex(),
-                    bits=1 + (n if payload[0] & 1 else 2 * len(arcs)),
-                )
+                {
+                    "name": label,
+                    "spins": spins,
+                    "compact": payload.hex(),
+                    "bits": 1 + (n if payload[0] & 1 else 2 * len(arcs)),
+                }
             )
         compact = encode_instance(PARAMS, instance)
         bad_witness = [
@@ -285,7 +286,7 @@ def cases() -> list[dict]:
         position_at = arc_at + 4
         positions, position_len = read_column(compact[position_at:], len(arcs) * 5)
 
-        def replace(at, value):
+        def replace(at, value, compact=compact):
             return compact[:at] + value + compact[at + len(value) :]
 
         bad_instance.extend(
@@ -359,23 +360,25 @@ def cases() -> list[dict]:
                     decoder(payload)
                 except CodecError as error:
                     output.append(
-                        dict(name=label, compact=payload.hex(), error=error.name)
+                        {"name": label, "compact": payload.hex(), "error": error.name}
                     )
                 else:
                     raise ValueError("negative golden accepted")
             return output
 
         result.append(
-            dict(
-                name=name,
-                params=PARAMS.hex(),
-                canonical=instance["canonical"].hex(),
-                compact=compact.hex(),
-                witnesses=witnesses,
-                invalid_witnesses=failures(bad_witness, lambda b: decode(instance, b)),
-                invalid_instances=failures(
+            {
+                "name": name,
+                "params": PARAMS.hex(),
+                "canonical": instance["canonical"].hex(),
+                "compact": compact.hex(),
+                "witnesses": witnesses,
+                "invalid_witnesses": failures(
+                    bad_witness, lambda b, instance=instance: decode(instance, b)
+                ),
+                "invalid_instances": failures(
                     bad_instance, lambda b: decode_instance(PARAMS, b)
                 ),
-            )
+            }
         )
     return result

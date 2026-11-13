@@ -5,16 +5,12 @@ import random
 import struct
 
 import pytest
-
-from family_oracle.codec_common import CodecError, encode_prefix
-from family_oracle.digests import descriptor_digest, params_digest
-from family_oracle.twisted import metadata
-
-
 from family_oracle import codec_twisted as codec
 from family_oracle.build import _twisted_params
+from family_oracle.codec_common import CodecError, encode_prefix
+from family_oracle.digests import descriptor_digest, params_digest
 from family_oracle.ice import lattice
-from family_oracle.twisted import generate
+from family_oracle.twisted import generate, metadata
 
 
 def test_instance_roundtrip():

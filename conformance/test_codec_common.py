@@ -3,16 +3,15 @@
 import struct
 
 import pytest
-
 from family_oracle.codec_common import (
     CodecError,
-    encode_column,
     decode_column,
-    encode_palette,
     decode_palette,
+    decode_prefix,
+    encode_column,
+    encode_palette,
     encode_prefix,
     preflight_prefix,
-    decode_prefix,
 )
 
 

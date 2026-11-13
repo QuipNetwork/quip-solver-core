@@ -5,7 +5,6 @@ import random
 import struct
 
 import pytest
-
 from family_oracle import codec_flow as codec
 from family_oracle import flow
 from family_oracle.build import _flow_params

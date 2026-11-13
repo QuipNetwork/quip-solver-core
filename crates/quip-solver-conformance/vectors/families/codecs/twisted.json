@@ -290,7 +290,7 @@
   "sources": {
     "conformance/family_oracle/build.py": "29d19e8772b5bf0a0845718da7d27077a6ab5fafd85f468fbd4d27e317222bad",
     "conformance/family_oracle/codec_common.py": "2e7f6b3a66eb1c9e04c7855371c308a44e92cbc8dec8663b7b2cd0d0d5b9959e",
-    "conformance/family_oracle/codec_twisted.py": "c72152430c4c452036b9fb6b1592bb6f884120003fbf086f0843fe4549c13618",
+    "conformance/family_oracle/codec_twisted.py": "fe8ac2f228aafd2d69f714d662f379cc3afd0e03e05de80c6d521498bdd3cf77",
     "conformance/family_oracle/codec_vectors.py": "be679e87d4b2bab51b29fd37c82d13e928908e77ddb59ca8adf968d0135de28a",
     "conformance/family_oracle/digests.py": "fedb48e9646e86a33af1eabe12ff194267f133c7c7899066de9f3c360c33d3be",
     "conformance/family_oracle/instance.py": "86d27714fa52582ad3b5ac22c840dcac860dc142bbc33e26312aa60a1a161121"

@@ -1,5 +1,6 @@
 """Independent compact ice-fields codecs with stored-order tile selection."""
 
+import itertools
 import struct
 
 from .codec_common import (
@@ -13,7 +14,13 @@ from .codec_common import (
 )
 from .digests import descriptor_digest, params_digest
 
-LIMITS = dict(nodes=131072, edges=2097152, coefficient=1000, offset=0, metadata=8388608)
+LIMITS = {
+    "nodes": 131072,
+    "edges": 2097152,
+    "coefficient": 1000,
+    "offset": 0,
+    "metadata": 8388608,
+}
 MASKS = (3, 5, 6, 9, 10, 12)
 
 
@@ -30,7 +37,7 @@ def _tiles(count, n, get):
         tile = tuple(get(4 * i + j) for j in range(4))
         if (
             any(p >= n for p in tile)
-            or any(a >= b for a, b in zip(tile, tile[1:]))
+            or any(a >= b for a, b in itertools.pairwise(tile))
             or (previous is not None and previous >= tile)
         ):
             raise CodecError("invalid_instance")
@@ -205,12 +212,14 @@ def cases() -> list[dict]:
         ]:
             payload = encode(instance, vector)
             witnesses.append(
-                dict(
-                    name=name,
-                    spins=vector,
-                    compact_hex=payload.hex(),
-                    bits=1 + len(nodes) - (len(tiles) if name == "structured" else 0),
-                )
+                {
+                    "name": name,
+                    "spins": vector,
+                    "compact_hex": payload.hex(),
+                    "bits": 1
+                    + len(nodes)
+                    - (len(tiles) if name == "structured" else 0),
+                }
             )
         malformed = []
         for name, payload in [
@@ -222,7 +231,7 @@ def cases() -> list[dict]:
                 decode_instance(params, payload)
             except CodecError as error:
                 malformed.append(
-                    dict(name=name, compact_hex=payload.hex(), error=error.name)
+                    {"name": name, "compact_hex": payload.hex(), "error": error.name}
                 )
         bad_witnesses = []
         valid = encode(instance, spins)
@@ -241,17 +250,17 @@ def cases() -> list[dict]:
                 decode(instance, payload)
             except CodecError as error:
                 bad_witnesses.append(
-                    dict(name=name, compact_hex=payload.hex(), error=error.name)
+                    {"name": name, "compact_hex": payload.hex(), "error": error.name}
                 )
         rows.append(
-            dict(
-                name=f"shared-fields-{seed}",
-                params_hex=params.hex(),
-                canonical_hex=instance["canonical"].hex(),
-                compact_hex=compact.hex(),
-                witnesses=witnesses,
-                malformed_instances=malformed,
-                malformed_witnesses=bad_witnesses,
-            )
+            {
+                "name": f"shared-fields-{seed}",
+                "params_hex": params.hex(),
+                "canonical_hex": instance["canonical"].hex(),
+                "compact_hex": compact.hex(),
+                "witnesses": witnesses,
+                "malformed_instances": malformed,
+                "malformed_witnesses": bad_witnesses,
+            }
         )
     return rows

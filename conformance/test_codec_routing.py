@@ -11,19 +11,19 @@ PARAMS = bytes.fromhex("010100020000000200020001000000040300020000002000")
 def fixture():
     arcs = [{"tail": 0, "head": 1, "x1": 2, "chain": [0, 1], "cost": [0, 65535]}]
     meta = metadata([(65535, 0), (0, 2)], [[-1, 1], [0, 0]], arcs, 65535)
-    instance: dict = dict(
-        descriptor_digest=descriptor_digest(
+    instance: dict = {
+        "descriptor_digest": descriptor_digest(
             b"quip/two-commodity-routing", 1, params_digest(PARAMS)
         ),
-        topology_order_digest=bytes(range(32)),
-        nonce=bytes(32),
-        node_ids=[9, 3, 7],
-        edges=[(0, 2)],
-        h=[-999, 0, 999],
-        j=[-1],
-        offset_milli=-123,
-        metadata=meta,
-    )
+        "topology_order_digest": bytes(range(32)),
+        "nonce": bytes(32),
+        "node_ids": [9, 3, 7],
+        "edges": [(0, 2)],
+        "h": [-999, 0, 999],
+        "j": [-1],
+        "offset_milli": -123,
+        "metadata": meta,
+    }
     instance["canonical"] = canonical_bytes(**instance)
     return instance
 
@@ -66,6 +66,7 @@ def test_chain_assignments_and_redundant_fallback():
 
 def test_decoder_properties():
     import random
+
     from family_oracle.codec_common import CodecError
 
     rng = random.Random(2311)
@@ -94,6 +95,7 @@ def test_decoder_properties():
 
 def test_instance_faults_and_priority():
     import struct
+
     from family_oracle.codec_common import preflight_prefix, read_column
 
     instance = fixture()
@@ -147,6 +149,7 @@ def test_instance_faults_and_priority():
 
 def test_nonminimal_and_unused_palettes():
     import struct
+
     from family_oracle.codec_common import preflight_prefix
 
     instance = fixture()
@@ -184,7 +187,7 @@ def test_golden_cases():
         for negative in row["invalid_instances"]:
             reject(
                 negative["error"],
-                lambda: codec.decode_instance(
+                lambda params=params, negative=negative: codec.decode_instance(
                     params, bytes.fromhex(negative["compact"])
                 ),
             )
@@ -218,19 +221,19 @@ def test_generated_instance_roundtrips():
 
 
 def test_zero_width_empty_instance():
-    instance: dict = dict(
-        descriptor_digest=descriptor_digest(
+    instance: dict = {
+        "descriptor_digest": descriptor_digest(
             b"quip/two-commodity-routing", 1, params_digest(PARAMS)
         ),
-        topology_order_digest=bytes(32),
-        nonce=bytes(32),
-        node_ids=[],
-        edges=[],
-        h=[],
-        j=[],
-        offset_milli=0,
-        metadata=metadata([], [], [], 0),
-    )
+        "topology_order_digest": bytes(32),
+        "nonce": bytes(32),
+        "node_ids": [],
+        "edges": [],
+        "h": [],
+        "j": [],
+        "offset_milli": 0,
+        "metadata": metadata([], [], [], 0),
+    }
     data = codec.encode_instance(PARAMS, instance)
     decoded = codec.decode_instance(PARAMS, data)
     assert decoded["canonical"] == canonical_bytes(**instance)

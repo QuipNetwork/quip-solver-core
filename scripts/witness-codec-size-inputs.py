@@ -50,16 +50,16 @@ def vectors(slug, instance):
 def small_inputs():
     from codec_cases import cases
 
-    schemas = dict(
-        polariton=build.POLARITON,
-        defects=build.DEFECTS,
-        flow=build.FLOW,
-        twisted=build.TWISTED_DIMER,
-        charge=build.CHARGED_ICE,
-        glass=build.ICE_GLASS,
-        fields=build.ICE_FIELDS,
-        routing=build.TWO_COMMODITY,
-    )
+    schemas = {
+        "polariton": build.POLARITON,
+        "defects": build.DEFECTS,
+        "flow": build.FLOW,
+        "twisted": build.TWISTED_DIMER,
+        "charge": build.CHARGED_ICE,
+        "glass": build.ICE_GLASS,
+        "fields": build.ICE_FIELDS,
+        "routing": build.TWO_COMMODITY,
+    }
     seen = set()
     for case in cases():
         slug = case["slug"]
@@ -85,21 +85,22 @@ def small_inputs():
         assert generated is not None and generated["canonical"] == case["canonical"], (
             case["name"]
         )
-        yield dict(
-            family_id=case["family"],
-            revision=1,
-            case="golden-" + case["name"],
-            params_hex=case["params"].hex(),
-            nonce_hex=nonce.hex(),
-            topology_nodes=nodes,
-            topology_edges=edges,
-            expected_status="measured",
-            expected_code=None,
-            canonical_hex=case["canonical"].hex(),
-            witnesses=[
-                dict(mode=mode, spins=spins) for mode, spins in vectors(slug, generated)
+        yield {
+            "family_id": case["family"],
+            "revision": 1,
+            "case": "golden-" + case["name"],
+            "params_hex": case["params"].hex(),
+            "nonce_hex": nonce.hex(),
+            "topology_nodes": nodes,
+            "topology_edges": edges,
+            "expected_status": "measured",
+            "expected_code": None,
+            "canonical_hex": case["canonical"].hex(),
+            "witnesses": [
+                {"mode": mode, "spins": spins}
+                for mode, spins in vectors(slug, generated)
             ],
-        )
+        }
 
 
 def build_inputs() -> list[dict]:
@@ -118,23 +119,23 @@ def build_inputs() -> list[dict]:
         )
         for seed in range(4):
             nonce = fixed_nonce if fixed_nonce is not None else bytes([seed]) * 32
-            row = dict(
-                family_id=family,
-                revision=1,
-                case=f"{name}-nonce{seed}",
-                params_hex=params.hex(),
-                nonce_hex=nonce.hex(),
-                topology_nodes=nodes,
-                topology_edges=edges,
-            )
+            row = {
+                "family_id": family,
+                "revision": 1,
+                "case": f"{name}-nonce{seed}",
+                "params_hex": params.hex(),
+                "nonce_hex": nonce.hex(),
+                "topology_nodes": nodes,
+                "topology_edges": edges,
+            }
             if admission:
                 rows.append(
                     row
-                    | dict(
-                        expected_code=admission,
-                        expected_status="rejected",
-                        witnesses=[],
-                    )
+                    | {
+                        "expected_code": admission,
+                        "expected_status": "rejected",
+                        "witnesses": [],
+                    }
                 )
                 break
             result = generator.generate(family.encode(), 1, params, nodes, edges, nonce)
@@ -142,20 +143,24 @@ def build_inputs() -> list[dict]:
             if instance is None:
                 rows.append(
                     row
-                    | dict(expected_code=code, expected_status="skipped", witnesses=[])
+                    | {
+                        "expected_code": code,
+                        "expected_status": "skipped",
+                        "witnesses": [],
+                    }
                 )
                 continue
             rows.append(
                 row
-                | dict(
-                    expected_status="measured",
-                    expected_code=None,
-                    canonical_hex=instance["canonical"].hex(),
-                    witnesses=[
-                        dict(mode=mode, spins=spins)
+                | {
+                    "expected_status": "measured",
+                    "expected_code": None,
+                    "canonical_hex": instance["canonical"].hex(),
+                    "witnesses": [
+                        {"mode": mode, "spins": spins}
                         for mode, spins in vectors(slug, instance)
                     ],
-                )
+                }
             )
             break
 

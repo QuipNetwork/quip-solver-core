@@ -1,10 +1,10 @@
 """Defects compact codec contracts."""
 
 import pytest
-from family_oracle.build import _defects_rows, _defects_instances
-from family_oracle.codec_common import CodecError
-from family_oracle.codec_defects import encode_instance, decode_instance, encode, decode
 from family_oracle import defects
+from family_oracle.build import _defects_instances, _defects_rows
+from family_oracle.codec_common import CodecError
+from family_oracle.codec_defects import decode, decode_instance, encode, encode_instance
 
 
 def fixtures():

@@ -15,7 +15,13 @@ from .codec_common import (
 from .digests import descriptor_digest, params_digest
 from .glass import metadata
 
-LIMITS = dict(nodes=131072, edges=2097152, coefficient=1000, offset=0, metadata=8388608)
+LIMITS = {
+    "nodes": 131072,
+    "edges": 2097152,
+    "coefficient": 1000,
+    "offset": 0,
+    "metadata": 8388608,
+}
 RANKS = (3, 5, 6, 9, 10, 12)
 
 
@@ -230,7 +236,9 @@ def cases() -> list[dict]:
             try:
                 decode_instance(params, payload)
             except CodecError as error:
-                negatives.append(dict(name=label, hex=payload.hex(), error=error.name))
+                negatives.append(
+                    {"name": label, "hex": payload.hex(), "error": error.name}
+                )
         witness_bad = []
         witness_payloads = [b"", encode(instance, structured) + b"\0"]
         if tiles:
@@ -245,20 +253,20 @@ def cases() -> list[dict]:
             try:
                 decode(instance, payload)
             except CodecError as error:
-                witness_bad.append(dict(hex=payload.hex(), error=error.name))
+                witness_bad.append({"hex": payload.hex(), "error": error.name})
         result.append(
-            dict(
-                name=name,
-                params_hex=params.hex(),
-                canonical_hex=instance["canonical"].hex(),
-                compact_hex=compact.hex(),
-                witnesses=[
-                    dict(spins=s, hex=encode(instance, s).hex()) for s in spins_rows
+            {
+                "name": name,
+                "params_hex": params.hex(),
+                "canonical_hex": instance["canonical"].hex(),
+                "compact_hex": compact.hex(),
+                "witnesses": [
+                    {"spins": s, "hex": encode(instance, s).hex()} for s in spins_rows
                 ],
-                invalid_instances=negatives,
-                invalid_witnesses=witness_bad,
-                nodes=len(gauge),
-                selected_tiles=len(tiles),
-            )
+                "invalid_instances": negatives,
+                "invalid_witnesses": witness_bad,
+                "nodes": len(gauge),
+                "selected_tiles": len(tiles),
+            }
         )
     return result

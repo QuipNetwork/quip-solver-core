@@ -1,5 +1,6 @@
 """Independent compact instance and soft-block witness codecs for twisted ice."""
 
+import itertools
 import struct
 
 from .codec_common import (
@@ -42,7 +43,7 @@ def _positions(count, arity, get, n):
     for i in range(count):
         row = tuple(get(arity * i + j) for j in range(arity))
         if (
-            any(a >= b for a, b in zip(row, row[1:]))
+            any(a >= b for a, b in itertools.pairwise(row))
             or row[-1] >= n
             or (previous is not None and previous >= row)
         ):
