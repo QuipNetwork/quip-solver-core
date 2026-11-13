@@ -92,6 +92,12 @@ The reason is one of these:
 - The `generated_families` entry breaks FAM-61. The reason names the broken rule.
 
 If the revision has a reference contract, the gate skips the other nine cases with the same reason.
+
+One exception applies to the second reason.
+If no reference params set admits and at least one set gives code 13 under the binary's own advertised limits, the binary is too small for the revision.
+Refusing such a lease is correct (FAM-47), so the gate skips all ten cases of the revision with the reason `the advertised limits are too small for this revision`, followed by the result of each params set.
+The Rust SDK's default session path lists every registered revision for every binary, including revisions that a binary's limits cannot hold.
+
 A case needs a reference params set that gives the admission code the case tests.
 If no set gives that code, the gate skips the case and states the reason.
 If the binary lists the next revision, the gate skips `revision-plus-one`.
@@ -260,7 +266,7 @@ Tests in `family_conformance.rs` keep this table equal to the contract.
 | `lease-admission-degree-bound-too-large` | FAM-47 | covered | host-only | `crates/quip-solver-core/tests/family_drive.rs::every_mode_passes_the_family_gate` (case `degree-bound-too-large`) |
 | `coordinator-never-sets-family-on-legacy-lease` | FAM-48 | not covered | none | needs CO-2 |
 | `coordinator-regenerates-family-result` | FAM-53 | not covered | none | needs CO-2 |
-| `no-generated-families-rejects-family-lease` | FAM-54 | covered | host-only | `crates/quip-solver-core/tests/family_drive.rs::a_generic_binary_is_not_asked_to_generate` |
+| `no-generated-families-rejects-family-lease` | FAM-54 | not covered | none | needs a non-SDK binary: the SDK default session path lists every registered family, so no SDK binary has an empty `generated_families` |
 | `coordinator-accepts-plain-model-solve-with-offset` | FAM-55 | not covered | none | needs CO-2 |
 | `capability-tier-per-revision` | FAM-56 | covered | host-only | `crates/quip-solver-core/tests/family_session.rs::explicit_job_vectors_hold_in_the_session` |
 | `generated-family-passes-conformance` | FAM-57 | covered | host-only | `crates/quip-solver-conformance/tests/family_conformance.rs::reference_layered_passes_every_vector_case`, `crates/quip-solver-core/tests/family_drive.rs::every_mode_passes_the_family_gate` |

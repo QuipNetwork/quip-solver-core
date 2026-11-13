@@ -830,9 +830,9 @@ fn coverage_rows_follow_the_status_rules() -> Result<(), String> {
     }
     let count = |status: &str| rows.iter().filter(|row| row.status == status).count();
     let (covered, review, missing) = (count("covered"), count("review only"), count("not covered"));
-    if (covered, review, missing) != (25, 2, 17) {
+    if (covered, review, missing) != (24, 2, 18) {
         return Err(format!(
-            "expected 25 covered, 2 review only, and 17 not covered, found {covered}, {review}, and {missing}"
+            "expected 24 covered, 2 review only, and 18 not covered, found {covered}, {review}, and {missing}"
         ));
     }
     Ok(())

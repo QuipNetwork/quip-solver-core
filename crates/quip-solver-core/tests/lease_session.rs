@@ -196,9 +196,14 @@ impl Session {
         if gated {
             assert_eq!(caps.stream_width, if mode == Some("wide") { 2 } else { 1 });
         }
+        // The default session path generates every registered family, so the
+        // family algorithm is listed too (FAM-58).
         assert_eq!(
             caps.generators,
-            vec![wire::GeneratorAlgorithm::Blake3Chacha8V1 as i32]
+            vec![
+                wire::GeneratorAlgorithm::Blake3Chacha8V1 as i32,
+                wire::GeneratorAlgorithm::FamilyChacha8V1 as i32,
+            ]
         );
         s.send(coord_msg::Msg::Welcome(wire::Welcome {
             protocol_version: 2,
