@@ -192,7 +192,7 @@ The tests in step 4 are in `crates/quip-solver-core/tests/family_registry_declar
    A different section name needs a change to all three functions together.
 
    To get the pin, run `registered_vectors_are_frozen` with a placeholder pin and copy the found value from the failure.
-   The oracle computes the same value as `blake3(build.canonical_json(cases))`.
+   The oracle computes the same value as `blake3(canonical.canonical_json(cases))`.
    The tests check the entry as follows:
    - `registry_entries_are_unique_and_valid` checks the order, the family id, the revision, the contract path, and the `name`.
    - `every_vectors_file_matches_the_schema` checks the entry shape of `registry.json` and that `evidence` is present.

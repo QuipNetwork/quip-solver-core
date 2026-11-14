@@ -7,7 +7,7 @@ from pathlib import Path
 
 import blake3
 
-from .build import canonical_json
+from .canonical import canonical_json
 
 FAMILIES = (
     "polariton",
