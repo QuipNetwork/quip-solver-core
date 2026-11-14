@@ -5,10 +5,10 @@
 //! `quip-solver-exec` already sends to an external solver, so the two are duals
 //! and the schema stays single.
 
+use crate::backend::{BackendIdentity, EXACT_COEFFICIENTS_FEATURE, LINEAR_SCHEDULE_FEATURE};
 use crate::coefficient::Coefficient;
 use crate::error::SampleError;
 use crate::ising::{BetaSchedule, IsingGraph, SampleParams};
-use crate::session::{BackendIdentity, EXACT_COEFFICIENTS_FEATURE, LINEAR_SCHEDULE_FEATURE};
 use crate::Sampler;
 use quip_protocol::session::{algorithm_name, backend_name};
 use serde::{Deserialize, Serialize};
