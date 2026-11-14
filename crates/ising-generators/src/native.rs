@@ -10,16 +10,14 @@
 //! the most cells keep a K4. The window is the first block of `(L + 1)^2` alive
 //! cells, in order of `c0`, then `r0`.
 
-pub(crate) mod codec;
-
 use alloc::collections::BTreeMap;
 use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::descriptor::Params;
 use crate::family::BaseTopology;
-use crate::ice::build::Reader;
 use crate::ice::topology::{zephyr_coordinates, zephyr_coupler};
+use crate::region::Reader;
 use crate::routing::{best_choice, unsigned, Cell, Grid, Shape};
 use crate::square::{Axis, SquareLattice};
 use crate::Code;

@@ -16,11 +16,12 @@ use core::num::NonZeroU32;
 use crate::descriptor::{Contract, FieldSpec, Params, SizeBounds, TopologyStats, Value, ValueType};
 use crate::family::{BaseTopology, Construction, InstanceBody, Streams};
 use crate::ice::build::{
-    lattice, mark_tiles, parse_tiles, region, sections, select_tiles, sorted_edges, tile_edges,
-    tiles_payload, topology_bounds, Reader,
+    lattice, mark_tiles, parse_tiles, select_tiles, sorted_edges, tile_edges, tiles_payload,
+    topology_bounds,
 };
 use crate::ice::{candidates, StructureError, Tile};
 use crate::instance::{Instance, InstanceLimits};
+use crate::region::{region, sections, Reader};
 use crate::rng::uniform;
 use crate::Code;
 

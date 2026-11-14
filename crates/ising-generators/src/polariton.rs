@@ -21,7 +21,6 @@ use alloc::vec::Vec;
 
 use crate::descriptor::{Contract, FieldSpec, Params, SizeBounds, TopologyStats, ValueType};
 use crate::family::{BaseTopology, Construction, InstanceBody, Streams};
-use crate::ice::build::{region, sections};
 use crate::ice::twisted_dimer::Recipe;
 use crate::instance::{Instance, InstanceLimits};
 use crate::native::{
@@ -29,6 +28,7 @@ use crate::native::{
     labels_of, parse_charges, parse_incidence, place, DenseLinks, Energy, Expansion, Native,
     KIND_CHARGES, KIND_INCIDENCE,
 };
+use crate::region::{region, sections};
 use crate::rng::shuffle;
 use crate::routing::unsigned;
 use crate::square::{charges, check_request, Boundary, Request, SquareLattice};

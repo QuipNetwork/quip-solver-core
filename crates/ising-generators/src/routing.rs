@@ -29,10 +29,10 @@ use core::num::NonZeroU32;
 
 use crate::descriptor::{Contract, FieldSpec, Params, SizeBounds, TopologyStats, Value, ValueType};
 use crate::family::{BaseTopology, Construction, InstanceBody, Streams};
-use crate::ice::build::{region, sections, Reader};
 use crate::ice::topology::{zephyr_coordinates, zephyr_coupler, zephyr_id};
 use crate::ice::twisted_dimer::Recipe;
 use crate::instance::{Instance, InstanceLimits};
+use crate::region::{region, sections, Reader};
 use crate::rng::{shuffle, uniform};
 use crate::Code;
 

@@ -20,12 +20,13 @@ use core::num::NonZeroU32;
 use crate::descriptor::{Contract, FieldSpec, Params, SizeBounds, TopologyStats, Value, ValueType};
 use crate::family::{BaseTopology, Construction, InstanceBody, Streams};
 use crate::ice::build::{
-    gauges_payload, lattice, mark_tiles, parse_gauges, parse_tiles, region, sections, select_tiles,
-    sorted_edges, tiles_payload, topology_bounds, Reader,
+    gauges_payload, lattice, mark_tiles, parse_gauges, parse_tiles, select_tiles, sorted_edges,
+    tiles_payload, topology_bounds,
 };
 use crate::ice::twisted_dimer::Recipe;
 use crate::ice::{candidates, StructureError};
 use crate::instance::{Instance, InstanceLimits};
+use crate::region::{region, sections, Reader};
 use crate::rng::uniform;
 use crate::Code;
 

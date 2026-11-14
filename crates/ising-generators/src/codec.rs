@@ -5,6 +5,7 @@ use core::fmt;
 
 pub(crate) mod bits;
 pub(crate) mod blocks;
+pub(crate) mod forest;
 pub(crate) mod instance;
 
 /// A compact codec failure, independent of the protocol FAM codes.
@@ -67,11 +68,11 @@ pub struct WitnessCodec {
     state: State,
 }
 enum State {
-    Forest(crate::native::codec::ForestCodec),
+    Forest(forest::ForestCodec),
     Blocks(blocks::BlocksCodec),
 }
-impl From<crate::native::codec::ForestCodec> for WitnessCodec {
-    fn from(value: crate::native::codec::ForestCodec) -> Self {
+impl From<forest::ForestCodec> for WitnessCodec {
+    fn from(value: forest::ForestCodec) -> Self {
         Self {
             state: State::Forest(value),
         }

@@ -1,6 +1,7 @@
 //! Lossless polariton instance metadata and forest witness adapter.
 use super::{parse, Config, LIMITS, POLARITON_V1};
 use crate::{
+    codec::forest::ForestCodec,
     codec::{
         bits::{BitReader, BitWriter},
         filled,
@@ -11,7 +12,6 @@ use crate::{
     },
     descriptor::Params,
     instance::Instance,
-    native::codec::ForestCodec,
 };
 use alloc::vec::Vec;
 

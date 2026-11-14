@@ -194,7 +194,7 @@ impl BlocksCodec {
 
 /// Read global-gauge tiles without validating their model coefficients.
 pub(crate) fn blocks(instance: &Instance) -> Result<Vec<Block>, CodecError> {
-    use crate::ice::build::{sections, Reader};
+    use crate::region::{sections, Reader};
     let [tiles, gauge] =
         sections(instance.metadata(), [1, 2]).ok_or(CodecError::InvalidInstance)?;
     let mut tiles = Reader::new(tiles);
