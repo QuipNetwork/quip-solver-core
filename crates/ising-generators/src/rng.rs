@@ -125,14 +125,18 @@ impl ChaCha8Rng {
 
 /// Unbiased draw in `0..n` by rejection. Reads at least one word, also for `n = 1`.
 #[must_use]
+#[inline]
 pub fn uniform(rng: &mut ChaCha8Rng, n: NonZeroU32) -> u32 {
-    let n = u64::from(n.get());
-    let limit = (1u64 << 32) - ((1u64 << 32) % n);
+    // A word is kept when it is below `2^32 - (2^32 % n)`, which in `u32` is
+    // `x <= u32::MAX - rem` with `rem = 2^32 % n = (2^32 - n) % n`. Since
+    // `rem < n`, every `x <= u32::MAX - (n - 1)` is kept without computing
+    // `rem`, so most draws need one division, not two, and no 64-bit one.
+    let n = n.get();
+    let sure = u32::MAX - (n - 1);
     loop {
-        let x = u64::from(rng.next_u32());
-        if x < limit {
-            #[expect(clippy::cast_possible_truncation, reason = "x % n < n <= u32::MAX")]
-            return (x % n) as u32;
+        let x = rng.next_u32();
+        if x <= sure || x <= u32::MAX - n.wrapping_neg() % n {
+            return x % n;
         }
     }
 }

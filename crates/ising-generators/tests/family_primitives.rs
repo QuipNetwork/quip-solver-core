@@ -152,6 +152,49 @@ fn call_words_used(calls: &[Value], k: usize) -> Result<usize, String> {
     usize::try_from(v).map_err(|e| e.to_string())
 }
 
+/// FAM-23 rejection written with 64-bit arithmetic, as the spec states it.
+fn uniform_reference(rng: &mut ChaCha8Rng, n: u32) -> u32 {
+    let n = u64::from(n);
+    let limit = (1u64 << 32) - ((1u64 << 32) % n);
+    loop {
+        let x = u64::from(rng.next_u32());
+        if x < limit {
+            return u32::try_from(x % n).unwrap_or(u32::MAX);
+        }
+    }
+}
+
+#[test]
+fn uniform_matches_the_64_bit_rejection() -> Result<(), String> {
+    // Bounds near the powers of two reject the most words.
+    let bounds = [
+        1,
+        2,
+        3,
+        7,
+        1000,
+        65_537,
+        (1 << 31) - 1,
+        1 << 31,
+        (1 << 31) + 1,
+        3 << 30,
+        u32::MAX - 1,
+        u32::MAX,
+    ];
+    for n in bounds {
+        let mut fast = ChaCha8Rng::from_seed([u8::try_from(n % 251).unwrap_or(0); 32]);
+        let mut reference = ChaCha8Rng::from_seed([u8::try_from(n % 251).unwrap_or(0); 32]);
+        for draw in 0..4096 {
+            let got = uniform(&mut fast, nz(u64::from(n))?);
+            let want = uniform_reference(&mut reference, n);
+            if got != want || fast.next_u32() != reference.next_u32() {
+                return Err(format!("n {n}, draw {draw}: got {got}, want {want}"));
+            }
+        }
+    }
+    Ok(())
+}
+
 #[test]
 fn uniform_of_one_reads_one_word() -> Result<(), String> {
     let seed = [7u8; 32];

@@ -10,6 +10,7 @@ use crate::descriptor::{
     check_size_bounds, topology_order_digest, Admitted, AdvertisedLimits, Params, SizeBounds,
     TopologyStats,
 };
+use crate::ice::cache::IceCache;
 use crate::instance::{Instance, InstanceParts};
 use crate::rng::{stream_seed, ChaCha8Rng};
 use crate::Code;
@@ -33,12 +34,18 @@ fn max_degree(n_nodes: usize, edges: &[(u32, u32)]) -> u64 {
 }
 
 /// A base topology in registration order (FAM-19, FAM-38).
+///
+/// With the `std` feature, the topology keeps the ice tile structure of each
+/// lattice after the first salt that needs it, so build it once per lease and
+/// reuse it for every salt. Clones copy the kept structure. Equality ignores it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BaseTopology {
     node_ids: Vec<u32>,
     edges: Vec<(u32, u32)>,
     stats: TopologyStats,
     order_digest: [u8; 32],
+    /// Ice tile structure, filled on first use per lattice.
+    ice: IceCache,
 }
 
 /// Why a wire topology cannot be a base topology.
@@ -93,6 +100,7 @@ impl BaseTopology {
             edges,
             stats,
             order_digest,
+            ice: IceCache::default(),
         })
     }
 
@@ -119,6 +127,11 @@ impl BaseTopology {
     #[must_use]
     pub const fn order_digest(&self) -> &[u8; 32] {
         &self.order_digest
+    }
+
+    /// The ice tile structure computed so far.
+    pub(crate) const fn ice_cache(&self) -> &IceCache {
+        &self.ice
     }
 }
 

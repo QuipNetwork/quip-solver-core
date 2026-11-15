@@ -16,11 +16,12 @@ use core::num::NonZeroU32;
 
 use crate::descriptor::{Contract, FieldSpec, Params, SizeBounds, TopologyStats, Value, ValueType};
 use crate::family::{BaseTopology, Construction, InstanceBody, Streams};
+use crate::ice::build::non_tile_edges;
 use crate::ice::build::{
-    gauges_payload, lattice, mark_tiles, parse_gauges, parse_tiles, select_tiles, sorted_edges,
-    tiles_payload, topology_bounds,
+    admit_tiles, gauges_payload, lattice, mark_tiles, parse_gauges, parse_tiles, select_tiles,
+    tiles_payload, topology_bounds, EdgeIndex, Selected,
 };
-use crate::ice::{candidates, StructureError, STRONG_MILLI};
+use crate::ice::STRONG_MILLI;
 use crate::instance::{Instance, InstanceLimits};
 use crate::region::{region, sections, Reader};
 use crate::rng::{shuffle, uniform};
@@ -184,9 +185,8 @@ fn check_topology(params: &Params<'_>, topology: &BaseTopology) -> bool {
     let Ok(lattice) = lattice(params) else {
         return false;
     };
-    match candidates(lattice, topology) {
-        Ok(_) | Err(StructureError::DegreeAboveLimit) => {}
-        Err(_) => return false,
+    if !admit_tiles(lattice, topology, |_| true) {
+        return false;
     }
     pair_count(params).is_some_and(|pairs| pairs <= topology.node_ids().len() / 2)
 }
@@ -226,7 +226,11 @@ fn generate(
     let weak = weak_milli(params).ok_or(Code::ParamsMalformed)?;
     let pairs = pair_count(params).ok_or(Code::ParamsMalformed)?;
     let lattice = lattice(params).map_err(|_| defect)?;
-    let tiles = select_tiles(lattice, topology, streams, LEFT, RIGHT)?;
+    let Selected {
+        tiles,
+        positions,
+        edges,
+    } = select_tiles(lattice, topology, streams, LEFT, RIGHT)?;
 
     let two = NonZeroU32::MIN.saturating_add(1);
     let mut gauge_stream = streams.open(GAUGE).ok_or(Code::NoInstance)?;
@@ -244,26 +248,29 @@ fn generate(
         .collect();
 
     let node_ids = topology.node_ids().to_vec();
-    let edges = sorted_edges(topology);
-    let mut strong: Vec<Option<i32>> = vec![None; edges.len()];
-    for (tile, gauge) in tiles.iter().zip(&gauges) {
-        for (pair, coupling) in tile_couplings(tile.nodes, *gauge).ok_or(Code::BoundsExceeded)? {
-            let at = edges.binary_search(&pair).map_err(|_| defect)?;
-            *strong.get_mut(at).ok_or(defect)? = Some(coupling);
+    // The strong couplings first. Every other edge gets a weak one.
+    let mut j: Vec<i32> = vec![0; edges.len()];
+    let mut strong = vec![false; edges.len()];
+    for ((tile, gauge), at) in tiles.iter().zip(&gauges).zip(&positions) {
+        let couplings = tile_couplings(tile.nodes, *gauge).ok_or(Code::BoundsExceeded)?;
+        for ((_, coupling), at) in couplings.into_iter().zip(at.ok_or(defect)?) {
+            *j.get_mut(at).ok_or(defect)? = coupling;
+            *strong.get_mut(at).ok_or(defect)? = true;
         }
     }
+    let free = non_tile_edges(&strong)?;
 
     let mut weak_stream = streams.open(WEAK).ok_or(Code::NoInstance)?;
-    let mut j: Vec<i32> = Vec::with_capacity(edges.len());
-    for fixed in &strong {
-        j.push(match fixed {
-            Some(coupling) => *coupling,
-            None if uniform(&mut weak_stream, two) == 0 => weak,
-            None => -weak,
-        });
+    for &at in &free {
+        let at = usize::try_from(at).map_err(|_| Code::BoundsExceeded)?;
+        *j.get_mut(at).ok_or(defect)? = if uniform(&mut weak_stream, two) == 0 {
+            weak
+        } else {
+            -weak
+        };
     }
 
-    let chosen = choose_pairs(streams, &edges, &strong, node_ids.len(), pairs)?;
+    let chosen = choose_pairs(streams, &edges, free, node_ids.len(), pairs)?;
     for &(at, _) in &chosen {
         *j.get_mut(at).ok_or(defect)? = PAIR_MILLI;
     }
@@ -281,9 +288,10 @@ fn generate(
     })
 }
 
-/// Shuffle the non-tile edges on the `dimer` stream and walk the result,
-/// taking each edge whose ends are both free. The shuffle runs also when
-/// `pairs` is zero. Returns `(edge position, edge)` for each pair taken.
+/// Shuffle the non-tile edges `order` (ascending positions) on the `dimer`
+/// stream and walk the result, taking each edge whose ends are both free.
+/// The shuffle runs also when `pairs` is zero. Returns `(edge position,
+/// edge)` for each pair taken.
 ///
 /// # Errors
 ///
@@ -291,16 +299,10 @@ fn generate(
 fn choose_pairs(
     streams: &mut Streams<'_>,
     edges: &[(u32, u32)],
-    strong: &[Option<i32>],
+    mut order: Vec<u32>,
     n: usize,
     pairs: usize,
 ) -> Result<Vec<ChosenPair>, Code> {
-    let mut order: Vec<u32> = Vec::new();
-    for (at, fixed) in strong.iter().enumerate() {
-        if fixed.is_none() {
-            order.push(u32::try_from(at).map_err(|_| Code::BoundsExceeded)?);
-        }
-    }
     let mut rng = streams.open(DIMER).ok_or(Code::NoInstance)?;
     shuffle(&mut rng, &mut order)?;
 
@@ -406,10 +408,11 @@ fn check_instance(params: &Params<'_>, instance: &Instance) -> Option<()> {
         return None;
     }
 
-    let mut is_tile = mark_tiles(&tiles, edges, n)?;
-    for (tile, gauge) in tiles.iter().zip(&gauges) {
-        for (pair, coupling) in tile_couplings(*tile, *gauge)? {
-            let at = edges.binary_search(&pair).ok()?;
+    let index = EdgeIndex::new(edges, n);
+    let marks = mark_tiles(&tiles, &index, n)?;
+    let mut is_tile = marks.strong;
+    for ((tile, gauge), at) in tiles.iter().zip(&gauges).zip(&marks.positions) {
+        for ((_, coupling), &at) in tile_couplings(*tile, *gauge)?.into_iter().zip(at) {
             if *js.get(at)? != coupling {
                 return None;
             }
@@ -418,7 +421,7 @@ fn check_instance(params: &Params<'_>, instance: &Instance) -> Option<()> {
 
     let mut taken = vec![false; n];
     for pair in &pairs {
-        let at = edges.binary_search(pair).ok()?;
+        let at = index.position(*pair)?;
         let tile_edge = is_tile.get_mut(at)?;
         if *tile_edge || *js.get(at)? != PAIR_MILLI {
             return None;
@@ -436,10 +439,18 @@ fn check_instance(params: &Params<'_>, instance: &Instance) -> Option<()> {
 
     // Tile edges and pair edges are both flagged now. The others are weak.
     // The tile and pair edges were checked above, so a flagged edge is done.
+    // Bitwise `&` and `|`, not `&&`: the flags alternate with the tiles, so a
+    // branch per edge would mispredict often.
+    let mut bad = false;
+    #[expect(
+        clippy::needless_bitwise_bool,
+        reason = "the bitwise form is the point: it keeps the loop free of branches"
+    )]
     for (&flagged, &coupling) in is_tile.iter().zip(js) {
-        if !flagged && coupling != weak && coupling != -weak {
-            return None;
-        }
+        bad |= !flagged & (coupling != weak) & (coupling != -weak);
+    }
+    if bad {
+        return None;
     }
     Some(())
 }

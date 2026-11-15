@@ -2,7 +2,9 @@
 //! solver protocol.
 //!
 //! The crate is `#![no_std]` and uses `alloc`. The `std` feature (on by
-//! default) only enables runtime SIMD detection in `blake3`. It changes no API.
+//! default) enables runtime SIMD detection in `blake3`, and it lets a
+//! [`family::BaseTopology`] keep its ice tile structure behind a mutex, so the
+//! salts of a lease reuse it. It changes no API and no output.
 //!
 //! Modules:
 //! - [`rng`]: the `ChaCha8` stream and per-substream seeding.
@@ -33,6 +35,8 @@
 #![no_std]
 
 extern crate alloc;
+#[cfg(feature = "std")]
+extern crate std;
 
 mod digest;
 

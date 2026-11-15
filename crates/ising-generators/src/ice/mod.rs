@@ -6,6 +6,7 @@
 //! the tiles and [`matching`] splits the spine edges into two sides.
 
 pub(crate) mod build;
+pub(crate) mod cache;
 pub mod charge;
 pub mod fields;
 pub mod glass;
