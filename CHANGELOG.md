@@ -5,6 +5,18 @@ This file documents changes to the Quip solver contract.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.0.16-rc1
+
+### Changed
+
+- The solver contract does not change in this release. Generated instances and
+  public Rust paths also stay the same.
+- Shared types and helpers move into leaf modules, which removes the circular
+  imports between modules in `quip-solver-core`, `ising-generators`,
+  `quip-solver-conformance`, and the Python family oracle.
+- The family vector files carry new source hashes, because the oracle's
+  `canonical_json` moved to `conformance/family_oracle/canonical.py`.
+
 ## 0.0.15
 
 ### Changed
