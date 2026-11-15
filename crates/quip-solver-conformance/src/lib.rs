@@ -17,6 +17,8 @@ pub mod solve;
 /// Generated family instances: the layered test construction.
 pub mod families;
 
+mod case;
+
 mod vectors;
 
 pub use vectors::{

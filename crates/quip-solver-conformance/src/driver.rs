@@ -28,7 +28,7 @@ use tokio_stream::wrappers::{ReceiverStream, UnixListenerStream};
 use tonic::transport::Server;
 use tonic::{Request, Response, Status, Streaming};
 
-use crate::families::{run_family_script, FamilyCase};
+use crate::case::FamilyCase;
 
 /// How long one phase waits for the reply its `CoordMsg` must cause.
 ///
@@ -614,13 +614,46 @@ pub(crate) enum ScriptKind {
     /// coordinator that refused the session token (expected: exit
     /// `TokenRejected`).
     CloseBeforeWelcome,
-    /// The family gate: family leases graded against reference contracts.
-    Family,
+}
+
+/// A scripted session that `MockCoordinator` plays against each connecting
+/// miner. It owns the miner's inbound stream and the coordinator's sender, and
+/// returns what it observed.
+pub(crate) type Script = std::sync::Arc<
+    dyn Fn(
+            Streaming<MinerMsg>,
+            mpsc::Sender<Result<CoordMsg, Status>>,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = SessionOutcome> + Send>>
+        + Send
+        + Sync,
+>;
+
+impl ScriptKind {
+    /// The session this kind names.
+    pub(crate) fn into_script(self) -> Script {
+        std::sync::Arc::new(move |mut inbound, tx| {
+            Box::pin(async move {
+                match self {
+                    Self::Full => run_script(&mut inbound, &tx).await,
+                    Self::BadWelcome => run_script_bad_welcome(&mut inbound, &tx).await,
+                    Self::OneJobThenWait => run_script_one_job(&mut inbound, &tx).await,
+                    // These two take the sender by value: dropping it is the whole
+                    // point of the script, and a borrow cannot close the stream.
+                    Self::CloseAfterWelcome => {
+                        run_script_close(&mut inbound, tx, /* send_welcome */ true).await
+                    }
+                    Self::CloseBeforeWelcome => {
+                        run_script_close(&mut inbound, tx, /* send_welcome */ false).await
+                    }
+                }
+            })
+        })
+    }
 }
 
 struct MockCoordinator {
     outcome_tx: Mutex<Option<oneshot::Sender<SessionOutcome>>>,
-    script: ScriptKind,
+    script: Script,
     connected: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -634,26 +667,13 @@ impl MinerService for MockCoordinator {
     ) -> Result<Response<Self::SessionStream>, Status> {
         self.connected
             .store(true, std::sync::atomic::Ordering::SeqCst);
-        let mut inbound = request.into_inner();
+        let inbound = request.into_inner();
         let (tx, rx) = mpsc::channel::<Result<CoordMsg, Status>>(64);
         let outcome_tx = self.outcome_tx.lock().await.take();
-        let script = self.script;
+        let script = std::sync::Arc::clone(&self.script);
 
         let _handle = tokio::spawn(async move {
-            let outcome = match script {
-                ScriptKind::Full => run_script(&mut inbound, &tx).await,
-                ScriptKind::BadWelcome => run_script_bad_welcome(&mut inbound, &tx).await,
-                ScriptKind::OneJobThenWait => run_script_one_job(&mut inbound, &tx).await,
-                // These two take the sender by value: dropping it is the whole
-                // point of the script, and a borrow cannot close the stream.
-                ScriptKind::CloseAfterWelcome => {
-                    run_script_close(&mut inbound, tx, /* send_welcome */ true).await
-                }
-                ScriptKind::CloseBeforeWelcome => {
-                    run_script_close(&mut inbound, tx, /* send_welcome */ false).await
-                }
-                ScriptKind::Family => run_family_script(&mut inbound, &tx).await,
-            };
+            let outcome = script(inbound, tx).await;
             if let Some(otx) = outcome_tx {
                 let _ = otx.send(outcome);
             }
@@ -1618,7 +1638,7 @@ pub(crate) async fn run_miner(
     bin_path: &str,
     extra_args: &[&str],
     socket: &str,
-    script: ScriptKind,
+    script: Script,
     child_timeout: Duration,
     stderr_drain: Duration,
 ) -> (SessionOutcome, i32, String) {
@@ -1729,7 +1749,7 @@ async fn drive_miner_with_script(bin_path: &str, socket: &str, script: ScriptKin
         bin_path,
         &[],
         socket,
-        script,
+        script.into_script(),
         CHILD_TIMEOUT,
         STDERR_DRAIN_TIMEOUT,
     )
@@ -2434,7 +2454,7 @@ mod tests {
             &wrapper.to_string_lossy(),
             &[],
             &format!("unix://{base}.sock"),
-            ScriptKind::Full,
+            ScriptKind::Full.into_script(),
             PHASE_TIMEOUT,
             Duration::from_millis(300),
         )
@@ -2457,7 +2477,7 @@ mod tests {
             "/bin/true",
             &[],
             &socket,
-            ScriptKind::Full,
+            ScriptKind::Full.into_script(),
             PHASE_TIMEOUT,
             Duration::from_millis(300),
         )
