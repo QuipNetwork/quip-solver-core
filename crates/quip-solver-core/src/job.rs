@@ -2,10 +2,10 @@
 //! `Result`/`Reject`.
 
 use crate::adapt::adapt_params;
+use crate::backend::BackendIdentity;
 use crate::coefficient::Coefficient;
 use crate::families::{FamilyContext, FamilyTable};
 use crate::ising::{IsingGraph, SampleParams, WarmStart};
-use crate::session::BackendIdentity;
 use crate::Sampler;
 use crate::{StreamJob, StreamOutcome, StreamResult};
 use quip_proto::v1::{
@@ -368,7 +368,7 @@ fn check_limits<C: Coefficient>(
 ) -> Result<(), String> {
     let exact_only = id
         .features
-        .contains(&crate::session::EXACT_COEFFICIENTS_FEATURE);
+        .contains(&crate::backend::EXACT_COEFFICIENTS_FEATURE);
     if exact_only && exact_energy.is_some() {
         return Err("a coefficient is not exactly representable by this solver".into());
     }
@@ -1022,7 +1022,7 @@ mod tests {
         }
 
         let exact = || BackendIdentity {
-            features: &[crate::session::EXACT_COEFFICIENTS_FEATURE],
+            features: &[crate::backend::EXACT_COEFFICIENTS_FEATURE],
             ..identity("sa")
         };
         // A zero field is on every resolution step, so a bound job with `h`
