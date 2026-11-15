@@ -65,7 +65,41 @@ pip install quip-solver-core
 The wheel exposes `scoring`, `wire`, `families`, and `lease`. The `families` module
 builds the canonical instance of a family lease with `families.generate`. It
 takes the descriptor, the topology as node and edge lists, and the nonce.
-`families.validate_instance` checks an explicit instance. For an explicit
+`families.validate_instance` checks an explicit instance.
+
+A miner that builds many salts of one lease uses `families.Generator`. The
+constructor takes the `generate` arguments without the nonce. It runs the
+descriptor and topology admission once and keeps the topology work that does
+not depend on the nonce. `Generator.generate(nonce)` returns the instance that
+`families.generate` returns for the same arguments. It raises the same
+`SaltSkipped` and `GeneratorDefect` errors. The constructor raises the
+`AdmissionError` that `generate` raises.
+
+`Generator.generate_batch(nonces, threads=0)` builds every nonce on Rust
+threads. `threads=0` uses the available parallelism. Element `i` of the result
+is the `Instance` of `nonces[i]`, or a `SaltSkipped` exception object when the
+salt gives no instance. The call does not raise `SaltSkipped`. A defect raises
+`GeneratorDefect` for the first defective nonce, after the call builds every
+nonce. `generate`, `Generator.generate`, and `generate_batch` release the
+Python global interpreter lock (GIL) while they build, so caller threads run in
+parallel.
+
+An `Instance` gives its arrays as lists (`node_ids`, `edges`, `h`, `j`) and as
+little-endian `int64` bytes (`node_ids_i64`, `edges_i64`, `h_i64`, `j_i64`).
+`edges_i64` is flat: `u0, v0, u1, v1, ...`. Read the bytes without a copy:
+
+```python
+import numpy as np
+
+gen = families.Generator(family_id, revision, params, params_digest, nodes, edges)
+instance = gen.generate(nonce)
+h = np.frombuffer(instance.h_i64, dtype="<i8")
+positions = np.frombuffer(instance.edges_i64, dtype="<i8").reshape(-1, 2)
+```
+
+NumPy marks these arrays read-only. Each read of a `*_i64` property builds new
+bytes. Each read of `digest` or `canonical_bytes()` computes the value again,
+with the GIL released. For an explicit
 family job, compute its `descriptor_digest` argument with
 `families.descriptor_digest`, because the job does not carry that digest.
 
