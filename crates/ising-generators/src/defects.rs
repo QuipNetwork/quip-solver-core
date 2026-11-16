@@ -47,13 +47,13 @@ use crate::dipolar::{
     Table,
 };
 use crate::family::{BaseTopology, Construction, InstanceBody, Streams};
-use crate::ice::build::{region, sections, Reader};
 use crate::instance::{Instance, InstanceLimits};
 use crate::native::{
     charges_payload, dense_links, incidence_payload, interior_vertices, is_zephyr_subgraph,
     labels_of, link_spins, on_border, parse_charges, parse_incidence, place, DenseLinks, Energy,
     Expansion, Native, KIND_CHARGES, KIND_INCIDENCE,
 };
+use crate::region::{region, sections, Reader};
 use crate::rng::shuffle;
 use crate::routing::unsigned;
 use crate::square::{charges, check_request, Axis, Boundary, Request, SquareLattice};

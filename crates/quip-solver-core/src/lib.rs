@@ -7,6 +7,7 @@
 //! Welcome, Configure, credits, reject reasons, Status, Shutdown, exit codes).
 
 pub mod adapt;
+mod backend;
 pub mod beta;
 pub mod cli;
 pub mod coefficient;
@@ -22,9 +23,12 @@ mod job;
 mod lease;
 pub mod limits;
 pub mod logging;
+mod pipeline;
 mod session;
+mod task;
 mod topology;
 
+pub use backend::{BackendIdentity, EXACT_COEFFICIENTS_FEATURE, LINEAR_SCHEDULE_FEATURE};
 pub use cli::CommonArgs;
 pub use csr::CsrGraph;
 pub use error::SampleError;
@@ -33,8 +37,7 @@ pub use lease::{FamilyLease, Lease, LeaseSink, LeaseStopped};
 pub use limits::ModelLimits;
 pub use quip_protocol::lease::TopologyView;
 pub use session::{
-    capabilities, capabilities_for, run, run_code, BackendIdentity, OpenError,
-    EXACT_COEFFICIENTS_FEATURE, INITIAL_SPINS_FEATURE, LINEAR_SCHEDULE_FEATURE,
+    capabilities, capabilities_for, run, run_code, OpenError, INITIAL_SPINS_FEATURE,
 };
 pub use topology::{NativeTopology, TopologyFit};
 

@@ -9,8 +9,8 @@ use crate::{
         CodecError, WitnessCodec,
     },
     descriptor::Params,
-    ice::build::sections,
     instance::Instance,
+    region::sections,
 };
 use alloc::vec::Vec;
 

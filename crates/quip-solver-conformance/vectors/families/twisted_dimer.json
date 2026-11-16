@@ -17411,8 +17411,12 @@
       "path": "conformance/family_oracle/__main__.py"
     },
     {
-      "blake3": "29d19e8772b5bf0a0845718da7d27077a6ab5fafd85f468fbd4d27e317222bad",
+      "blake3": "fce5ecc0c7f1492055866206f8bef5d5a11e937fad034586d1abc1e47dd5a473",
       "path": "conformance/family_oracle/build.py"
+    },
+    {
+      "blake3": "161372dd582f43f0f965bf395f43d9077352a16301bbb0934acbd22a0f906cb3",
+      "path": "conformance/family_oracle/canonical.py"
     },
     {
       "blake3": "4795384476baa0cce2cc1c38c7d647e3c96ce3324e38803d22d0af9ab74c8fad",
@@ -17459,7 +17463,7 @@
       "path": "conformance/family_oracle/codec_twisted.py"
     },
     {
-      "blake3": "be679e87d4b2bab51b29fd37c82d13e928908e77ddb59ca8adf968d0135de28a",
+      "blake3": "e2edfbe3ae406fede5a6ed91078455d99a5328f1eb807dbd7bebf9f8b94e0a91",
       "path": "conformance/family_oracle/codec_vectors.py"
     },
     {

@@ -8,7 +8,7 @@ import re
 
 import blake3
 import pytest
-from family_oracle import build, topology_blob
+from family_oracle import build, canonical, topology_blob
 
 
 def _spec_ids() -> set[str]:
@@ -165,7 +165,7 @@ def test_evidence_matches_the_registry(name, load, sections):
 )
 def test_pin_matches_the_cases(name, load):
     entry = _registry_entry(name)
-    digest = blake3.blake3(build.canonical_json(load()["cases"]).encode())
+    digest = blake3.blake3(canonical.canonical_json(load()["cases"]).encode())
     assert digest.hexdigest() == entry["vectors_blake3"]
 
 
@@ -416,11 +416,13 @@ def test_polariton_recipe_pairs_follow_the_side():
 
 
 def test_canonical_json_is_sorted_compact_and_rejects_floats():
-    assert build.canonical_json({"b": [1, "x"], "a": None}) == '{"a":null,"b":[1,"x"]}'
+    assert (
+        canonical.canonical_json({"b": [1, "x"], "a": None}) == '{"a":null,"b":[1,"x"]}'
+    )
     with pytest.raises(TypeError):
-        build.canonical_json({"a": 1.5})
+        canonical.canonical_json({"a": 1.5})
     with pytest.raises(TypeError):
-        build.canonical_json({"a": "caf\u00e9"})
+        canonical.canonical_json({"a": "caf\u00e9"})
 
 
 def test_every_sc2_id_is_provided_partial_or_deferred():
@@ -608,7 +610,7 @@ def test_codec_vector_pin_and_mutation(slug, pin):
     path = build.FAMILIES_DIR / "codecs" / f"{slug}.json"
     stored = json.loads(path.read_text())
     assert stored == document(slug)
-    encoded = build.canonical_json(stored["cases"]).encode("ascii")
+    encoded = canonical.canonical_json(stored["cases"]).encode("ascii")
     assert blake3.blake3(encoded).hexdigest() == pin == stored["cases_blake3"]
     changed = json.loads(encoded)
     row = changed[0]
@@ -619,5 +621,6 @@ def test_codec_vector_pin_and_mutation(slug, pin):
     wire[0] ^= 1
     row[key] = wire.hex()
     assert (
-        blake3.blake3(build.canonical_json(changed).encode("ascii")).hexdigest() != pin
+        blake3.blake3(canonical.canonical_json(changed).encode("ascii")).hexdigest()
+        != pin
     )

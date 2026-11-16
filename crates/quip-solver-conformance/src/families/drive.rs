@@ -40,22 +40,12 @@ use super::twisted::{P_TWISTED_ADJ_W45_P6, P_TWISTED_W1000, P_TWISTED_Z22_W62_P8
 use super::{
     export_instances, reference_revision, ReferenceRevision, REFERENCE_REVISIONS, T_SPARSE_TOPOLOGY,
 };
+use crate::case::FamilyCase;
 use crate::driver::{
-    configure, dispatch, drain_to_end, read_hello, read_until, run_miner, send, ScriptKind,
-    SessionOutcome, Terminal, CONFIGURED_SWEEPS, PHASE_TIMEOUT, STDERR_DRAIN_TIMEOUT,
+    configure, dispatch, drain_to_end, read_hello, read_until, run_miner, send, SessionOutcome,
+    Terminal, CONFIGURED_SWEEPS, PHASE_TIMEOUT, STDERR_DRAIN_TIMEOUT,
 };
 use crate::solve::CaseOutcome;
-
-/// One graded case of the `--family` gate.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FamilyCase {
-    /// Stable case name, for example `revision-plus-one`.
-    pub name: &'static str,
-    /// `family_id@revision` for a per-revision case, `None` for a session case.
-    pub subject: Option<String>,
-    /// How it ended.
-    pub outcome: CaseOutcome,
-}
 
 /// Every case the gate ran against one binary.
 #[derive(Clone, Debug, Default)]
@@ -1814,7 +1804,7 @@ fn load_sparse(outcome: &mut SessionOutcome) -> Option<GateTopology> {
 /// The family session script: handshake, setup, the cancel watermark, the
 /// session cases, the cases of each advertised revision, the explicit-job
 /// cases of each accepted revision, the credit ledger, and `Shutdown`.
-pub(crate) async fn run_family_script(
+async fn run_family_script(
     inbound: &mut Streaming<MinerMsg>,
     tx: &mpsc::Sender<Result<CoordMsg, Status>>,
 ) -> SessionOutcome {
@@ -1939,7 +1929,9 @@ pub async fn drive_miner_family(bin_path: &str, args: &[&str], socket: &str) -> 
         bin_path,
         args,
         socket,
-        ScriptKind::Family,
+        std::sync::Arc::new(|mut inbound, tx| {
+            Box::pin(async move { run_family_script(&mut inbound, &tx).await })
+        }),
         family_child_timeout(),
         STDERR_DRAIN_TIMEOUT,
     )

@@ -1,8 +1,9 @@
 //! Default salt expansion and lease completion accounting.
+use crate::backend::BackendIdentity;
 use crate::coefficient::Coefficient;
 use crate::families::{FamilyContext, FamilySource, FamilyTable};
 use crate::job::{miner, now_unix_ms, os_seed, pick_param, ExactEnergy, SessionTarget};
-use crate::session::{BackendIdentity, Control, JobSender, PendingJob, PendingParams};
+use crate::pipeline::{Control, JobSender, LocalDelivery, PendingJob, PendingParams};
 use crate::{
     CancelToken, IsingGraph, SampleError, SampleParams, Sampler, SamplerResult, StreamJob,
     StreamOutcome, StreamResult,
@@ -298,6 +299,36 @@ fn refund() -> MinerMsg {
 pub(crate) fn expired(deadline: u64) -> bool {
     deadline != 0 && now_unix_ms().is_none_or(|now| now > deadline)
 }
+/// A lease's stop state, carried with each local message to the writer.
+struct LeaseDelivery {
+    state: Arc<LeaseState>,
+    shutdown: watch::Receiver<Option<ShutdownDeadlines>>,
+}
+impl LocalDelivery for LeaseDelivery {
+    fn send_local(
+        &self,
+        msgs: Vec<MinerMsg>,
+        permits: mpsc::PermitIterator<'_, MinerMsg>,
+        cancel: &CancelToken,
+        close_expired: bool,
+    ) {
+        self.state.send_local(msgs, permits, cancel, close_expired);
+    }
+    fn close_expired(&self) -> bool {
+        self.shutdown
+            .borrow()
+            .is_some_and(|deadlines| tokio::time::Instant::now() >= deadlines.close)
+    }
+}
+fn local_delivery(
+    state: &Arc<LeaseState>,
+    shutdown: &watch::Receiver<Option<ShutdownDeadlines>>,
+) -> Box<dyn LocalDelivery> {
+    Box::new(LeaseDelivery {
+        state: Arc::clone(state),
+        shutdown: shutdown.clone(),
+    })
+}
 pub(crate) struct LeaseLink {
     pub(crate) state: Arc<LeaseState>,
     index: u64,
@@ -355,7 +386,7 @@ pub(crate) fn test_link() -> (LeaseLink, Arc<LeaseState>) {
 
 pub(crate) struct Expander<C: Coefficient> {
     pub(crate) jobs: JobSender<C>,
-    pub(crate) pending: PendingParams,
+    pub(crate) pending: PendingParams<LeaseLink>,
     pub(crate) slots: Arc<Semaphore>,
     pub(crate) cancel: CancelToken,
     pub(crate) shutdown: watch::Receiver<Option<ShutdownDeadlines>>,
@@ -735,7 +766,7 @@ impl<C: Coefficient> Expander<C> {
                 break;
             };
             params.seed = seed;
-            let job_id = crate::session::pending_id(&state.job_id, Some(index));
+            let job_id = crate::pipeline::pending_id(&state.job_id, Some(index));
             let entry = PendingJob {
                 exact_energy,
                 offset_milli,
@@ -1077,7 +1108,7 @@ impl LeaseSink {
             .blocking_send(if matches!(msg.msg, Some(miner_msg::Msg::Fatal(_))) {
                 msg.into()
             } else {
-                Control::local(msg, Arc::clone(&self.state), self.shutdown.clone())
+                Control::local(msg, local_delivery(&self.state, &self.shutdown))
             })
             .map_err(|_| LeaseStopped)
     }
@@ -1104,7 +1135,7 @@ impl LeaseSink {
             sampler.sample_lease(&self.state.lease, &self.state.topology, &self.params, self)
         }))
         .unwrap_or_else(|panic| {
-            let payload = crate::session::panic_payload_message(&*panic);
+            let payload = crate::task::panic_payload_message(&*panic);
             tracing::error!(panic = %payload, "lease thread panicked");
             Err(SampleError::DeviceFault(format!(
                 "lease thread panicked: {payload}"
@@ -1125,7 +1156,7 @@ impl LeaseSink {
             if let Some(ctrl) = self.ctrl.upgrade() {
                 let _ = ctrl.blocking_send(Control::summary(
                     done,
-                    Some((Arc::clone(&self.state), self.shutdown.clone())),
+                    Some(local_delivery(&self.state, &self.shutdown)),
                 ));
             }
         }
@@ -1153,8 +1184,8 @@ pub(crate) async fn monitor_local(
         if let Some(done) = done {
             // Stop summaries bypass queued results after cancellation or the
             // close deadline. The writer drops those results using the same state.
-            let control = Control::summary(done, Some((Arc::clone(&state), shutdown.clone())));
-            let send = crate::session::send_control(&tx, control, &cancel);
+            let control = Control::summary(done, Some(local_delivery(&state, &shutdown)));
+            let send = crate::pipeline::send_control(&tx, control, &cancel);
             tokio::pin!(send);
             loop {
                 let teardown = shutdown.borrow().map(|d| d.teardown);
@@ -1456,7 +1487,7 @@ mod tests {
             .try_recv()
             .expect("shutdown change must force a summary before teardown");
         let (out, mut out_rx) = mpsc::channel(2);
-        assert!(crate::session::send_control(&out, control, &CancelToken::default()).await);
+        assert!(crate::pipeline::send_control(&out, control, &CancelToken::default()).await);
         assert!(matches!(
             out_rx.try_recv().unwrap().msg,
             Some(miner_msg::Msg::LeaseDone(_))
@@ -1589,7 +1620,7 @@ mod tests {
         let start = tokio::time::Instant::now();
         let ended = tokio::time::timeout(
             grace + std::time::Duration::from_millis(50),
-            crate::session::join_expanders(&mut expanders, start + grace),
+            crate::task::join_expanders(&mut expanders, start + grace),
         )
         .await;
         assert!(

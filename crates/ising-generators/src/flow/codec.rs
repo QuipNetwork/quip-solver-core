@@ -1,6 +1,7 @@
 //! Compact flow cycles and lossless structural instance metadata.
 use super::{is_corner, on_border, Config, KIND_FLOW, LIMITS};
 use crate::{
+    codec::forest::ForestCodec,
     codec::{
         bits::{BitReader, BitWriter},
         instance::{
@@ -10,9 +11,9 @@ use crate::{
         CodecError, WitnessCodec,
     },
     descriptor::Params,
-    ice::build::sections,
     instance::Instance,
-    native::{codec::ForestCodec, KIND_CHARGES, KIND_INCIDENCE},
+    native::{KIND_CHARGES, KIND_INCIDENCE},
+    region::sections,
     square::{Boundary, SquareLattice},
 };
 use alloc::vec::Vec;

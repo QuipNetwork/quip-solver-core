@@ -4,26 +4,27 @@
 //! handling with Reject reasons, Status on Ping/Cancel, clean drain on
 //! Shutdown / idle timeout. Backends supply only a [`Sampler`].
 
+use crate::backend::BackendIdentity;
 use crate::cli::CommonArgs;
 use crate::coefficient::Coefficient;
 use crate::display::{energy_units, format_duration_ms};
-use crate::families::{DeclarationError, FamilyContext, FamilyTable};
-use crate::job::ExactEnergy;
+use crate::families::{DeclarationError, FamilyTable};
 use crate::job::{
     finalize_result, miner, num_sweeps_from_toml, prepare_job, status_msg, Prepared, SessionTarget,
     TopologyCache, DEFAULT_NUM_SWEEPS,
 };
 use crate::lease::{self, Expander, LeaseLink};
+use crate::pipeline::{pending_id, send_control, Control, JobSender, PendingJob, PendingParams};
+use crate::task::{join_expanders, panic_payload_message};
 use crate::{
-    CancelToken, NativeTopology, Sampler, StreamJob, StreamOutcome, StreamResult, WarmStart,
-    WarmStreamJob,
+    CancelToken, NativeTopology, Sampler, StreamJob, StreamOutcome, StreamResult, WarmStreamJob,
 };
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
 use quip_proto::v1::miner_service_client::MinerServiceClient;
 use quip_proto::v1::{
-    coord_msg, miner_msg, Algorithm, Backend, Capabilities, CoefficientEncoding, CoordMsg,
-    FamilySupport, Fatal, GeneratorAlgorithm, JobKind, JobRequest, MinerMsg, Ready,
+    coord_msg, miner_msg, Capabilities, CoefficientEncoding, CoordMsg, FamilySupport, Fatal,
+    GeneratorAlgorithm, JobKind, JobRequest, MinerMsg, Ready,
 };
 use quip_protocol::session::{
     algorithm_name, backend_name, build_hello, check_welcome, ExitCode, SessionConfig, SessionError,
@@ -39,29 +40,6 @@ use tokio::sync::{mpsc, watch, Semaphore};
 use tonic::transport::{Endpoint, Uri};
 
 mod transport;
-
-/// Static backend metadata advertised in capabilities and Hello.
-#[derive(Clone, Copy, Debug)]
-pub struct BackendIdentity {
-    /// Backend name advertised in Hello / capabilities (e.g. `"cpu"`, `"cuda"`).
-    pub backend: Backend,
-    /// Algorithm name advertised in Hello / capabilities (e.g. `"sa"`, `"gibbs"`).
-    pub algorithm: Algorithm,
-    /// Hard cap on variables accepted for a job.
-    pub max_nodes: u32,
-    /// Hard cap on edges accepted for a job.
-    pub max_edges: u32,
-    /// Extra capability names advertised in `Hello` and `Capabilities`
-    /// (for example `"streaming"`, `"governor"`). Empty for a plain backend.
-    pub features: &'static [&'static str],
-    /// Sampling-parameter envelope used by `adapt::adapt_params`.
-    pub adapt: crate::adapt::AdaptBounds,
-    /// Which models this backend solves, beyond `max_nodes` and `max_edges`.
-    /// Advertised in `Capabilities` and enforced on every plain job and every
-    /// `--solve` problem. [`ModelLimits::UNSTATED`](crate::ModelLimits::UNSTATED)
-    /// makes no claim.
-    pub limits: crate::limits::ModelLimits,
-}
 
 /// Failure to open a device / build a sampler, surfaced as `EnvIncompatible`.
 #[derive(Debug)]
@@ -280,18 +258,6 @@ fn advertised_capabilities<S: Sampler<C>, C: Coefficient>(
 /// Feature string for a solver that uses `IsingProblem.initial_spins`.
 pub const INITIAL_SPINS_FEATURE: &str = "initial-spins";
 
-/// Feature string for a solver whose ladder honours
-/// [`BetaSchedule::Linear`](crate::BetaSchedule::Linear). A binary lists it in
-/// `BackendIdentity.features`; `--solve` refuses a linear schedule otherwise.
-pub const LINEAR_SCHEDULE_FEATURE: &str = "linear-schedule";
-
-/// Feature string for the refuse-not-quantize policy. A binary that lists it
-/// gets every model refused, as capacity, that it would not represent exactly:
-/// a coefficient off its advertised exact resolution, or one its coefficient
-/// type would round or saturate. A binary that does not list it keeps
-/// quantizing, and the SDK rescores the energies.
-pub const EXACT_COEFFICIENTS_FEATURE: &str = "exact-coefficients";
-
 /// The features `Hello` and `Capabilities` carry: the identity's own list, plus
 /// [`INITIAL_SPINS_FEATURE`] when [`Sampler::accepts_warm_start`] is true.
 /// Deriving it from the trait keeps the advertisement and the behaviour from
@@ -308,40 +274,6 @@ fn advertised_features<S: Sampler<C>, C: Coefficient>(id: &BackendIdentity) -> V
 enum JobReceiver<C: Coefficient> {
     Plain(mpsc::Receiver<StreamJob<C>>),
     Warm(mpsc::Receiver<WarmStreamJob<C>>),
-}
-
-/// The sending half of the channel into the sampler thread. Which one depends
-/// on [`Sampler::accepts_warm_start`] and [`Sampler::accepts_family_metadata`],
-/// fixed for the session.
-#[derive(Clone)]
-pub(crate) enum JobSender<C: Coefficient> {
-    /// Feeds [`Sampler::sample_stream`]; warm starts and family contexts are
-    /// dropped.
-    Plain(mpsc::Sender<StreamJob<C>>),
-    /// Feeds [`Sampler::sample_stream_warm`].
-    Warm(mpsc::Sender<WarmStreamJob<C>>),
-}
-
-impl<C: Coefficient> JobSender<C> {
-    /// Send one job. `Err` means the sampler thread is gone.
-    pub(crate) async fn send(
-        &self,
-        job: StreamJob<C>,
-        warm_start: Option<WarmStart>,
-        family: Option<FamilyContext>,
-    ) -> Result<(), ()> {
-        match self {
-            Self::Plain(tx) => tx.send(job).await.map_err(|_| ()),
-            Self::Warm(tx) => tx
-                .send(WarmStreamJob {
-                    job,
-                    warm_start,
-                    family,
-                })
-                .await
-                .map_err(|_| ()),
-        }
-    }
 }
 
 /// The `Capabilities` the in-session reply carries.
@@ -514,52 +446,6 @@ fn reap_lease_threads(threads: &mut Vec<std::thread::JoinHandle<()>>) -> Option<
     failure
 }
 
-/// What the read loop knew about a job at prepare time, held until the writer
-/// finalizes it.
-///
-/// The sampling parameters build the outbound `SamplerMeta`. The rest exists so
-/// the completion log can report an attempt the way the v0.2.1 miner did:
-/// elapsed wall time, and the requirement the attempt was measured against.
-/// Plain jobs retain their admission target for logging. Lease results carry
-/// no target: the writer reports every completed salt's reads unfiltered.
-pub(crate) struct PendingJob {
-    pub(crate) lease: Option<LeaseLink>,
-    /// Original wire graph, present only for lossy coefficient types.
-    pub(crate) exact_energy: Option<ExactEnergy>,
-    /// The instance offset of a family lease salt, added after rescoring.
-    /// Zero for every other job.
-    pub(crate) offset_milli: i64,
-    pub(crate) num_reads: u32,
-    pub(crate) num_sweeps: u32,
-    pub(crate) started: std::time::Instant,
-    /// Session energy threshold, or `None` when no `SetTarget` has arrived.
-    pub(crate) max_energy_milli: Option<i64>,
-    pub(crate) min_solutions: u32,
-    /// This job's cancellation watermark, as `prepare_job` resolved it. The
-    /// writer re-checks it so a `Result` for a generation the coordinator
-    /// abandoned cannot reach the wire, whatever the backend decided.
-    pub(crate) watermark: Option<u64>,
-}
-
-/// `job_id` → its [`PendingJob`], shared between the session's read loop (which
-/// inserts) and its outbound writer (which removes).
-pub(crate) type PendingParams = Arc<StdMutex<HashMap<Vec<u8>, PendingJob>>>;
-
-pub(crate) fn pending_id(wire_id: &[u8], salt_index: Option<u64>) -> Vec<u8> {
-    // Internal IDs are 0 || plain wire ID or 1 || lease wire ID || index LE64.
-    // Distinct tags make the namespaces disjoint for arbitrary coordinator IDs.
-    // Stream jobs, completions, and the pending map use them internally. The writer
-    // removes the tag and salt suffix after lookup, before cancellation, rescoring,
-    // logging, and wire replies.
-    let mut id = Vec::with_capacity(1 + wire_id.len() + salt_index.map_or(0, |_| 8));
-    id.push(u8::from(salt_index.is_some()));
-    id.extend_from_slice(wire_id);
-    if let Some(index) = salt_index {
-        id.extend_from_slice(&index.to_le_bytes());
-    }
-    id
-}
-
 fn wire_job_id(id: &[u8]) -> Vec<u8> {
     match id.split_first() {
         Some((0, wire)) => wire.to_vec(),
@@ -596,7 +482,7 @@ fn log_progress(
     jobs_done: u64,
     elapsed: Duration,
     best_energy_milli: i64,
-    pending: Option<&PendingJob>,
+    pending: Option<&PendingJob<LeaseLink>>,
 ) {
     let secs = elapsed.as_secs_f64();
     let rate = if secs > 0.0 {
@@ -620,7 +506,7 @@ fn log_progress(
 ///
 /// The per-attempt line no longer carries this. Sampling parameters stay
 /// constant for a round, so the progress interval is enough.
-fn format_requirement(pending: Option<&PendingJob>) -> String {
+fn format_requirement(pending: Option<&PendingJob<LeaseLink>>) -> String {
     match pending.and_then(|p| p.max_energy_milli) {
         Some(max) => format!(
             "requires energy<={}, solutions>={}",
@@ -643,7 +529,7 @@ fn format_requirement(pending: Option<&PendingJob>) -> String {
 /// `pending` is `None` when the writer sees a result for a job the read loop
 /// never recorded. That is not reachable through the normal path, so the line
 /// still goes out, with the parameters and elapsed time reported as unknown.
-fn log_attempt(backend: &str, sr: &StreamResult, pending: Option<&PendingJob>) {
+fn log_attempt(backend: &str, sr: &StreamResult, pending: Option<&PendingJob<LeaseLink>>) {
     let job = short_job_id(&sr.job_id);
     #[expect(
         clippy::cast_possible_truncation,
@@ -686,7 +572,7 @@ fn log_attempt(backend: &str, sr: &StreamResult, pending: Option<&PendingJob>) {
 struct WriterContext {
     aborted: Arc<AtomicBool>,
     /// Prepare-time parameters per job, removed as each one finalizes.
-    pending: PendingParams,
+    pending: PendingParams<LeaseLink>,
     /// Completed plain jobs plus sampled lease salts, published in `Status`.
     jobs_done: Arc<AtomicU64>,
     /// Set when the writer sends `Fatal` for an unrecoverable device.
@@ -698,89 +584,6 @@ struct WriterContext {
     shutdown: watch::Receiver<Option<lease::ShutdownDeadlines>>,
     /// Backend name for the log lines.
     backend: &'static str,
-}
-
-/// Local messages retain their stop state until the writer commits them.
-pub(crate) struct Control {
-    msg: MinerMsg,
-    /// Send `JobRequest { credits: 1 }` right after `msg`, from the same reservation.
-    refund: bool,
-    local: Option<(
-        Arc<lease::LeaseState>,
-        watch::Receiver<Option<lease::ShutdownDeadlines>>,
-    )>,
-}
-impl From<MinerMsg> for Control {
-    fn from(msg: MinerMsg) -> Self {
-        Self {
-            msg,
-            refund: false,
-            local: None,
-        }
-    }
-}
-impl Control {
-    pub(crate) fn local(
-        msg: MinerMsg,
-        state: Arc<lease::LeaseState>,
-        shutdown: watch::Receiver<Option<lease::ShutdownDeadlines>>,
-    ) -> Self {
-        Self {
-            msg,
-            refund: false,
-            local: Some((state, shutdown)),
-        }
-    }
-    /// A lease summary and its credit refund. The writer commits both or neither.
-    pub(crate) fn summary(
-        done: MinerMsg,
-        local: Option<(
-            Arc<lease::LeaseState>,
-            watch::Receiver<Option<lease::ShutdownDeadlines>>,
-        )>,
-    ) -> Self {
-        Self {
-            msg: done,
-            refund: true,
-            local,
-        }
-    }
-}
-
-pub(crate) async fn send_control(
-    tx: &mpsc::Sender<MinerMsg>,
-    control: Control,
-    cancel: &CancelToken,
-) -> bool {
-    let count = if control.refund { 2 } else { 1 };
-    // Ready terminal messages must not yield on a depleted task budget at
-    // the grace boundary. Only wait when the channel is actually full.
-    let permits = match tx.try_reserve_many(count) {
-        Ok(permits) => permits,
-        Err(mpsc::error::TrySendError::Closed(())) => return false,
-        Err(mpsc::error::TrySendError::Full(())) => {
-            let Ok(permits) = tx.reserve_many(count).await else {
-                return false;
-            };
-            permits
-        }
-    };
-    let fatal = matches!(control.msg.msg, Some(miner_msg::Msg::Fatal(_)));
-    let mut msgs = vec![control.msg];
-    if control.refund {
-        msgs.push(miner(miner_msg::Msg::JobRequest(JobRequest { credits: 1 })));
-    }
-    if let Some((state, shutdown)) = &control.local {
-        let close_expired = shutdown
-            .borrow()
-            .is_some_and(|deadlines| tokio::time::Instant::now() >= deadlines.close);
-        state.send_local(msgs, permits, cancel, close_expired);
-        return true;
-    }
-    for (permit, msg) in permits.zip(msgs) {
-        permit.send(msg);
-    }
-    !fatal
 }
 
 /// Send every control reply already queued, without waiting for more.
@@ -808,7 +611,7 @@ async fn drain_queued_ctrl(
     true
 }
 
-fn rescore_result(sr: &mut StreamResult, entry: Option<&PendingJob>, required: bool) {
+fn rescore_result(sr: &mut StreamResult, entry: Option<&PendingJob<LeaseLink>>, required: bool) {
     if !required {
         return;
     }
@@ -826,7 +629,7 @@ fn rescore_result(sr: &mut StreamResult, entry: Option<&PendingJob>, required: b
 /// Add a family lease salt's instance offset to each read (FAM-33, D4-A).
 /// FAM-37 bounds keep the sampled energy below 2^57 and the offset at most
 /// 2^56, so the sum never saturates on a valid instance.
-fn add_offset(sr: &mut StreamResult, entry: Option<&PendingJob>) {
+fn add_offset(sr: &mut StreamResult, entry: Option<&PendingJob<LeaseLink>>) {
     let Some(job) = entry.filter(|job| job.lease.is_some()) else {
         return;
     };
@@ -1042,27 +845,6 @@ async fn outbound_writer<C: Coefficient>(
     }
 }
 
-// Shared shutdown stage, also exercised with saturated channels in tests.
-pub(crate) async fn join_expanders(
-    expanders: &mut tokio::task::JoinSet<()>,
-    deadline: tokio::time::Instant,
-) -> Option<String> {
-    let mut failure = None;
-    loop {
-        match tokio::time::timeout_at(deadline, expanders.join_next()).await {
-            Ok(Some(Err(error))) => failure = Some(format!("lease expander failed: {error}")),
-            Ok(Some(Ok(()))) => {}
-            Ok(None) => break,
-            Err(_) => {
-                tracing::warn!("lease expanders exceeded the shutdown grace window; aborting them");
-                expanders.shutdown().await;
-                break;
-            }
-        }
-    }
-    failure
-}
-
 /// Leases close this long before the grace deadline, so their summaries reach
 /// the writer while it can still flush them.
 fn summary_margin(grace: Duration) -> Duration {
@@ -1245,7 +1027,7 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
     // job_id → (num_reads, num_sweeps) resolved at prepare, for the result meta.
     // Shared: the read loop inserts at prepare, the writer task removes at
     // finalize. The lock is never held across an await.
-    let pending: PendingParams = Arc::new(StdMutex::new(HashMap::new()));
+    let pending: PendingParams<LeaseLink> = Arc::new(StdMutex::new(HashMap::new()));
     // Published by the writer, read here for `Status.jobs_done`.
     let jobs_done = Arc::new(AtomicU64::new(0));
 
@@ -1927,17 +1709,6 @@ fn join_error_message(e: tokio::task::JoinError) -> String {
     }
 }
 
-/// Format a `JoinHandle` panic payload for logging / error messages.
-pub(crate) fn panic_payload_message(panic: &(dyn std::any::Any + Send)) -> String {
-    if let Some(s) = panic.downcast_ref::<&str>() {
-        (*s).to_owned()
-    } else if let Some(s) = panic.downcast_ref::<String>() {
-        s.clone()
-    } else {
-        "non-string panic payload".to_owned()
-    }
-}
-
 fn map_err_to_exit(err: Box<dyn std::error::Error>, backend: &str) -> ExitCode {
     // Prefer the canonical `SessionError -> ExitCode` mapping (quip-protocol)
     // over a hand-rolled match, so real miners exit the same code as the mock
@@ -2104,6 +1875,8 @@ pub fn run<S: Sampler<C>, C: Coefficient>(
 mod tests {
     use super::*;
     use crate::families::Declaration;
+    use crate::job::ExactEnergy;
+    use quip_proto::v1::{Algorithm, Backend};
     use tokio_stream::wrappers::ReceiverStream;
 
     #[test]
@@ -2131,7 +1904,7 @@ mod tests {
         res_tx: mpsc::Sender<StreamResult>,
         ctrl_tx: mpsc::Sender<Control>,
         out_rx: mpsc::Receiver<MinerMsg>,
-        pending: PendingParams,
+        pending: PendingParams<LeaseLink>,
         jobs_done: Arc<AtomicU64>,
         shutdown_tx: watch::Sender<Option<lease::ShutdownDeadlines>>,
         cancel: CancelToken,
@@ -2146,7 +1919,7 @@ mod tests {
         let (tx, out_rx) = mpsc::channel::<MinerMsg>(depth);
         let (res_tx, res_rx) = mpsc::channel::<StreamResult>(depth);
         let (ctrl_tx, ctrl_rx) = mpsc::channel::<Control>(depth);
-        let pending: PendingParams = Arc::new(StdMutex::new(HashMap::new()));
+        let pending: PendingParams<LeaseLink> = Arc::new(StdMutex::new(HashMap::new()));
         let cancel = CancelToken::default();
         let jobs_done = Arc::new(AtomicU64::new(0));
         let (shutdown_tx, shutdown) = watch::channel(None);
@@ -2227,60 +2000,6 @@ mod tests {
         drop(harness.res_tx);
         drop(harness.ctrl_tx);
         harness.writer.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn terminal_control_uses_available_capacity_with_exhausted_task_budget() {
-        use std::future::Future as _;
-        let (tx, mut rx) = mpsc::channel(2);
-        let cancel = CancelToken::default();
-        let message = miner(miner_msg::Msg::JobRequest(JobRequest { credits: 1 }));
-        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
-        // Consume the current task budget without yielding to another task.
-        while std::pin::pin!(tokio::task::consume_budget())
-            .poll(&mut context)
-            .is_ready()
-        {}
-        assert!(
-            std::pin::pin!(send_control(&tx, message.into(), &cancel))
-                .poll(&mut context)
-                .is_ready(),
-            "ready terminal send yielded past the grace deadline"
-        );
-        assert!(rx.try_recv().is_ok());
-    }
-
-    #[tokio::test]
-    async fn a_summary_and_its_refund_are_committed_together() {
-        use std::future::Future as _;
-        let (tx, mut rx) = mpsc::channel(2);
-        let cancel = CancelToken::default();
-        tx.send(miner(miner_msg::Msg::JobRequest(JobRequest { credits: 7 })))
-            .await
-            .unwrap();
-        let done = miner(miner_msg::Msg::LeaseDone(quip_proto::v1::LeaseDone {
-            job_id: b"lease".to_vec(),
-            salts_done: 3,
-            best_energy_milli: -5,
-        }));
-        let send = send_control(&tx, Control::summary(done.clone(), None), &cancel);
-        tokio::pin!(send);
-        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
-        assert!(
-            send.as_mut().poll(&mut context).is_pending(),
-            "one free slot must not take half a summary"
-        );
-        assert_eq!(
-            rx.try_recv().unwrap().msg,
-            Some(miner_msg::Msg::JobRequest(JobRequest { credits: 7 }))
-        );
-        assert!(rx.try_recv().is_err());
-        assert!(send.as_mut().poll(&mut context).is_ready());
-        assert_eq!(rx.try_recv().unwrap(), done);
-        assert_eq!(
-            rx.try_recv().unwrap().msg,
-            Some(miner_msg::Msg::JobRequest(JobRequest { credits: 1 }))
-        );
     }
 
     struct PausingLocalSampler(Arc<dyn Fn() + Send + Sync>);
@@ -2731,7 +2450,7 @@ mod tests {
         }
     }
 
-    fn pending_job(watermark: Option<u64>) -> PendingJob {
+    fn pending_job(watermark: Option<u64>) -> PendingJob<LeaseLink> {
         PendingJob {
             lease: None,
             exact_energy: None,

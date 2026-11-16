@@ -24,7 +24,9 @@ from . import (
     topology_blob,
     twisted,
 )
+from .canonical import canonical_json
 from .chacha8 import ChaCha8, shuffle, uniform
+from .codec_vectors import FAMILIES, document
 from .digests import (
     descriptor_digest,
     descriptor_material,
@@ -852,8 +854,6 @@ def targets() -> dict[Path, bytes]:
         FLOW_PATH: render(build_flow()),
         INDEX_PATH: render(build_topology_index()),
     }
-    from .codec_vectors import FAMILIES, document
-
     texts.update(
         {
             FAMILIES_DIR / "codecs" / f"{family}.json": render(document(family))
@@ -1597,28 +1597,6 @@ _LEGACY_ABOUT = [
     "The golden_lease.json topology is edge k = (k mod n_nodes, (k + 1) mod n_nodes).",
     "Archived research instances are a separate provenance and are not referenced here.",
 ]
-
-
-def _canonical(value: object) -> str:
-    if isinstance(value, float):
-        raise TypeError(f"float in canonical JSON: {value!r}")
-    if isinstance(value, str) and not value.isascii():
-        raise TypeError(f"non-ASCII string in canonical JSON: {value!r}")
-    if isinstance(value, dict):
-        for key in value:
-            _canonical(key)
-        for item in value.values():
-            _canonical(item)
-    elif isinstance(value, list):
-        for item in value:
-            _canonical(item)
-    return ""
-
-
-def canonical_json(value: object) -> str:
-    """Keys sorted, no whitespace, integers and ASCII strings only."""
-    _canonical(value)
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
 
 
 def _legacy_reference(file: str, section: str, index: int, evidence: list[str]) -> dict:

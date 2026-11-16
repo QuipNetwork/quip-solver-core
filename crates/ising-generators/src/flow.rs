@@ -39,13 +39,13 @@ use core::num::NonZeroU32;
 
 use crate::descriptor::{Contract, FieldSpec, Params, SizeBounds, TopologyStats, ValueType};
 use crate::family::{BaseTopology, Construction, InstanceBody, Streams};
-use crate::ice::build::{region, sections, Reader};
 use crate::ice::twisted_dimer::Recipe;
 use crate::instance::{Instance, InstanceLimits};
 use crate::native::{
     charges_payload, dense_links, incidence_payload, is_zephyr_subgraph, link_spins, on_border,
     parse_incidence, place, DenseLinks, Energy, Expansion, Native, KIND_CHARGES, KIND_INCIDENCE,
 };
+use crate::region::{region, sections, Reader};
 use crate::rng::{shuffle, uniform, ChaCha8Rng};
 use crate::routing::unsigned;
 use crate::square::{charges, check_request, Boundary, Request, SquareLattice};

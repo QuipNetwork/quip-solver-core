@@ -1,6 +1,7 @@
 //! Lossless defects metadata and pinned-forest witness codecs.
 use super::{Config, LIMITS};
 use crate::{
+    codec::forest::ForestCodec,
     codec::{
         bits::{BitReader, BitWriter},
         instance::{
@@ -9,9 +10,8 @@ use crate::{
         CodecError, WitnessCodec,
     },
     descriptor::Params,
-    ice::build::{sections, Reader},
     instance::Instance,
-    native::codec::ForestCodec,
+    region::{sections, Reader},
 };
 use alloc::vec::Vec;
 

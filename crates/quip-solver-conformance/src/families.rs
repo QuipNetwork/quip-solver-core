@@ -28,8 +28,8 @@ pub mod registry;
 pub mod routing;
 pub mod twisted;
 
-pub(crate) use drive::run_family_script;
-pub use drive::{drive_miner_family, FamilyCase, FamilyReport};
+pub use crate::case::FamilyCase;
+pub use drive::{drive_miner_family, FamilyReport};
 
 use charge::{P_CHARGED_A251, P_CHARGED_ADJ_A100_B45_C256, P_CHARGED_Z22_A250_B31_C128};
 use defects::{P_DEFECTS_SIDE4, P_DEFECTS_Z24_L2, P_DEFECTS_Z34_L3};

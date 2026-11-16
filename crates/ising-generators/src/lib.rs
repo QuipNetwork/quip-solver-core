@@ -49,6 +49,7 @@ pub mod instance;
 mod native;
 pub mod polariton;
 pub mod random;
+mod region;
 pub mod registry;
 pub mod rng;
 pub mod routing;
