@@ -6,7 +6,8 @@ use alloc::vec::Vec;
 
 use crate::descriptor::{Params, SizeBounds, TopologyStats, Value};
 use crate::family::{BaseTopology, Streams};
-use crate::ice::{candidates, select, sides, Lattice, StructureError, Tile, MAX_DEGREE};
+use crate::ice::cache::ice_tiles;
+use crate::ice::{Candidates, Lattice, StructureError, Tile, MAX_DEGREE};
 use crate::region::Reader;
 use crate::rng::shuffle;
 use crate::Code;
@@ -64,33 +65,83 @@ pub(crate) const fn tile_edges(nodes: [u32; 4]) -> [(u32, u32); 6] {
     [(a, b), (a, c), (a, d), (b, c), (b, d), (c, d)]
 }
 
+/// The outcome of [`select_tiles`].
+pub(crate) struct Selected {
+    /// The selected tiles, ascending.
+    pub(crate) tiles: Vec<Tile>,
+    /// Parallel to `tiles`: the positions in `edges` of the six tile edges in
+    /// [`tile_edges`] order, or `None` when one is not an edge.
+    pub(crate) positions: Vec<Option<[usize; 6]>>,
+    /// The edges of the topology as `(min, max)` pairs, sorted ascending.
+    pub(crate) edges: Vec<(u32, u32)>,
+}
+
 /// Candidates, sides, both shuffles, and select. A structure error maps to
 /// [`Code::TopologyIncompatible`]. The `left` and `right` stream labels order
 /// the two sides.
+///
+/// Everything but the shuffles and the matching comes from the topology's
+/// cache (see [`ice_tiles`]).
 pub(crate) fn select_tiles(
     lattice: Lattice,
     topology: &BaseTopology,
     streams: &mut Streams<'_>,
     left: &str,
     right: &str,
-) -> Result<Vec<Tile>, Code> {
+) -> Result<Selected, Code> {
     let defect = Code::TopologyIncompatible;
-    let found = candidates(lattice, topology).map_err(|_| defect)?;
-    let split = sides(lattice, topology, &found).map_err(|_| defect)?;
-    let left_order = shuffled_order(streams, left, split.left.len())?;
-    let right_order = shuffled_order(streams, right, split.right.len())?;
-    select(&found, &split, &left_order, &right_order).map_err(|_| defect)
+    let cached = ice_tiles(lattice, topology);
+    let structure = cached.as_ref().as_ref().map_err(|_| defect)?;
+    let graph = structure.graph.as_ref().map_err(|_| defect)?;
+    let left_order = shuffled_order(streams, left, graph.left_len())?;
+    let right_order = shuffled_order(streams, right, graph.right_len())?;
+    let chosen = graph
+        .select(&left_order, &right_order)
+        .map_err(|_| defect)?;
+    let mut tiles = Vec::with_capacity(chosen.len());
+    let mut positions = Vec::with_capacity(chosen.len());
+    for at in chosen {
+        tiles.push(*structure.candidates.tiles.get(at).ok_or(defect)?);
+        positions.push(*structure.positions.get(at).ok_or(defect)?);
+    }
+    Ok(Selected {
+        tiles,
+        positions,
+        edges: structure.edges.clone(),
+    })
 }
 
-/// The edges of the topology as `(min, max)` pairs, sorted ascending.
-pub(crate) fn sorted_edges(topology: &BaseTopology) -> Vec<(u32, u32)> {
-    let mut edges: Vec<(u32, u32)> = topology
-        .edges()
-        .iter()
-        .map(|&(u, v)| (u.min(v), u.max(v)))
-        .collect();
-    edges.sort_unstable();
-    edges
+/// The positions of the edges that `strong` does not mark, ascending.
+pub(crate) fn non_tile_edges(strong: &[bool]) -> Result<Vec<u32>, Code> {
+    let len = u32::try_from(strong.len()).map_err(|_| Code::BoundsExceeded)?;
+    // Write every position and advance past the non-tile ones. A branch on
+    // the flag would mispredict about as often as the tiles alternate.
+    let mut free = vec![0u32; strong.len()];
+    let mut count = 0usize;
+    for (at, &is_tile) in (0..len).zip(strong) {
+        if let Some(slot) = free.get_mut(count) {
+            *slot = at;
+        }
+        count += usize::from(!is_tile);
+    }
+    free.truncate(count);
+    Ok(free)
+}
+
+/// The structure check of every ice admission: `check` of the candidates when
+/// the topology carries tiles for `lattice`, `true` when only the degree limit
+/// fails (code 13 then comes from the size bounds), and `false` for any other
+/// structure error.
+pub(crate) fn admit_tiles(
+    lattice: Lattice,
+    topology: &BaseTopology,
+    check: impl FnOnce(&Candidates) -> bool,
+) -> bool {
+    match ice_tiles(lattice, topology).as_ref() {
+        Ok(structure) => check(&structure.candidates),
+        Err(StructureError::DegreeAboveLimit) => true,
+        Err(_) => false,
+    }
 }
 
 /// The tiles of a tile payload: four positions each, ascending, tiles
@@ -114,27 +165,92 @@ pub(crate) fn parse_tiles(payload: &[u8], n: usize) -> Option<Vec<[u32; 4]>> {
     Some(tiles)
 }
 
+/// The position of each edge in a list of distinct edges sorted ascending,
+/// found by first end. [`EdgeIndex::position`] gives the same answer as a
+/// binary search of the whole list, from a run of at most the node degree.
+pub(crate) struct EdgeIndex<'a> {
+    edges: &'a [(u32, u32)],
+    /// `starts[a]` is the position of the first edge whose first end is at
+    /// least `a`, for `a` in `0..=n`.
+    starts: Vec<usize>,
+}
+
+impl<'a> EdgeIndex<'a> {
+    /// Index `edges`, which must be sorted ascending, for first ends below `n`.
+    pub(crate) fn new(edges: &'a [(u32, u32)], n: usize) -> Self {
+        let mut starts = Vec::with_capacity(n.saturating_add(1));
+        let mut at = 0usize;
+        for a in 0..=n {
+            while edges
+                .get(at)
+                .is_some_and(|&(u, _)| usize::try_from(u).is_ok_and(|u| u < a))
+            {
+                at = at.saturating_add(1);
+            }
+            starts.push(at);
+        }
+        Self { edges, starts }
+    }
+
+    /// The indexed edges.
+    pub(crate) const fn edges(&self) -> &'a [(u32, u32)] {
+        self.edges
+    }
+
+    /// The position of `pair`, `None` when it is not an edge.
+    pub(crate) fn position(&self, pair: (u32, u32)) -> Option<usize> {
+        let first = usize::try_from(pair.0).ok();
+        let run =
+            first.and_then(|a| Some((*self.starts.get(a)?, *self.starts.get(a.checked_add(1)?)?)));
+        match run {
+            Some((start, end)) => {
+                let offset = self
+                    .edges
+                    .get(start..end)?
+                    .binary_search_by_key(&pair.1, |&(_, v)| v)
+                    .ok()?;
+                start.checked_add(offset)
+            }
+            // A first end outside the index: search the whole list.
+            None => self.edges.binary_search(&pair).ok(),
+        }
+    }
+}
+
+/// The tile edges of an instance, from [`mark_tiles`].
+pub(crate) struct TileMarks {
+    /// Indexed by edge position: `true` for a tile edge.
+    pub(crate) strong: Vec<bool>,
+    /// Parallel to the tiles: the positions of the six tile edges in
+    /// [`tile_edges`] order.
+    pub(crate) positions: Vec<[usize; 6]>,
+}
+
 /// Mark the tile edges (flags indexed by edge position in `edges`, which is
 /// sorted ascending). `None` when a node is in more than two tiles, a tile
 /// edge is missing from `edges`, or two tiles share an edge.
-pub(crate) fn mark_tiles(tiles: &[[u32; 4]], edges: &[(u32, u32)], n: usize) -> Option<Vec<bool>> {
-    let mut strong = vec![false; edges.len()];
+pub(crate) fn mark_tiles(tiles: &[[u32; 4]], edges: &EdgeIndex<'_>, n: usize) -> Option<TileMarks> {
+    let mut strong = vec![false; edges.edges().len()];
+    let mut positions = Vec::with_capacity(tiles.len());
     let mut slots = vec![0u8; n];
     for tile in tiles {
         for pos in *tile {
             let slot = slots.get_mut(usize::try_from(pos).ok()?)?;
             *slot = slot.checked_add(1).filter(|count| *count <= 2)?;
         }
-        for pair in tile_edges(*tile) {
-            let at = edges.binary_search(&pair).ok()?;
+        let mut found = [0usize; 6];
+        for (pair, slot) in tile_edges(*tile).into_iter().zip(&mut found) {
+            let at = edges.position(pair)?;
             let seen = strong.get_mut(at)?;
             if *seen {
                 return None;
             }
             *seen = true;
+            *slot = at;
         }
+        positions.push(found);
     }
-    Some(strong)
+    Some(TileMarks { strong, positions })
 }
 
 /// The payload of a tile list: the count, then four positions per tile.

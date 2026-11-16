@@ -6,13 +6,17 @@
 //! Compact codec faults raise [`CodecError`] with a stable `name` and no FAM code.
 //! A wrong Python argument type stays a `TypeError`.
 
-use ising_generators::descriptor::{self, AdvertisedLimits};
+use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use ising_generators::descriptor::{self, AdvertisedLimits, SizeBounds};
 use ising_generators::family::{self, BaseTopology, Defect, SaltFault};
 use ising_generators::instance::{self, InstanceLimits, InstanceParts};
 use ising_generators::registry::CONTRACTS;
 use ising_generators::Code;
-use pyo3::exceptions::{PyMemoryError, PyOverflowError, PyValueError};
+use pyo3::exceptions::{PyMemoryError, PyOverflowError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
+use pyo3::pybacked::PyBackedBytes;
 use pyo3::types::PyBytes;
 use pyo3::{create_exception, wrap_pyfunction, PyTypeInfo};
 
@@ -86,6 +90,24 @@ fn array32(bytes: &[u8]) -> Option<[u8; 32]> {
     <[u8; 32]>::try_from(bytes).ok()
 }
 
+/// Little-endian `int64` bytes of `values`, written straight into the bytes
+/// object.
+fn le_i64(
+    py: Python<'_>,
+    len: usize,
+    values: impl Iterator<Item = i64>,
+) -> PyResult<Bound<'_, PyBytes>> {
+    let size = len
+        .checked_mul(8)
+        .ok_or_else(|| PyOverflowError::new_err("the buffer size overflows"))?;
+    PyBytes::new_with(py, size, |buf| {
+        for (chunk, value) in buf.chunks_exact_mut(8).zip(values) {
+            chunk.copy_from_slice(&value.to_le_bytes());
+        }
+        Ok(())
+    })
+}
+
 /// An immutable canonical instance. Coefficients keep the integer milli scale.
 #[pyclass(frozen, module = "quip_solver_core")]
 struct Instance {
@@ -130,6 +152,41 @@ impl Instance {
         self.inner.j().to_vec()
     }
 
+    /// `node_ids` as little-endian `int64`, 8 bytes per node.
+    #[getter]
+    fn node_ids_i64<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        let ids = self.inner.node_ids();
+        le_i64(py, ids.len(), ids.iter().map(|&id| i64::from(id)))
+    }
+
+    /// `edges` as little-endian `int64`, flat: `u0, v0, u1, v1, ...`.
+    #[getter]
+    fn edges_i64<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        let edges = self.inner.edges();
+        let len = edges
+            .len()
+            .checked_mul(2)
+            .ok_or_else(|| PyOverflowError::new_err("the buffer size overflows"))?;
+        let flat = edges
+            .iter()
+            .flat_map(|&(u, v)| [i64::from(u), i64::from(v)]);
+        le_i64(py, len, flat)
+    }
+
+    /// `h` as little-endian `int64`, 8 bytes per node.
+    #[getter]
+    fn h_i64<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        let h = self.inner.h();
+        le_i64(py, h.len(), h.iter().map(|&v| i64::from(v)))
+    }
+
+    /// `j` as little-endian `int64`, 8 bytes per edge.
+    #[getter]
+    fn j_i64<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        let j = self.inner.j();
+        le_i64(py, j.len(), j.iter().map(|&v| i64::from(v)))
+    }
+
     #[getter]
     fn offset_milli(&self) -> i64 {
         self.inner.offset_milli()
@@ -140,17 +197,21 @@ impl Instance {
         PyBytes::new(py, self.inner.metadata())
     }
 
-    /// The instance digest (FAM-18).
+    /// The instance digest (FAM-18). Computed on each read, with the GIL
+    /// released.
     #[getter]
     fn digest<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
-        digest_bytes(py, &self.inner.digest())
+        let inner = &self.inner;
+        let digest = py.detach(|| inner.digest());
+        digest_bytes(py, &digest)
     }
 
-    /// The canonical instance bytes (FAM-30).
+    /// The canonical instance bytes (FAM-30). Encoded on each call, with the
+    /// GIL released.
     fn canonical_bytes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
-        let bytes = self
-            .inner
-            .canonical_bytes()
+        let inner = &self.inner;
+        let bytes = py
+            .detach(|| inner.canonical_bytes())
             .map_err(|e| PyMemoryError::new_err(e.to_string()))?;
         Ok(PyBytes::new(py, &bytes))
     }
@@ -247,11 +308,59 @@ fn descriptor_digest<'py>(
     Ok(digest_bytes(py, &admitted.descriptor().digest()))
 }
 
+/// Why generation gave no instance, before it becomes a Python exception.
+/// Generation runs with the GIL released, so it cannot build one itself.
+enum Failure {
+    /// `AdmissionError` with this code and message.
+    Admission(Code, String),
+    /// `SaltSkipped` or `GeneratorDefect`.
+    Salt(SaltFault),
+}
+
+impl Failure {
+    fn into_py(self, py: Python<'_>) -> PyErr {
+        match self {
+            Self::Admission(code, message) => coded::<AdmissionError>(py, code, &message),
+            Self::Salt(fault) => salt_error(py, fault),
+        }
+    }
+}
+
+fn salt_error(py: Python<'_>, salt: SaltFault) -> PyErr {
+    match salt {
+        SaltFault::Skip(code) => coded::<SaltSkipped>(py, code, "the salt gives no instance"),
+        SaltFault::Defect(defect) => {
+            fault::<GeneratorDefect>(py, 0, defect_name(defect), "construction defect")
+        }
+    }
+}
+
+/// The base topology and the admitted size bounds of a descriptor. This is
+/// the FAM-47 topology admission that `generate` and `Generator` share.
+fn admit_base(
+    admitted: &descriptor::Admitted<'_>,
+    nodes: Vec<u32>,
+    edges: &[(u32, u32)],
+    advertised: &AdvertisedLimits,
+) -> Result<(BaseTopology, SizeBounds), Failure> {
+    let topology = BaseTopology::new(nodes, edges)
+        .map_err(|fault| Failure::Admission(Code::TopologyIncompatible, format!("{fault:?}")))?;
+    let order_digest = *topology.order_digest();
+    let bounds = family::admit_topology(admitted, &topology, &order_digest, advertised)
+        .map_err(|code| Failure::Admission(code, "topology admission failed".to_owned()))?;
+    Ok((topology, bounds))
+}
+
+fn nonce32(nonce: &[u8]) -> PyResult<[u8; 32]> {
+    array32(nonce).ok_or_else(|| PyValueError::new_err("nonce must be exactly 32 bytes"))
+}
+
 /// Build the canonical instance of `nonce` on the topology `nodes` and `edges`.
 ///
 /// `edges` holds native node ids in registration order. A limit of 0 makes
 /// no advertised claim. The sent order digest is the topology's own, so code
-/// 11 cannot occur here.
+/// 11 cannot occur here. The topology work and the construction run with the
+/// GIL released.
 ///
 /// # Errors
 ///
@@ -281,27 +390,223 @@ fn generate(
     max_degree: u64,
 ) -> PyResult<Instance> {
     let admitted = admit(py, family_id, revision, params, params_digest)?;
-    let topology = BaseTopology::new(nodes, &edges).map_err(|fault| {
-        coded::<AdmissionError>(py, Code::TopologyIncompatible, &format!("{fault:?}"))
-    })?;
     let advertised = AdvertisedLimits {
         max_nodes,
         max_edges,
         max_degree,
     };
-    let order_digest = *topology.order_digest();
-    let bounds = family::admit_topology(&admitted, &topology, &order_digest, &advertised)
-        .map_err(|code| coded::<AdmissionError>(py, code, "topology admission failed"))?;
-    let nonce =
-        array32(nonce).ok_or_else(|| PyValueError::new_err("nonce must be exactly 32 bytes"))?;
-    family::generate_instance(&admitted, &topology, &bounds, nonce)
+    let (topology, bounds) = py
+        .detach(|| admit_base(&admitted, nodes, &edges, &advertised))
+        .map_err(|failure| failure.into_py(py))?;
+    // The nonce check stays after topology admission, as before.
+    let nonce = nonce32(nonce)?;
+    py.detach(|| family::generate_instance(&admitted, &topology, &bounds, nonce))
         .map(|inner| Instance { inner })
-        .map_err(|err| match err {
-            SaltFault::Skip(code) => coded::<SaltSkipped>(py, code, "the salt gives no instance"),
-            SaltFault::Defect(defect) => {
-                fault::<GeneratorDefect>(py, 0, defect_name(defect), "construction defect")
+        .map_err(|fault| salt_error(py, fault))
+}
+
+/// The nonce-independent state of one descriptor on one topology.
+struct Prepared {
+    family_id: String,
+    revision: u32,
+    params: Vec<u8>,
+    params_digest: [u8; 32],
+    topology: BaseTopology,
+    bounds: SizeBounds,
+}
+
+impl Prepared {
+    /// The canonical instance of `nonce`. Runs without the GIL.
+    fn generate(&self, nonce: [u8; 32]) -> Result<instance::Instance, Failure> {
+        // The same inputs passed admission when the generator was built.
+        let admitted = descriptor::admit(
+            CONTRACTS,
+            self.family_id.as_bytes(),
+            self.revision,
+            &self.params,
+            &self.params_digest,
+        )
+        .map_err(|code| Failure::Admission(code, "descriptor admission failed".to_owned()))?;
+        family::generate_instance(&admitted, &self.topology, &self.bounds, nonce)
+            .map_err(Failure::Salt)
+    }
+
+    /// The instance of every nonce, in order, on up to `threads` threads.
+    fn generate_all(
+        &self,
+        nonces: &[[u8; 32]],
+        threads: NonZeroUsize,
+    ) -> Result<Vec<Result<instance::Instance, Failure>>, &'static str> {
+        let workers = threads.get().min(nonces.len());
+        if workers <= 1 {
+            return Ok(nonces.iter().map(|&n| self.generate(n)).collect());
+        }
+        // Each worker takes the next unclaimed index, so a slow salt does not
+        // hold back a fixed share of the batch.
+        let next = AtomicUsize::new(0);
+        let work = || {
+            let mut done = Vec::new();
+            loop {
+                let at = next.fetch_add(1, Ordering::Relaxed);
+                let Some(&nonce) = nonces.get(at) else {
+                    return done;
+                };
+                done.push((at, self.generate(nonce)));
             }
+        };
+        let parts = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..workers).map(|_| scope.spawn(work)).collect();
+            handles
+                .into_iter()
+                .map(std::thread::ScopedJoinHandle::join)
+                .collect::<Result<Vec<_>, _>>()
         })
+        .map_err(|_| "a generation thread panicked")?;
+        let mut slots: Vec<Option<Result<instance::Instance, Failure>>> =
+            std::iter::repeat_with(|| None).take(nonces.len()).collect();
+        for (at, result) in parts.into_iter().flatten() {
+            if let Some(slot) = slots.get_mut(at) {
+                *slot = Some(result);
+            }
+        }
+        slots
+            .into_iter()
+            .collect::<Option<Vec<_>>>()
+            .ok_or("a nonce was not generated")
+    }
+}
+
+/// A descriptor admitted on one topology, ready to generate any nonce.
+///
+/// The constructor runs descriptor and topology admission once. `generate`
+/// then takes only the nonce and builds the same instance as the
+/// module-level `generate` with the same arguments. Both methods release the
+/// GIL while they build.
+#[pyclass(frozen, module = "quip_solver_core")]
+struct Generator {
+    prepared: Prepared,
+}
+
+#[pymethods]
+impl Generator {
+    /// Admit the descriptor and the topology.
+    ///
+    /// # Errors
+    ///
+    /// `AdmissionError` (3 to 9, 12, 13), as `generate` raises it.
+    #[new]
+    #[pyo3(signature = (
+        family_id, revision, params, params_digest, nodes, edges,
+        *, max_nodes = 0, max_edges = 0, max_degree = 0
+    ))]
+    #[expect(
+        clippy::too_many_arguments,
+        clippy::needless_pass_by_value,
+        reason = "the Python signature is the API, and PyO3 extracts owned lists"
+    )]
+    fn new(
+        py: Python<'_>,
+        family_id: &str,
+        revision: u32,
+        params: &[u8],
+        params_digest: &[u8],
+        nodes: Vec<u32>,
+        edges: Vec<(u32, u32)>,
+        max_nodes: u64,
+        max_edges: u64,
+        max_degree: u64,
+    ) -> PyResult<Self> {
+        let admitted = admit(py, family_id, revision, params, params_digest)?;
+        let sent_digest = array32(params_digest).ok_or_else(|| {
+            coded::<AdmissionError>(
+                py,
+                Code::ParamsDigestMismatch,
+                "descriptor admission failed",
+            )
+        })?;
+        let advertised = AdvertisedLimits {
+            max_nodes,
+            max_edges,
+            max_degree,
+        };
+        let (topology, bounds) = py
+            .detach(|| admit_base(&admitted, nodes, &edges, &advertised))
+            .map_err(|failure| failure.into_py(py))?;
+        Ok(Self {
+            prepared: Prepared {
+                family_id: family_id.to_owned(),
+                revision,
+                params: params.to_vec(),
+                params_digest: sent_digest,
+                topology,
+                bounds,
+            },
+        })
+    }
+
+    /// The canonical instance of `nonce`.
+    ///
+    /// # Errors
+    ///
+    /// `SaltSkipped` (13 or 14) or `GeneratorDefect`. A nonce that is not 32
+    /// bytes is a `ValueError`.
+    fn generate(&self, py: Python<'_>, nonce: &[u8]) -> PyResult<Instance> {
+        let nonce = nonce32(nonce)?;
+        let prepared = &self.prepared;
+        py.detach(|| prepared.generate(nonce))
+            .map(|inner| Instance { inner })
+            .map_err(|failure| failure.into_py(py))
+    }
+
+    /// The instance of each nonce, in order, built on `threads` threads.
+    ///
+    /// `threads = 0` uses the available parallelism. Element `i` of the
+    /// result is the `Instance` of `nonces[i]`, or a `SaltSkipped` exception
+    /// object (not raised) when that salt gives no instance. A defect raises
+    /// `GeneratorDefect` for the first defective nonce in order, after every
+    /// nonce is built.
+    ///
+    /// # Errors
+    ///
+    /// `GeneratorDefect`, or `ValueError` when a nonce is not 32 bytes. That
+    /// check runs before any generation.
+    #[pyo3(signature = (nonces, *, threads = 0))]
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "PyO3 extracts an owned list of nonces"
+    )]
+    fn generate_batch(
+        &self,
+        py: Python<'_>,
+        nonces: Vec<PyBackedBytes>,
+        threads: usize,
+    ) -> PyResult<Vec<Py<PyAny>>> {
+        let mut fixed = Vec::with_capacity(nonces.len());
+        for (at, nonce) in nonces.iter().enumerate() {
+            fixed.push(array32(nonce).ok_or_else(|| {
+                PyValueError::new_err(format!("nonce {at} must be exactly 32 bytes"))
+            })?);
+        }
+        let threads = NonZeroUsize::new(threads)
+            .or_else(|| std::thread::available_parallelism().ok())
+            .unwrap_or(NonZeroUsize::MIN);
+        let prepared = &self.prepared;
+        let results = py
+            .detach(|| prepared.generate_all(&fixed, threads))
+            .map_err(PyRuntimeError::new_err)?;
+        let mut out = Vec::with_capacity(results.len());
+        for result in results {
+            match result {
+                Ok(inner) => out.push(Py::new(py, Instance { inner })?.into_any()),
+                Err(Failure::Salt(SaltFault::Skip(code))) => {
+                    let err = coded::<SaltSkipped>(py, code, "the salt gives no instance");
+                    out.push(err.into_value(py).into_any());
+                }
+                Err(failure) => return Err(failure.into_py(py)),
+            }
+        }
+        Ok(out)
+    }
 }
 
 /// Rebuild and check an explicit instance in the FAM-65 order.
@@ -530,6 +835,7 @@ pub(crate) fn register(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> 
     families.add_function(wrap_pyfunction!(encode_witness, &families)?)?;
     families.add_function(wrap_pyfunction!(decode_witness, &families)?)?;
     families.add_class::<Instance>()?;
+    families.add_class::<Generator>()?;
     m.add("CodecError", py.get_type::<CodecError>())?;
     m.add_submodule(&families)?;
 

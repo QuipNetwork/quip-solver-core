@@ -20,11 +20,12 @@ use core::num::NonZeroU32;
 use crate::descriptor::{Contract, FieldSpec, Params, SizeBounds, TopologyStats, Value, ValueType};
 use crate::family::{BaseTopology, Construction, InstanceBody, Streams};
 use crate::ice::build::{
-    gauges_payload, lattice, mark_tiles, parse_gauges, parse_tiles, select_tiles, sorted_edges,
-    tiles_payload, topology_bounds,
+    admit_tiles, gauges_payload, lattice, mark_tiles, parse_gauges, parse_tiles, select_tiles,
+    tiles_payload, topology_bounds, EdgeIndex,
 };
+use crate::ice::build::{non_tile_edges, Selected};
 use crate::ice::twisted_dimer::Recipe;
-use crate::ice::{candidates, StructureError};
+
 use crate::instance::{Instance, InstanceLimits};
 use crate::region::{region, sections, Reader};
 use crate::rng::uniform;
@@ -160,10 +161,7 @@ fn check_topology(params: &Params<'_>, topology: &BaseTopology) -> bool {
     let Ok(lattice) = lattice(params) else {
         return false;
     };
-    match candidates(lattice, topology) {
-        Ok(_) | Err(StructureError::DegreeAboveLimit) => true,
-        Err(_) => false,
-    }
+    admit_tiles(lattice, topology, |_| true)
 }
 
 /// The six edges of a tile with their couplings under the tile's own gauge:
@@ -222,7 +220,11 @@ fn generate(
     let background = milli(params, TAG_BACKGROUND).ok_or(Code::ParamsMalformed)?;
     let chance = charged_per_256(params).ok_or(Code::ParamsMalformed)?;
     let lattice = lattice(params).map_err(|_| defect)?;
-    let tiles = select_tiles(lattice, topology, streams, LEFT, RIGHT)?;
+    let Selected {
+        tiles,
+        positions,
+        edges,
+    } = select_tiles(lattice, topology, streams, LEFT, RIGHT)?;
 
     let two = NonZeroU32::MIN.saturating_add(1);
     let of_256 = NonZeroU32::MIN.saturating_add(255);
@@ -255,24 +257,26 @@ fn generate(
         .collect();
 
     let node_ids = topology.node_ids().to_vec();
-    let edges = sorted_edges(topology);
-    let mut fixed: Vec<Option<i32>> = vec![None; edges.len()];
+    // The tile couplings first. Every other edge gets a background one.
+    let mut j: Vec<i32> = vec![0; edges.len()];
+    let mut fixed = vec![false; edges.len()];
     let tile_nodes: Vec<[u32; 4]> = tiles.iter().map(|tile| tile.nodes).collect();
-    for (tile, gauge) in tile_nodes.iter().zip(&gauges) {
-        for (pair, coupling) in tile_couplings(*tile, *gauge, scale).ok_or(Code::BoundsExceeded)? {
-            let at = edges.binary_search(&pair).map_err(|_| defect)?;
-            *fixed.get_mut(at).ok_or(defect)? = Some(coupling);
+    for ((tile, gauge), at) in tile_nodes.iter().zip(&gauges).zip(&positions) {
+        let couplings = tile_couplings(*tile, *gauge, scale).ok_or(Code::BoundsExceeded)?;
+        for ((_, coupling), at) in couplings.into_iter().zip(at.ok_or(defect)?) {
+            *j.get_mut(at).ok_or(defect)? = coupling;
+            *fixed.get_mut(at).ok_or(defect)? = true;
         }
     }
 
     let mut background_stream = streams.open(BACKGROUND).ok_or(Code::NoInstance)?;
-    let mut j: Vec<i32> = Vec::with_capacity(edges.len());
-    for coupling in &fixed {
-        j.push(match coupling {
-            Some(coupling) => *coupling,
-            None if uniform(&mut background_stream, two) == 0 => background,
-            None => -background,
-        });
+    for at in non_tile_edges(&fixed)? {
+        let at = usize::try_from(at).map_err(|_| Code::BoundsExceeded)?;
+        *j.get_mut(at).ok_or(defect)? = if uniform(&mut background_stream, two) == 0 {
+            background
+        } else {
+            -background
+        };
     }
 
     let (h, offset_milli) = expected_fields(&tile_nodes, &gauges, &charges, scale, node_ids.len())
@@ -354,19 +358,28 @@ fn check_instance(params: &Params<'_>, instance: &Instance) -> Option<Decoded> {
         return None;
     }
 
-    let is_tile = mark_tiles(&tiles, edges, n)?;
-    for (tile, gauge) in tiles.iter().zip(&gauges) {
-        for (pair, coupling) in tile_couplings(*tile, *gauge, scale)? {
-            let at = edges.binary_search(&pair).ok()?;
+    let index = EdgeIndex::new(edges, n);
+    let marks = mark_tiles(&tiles, &index, n)?;
+    let is_tile = marks.strong;
+    for ((tile, gauge), at) in tiles.iter().zip(&gauges).zip(&marks.positions) {
+        for ((_, coupling), &at) in tile_couplings(*tile, *gauge, scale)?.into_iter().zip(at) {
             if *js.get(at)? != coupling {
                 return None;
             }
         }
     }
+    // Bitwise `&` and `|`, not `&&`: the flags alternate with the tiles, so a
+    // branch per edge would mispredict often.
+    let mut bad = false;
+    #[expect(
+        clippy::needless_bitwise_bool,
+        reason = "the bitwise form is the point: it keeps the loop free of branches"
+    )]
     for (&flagged, &coupling) in is_tile.iter().zip(js) {
-        if !flagged && coupling != background && coupling != -background {
-            return None;
-        }
+        bad |= !flagged & (coupling != background) & (coupling != -background);
+    }
+    if bad {
+        return None;
     }
     Some((tiles, gauges, charges))
 }

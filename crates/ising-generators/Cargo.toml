@@ -12,7 +12,8 @@ categories = ["no-std", "algorithms", "cryptography"]
 
 [features]
 default = ["std"]
-# Runtime SIMD detection in blake3. No API change: the crate is no_std either way.
+# Runtime SIMD detection in blake3, and the per-topology ice tile cache (it
+# needs std::sync::Mutex). No API or output change: the crate is no_std either way.
 std = ["blake3/std"]
 # The topology blob codec (gzip plus varints). no_std: it needs only miniz_oxide
 # with its `with-alloc` feature.

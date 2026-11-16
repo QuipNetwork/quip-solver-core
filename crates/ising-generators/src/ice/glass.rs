@@ -15,11 +15,12 @@ use core::num::NonZeroU32;
 
 use crate::descriptor::{Contract, FieldSpec, Params, SizeBounds, TopologyStats, Value, ValueType};
 use crate::family::{BaseTopology, Construction, InstanceBody, Streams};
+use crate::ice::build::Selected;
 use crate::ice::build::{
-    lattice, mark_tiles, parse_tiles, select_tiles, sorted_edges, tile_edges, tiles_payload,
-    topology_bounds,
+    admit_tiles, lattice, mark_tiles, parse_tiles, select_tiles, tile_edges, tiles_payload,
+    topology_bounds, EdgeIndex,
 };
-use crate::ice::{candidates, StructureError, Tile};
+use crate::ice::Tile;
 use crate::instance::{Instance, InstanceLimits};
 use crate::region::{region, sections, Reader};
 use crate::rng::uniform;
@@ -111,10 +112,7 @@ fn check_topology(params: &Params<'_>, topology: &BaseTopology) -> bool {
     let Ok(lattice) = lattice(params) else {
         return false;
     };
-    match candidates(lattice, topology) {
-        Ok(_) | Err(StructureError::DegreeAboveLimit) => true,
-        Err(_) => false,
-    }
+    admit_tiles(lattice, topology, |_| true)
 }
 
 /// The sign of the gauge at `pos`: `1` or `-1`.
@@ -191,11 +189,11 @@ pub(crate) fn glass_base(
     let defect = Code::TopologyIncompatible;
     let glass_value = glass_milli(params).ok_or(Code::ParamsMalformed)?;
     let lattice = lattice(params).map_err(|_| defect)?;
-    let tiles = select_tiles(lattice, topology, streams, labels.left, labels.right)?;
+    let Selected { tiles, edges, .. } =
+        select_tiles(lattice, topology, streams, labels.left, labels.right)?;
 
     let n = u32::try_from(topology.node_ids().len()).map_err(|_| Code::BoundsExceeded)?;
     let node_ids = topology.node_ids().to_vec();
-    let edges = sorted_edges(topology);
     let strong: BTreeSet<(u32, u32)> = tiles
         .iter()
         .flat_map(|tile| tile_edges(tile.nodes))
@@ -293,7 +291,7 @@ pub(crate) fn check_glass(params: &Params<'_>, instance: &Instance) -> Option<Ve
     let gauge = parse_gauge(gauge_payload, n)?;
     let edges = instance.edges();
 
-    let strong = mark_tiles(&tiles, edges, n)?;
+    let strong = mark_tiles(&tiles, &EdgeIndex::new(edges, n), n)?.strong;
 
     if instance.j().len() != edges.len() {
         return None;

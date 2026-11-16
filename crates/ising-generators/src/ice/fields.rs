@@ -15,11 +15,11 @@ use core::num::NonZeroU32;
 
 use crate::descriptor::{Contract, FieldSpec, Params, SizeBounds, TopologyStats, Value, ValueType};
 use crate::family::{BaseTopology, Construction, InstanceBody, Streams};
-use crate::ice::build::lattice;
+use crate::ice::build::{admit_tiles, lattice};
 use crate::ice::glass::{check_glass, glass_base, metadata_region, GlassStreams};
 use crate::ice::topology::two_slot_nodes;
 use crate::ice::twisted_dimer::Recipe;
-use crate::ice::{candidates, StructureError};
+
 use crate::instance::{Instance, InstanceLimits};
 use crate::rng::{shuffle, uniform};
 use crate::Code;
@@ -160,16 +160,10 @@ fn check_topology(params: &Params<'_>, topology: &BaseTopology) -> bool {
     let Ok(lattice) = lattice(params) else {
         return false;
     };
-    match candidates(lattice, topology) {
-        Ok(found) => {
-            let Some(count) = field_count(params, topology.node_ids().len()) else {
-                return false;
-            };
-            two_slot_nodes(topology, &found).is_ok_and(|slots| count <= slots)
-        }
-        Err(StructureError::DegreeAboveLimit) => true,
-        Err(_) => false,
-    }
+    admit_tiles(lattice, topology, |found| {
+        field_count(params, topology.node_ids().len())
+            .is_some_and(|count| two_slot_nodes(topology, found).is_ok_and(|slots| count <= slots))
+    })
 }
 
 fn generate(

@@ -187,15 +187,23 @@ fn check_order(order: &[u32], len: usize) -> Result<(), StructureError> {
 /// Try to match left spine `root`, following augmenting paths in the order
 /// of `adj`. This is the recursive `try(l)` with an explicit stack: each
 /// frame is a left spine and the next position in its list.
+///
+/// A right spine counts as visited when its `visited` entry equals `stamp`,
+/// so one buffer serves every root without a reset.
+///
+/// `stack` is scratch space that the caller reuses across roots.
 fn augment(
     root: usize,
-    adj: &[Vec<usize>],
-    visited: &mut [bool],
+    adj: &Adjacency,
+    visited: &mut [usize],
+    stamp: usize,
     matched: &mut [Option<usize>],
+    stack: &mut Vec<(usize, usize)>,
 ) -> Result<(), StructureError> {
-    let mut stack: Vec<(usize, usize)> = vec![(root, 0)];
+    stack.clear();
+    stack.push((root, 0));
     while let Some(&(left, position)) = stack.last() {
-        let list = adj.get(left).ok_or(StructureError::Overflow)?;
+        let list = adj.list(left)?;
         let Some(&right) = list.get(position) else {
             let _ = stack.pop();
             continue;
@@ -204,10 +212,10 @@ fn augment(
             top.1 = position.saturating_add(1);
         }
         let seen = visited.get_mut(right).ok_or(StructureError::Overflow)?;
-        if *seen {
+        if *seen == stamp {
             continue;
         }
-        *seen = true;
+        *seen = stamp;
         let owner = matched
             .get(right)
             .copied()
@@ -217,10 +225,10 @@ fn augment(
             continue;
         }
         // Success: every frame takes the right spine it just tried.
-        for &(frame_left, next_position) in &stack {
+        for &(frame_left, next_position) in stack.iter() {
             let chosen = adj
-                .get(frame_left)
-                .and_then(|l| l.get(next_position.saturating_sub(1)))
+                .list(frame_left)?
+                .get(next_position.saturating_sub(1))
                 .copied()
                 .ok_or(StructureError::Overflow)?;
             *matched.get_mut(chosen).ok_or(StructureError::Overflow)? = Some(frame_left);
@@ -228,6 +236,185 @@ fn augment(
         return Ok(());
     }
     Ok(())
+}
+
+/// The right spines of each left spine, in one flat array.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Adjacency {
+    /// `starts[l]..starts[l + 1]` is the range of left spine `l` in `right`.
+    starts: Vec<usize>,
+    /// Right spine indices.
+    right: Vec<usize>,
+}
+
+impl Adjacency {
+    fn list(&self, left: usize) -> Result<&[usize], StructureError> {
+        let start = *self.starts.get(left).ok_or(StructureError::Overflow)?;
+        let end = *self
+            .starts
+            .get(left.saturating_add(1))
+            .ok_or(StructureError::Overflow)?;
+        self.right.get(start..end).ok_or(StructureError::Overflow)
+    }
+}
+
+/// The nonce-independent part of [`select`]: the free tiles and the spine
+/// tile of each `(left, right)` spine pair, as indices into the candidate
+/// tiles. Build it once per topology and call [`SelectGraph::select`] for each
+/// pair of orders.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SelectGraph {
+    /// The number of candidate tiles.
+    candidate_count: usize,
+    /// Free tiles, in candidate order.
+    free: Vec<usize>,
+    /// The right spines of each left spine, ascending.
+    adj: Adjacency,
+    /// Parallel to `adj.right`: the tile of each `(left, right)` pair.
+    tiles: Vec<usize>,
+    /// The number of right spines.
+    right_len: usize,
+}
+
+impl SelectGraph {
+    /// The graph of `candidates` split by `sides`.
+    ///
+    /// # Errors
+    ///
+    /// [`StructureError::Overflow`] when `sides` does not match `candidates`.
+    pub(crate) fn new(candidates: &Candidates, sides: &Sides) -> Result<Self, StructureError> {
+        let mut tile_of: BTreeMap<(usize, usize), usize> = BTreeMap::new();
+        let mut free: Vec<usize> = Vec::new();
+        for (at, spine) in candidates.spines.iter().enumerate() {
+            let Some([e, f]) = spine else {
+                free.push(at);
+                continue;
+            };
+            let straight = (sides.left.binary_search(e), sides.right.binary_search(f));
+            let swapped = (sides.left.binary_search(f), sides.right.binary_search(e));
+            let (Ok(l), Ok(r)) = (if straight.0.is_ok() {
+                straight
+            } else {
+                swapped
+            }) else {
+                return Err(StructureError::Overflow);
+            };
+            // Two distinct candidate tiles cannot share both spine edges, since
+            // the two edges name all four nodes.
+            if tile_of.insert((l, r), at).is_some() {
+                return Err(StructureError::Overflow);
+            }
+        }
+        let mut starts = vec![0usize; sides.left.len().saturating_add(1)];
+        for &(l, _) in tile_of.keys() {
+            let slot = starts
+                .get_mut(l.saturating_add(1))
+                .ok_or(StructureError::Overflow)?;
+            *slot = slot.saturating_add(1);
+        }
+        for i in 1..starts.len() {
+            let before = starts.get(i - 1).copied().unwrap_or(0);
+            if let Some(slot) = starts.get_mut(i) {
+                *slot = slot.saturating_add(before);
+            }
+        }
+        // `tile_of` iterates in `(l, r)` order, so each left run is contiguous.
+        let (right, tiles): (Vec<usize>, Vec<usize>) =
+            tile_of.into_iter().map(|((_, r), at)| (r, at)).unzip();
+        Ok(Self {
+            candidate_count: candidates.tiles.len(),
+            free,
+            adj: Adjacency { starts, right },
+            tiles,
+            right_len: sides.right.len(),
+        })
+    }
+
+    /// The number of left spines.
+    pub(crate) fn left_len(&self) -> usize {
+        self.adj.starts.len().saturating_sub(1)
+    }
+
+    /// The number of right spines.
+    pub(crate) const fn right_len(&self) -> usize {
+        self.right_len
+    }
+
+    /// The selection for one pair of orders, as ascending indices into the
+    /// candidate tiles. See [`select`].
+    ///
+    /// # Errors
+    ///
+    /// [`StructureError::BadOrder`] when an order has the wrong length or
+    /// repeats or exceeds an index.
+    pub(crate) fn select(
+        &self,
+        left_order: &[u32],
+        right_order: &[u32],
+    ) -> Result<Vec<usize>, StructureError> {
+        check_order(left_order, self.left_len())?;
+        let rank = ranks(right_order, self.right_len)?;
+        // Each left list, ascending by rank. The ranks are distinct, so the
+        // result does not depend on the order the list starts in.
+        let mut pairs: Vec<(usize, usize)> = self
+            .adj
+            .right
+            .iter()
+            .copied()
+            .zip(self.tiles.iter().copied())
+            .collect();
+        for l in 0..self.left_len() {
+            let start = self.adj.starts.get(l).copied().unwrap_or(0);
+            let end = self
+                .adj
+                .starts
+                .get(l.saturating_add(1))
+                .copied()
+                .unwrap_or(0);
+            if let Some(list) = pairs.get_mut(start..end) {
+                list.sort_by_key(|(r, _)| rank.get(*r).copied().unwrap_or(usize::MAX));
+            }
+        }
+        let (right, tiles): (Vec<usize>, Vec<usize>) = pairs.into_iter().unzip();
+        let adj = Adjacency {
+            starts: self.adj.starts.clone(),
+            right,
+        };
+        let mut matched: Vec<Option<usize>> = vec![None; self.right_len];
+        // Stamps start at 1, so the zeroed buffer reads as unvisited.
+        let mut visited = vec![0usize; self.right_len];
+        let mut stack = Vec::new();
+        for (stamp, &l) in (1usize..).zip(left_order) {
+            let root = usize::try_from(l).map_err(|_| StructureError::BadOrder)?;
+            augment(root, &adj, &mut visited, stamp, &mut matched, &mut stack)?;
+        }
+        // The tile of `(l, r)`: its position in the list of `l`.
+        let tile_at = |l: usize, r: usize| -> Option<usize> {
+            let start = adj.starts.get(l).copied()?;
+            let list = adj.list(l).ok()?;
+            let offset = list.iter().position(|&x| x == r)?;
+            tiles.get(start.checked_add(offset)?).copied()
+        };
+        // Marking the chosen candidates and reading them back in index order
+        // sorts them, because the candidates are ascending.
+        let mut chosen = vec![false; self.candidate_count];
+        let mut mark = |at: usize| -> Result<(), StructureError> {
+            *chosen.get_mut(at).ok_or(StructureError::Overflow)? = true;
+            Ok(())
+        };
+        for &at in &self.free {
+            mark(at)?;
+        }
+        for (r, owner) in matched.iter().enumerate() {
+            if let Some(l) = owner {
+                mark(tile_at(*l, r).ok_or(StructureError::Overflow)?)?;
+            }
+        }
+        Ok((0..self.candidate_count)
+            .zip(chosen)
+            .filter_map(|(at, on)| on.then_some(at))
+            .collect())
+    }
 }
 
 /// Select the tiles: free tiles plus a maximum matching of spine tiles.
@@ -251,47 +438,16 @@ pub fn select(
     right_order: &[u32],
 ) -> Result<Vec<Tile>, StructureError> {
     check_order(left_order, sides.left.len())?;
-    let rank = ranks(right_order, sides.right.len())?;
-    let mut tile_of: BTreeMap<(usize, usize), Tile> = BTreeMap::new();
-    let mut selected: Vec<Tile> = Vec::new();
-    for (tile, spine) in candidates.tiles.iter().zip(&candidates.spines) {
-        let Some([e, f]) = spine else {
-            selected.push(*tile);
-            continue;
-        };
-        let straight = (sides.left.binary_search(e), sides.right.binary_search(f));
-        let swapped = (sides.left.binary_search(f), sides.right.binary_search(e));
-        let (Ok(l), Ok(r)) = (if straight.0.is_ok() {
-            straight
-        } else {
-            swapped
-        }) else {
-            return Err(StructureError::Overflow);
-        };
-        // Two distinct candidate tiles cannot share both spine edges, since
-        // the two edges name all four nodes.
-        if tile_of.insert((l, r), *tile).is_some() {
-            return Err(StructureError::Overflow);
-        }
-    }
-    let mut adj: Vec<Vec<usize>> = vec![Vec::new(); sides.left.len()];
-    for &(l, r) in tile_of.keys() {
-        adj.get_mut(l).ok_or(StructureError::Overflow)?.push(r);
-    }
-    for list in &mut adj {
-        list.sort_by_key(|r| rank.get(*r).copied().unwrap_or(usize::MAX));
-    }
-    let mut matched: Vec<Option<usize>> = vec![None; sides.right.len()];
-    for &l in left_order {
-        let mut visited = vec![false; sides.right.len()];
-        let root = usize::try_from(l).map_err(|_| StructureError::BadOrder)?;
-        augment(root, &adj, &mut visited, &mut matched)?;
-    }
-    for (r, owner) in matched.iter().enumerate() {
-        if let Some(l) = owner {
-            selected.push(*tile_of.get(&(*l, r)).ok_or(StructureError::Overflow)?);
-        }
-    }
-    selected.sort_unstable();
-    Ok(selected)
+    let _ = ranks(right_order, sides.right.len())?;
+    SelectGraph::new(candidates, sides)?
+        .select(left_order, right_order)?
+        .into_iter()
+        .map(|at| {
+            candidates
+                .tiles
+                .get(at)
+                .copied()
+                .ok_or(StructureError::Overflow)
+        })
+        .collect()
 }

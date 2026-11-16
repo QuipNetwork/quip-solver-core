@@ -5,6 +5,25 @@ This file documents changes to the Quip solver contract.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.0.16-rc2
+
+### Added
+
+- Python `families.Generator`, a descriptor admitted once on one topology.
+  Its `generate(nonce)` builds the same instance as `families.generate`.
+  Its `generate_batch(nonces, threads=0)` builds many nonces on Rust threads
+  and returns a `SaltSkipped` object for each skipped salt.
+- Python `Instance.node_ids_i64`, `edges_i64`, `h_i64`, and `j_i64`:
+  little-endian `int64` bytes for `numpy.frombuffer`.
+
+### Changed
+
+- `families.generate`, `Instance.digest`, and `Instance.canonical_bytes`
+  release the Python global interpreter lock while they build.
+- With the `std` feature, a `BaseTopology` keeps the ice tile structure of each
+  lattice after the first use, and later salts of the four ice families reuse
+  it. The instances stay byte for byte the same.
+
 ## 0.0.16-rc1
 
 ### Changed
