@@ -5,6 +5,15 @@ This file documents changes to the Quip solver contract.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+
+- `FamilyLease::context(salt_index, instance)` builds the `FamilyContext` of a
+  salt from the instance `FamilyLease::generate` returned for it. A sampler that
+  works a lease itself can now route its salts through the same family code
+  path as the default session path.
+
 ## 0.0.16-rc2
 
 ### Added

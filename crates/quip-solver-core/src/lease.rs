@@ -143,6 +143,23 @@ impl FamilyLease {
         .map_err(|code| SaltFault::Defect(Defect::ConstructionCode(code)))?;
         ising_generators::family::generate_instance(&admitted, &self.topology, &self.bounds, nonce)
     }
+    /// The family context of salt `salt_index`, built around the instance that
+    /// [`generate`](Self::generate) returned for that salt's nonce.
+    ///
+    /// A sampler that works a lease itself (`Sampler::generates_locally`) uses
+    /// this to hand a salt to the same family code path as the default session
+    /// path, for example its own `Sampler::sample_family`. The context carries
+    /// this lease's contract and parameters and `FamilySource::Lease`, exactly
+    /// as the default path builds it.
+    #[must_use]
+    pub fn context(&self, salt_index: u64, instance: Arc<Instance>) -> FamilyContext {
+        FamilyContext::new(
+            self.contract,
+            Arc::clone(&self.params),
+            instance,
+            FamilySource::Lease { salt_index },
+        )
+    }
 }
 
 /// Salt indices a local sampler already pushed, stored as merged `start..end` ranges.
@@ -2092,6 +2109,25 @@ mod family_tests {
                 degree: 4
             }
         );
+    }
+
+    #[test]
+    fn a_family_lease_builds_the_context_of_a_generated_salt() {
+        let families = table();
+        let cache = Arc::new(LeaseTopology::new(&sparse(), &families));
+        let job = family_job(&UNIFORM_V1, &P_SPEC);
+        let (state, _) =
+            run_prepare(&job, Some(&cache), Some(&TARGET), &families, 512).expect("admitted");
+        let family = state.lease.family().expect("a family lease");
+        let instance = family
+            .generate(state.lease.nonce(1))
+            .expect("salt 1 is not skipped");
+        let bytes = instance.canonical_bytes().expect("bytes");
+        let context = family.context(1, Arc::new(instance));
+        assert_eq!(context.family_id(), UNIFORM_V1.family_id);
+        assert_eq!(context.params(), &P_SPEC[..]);
+        assert_eq!(context.source(), FamilySource::Lease { salt_index: 1 });
+        assert_eq!(context.instance().canonical_bytes().expect("bytes"), bytes);
     }
 
     #[test]
