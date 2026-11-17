@@ -369,14 +369,26 @@ Node `i` is bit `i % 8` of byte `i / 8`, lowest bit first. Bit
 `ceil(num_nodes / 8)` bytes, and its padding bits are `0`. The entries come in
 order of energy, lowest first.
 
-Three fields set where a seeded anneal starts. The value `0` in any of
-them means the solver picks.
+Three fields set where a seeded anneal starts. The value `0` in
+`reversal_s_milli` or `reversal_pause_us` means the solver picks. The value
+`0` in `start_beta_milli` selects the default start that follows the table.
 
 | Field | Used by | Meaning |
 |---|---|---|
 | `start_beta_milli`, 10 | Seeded SA | Inverse temperature the anneal starts from, in milli-units. |
 | `reversal_s_milli`, 11 | Seeded quantum processing unit | Anneal fraction `s` that the reverse anneal backs off to, in milli-units, from 1 to 999. |
 | `reversal_pause_us`, 12 | Seeded quantum processing unit | Pause at the reversal point, in microseconds. |
+
+A seeded SA run with `start_beta_milli` set to `0` starts at the midpoint of
+the beta range in the spacing of its own ladder:
+
+| Ladder | Default start |
+|---|---|
+| Geometric | `sqrt(beta_hot * beta_cold)` |
+| Linear | `(beta_hot + beta_cold) / 2` |
+
+The ladder then runs from the start to `beta_cold` over the same number of
+rungs as a cold run. A start larger than `beta_cold` holds the ladder at the start.
 
 The solver applies these rules:
 
