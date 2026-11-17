@@ -147,6 +147,9 @@ struct Advertised {
     max_degree: Option<u64>,
     max_local_field_milli: Option<u64>,
     exact_resolution_milli: Option<u64>,
+    /// `(name, type)` of each option in `solveOptions`, the type spelled as
+    /// the protobuf JSON mapping does, such as `OPTION_TYPE_INT`.
+    solve_options: Vec<(String, String)>,
 }
 
 impl Advertised {
@@ -186,6 +189,23 @@ impl Advertised {
                 .ok_or("a feature is not a string")
         })
         .collect::<Result<Vec<_>, _>>()?;
+        let solve_options = match json.get("solveOptions") {
+            None => &[][..],
+            Some(v) => v
+                .as_array()
+                .ok_or("--capabilities solveOptions is not an array")?,
+        }
+        .iter()
+        .map(|o| {
+            let field = |key: &str| {
+                o.get(key)
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                    .ok_or_else(|| format!("a solveOptions entry has no string {key}"))
+            };
+            Ok((field("name")?, field("type")?))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
         Ok(Self {
             backend: text("backend")?,
             algorithm: text("algorithm")?,
@@ -195,6 +215,7 @@ impl Advertised {
             max_degree: optional("maxDegree")?,
             max_local_field_milli: optional("maxLocalFieldMilli")?,
             exact_resolution_milli: optional("exactResolutionMilli")?,
+            solve_options,
         })
     }
 
@@ -632,6 +653,7 @@ pub async fn drive_solve(bin_path: &str) -> SolveReport {
     resolution_cases(bin_path, &adv, &mut report).await;
     anneal_time_case(bin_path, &adv, &base, &mut report).await;
     embed_case(bin_path, &adv, &mut report).await;
+    option_cases(bin_path, &adv, &base, &mut report).await;
     report
 }
 
@@ -804,6 +826,92 @@ async fn schedule_case(bin: &str, adv: &Advertised, base: &Problem, report: &mut
         expect_refused(bin, &linear.bytes(), EXIT_CONFIG_INVALID).await
     };
     report.grade("linear-schedule", result);
+}
+
+/// A value of the type `kind` names, for the valid-option case. The gate
+/// cannot know a solver's range, so it sends the plainest value of the type.
+fn valid_option_value(kind: &str) -> Result<Value, String> {
+    match kind {
+        "OPTION_TYPE_BOOL" => Ok(json!(true)),
+        "OPTION_TYPE_INT" => Ok(json!(1)),
+        "OPTION_TYPE_NUMBER" => Ok(json!(1.5)),
+        "OPTION_TYPE_STRING" => Ok(json!("default")),
+        other => Err(format!("solveOptions lists the unknown type {other}")),
+    }
+}
+
+/// A value that is not of the type `kind` names.
+fn wrong_option_value(kind: &str) -> Value {
+    if kind == "OPTION_TYPE_STRING" {
+        json!(1)
+    } else {
+        json!("not-the-declared-type")
+    }
+}
+
+/// The base problem with `options` as its `options` object.
+fn with_options(base: &Problem, options: Value) -> Vec<u8> {
+    edited(base, |o| {
+        let _ = o.insert("options".into(), options);
+    })
+}
+
+/// Options: every advertised option takes a valid value, an unadvertised
+/// name is refused, and a value of the wrong type is refused. The refusals
+/// are exit 64 with nothing on stdout, as for any malformed request.
+async fn option_cases(bin: &str, adv: &Advertised, base: &Problem, report: &mut SolveReport) {
+    let mut valid = Ok(());
+    for (name, kind) in &adv.solve_options {
+        let attempt = match valid_option_value(kind) {
+            Ok(value) => match run(
+                bin,
+                &["--solve"],
+                &with_options(base, json!({ name: value })),
+            )
+            .await
+            {
+                Ok(run) => check_solutions(adv, base, &run, false).map(|_| ()),
+                Err(why) => Err(why),
+            },
+            Err(why) => Err(why),
+        };
+        if let Err(why) = attempt {
+            valid = Err(format!("option {name}: {why}"));
+            break;
+        }
+    }
+    if adv.solve_options.is_empty() {
+        report.push(
+            "option-valid",
+            CaseOutcome::Skipped("the solver advertises no solveOptions".into()),
+        );
+    } else {
+        report.grade("option-valid", valid);
+    }
+
+    // A name no solver advertises, so it is undeclared for every solver.
+    let undeclared = with_options(base, json!({"quip-conformance-undeclared": true}));
+    report.grade(
+        "option-undeclared",
+        expect_refused(bin, &undeclared, EXIT_CONFIG_INVALID).await,
+    );
+
+    let mut wrong = Ok(());
+    for (name, kind) in &adv.solve_options {
+        let input = with_options(base, json!({ name: wrong_option_value(kind) }));
+        if let Err(why) = expect_refused(bin, &input, EXIT_CONFIG_INVALID).await {
+            wrong = Err(format!("option {name}: {why}"));
+            break;
+        }
+    }
+    if adv.solve_options.is_empty() {
+        report.push(
+            "option-wrong-type",
+            CaseOutcome::Skipped("the solver advertises no solveOptions".into()),
+        );
+    } else {
+        report.grade("option-wrong-type", wrong);
+    }
 }
 
 /// A model just inside the limits solves; one just outside is capacity.

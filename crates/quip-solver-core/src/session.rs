@@ -24,7 +24,7 @@ use base64::Engine as _;
 use quip_proto::v1::miner_service_client::MinerServiceClient;
 use quip_proto::v1::{
     coord_msg, miner_msg, Capabilities, CoefficientEncoding, CoordMsg, FamilySupport, Fatal,
-    GeneratorAlgorithm, JobKind, JobRequest, MinerMsg, Ready,
+    GeneratorAlgorithm, JobKind, JobRequest, MinerMsg, Ready, SolveOption,
 };
 use quip_protocol::session::{
     algorithm_name, backend_name, build_hello, check_welcome, ExitCode, SessionConfig, SessionError,
@@ -136,6 +136,7 @@ pub fn capabilities(id: &BackendIdentity, stream_width: u32) -> Capabilities {
         solver_id: String::new(),
         generated_families: vec![],
         accepted_families: vec![],
+        solve_options: vec![],
     }
 }
 
@@ -173,6 +174,16 @@ struct CapabilitiesJson<'a> {
     generated_families: Vec<FamilySupportJson<'a>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     accepted_families: Vec<FamilySupportJson<'a>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    solve_options: Vec<SolveOptionJson<'a>>,
+}
+
+/// Protobuf JSON view of a [`SolveOption`].
+#[derive(Serialize)]
+struct SolveOptionJson<'a> {
+    name: &'a str,
+    #[serde(rename = "type")]
+    kind: &'static str,
 }
 
 /// Protobuf JSON view of a [`FamilySupport`].
@@ -262,6 +273,13 @@ fn advertised_capabilities<S: Sampler<C>, C: Coefficient>(
         .collect();
     families.solver_id().clone_into(&mut caps.solver_id);
     caps.accepted_families = families.accepted().to_vec();
+    caps.solve_options = S::solve_options()
+        .iter()
+        .map(|o| SolveOption {
+            name: o.name.to_owned(),
+            r#type: o.kind as i32,
+        })
+        .collect();
     if !S::accepts_leases() {
         // A solver that declines leases expands none, so it lists no
         // generators and no generated families, and serves only ISING_SAMPLE.
@@ -368,6 +386,14 @@ fn capabilities_json_from(c: &Capabilities) -> String {
         solver_id: &c.solver_id,
         generated_families: family_support_json(&c.generated_families),
         accepted_families: family_support_json(&c.accepted_families),
+        solve_options: c
+            .solve_options
+            .iter()
+            .map(|o| SolveOptionJson {
+                name: &o.name,
+                kind: o.r#type().as_str_name(),
+            })
+            .collect(),
     };
     #[expect(
         clippy::expect_used,
@@ -2597,6 +2623,53 @@ mod tests {
         assert_eq!(
             hex,
             "1a020103206428c801320973747265616d696e6738024001520201065a020102600768019201150a10717569702f636861726765642d6963651201019201180a13717569702f646566656374732d7374617469631201019201150a10717569702f666c6f772d7374617469631201019201140a0f717569702f6963652d6669656c64731201019201130a0e717569702f6963652d676c61737312010192011a0a15717569702f706f6c617269746f6e2d73746174696312010192011b0a16717569702f747769737465642d6963652d64696d657212010192011f0a1a717569702f74776f2d636f6d6d6f646974792d726f7574696e67120101"
+        );
+    }
+
+    #[test]
+    fn declared_solve_options_reach_the_message_and_the_printer() {
+        use crate::OptionDecl;
+        use quip_proto::v1::OptionType;
+        struct WithOptions;
+        impl Sampler for WithOptions {
+            fn sample(
+                &self,
+                _graph: &crate::ising::IsingGraph,
+                _params: &crate::SampleParams,
+            ) -> Result<Vec<crate::SamplerResult>, crate::SampleError> {
+                Ok(vec![])
+            }
+            fn solve_options() -> &'static [OptionDecl] {
+                &[
+                    OptionDecl {
+                        name: "restarts",
+                        kind: OptionType::Int,
+                    },
+                    OptionDecl {
+                        name: "mode",
+                        kind: OptionType::String,
+                    },
+                ]
+            }
+        }
+        let caps = capabilities_for::<WithOptions, f64>(&test_identity()).expect("valid");
+        let listed: Vec<_> = caps
+            .solve_options
+            .iter()
+            .map(|o| (o.name.as_str(), o.r#type()))
+            .collect();
+        assert_eq!(
+            listed,
+            [("restarts", OptionType::Int), ("mode", OptionType::String)]
+        );
+        let v: serde_json::Value =
+            serde_json::from_str(&capabilities_json_from(&caps)).expect("printer emits JSON");
+        assert_eq!(
+            v.get("solveOptions").expect("solveOptions"),
+            &serde_json::json!([
+                {"name": "restarts", "type": "OPTION_TYPE_INT"},
+                {"name": "mode", "type": "OPTION_TYPE_STRING"}
+            ])
         );
     }
 

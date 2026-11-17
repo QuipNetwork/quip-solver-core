@@ -24,6 +24,7 @@ fn hello_roundtrips_through_prost() {
             solver_id: String::new(),
             generated_families: vec![],
             accepted_families: vec![],
+            solve_options: vec![],
         }),
     };
     let msg = MinerMsg {
@@ -62,6 +63,7 @@ fn capabilities_roundtrip_keeps_optional_limit_presence() {
         solver_id: String::new(),
         generated_families: vec![],
         accepted_families: vec![],
+        solve_options: vec![],
     };
     let bytes = c.encode_to_vec();
     assert_eq!(Capabilities::decode(&bytes[..]).expect("decode"), c);

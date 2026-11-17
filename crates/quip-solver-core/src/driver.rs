@@ -45,6 +45,11 @@ pub struct ProblemJson {
     pub beta_schedule_type: BetaSchedule,
     /// PRNG seed.
     pub seed: u64,
+    /// Per-algorithm options: names the solver lists in `--capabilities`
+    /// under `solveOptions`, each with a JSON scalar of the listed type.
+    /// Optional: absent is no options. A name the solver does not list, or a
+    /// value of another type, is refused before sampling.
+    pub options: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 /// One completed read, as written to stdout.
@@ -183,6 +188,16 @@ fn convert_units<C: Coefficient>(name: &str, values: &[f64]) -> Result<Vec<C>, S
         .collect()
 }
 
+/// The `options` object checked against what `S` declares, or none.
+fn checked_options<S: Sampler<C>, C: Coefficient>(
+    raw: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> Result<crate::options::SolveOptions, SolveError> {
+    raw.map_or_else(
+        || Ok(crate::options::SolveOptions::new()),
+        |raw| crate::options::validate(raw, S::solve_options()).map_err(SolveError::Malformed),
+    )
+}
+
 /// Microseconds since `start`, saturating.
 fn micros_since(start: Instant) -> u64 {
     u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX)
@@ -281,6 +296,7 @@ pub fn solve<S: Sampler<C>, C: Coefficient>(
         serde_json::from_slice(input).map_err(|e| SolveError::Malformed(e.to_string()))?;
 
     check_request(sampler, id, &p)?;
+    let options = checked_options::<S, C>(p.options.as_ref())?;
 
     // JSON also accepts sub-milli values and values outside the wire range.
     // Preserve those inputs, while wire-representable models share the session
@@ -340,6 +356,7 @@ pub fn solve<S: Sampler<C>, C: Coefficient>(
         beta_range: p.beta_range,
         schedule: p.beta_schedule_type,
         seed: p.seed,
+        options,
     };
     let sample_started = Instant::now();
     let mut reads = sampler.sample(&graph, &params)?;
@@ -433,6 +450,104 @@ mod tests {
             matches!(err, SolveError::Malformed(_)),
             "a malformed problem document is a caller error, not {err:?}"
         );
+    }
+
+    /// Records the options it was given, in the first read's `spins`.
+    struct OptionsProbe;
+
+    impl Sampler for OptionsProbe {
+        fn sample(
+            &self,
+            graph: &IsingGraph,
+            params: &SampleParams,
+        ) -> Result<Vec<SamplerResult>, SampleError> {
+            // One read whose spins encode `restarts` as a count of `+1`s.
+            let restarts = match params.options.get("restarts") {
+                Some(crate::OptionValue::Int(n)) => usize::try_from(*n).unwrap_or(0),
+                _ => 0,
+            };
+            let mut spins = vec![-1_i8; graph.h.len()];
+            spins.iter_mut().take(restarts).for_each(|s| *s = 1);
+            Ok(vec![SamplerResult {
+                spins,
+                energy_milli: 0,
+            }])
+        }
+
+        fn solve_options() -> &'static [crate::OptionDecl] {
+            &[
+                crate::OptionDecl {
+                    name: "restarts",
+                    kind: quip_proto::v1::OptionType::Int,
+                },
+                crate::OptionDecl {
+                    name: "greedy",
+                    kind: quip_proto::v1::OptionType::Bool,
+                },
+            ]
+        }
+    }
+
+    fn problem_with(options: &str) -> Vec<u8> {
+        format!(
+            r#"{{"h":[0,0,0],"j":[],"edges":[],"num_reads":1,"num_sweeps":1,
+                "sweeps_per_beta":1,"beta_range":null,"seed":1{options}}}"#
+        )
+        .into_bytes()
+    }
+
+    #[test]
+    fn declared_options_reach_the_sampler() {
+        let out = solve(
+            &OptionsProbe,
+            &id(),
+            &problem_with(r#","options":{"restarts":2}"#),
+        )
+        .expect("declared option is accepted");
+        let v: serde_json::Value = serde_json::from_slice(&out).expect("json");
+        assert_eq!(
+            v.pointer("/0/spins").expect("spins"),
+            &serde_json::json!([1, 1, -1])
+        );
+    }
+
+    #[test]
+    fn absent_null_and_empty_options_are_no_options() {
+        for extra in ["", r#","options":null"#, r#","options":{}"#] {
+            let out = solve(&OptionsProbe, &id(), &problem_with(extra)).expect("accepted");
+            let v: serde_json::Value = serde_json::from_slice(&out).expect("json");
+            assert_eq!(
+                v.pointer("/0/spins").expect("spins"),
+                &serde_json::json!([-1, -1, -1]),
+                "{extra}"
+            );
+        }
+    }
+
+    #[test]
+    fn undeclared_and_wrong_type_options_are_refused_before_sampling() {
+        for extra in [
+            r#","options":{"nope":1}"#,
+            r#","options":{"restarts":"2"}"#,
+            r#","options":{"restarts":1.5}"#,
+            r#","options":{"greedy":1}"#,
+            r#","options":[1]"#,
+        ] {
+            let err = solve(&OptionsProbe, &id(), &problem_with(extra)).expect_err(extra);
+            assert!(matches!(err, SolveError::Malformed(_)), "{extra}: {err:?}");
+            assert_eq!(err.exit_code(), crate::ExitCode::ConfigInvalid);
+        }
+    }
+
+    #[test]
+    fn a_sampler_that_declares_no_options_refuses_any() {
+        let err = solve(
+            &StubSampler,
+            &id(),
+            &problem_with(r#","options":{"restarts":1}"#),
+        )
+        .expect_err("no options are declared");
+        assert!(matches!(err, SolveError::Malformed(_)), "{err:?}");
     }
 
     struct WrongLossy;

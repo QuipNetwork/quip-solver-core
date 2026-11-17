@@ -26,6 +26,13 @@ that declines leases lists only `ISING_SAMPLE` and no generators. It answers an
 `ISING_GENERATE` job with `Reject` reason `UNSUPPORTED_KIND`. The Rust
 `Sampler::accepts_leases` switch makes the session do all three.
 
+`solve_options`, `Capabilities` field 20, lists the options that `--solve`
+accepts in its `options` object. Each entry has a `name` and a `type`. The
+type is `OPTION_TYPE_BOOL`, `OPTION_TYPE_INT`, `OPTION_TYPE_NUMBER`, or
+`OPTION_TYPE_STRING`. An empty list means the solver accepts no options. The
+Rust `Sampler::solve_options` method declares the list. Hello and
+`GetCapabilities` carry the same list.
+
 ### `--solve`
 
 This mode reads one problem as JSON on stdin. It writes the solutions as JSON
@@ -33,8 +40,8 @@ on stdout, then exits.
 
 `XQSA` and IsingMark use `--solve`.
 
-The input is one JSON object. Every key except `beta_schedule_type` and
-`anneal_time_us` is required. A solver rejects any other key.
+The input is one JSON object. Every key except `beta_schedule_type`,
+`anneal_time_us`, and `options` is required. A solver rejects any other key.
 
 | Key | Type | Meaning |
 |---|---|---|
@@ -48,6 +55,7 @@ The input is one JSON object. Every key except `beta_schedule_type` and
 | `beta_schedule_type` | `"geometric"` or `"linear"` | Optional. Absent means `"geometric"`. |
 | `seed` | integer from 0 to 2^64 − 1 | Random seed. The same seed gives the same samples. |
 | `anneal_time_us` | integer, at least 1 | Optional. Anneal time of each read in microseconds, for a quantum annealer. Only a solver that lists `anneal-time` accepts it. |
+| `options` | object | Optional. Absent, `null`, or `{}` means no options. Each key is an option name from `solve_options`. Each value is a JSON scalar of the listed type. A solver passes the object to its algorithm without change. |
 
 A quantum annealer has no sweeps, beta ladder, or seed. It still requires
 `num_sweeps`, `sweeps_per_beta`, `beta_range`, and `seed`, and echoes them in
@@ -110,6 +118,10 @@ The input is malformed, exit 64, when any of these holds:
 - `beta_schedule_type` is not `"geometric"` or `"linear"`.
 - `beta_schedule_type` is `"linear"` and the solver does not list `linear-schedule`.
 - `anneal_time_us` is present and the solver does not list `anneal-time`, or it is 0.
+- `options` is not an object, or it has a key that `solve_options` does not list.
+- An option value has a type other than the one `solve_options` lists for it.
+  `OPTION_TYPE_NUMBER` takes any JSON number, `OPTION_TYPE_INT` takes only an
+  integer, and `null` is never valid.
 
 The model exceeds the solver, exit 65, when any of these holds:
 
@@ -497,6 +509,7 @@ The seventeen defaulted methods are:
 |---|---|
 | `sample_stream` | Serial loop over `sample`. Polls the cancel token at dequeue. |
 | `accepts_leases` | `true`. `false` lists only `ISING_SAMPLE`, advertises no generators and no generated families, and rejects every `ISING_GENERATE` job with `UNSUPPORTED_KIND`. |
+| `solve_options` | None. Lists the `--solve` options the solver accepts, each with a name and a type. The SDK refuses an undeclared option or a value of the wrong type with exit 64 before it samples. The sampler reads the validated values from `SampleParams::options`. |
 | `accepts_warm_start` | `false`. `true` adds `initial-spins` to the advertised features. |
 | `sample_warm` | Ignores the `WarmStart` and calls `sample`. |
 | `sample_stream_warm` | Serial loop over `sample_warm` for a seeded job and `sample` for a cold one. |

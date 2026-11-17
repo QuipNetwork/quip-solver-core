@@ -373,6 +373,18 @@ pub struct Capabilities {
     pub generated_families: ::prost::alloc::vec::Vec<FamilySupport>,
     #[prost(message, repeated, tag = "19")]
     pub accepted_families: ::prost::alloc::vec::Vec<FamilySupport>,
+    /// Options `--solve` accepts in its `options` object, each with the scalar
+    /// type its value must have. Empty means the solver accepts none.
+    #[prost(message, repeated, tag = "20")]
+    pub solve_options: ::prost::alloc::vec::Vec<SolveOption>,
+}
+/// One option a solver accepts in `--solve`.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SolveOption {
+    #[prost(string, tag = "1")]
+    pub name: ::prost::alloc::string::String,
+    #[prost(enumeration = "OptionType", tag = "2")]
+    pub r#type: i32,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct IsingProblemGenerator {
@@ -773,6 +785,44 @@ impl RejectReason {
             "TARGET_MISSING" => Some(Self::TargetMissing),
             "FAMILY_UNSUPPORTED" => Some(Self::FamilyUnsupported),
             "NO_SOLUTION" => Some(Self::NoSolution),
+            _ => None,
+        }
+    }
+}
+/// Scalar type of one `--solve` option value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum OptionType {
+    Unspecified = 0,
+    Bool = 1,
+    /// a JSON integer
+    Int = 2,
+    /// any JSON number, integer or not
+    Number = 3,
+    String = 4,
+}
+impl OptionType {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "OPTION_TYPE_UNSPECIFIED",
+            Self::Bool => "OPTION_TYPE_BOOL",
+            Self::Int => "OPTION_TYPE_INT",
+            Self::Number => "OPTION_TYPE_NUMBER",
+            Self::String => "OPTION_TYPE_STRING",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "OPTION_TYPE_UNSPECIFIED" => Some(Self::Unspecified),
+            "OPTION_TYPE_BOOL" => Some(Self::Bool),
+            "OPTION_TYPE_INT" => Some(Self::Int),
+            "OPTION_TYPE_NUMBER" => Some(Self::Number),
+            "OPTION_TYPE_STRING" => Some(Self::String),
             _ => None,
         }
     }

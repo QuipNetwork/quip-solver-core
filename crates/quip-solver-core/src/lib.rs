@@ -24,6 +24,7 @@ mod job;
 mod lease;
 pub mod limits;
 pub mod logging;
+pub mod options;
 mod pipeline;
 mod session;
 mod task;
@@ -39,6 +40,7 @@ pub use ising::{
 };
 pub use lease::{FamilyLease, Lease, LeaseSink, LeaseStopped};
 pub use limits::ModelLimits;
+pub use options::{OptionDecl, OptionValue, SolveOptions};
 pub use quip_protocol::lease::TopologyView;
 pub use session::{
     capabilities, capabilities_for, run, run_code, OpenError, INITIAL_SPINS_FEATURE,
@@ -271,6 +273,22 @@ pub trait Sampler<C: Coefficient = f64>: Send + Sync + 'static {
         cancel: CancelToken,
     ) {
         serial_stream(self, jobs, &out, &cancel, |j| (j, None, None));
+    }
+
+    /// The options `--solve` accepts in its `options` object, each with the
+    /// type its value must have. Answered without a device, because
+    /// `--capabilities` advertises it as `solve_options`.
+    ///
+    /// Default: none. `--solve` refuses, with exit 64 and before sampling, an
+    /// option that is not listed here or whose value has another type. A
+    /// sampler therefore finds only declared names, with values of the declared
+    /// type, in [`SampleParams::options`].
+    #[must_use]
+    fn solve_options() -> &'static [OptionDecl]
+    where
+        Self: Sized,
+    {
+        &[]
     }
 
     /// Whether this backend serves `ISING_GENERATE` leases. Answered without a

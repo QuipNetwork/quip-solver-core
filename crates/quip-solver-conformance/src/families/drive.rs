@@ -2000,6 +2000,7 @@ mod tests {
             protocol_version: 2,
             generated_families: list.clone(),
             accepted_families: list,
+            solve_options: vec![],
             ..Capabilities::default()
         }
     }
@@ -3109,6 +3110,7 @@ mod tests {
             max_degree: None,
             generated_families: list.clone(),
             accepted_families: list,
+            solve_options: vec![],
             ..mock_caps()
         }
     }

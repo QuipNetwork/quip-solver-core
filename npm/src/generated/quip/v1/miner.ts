@@ -542,6 +542,60 @@ export function rejectReasonToJSON(object: RejectReason): string {
   }
 }
 
+/** Scalar type of one `--solve` option value. */
+export enum OptionType {
+  OPTION_TYPE_UNSPECIFIED = 0,
+  OPTION_TYPE_BOOL = 1,
+  /** OPTION_TYPE_INT - a JSON integer */
+  OPTION_TYPE_INT = 2,
+  /** OPTION_TYPE_NUMBER - any JSON number, integer or not */
+  OPTION_TYPE_NUMBER = 3,
+  OPTION_TYPE_STRING = 4,
+  UNRECOGNIZED = -1,
+}
+
+export function optionTypeFromJSON(object: any): OptionType {
+  switch (object) {
+    case 0:
+    case "OPTION_TYPE_UNSPECIFIED":
+      return OptionType.OPTION_TYPE_UNSPECIFIED;
+    case 1:
+    case "OPTION_TYPE_BOOL":
+      return OptionType.OPTION_TYPE_BOOL;
+    case 2:
+    case "OPTION_TYPE_INT":
+      return OptionType.OPTION_TYPE_INT;
+    case 3:
+    case "OPTION_TYPE_NUMBER":
+      return OptionType.OPTION_TYPE_NUMBER;
+    case 4:
+    case "OPTION_TYPE_STRING":
+      return OptionType.OPTION_TYPE_STRING;
+    case -1:
+    case "UNRECOGNIZED":
+    default:
+      return OptionType.UNRECOGNIZED;
+  }
+}
+
+export function optionTypeToJSON(object: OptionType): string {
+  switch (object) {
+    case OptionType.OPTION_TYPE_UNSPECIFIED:
+      return "OPTION_TYPE_UNSPECIFIED";
+    case OptionType.OPTION_TYPE_BOOL:
+      return "OPTION_TYPE_BOOL";
+    case OptionType.OPTION_TYPE_INT:
+      return "OPTION_TYPE_INT";
+    case OptionType.OPTION_TYPE_NUMBER:
+      return "OPTION_TYPE_NUMBER";
+    case OptionType.OPTION_TYPE_STRING:
+      return "OPTION_TYPE_STRING";
+    case OptionType.UNRECOGNIZED:
+    default:
+      return "UNRECOGNIZED";
+  }
+}
+
 export interface MinerMsg {
   hello?: Hello | undefined;
   ready?: Ready | undefined;
@@ -834,6 +888,17 @@ export interface Capabilities {
   solverId: string;
   generatedFamilies: FamilySupport[];
   acceptedFamilies: FamilySupport[];
+  /**
+   * Options `--solve` accepts in its `options` object, each with the scalar
+   * type its value must have. Empty means the solver accepts none.
+   */
+  solveOptions: SolveOption[];
+}
+
+/** One option a solver accepts in `--solve`. */
+export interface SolveOption {
+  name: string;
+  type: OptionType;
 }
 
 export interface IsingProblemGenerator {
@@ -3985,6 +4050,7 @@ function createBaseCapabilities(): Capabilities {
     solverId: "",
     generatedFamilies: [],
     acceptedFamilies: [],
+    solveOptions: [],
   };
 }
 
@@ -4046,6 +4112,9 @@ export const Capabilities: MessageFns<Capabilities> = {
     }
     for (const v of message.acceptedFamilies) {
       FamilySupport.encode(v!, writer.uint32(154).fork()).join();
+    }
+    for (const v of message.solveOptions) {
+      SolveOption.encode(v!, writer.uint32(162).fork()).join();
     }
     return writer;
   },
@@ -4223,6 +4292,14 @@ export const Capabilities: MessageFns<Capabilities> = {
           message.acceptedFamilies.push(FamilySupport.decode(reader, reader.uint32()));
           continue;
         }
+        case 20: {
+          if (tag !== 162) {
+            break;
+          }
+
+          message.solveOptions.push(SolveOption.decode(reader, reader.uint32()));
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -4303,6 +4380,11 @@ export const Capabilities: MessageFns<Capabilities> = {
         : globalThis.Array.isArray(object?.accepted_families)
         ? object.accepted_families.map((e: any) => FamilySupport.fromJSON(e))
         : [],
+      solveOptions: globalThis.Array.isArray(object?.solveOptions)
+        ? object.solveOptions.map((e: any) => SolveOption.fromJSON(e))
+        : globalThis.Array.isArray(object?.solve_options)
+        ? object.solve_options.map((e: any) => SolveOption.fromJSON(e))
+        : [],
     };
   },
 
@@ -4359,6 +4441,9 @@ export const Capabilities: MessageFns<Capabilities> = {
     if (message.acceptedFamilies?.length) {
       obj.acceptedFamilies = message.acceptedFamilies.map((e) => FamilySupport.toJSON(e));
     }
+    if (message.solveOptions?.length) {
+      obj.solveOptions = message.solveOptions.map((e) => SolveOption.toJSON(e));
+    }
     return obj;
   },
 
@@ -4384,6 +4469,83 @@ export const Capabilities: MessageFns<Capabilities> = {
     message.solverId = object.solverId ?? "";
     message.generatedFamilies = object.generatedFamilies?.map((e) => FamilySupport.fromPartial(e)) || [];
     message.acceptedFamilies = object.acceptedFamilies?.map((e) => FamilySupport.fromPartial(e)) || [];
+    message.solveOptions = object.solveOptions?.map((e) => SolveOption.fromPartial(e)) || [];
+    return message;
+  },
+};
+
+function createBaseSolveOption(): SolveOption {
+  return { name: "", type: 0 };
+}
+
+export const SolveOption: MessageFns<SolveOption> = {
+  encode(message: SolveOption, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.name !== "") {
+      writer.uint32(10).string(message.name);
+    }
+    if (message.type !== 0) {
+      writer.uint32(16).int32(message.type);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): SolveOption {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseSolveOption();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.name = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.type = reader.int32() as any;
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): SolveOption {
+    return {
+      name: isSet(object.name) ? globalThis.String(object.name) : "",
+      type: isSet(object.type) ? optionTypeFromJSON(object.type) : 0,
+    };
+  },
+
+  toJSON(message: SolveOption): unknown {
+    const obj: any = {};
+    if (message.name !== "") {
+      obj.name = message.name;
+    }
+    if (message.type !== 0) {
+      obj.type = optionTypeToJSON(message.type);
+    }
+    return obj;
+  },
+
+  create(base?: DeepPartial<SolveOption>): SolveOption {
+    return SolveOption.fromPartial(base ?? {});
+  },
+  fromPartial(object: DeepPartial<SolveOption>): SolveOption {
+    const message = createBaseSolveOption();
+    message.name = object.name ?? "";
+    message.type = object.type ?? 0;
     return message;
   },
 };

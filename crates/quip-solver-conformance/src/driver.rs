@@ -2051,6 +2051,7 @@ mod tests {
             solver_id: String::new(),
             generated_families: vec![],
             accepted_families: vec![],
+            solve_options: vec![],
         }
     }
 

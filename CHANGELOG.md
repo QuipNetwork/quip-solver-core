@@ -35,6 +35,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a `headroom` outside `0.0..=1.0`. It also fails a solver whose final `Status`
   reports `limit_reached` and that then accepts the next job instead of
   refusing it with `OVERLOADED` (QUI-1661).
+- `--solve` accepts an optional `options` object. A solver lists the options it
+  accepts, each with a name and a scalar type, in the new
+  `Capabilities.solve_options` field 20. The field uses the new `SolveOption`
+  and `OptionType` types. `--capabilities`, Hello, and `GetCapabilities` carry
+  it. A Rust solver declares the list with the new `Sampler::solve_options`
+  method, which defaults to none. The SDK exits 64 before sampling when an
+  option is not listed or its value has another type. The sampler reads the
+  checked values from the new `SampleParams::options` field. The conformance
+  gate has the cases `option-valid`, `option-undeclared`, and
+  `option-wrong-type` (QUI-2428).
 - `SPEC.md` section 4 states how `SamplerMeta.device_access_time_us` and
   `qpu_access_us` differ, how a solver reports the cost of a cancelled or
   rejected job, and what `headroom` and `limit_reached` mean (QUI-1661).
