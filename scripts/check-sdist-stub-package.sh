@@ -35,7 +35,10 @@ for name in \
     python/quip/v1/__init__.py \
     python/quip/v1/miner_pb2.py \
     python/quip/v1/miner_pb2_grpc.py; do
-    if printf '%s\n' "$CONTENTS" | grep -Fxq "$ROOT/$name"; then
+    # A here-string, not a pipe. grep -q exits at the first match, and a
+    # writer still in a pipe then dies of SIGPIPE, which pipefail reports
+    # as a missing file.
+    if grep -Fxq -- "$ROOT/$name" <<<"$CONTENTS"; then
         echo "  ok      $name"
     else
         echo "  MISSING $name" >&2
