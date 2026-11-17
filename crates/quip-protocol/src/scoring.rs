@@ -140,6 +140,68 @@ pub fn energy_from_milli(
     saturate_i64(acc)
 }
 
+/// Integer quadratic model energy `Σ h_i·x_i + Σ j_k·x_u·x_v` from milli
+/// coefficients, in milli (`IQM_SAMPLE`).
+///
+/// Each `values[i]` is the integer value of variable `i`. The rules are those
+/// of [`energy_from_milli`]: an entry with no matching value and an edge naming
+/// an out-of-range variable contribute nothing, and the `i128` sum saturates to
+/// `i64::MIN` or `i64::MAX`. A single term is at most `2^31 · 2^64`, so no term
+/// overflows `i128`. Bounds are not checked here: the caller compares each
+/// value with its `IqmProblem.upper_bounds` entry.
+#[must_use]
+pub fn iqm_energy_from_milli(
+    values: &[u32],
+    h_milli: &[i32],
+    j_milli: &[i32],
+    edges: &[(usize, usize)],
+) -> i64 {
+    let mut acc: i128 = 0;
+    for (&x, &milli) in values.iter().zip(h_milli) {
+        acc = acc.saturating_add(i128::from(milli) * i128::from(x));
+    }
+    for (k, &(u, v)) in edges.iter().enumerate() {
+        let (Some(&milli), Some(&xu), Some(&xv)) = (j_milli.get(k), values.get(u), values.get(v))
+        else {
+            continue;
+        };
+        acc = acc.saturating_add(i128::from(milli) * i128::from(xu) * i128::from(xv));
+    }
+    saturate_i64(acc)
+}
+
+/// Integer quadratic model energy from unit coefficients, in milli.
+///
+/// The `f64` form of [`iqm_energy_from_milli`] for the Python and WASM
+/// bindings, with the rules of [`energy_milli`]: each coefficient that is read
+/// is recovered as its exact milli value, and a non-finite one returns
+/// [`ENERGY_MILLI_NON_FINITE`].
+#[must_use]
+pub fn iqm_energy_milli(values: &[u32], h: &[f64], j: &[f64], edges: &[(usize, usize)]) -> i64 {
+    let mut acc: i128 = 0;
+    for (&x, &coeff) in values.iter().zip(h) {
+        let Some(milli) = coefficient_milli(coeff) else {
+            return ENERGY_MILLI_NON_FINITE;
+        };
+        acc = acc.saturating_add(i128::from(milli) * i128::from(x));
+    }
+    for (k, &(u, v)) in edges.iter().enumerate() {
+        let (Some(&coeff), Some(&xu), Some(&xv)) = (j.get(k), values.get(u), values.get(v)) else {
+            continue;
+        };
+        let Some(milli) = coefficient_milli(coeff) else {
+            return ENERGY_MILLI_NON_FINITE;
+        };
+        // A saturated `i64` coefficient times two `u32` values can pass the
+        // `i128` range, so this product saturates too.
+        let term = i128::from(milli)
+            .saturating_mul(i128::from(xu))
+            .saturating_mul(i128::from(xv));
+        acc = acc.saturating_add(term);
+    }
+    saturate_i64(acc)
+}
+
 /// Flip-invariant Hamming distance between two spin vectors, `min(d, n - d)`.
 ///
 /// Returns `0` when the vectors differ in width. Mismatched widths are a caller
@@ -492,5 +554,103 @@ mod tests {
                 "case {case}"
             );
         }
+    }
+
+    #[test]
+    fn iqm_energy_from_milli_scores_integer_assignments() {
+        type Case = (
+            &'static str,
+            Vec<u32>,
+            Vec<i32>,
+            Vec<i32>,
+            Vec<(usize, usize)>,
+            i64,
+        );
+        let cases: [Case; 5] = [
+            // E = 1000*2 + (-500)*3 + 250*2*3 = 2000 - 1500 + 1500 = 2000
+            (
+                "linear and pair",
+                vec![2, 3],
+                vec![1000, -500],
+                vec![250],
+                vec![(0, 1)],
+                2000,
+            ),
+            // A zero value removes every term it appears in.
+            (
+                "zero value",
+                vec![0, 7],
+                vec![1000, 1],
+                vec![-9000],
+                vec![(0, 1)],
+                7,
+            ),
+            // h terms -2*1 + 0*4 + 3*5 = 13; pairs 1*1*4 = 4 and -2*4*5 = -40.
+            (
+                "chain",
+                vec![1, 4, 5],
+                vec![-2, 0, 3],
+                vec![1, -2],
+                vec![(0, 1), (1, 2)],
+                -23,
+            ),
+            // An out-of-range edge and an h entry with no value score nothing.
+            (
+                "skipped terms",
+                vec![1],
+                vec![5, 100],
+                vec![7],
+                vec![(0, 3)],
+                5,
+            ),
+            // Large values accumulate in i128 and saturate to the wire type.
+            (
+                "saturates",
+                vec![u32::MAX, u32::MAX],
+                vec![0, 0],
+                vec![i32::MAX],
+                vec![(0, 1)],
+                i64::MAX,
+            ),
+        ];
+        for (label, values, h, j, edges, expected) in cases {
+            assert_eq!(
+                iqm_energy_from_milli(&values, &h, &j, &edges),
+                expected,
+                "{label}"
+            );
+        }
+        assert_eq!(
+            iqm_energy_from_milli(&[u32::MAX, u32::MAX], &[], &[i32::MIN], &[(0, 1)]),
+            i64::MIN
+        );
+    }
+
+    #[test]
+    fn iqm_energy_milli_matches_the_integer_form() {
+        let values = [3, 0, 2];
+        let h_milli = [100, -37, 1];
+        let j_milli = [-250, 125];
+        let edges = [(0, 2), (1, 2)];
+        assert_eq!(
+            iqm_energy_milli(&values, &unit(&h_milli), &unit(&j_milli), &edges),
+            iqm_energy_from_milli(&values, &h_milli, &j_milli, &edges)
+        );
+        // 0.1 summed ten times is 1000 milli exactly, as for Ising.
+        assert_eq!(iqm_energy_milli(&[1; 10], &[0.1; 10], &[], &[]), 1000);
+        assert_eq!(
+            iqm_energy_milli(&[1], &[f64::NAN], &[], &[]),
+            ENERGY_MILLI_NON_FINITE
+        );
+        assert_eq!(
+            iqm_energy_milli(&[1, 1], &[0.0, 0.0], &[f64::INFINITY], &[(0, 1)]),
+            ENERGY_MILLI_NON_FINITE
+        );
+        // A finite coefficient too large for i64 milli saturates instead of
+        // overflowing the i128 product.
+        assert_eq!(
+            iqm_energy_milli(&[u32::MAX, u32::MAX], &[0.0, 0.0], &[f64::MAX], &[(0, 1)]),
+            i64::MAX
+        );
     }
 }

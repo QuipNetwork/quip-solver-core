@@ -40,8 +40,9 @@ on stdout, then exits.
 
 `XQSA` and IsingMark use `--solve`.
 
-The input is one JSON object. Every key except `beta_schedule_type`,
-`anneal_time_us`, and `options` is required. A solver rejects any other key.
+The input is one JSON object. A solver requires every key except
+`beta_schedule_type`, `anneal_time_us`, `options`, and the IQM keys `problem`
+and `bounds`, and it rejects any other key.
 
 | Key | Type | Meaning |
 |---|---|---|
@@ -122,6 +123,8 @@ The input is malformed, exit 64, when any of these holds:
 - An option value has a type other than the one `solve_options` lists for it.
   `OPTION_TYPE_NUMBER` takes any JSON number, `OPTION_TYPE_INT` takes only an
   integer, and `null` is never valid.
+- `problem` is not `"ising"` or `"iqm"`, or `bounds` is present and `problem`
+  is not `"iqm"`.
 
 The model exceeds the solver, exit 65, when any of these holds:
 
@@ -133,6 +136,31 @@ The model exceeds the solver, exit 65, when any of these holds:
 - `--embed` is set and the embedder cannot place the model.
 
 A refused problem writes nothing on stdout.
+
+The IQM form asks for an integer quadratic model, the `IQM_SAMPLE` kind of
+section 3. It adds two keys to the input:
+
+| Key | Type | Meaning |
+|---|---|---|
+| `problem` | `"ising"` or `"iqm"` | Optional. Absent means `"ising"`, the preceding form. `"iqm"` selects the IQM form. |
+| `bounds` | array of integers from 0 to 2^32 − 1 | Required in the IQM form, refused in the Ising form. The inclusive upper bound of each variable, one per entry of `h`. The lower bound is 0. |
+
+In the IQM form, `h` holds the linear coefficients and `j` the pair
+coefficients, both in units. `edges` holds the pairs. Every other key keeps
+its meaning. Each read has `values`, one integer per variable in `h` order,
+in place of `spins`. `energy_milli` is the exact energy of `values`.
+`sampler` has the same fields as in the Ising form, without `beta_ladder`.
+
+A solver refuses the IQM form as malformed, exit 64, when any rule for the
+Ising form fails, or when any of these holds:
+
+- The solver does not list `IQM_SAMPLE` in `supportedKinds`.
+- `bounds` is missing, or it has a different length than `h`.
+- A coefficient is not a whole number of milli.
+
+`maxNodes` and `maxEdges` bound the variables and the pairs, and a model over
+either exits 65. The model limits `maxDegree`, `maxLocalFieldMilli`, and
+`exactResolutionMilli` do not apply to the IQM form.
 
 ### `--check`
 
@@ -213,7 +241,7 @@ M is the solver. C is the coordinator.
 | `SetTarget` | C→M | Difficulty target and optional parameter pins. |
 | `Ready` | M→C | Configured and ready to accept jobs. |
 | `JobRequest` | M→C | Grant credits. |
-| `Job` | C→M | One Ising problem or a salt lease. |
+| `Job` | C→M | An Ising problem, a salt lease, or an integer quadratic model. |
 | `Result` | M→C | Plain job solutions or the reads a lease backend chose to report for one salt. |
 | `LeaseDone` | M→C | Finish a lease and report its counts and lowest energy. |
 | `Reject` | M→C | Decline a job, with a reason. |
@@ -353,6 +381,42 @@ The default path adds the offset after exact rescoring.
 `Result.solutions` and `best_energy_milli` use that energy.
 The normative rules are in [docs/problem-families.md](docs/problem-families.md).
 See [Wire extension](docs/problem-families.md#wire-extension) and [Lease admission](docs/problem-families.md#lease-admission).
+
+### Integer quadratic models
+
+`IQM_SAMPLE` is job kind 4. Its `Job.iqm`, field 8, carries an `IqmProblem`.
+Variable `i` takes an integer value from 0 to `upper_bounds[i]`, inclusive.
+The energy of an assignment `x` is the XQMX energy
+`E(x) = Σ h_i·x_i + Σ j_k·x_u·x_v`. The second sum runs over the pairs
+`(u, v)` in `edges`. No term couples a variable to itself. This kind has no
+constraints.
+
+`IqmProblem` uses the coefficient rules of `IsingProblem`: `encoding`,
+`scale`, and little-endian `h` and `j`, with an exact `i32` milli value for
+each element. `h` has one value per entry of `upper_bounds`. `j` has one
+value per pair. `num_reads` and `num_sweeps` override `SetTarget` as they do
+in `IsingProblem`.
+
+A solver claims the kind by listing `IQM_SAMPLE` in `supported_kinds`. A
+solver that does not list it answers each `IQM_SAMPLE` job with `Reject`
+`UNSUPPORTED_KIND`.
+
+A solver that lists it answers with one `Result`, which holds one `Solution`
+per read. `Solution.values`, field 4, holds the value of each variable in
+`upper_bounds` order, and `Solution.spins` is empty. `energy_milli` is
+`E(values)` in milli. The integer sum is exact and saturates at the ends of
+the `i64` range. `Solution.values` is empty for the Ising kinds.
+
+The solver rejects an `IQM_SAMPLE` job with these reasons:
+
+| Reason | When |
+|---|---|
+| `EXPIRED` | The deadline has passed. |
+| `MALFORMED` | `iqm` is missing, `edges.u` and `edges.v` differ in length, `h` and `upper_bounds` differ in length, `j` and the pairs differ in length, a pair names a variable outside `upper_bounds`, a pair joins a variable to itself, or a coefficient breaks the coefficient rules of this section. |
+| `TOO_LARGE` | The variables exceed `max_nodes`, the pairs exceed `max_edges`, or `num_reads` exceeds the read limit. |
+
+The model limits below do not apply to this kind. A job at generation 0 is
+never cancelled. A job at a higher generation follows section 5.
 
 ### Model limits
 
@@ -621,6 +685,29 @@ The coordinator verifies everything it receives.
 A sampler panic is still a device fault and ends the run.
 C solvers use the default lease path and have no local-generation callback.
 
+### Integer quadratic models
+
+A solver serves `IQM_SAMPLE` by returning `true` from `accepts_iqm()` and
+overriding this method:
+
+```rust
+fn sample_iqm(
+    &self,
+    model: &IqmModel,
+    params: &SampleParams,
+) -> Result<Vec<Vec<u32>>, SampleError>;
+```
+
+`accepts_iqm()` defaults to `false`, and the session then lists no
+`IQM_SAMPLE` and rejects the kind. `sample_iqm` defaults to a `DeviceFault`.
+`IqmModel` holds `upper_bounds`, `h_milli`, `j_milli`, and `edges`.
+`sample_iqm` returns one assignment per read. The session and `--solve` call
+it on a blocking thread, check that each assignment has one value per
+variable within its bound, and score it with `IqmModel::energy_milli`. The
+SDK reports an assignment that fails the check as a `DeviceFault`. For a
+session job, the sweep budget comes from the same sources as for an Ising
+job, and the seed from the OS.
+
 ### Sampling errors
 
 `SampleError` has four variants. Plain jobs use these wire responses:
@@ -744,6 +831,10 @@ A solver is conformant when all of these hold:
 - A solver that lists `generated_families` passes the family gate, `quip-solver-drive --family <solver-binary> unix://<socket>`, as [Family conformance](docs/family-conformance.md) defines it.
 - The adaptive parameters of the solver match the `golden_adapt.json` cases.
 - Every `Status.headroom` the solver sends is within `0.0` to `1.0`.
+- Every session sends one `IQM_SAMPLE` job at generation 0. When the solver
+  lists the kind, the driver requires a `Result` whose values are within the
+  bounds and whose energies are the scores of those values. Otherwise the
+  solver must reject the job with `UNSUPPORTED_KIND`.
 - A solver whose final `Status` has `limit_reached` set to `true` refuses the
   next job with `OVERLOADED`. The driver sends a `Ping` after every other job
   of its walk. When the answering `Status` has `limit_reached`, the driver sends
@@ -777,6 +868,7 @@ Other cases run only when the solver advertises the behaviour:
 | `exact-coefficients` and `exactResolutionMilli` | A coefficient on the step solves. One off the step exits 65. |
 | `anneal-time` | The ring with an anneal time solves and echoes it. An anneal time of 0 exits 64. Without the feature, any anneal time exits 64. |
 | `embed` | A complete graph on 24 nodes solves under `--embed`, with an `embedding` object on every read. Without `--embed`, it exits 65. |
+| `IQM_SAMPLE` in `supportedKinds` | The IQM form of a four-variable ring solves. Each value is within its bound, and each energy is the score of its values. One bound short exits 64. Without the kind, the IQM form exits 64. |
 
 No quantum annealer in service has a native degree of 23, so the complete
 graph on 24 nodes is off every working graph.

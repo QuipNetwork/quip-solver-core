@@ -45,6 +45,26 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   checked values from the new `SampleParams::options` field. The conformance
   gate has the cases `option-valid`, `option-undeclared`, and
   `option-wrong-type` (QUI-2428).
+- A new job kind, `IQM_SAMPLE = 4`, carries an integer quadratic model in the
+  new `IqmProblem` message, `Job.iqm` field 8. Each variable has an inclusive
+  upper bound and a lower bound of 0. The coefficients use the `IsingProblem`
+  encoding rules. Each `Solution` returns the integer values in the new
+  `values` field 4 (QUI-1663).
+- A Rust solver serves the kind with the new `Sampler::accepts_iqm` and
+  `Sampler::sample_iqm` methods. `accepts_iqm` defaults to `false`, and such a
+  solver rejects an `IQM_SAMPLE` job with `UNSUPPORTED_KIND`. The SDK checks
+  each returned assignment against the bounds and scores it (QUI-1663).
+- `--solve` accepts an IQM form: `"problem": "iqm"` with `bounds`, `h`, `j`,
+  and `edges`. Each read carries `values` in place of `spins`. A solver that
+  does not list `IQM_SAMPLE` refuses the form with exit 64 (QUI-1663).
+- `quip_protocol::scoring` has `iqm_energy_from_milli` and `iqm_energy_milli`.
+  The Python `scoring.iqm_energy_milli` and the WebAssembly `iqmEnergyMilli`
+  expose the second one (QUI-1663).
+- The conformance driver sends one `IQM_SAMPLE` job in every session. It
+  re-scores the values of a solver that lists the kind and checks the bounds.
+  It expects `UNSUPPORTED_KIND` from any other solver. The `--solve` gate has
+  the cases `iqm-solve`, `iqm-bounds-mismatch`, and `iqm-unsupported`
+  (QUI-1663).
 - `SPEC.md` section 4 states how `SamplerMeta.device_access_time_us` and
   `qpu_access_us` differ, how a solver reports the cost of a cancelled or
   rejected job, and what `headroom` and `limit_reached` mean (QUI-1661).

@@ -73,6 +73,7 @@ enum JobKind {
   ISING_SAMPLE = 1;
   GATE_CIRCUIT = 2; // reserved
   ISING_GENERATE = 3;
+  IQM_SAMPLE = 4; // integer quadratic model, IqmProblem
 }
 
 enum RejectReason {
@@ -211,6 +212,27 @@ message IsingProblem {
   uint32 reversal_pause_us = 12;
 }
 
+// Integer quadratic model for IQM_SAMPLE. Variable i takes an integer value
+// from 0 to upper_bounds[i], inclusive. The energy is
+// E(x) = sum_i h_i x_i + sum_k j_k x_u x_v over the pairs (u, v) in edges.
+// No term couples a variable to itself.
+message IqmProblem {
+  // Dense variable indices into upper_bounds and h. u != v for every pair.
+  EdgeList edges = 1;
+  // One inclusive upper bound per variable. The lower bound is always 0.
+  repeated uint32 upper_bounds = 2;
+  // h and j use the IsingProblem coefficient rules: little-endian elements
+  // of encoding's type, one per variable and per pair, integer values stored
+  // / scale, float encodings with scale 0, and every value exact in i32
+  // milli-units.
+  CoefficientEncoding encoding = 3;
+  uint32 scale = 4;
+  bytes h = 5;
+  bytes j = 6;
+  uint32 num_reads  = 7; // per-job override; 0 = unset -> SetTarget
+  uint32 num_sweeps = 8; // per-job override; 0 = unset
+}
+
 message Provenance {
   bool   is_pow   = 1;
   bytes  order_id = 2; // mempool reward attribution; empty for PoW
@@ -224,6 +246,7 @@ message Job {
   IsingProblem ising  = 5;
   Provenance provenance = 6;
   IsingProblemGenerator generator = 7; // ISING_GENERATE only
+  IqmProblem iqm = 8; // IQM_SAMPLE only
 }
 
 message JobRequest { uint32 credits = 1; }
@@ -241,6 +264,9 @@ message Solution {
   // Node i is bit i % 8 of byte i / 8, LSB first: 1 = +1, 0 = -1.
   // Exactly ceil(num_nodes / 8) bytes, with zero padding bits.
   bytes spins = 3;
+  // IQM_SAMPLE only: the value of each variable, in IqmProblem order. Empty
+  // for the Ising kinds, and spins is empty for IQM_SAMPLE.
+  repeated uint32 values = 4;
 }
 
 message SamplerMeta {

@@ -19,6 +19,7 @@ mod encoding;
 pub mod error;
 pub mod families;
 mod headroom;
+pub mod iqm;
 pub mod ising;
 mod job;
 mod lease;
@@ -35,6 +36,7 @@ pub use cli::CommonArgs;
 pub use csr::CsrGraph;
 pub use error::SampleError;
 pub use headroom::Headroom;
+pub use iqm::IqmModel;
 pub use ising::{
     Algorithm, BetaLadder, BetaSchedule, IsingGraph, SampleParams, SamplerResult, WarmStart,
 };
@@ -309,6 +311,49 @@ pub trait Sampler<C: Coefficient = f64>: Send + Sync + 'static {
         Self: Sized,
     {
         true
+    }
+
+    /// Whether this backend serves `IQM_SAMPLE` jobs (integer quadratic
+    /// models). Answered without a device, like
+    /// [`accepts_leases`](Sampler::accepts_leases), because `--capabilities`
+    /// reads it too.
+    ///
+    /// Default `false`: the session leaves `IQM_SAMPLE` out of
+    /// `supported_kinds` and answers every `IQM_SAMPLE` job with `Reject`
+    /// reason `UNSUPPORTED_KIND`, and `--solve` refuses the IQM form with exit
+    /// 64. Return `true` together with an override of
+    /// [`sample_iqm`](Sampler::sample_iqm).
+    #[must_use]
+    fn accepts_iqm() -> bool
+    where
+        Self: Sized,
+    {
+        false
+    }
+
+    /// Sample one integer quadratic model. Called only when
+    /// [`accepts_iqm`](Sampler::accepts_iqm) is `true`, on a blocking thread
+    /// of its own.
+    ///
+    /// Return one assignment per read, `params.num_reads` in all, each with
+    /// one value per variable no greater than its bound. The SDK checks each
+    /// assignment and scores it with
+    /// [`IqmModel::energy_milli`](iqm::IqmModel::energy_milli); an assignment
+    /// of the wrong length or outside a bound is a device fault.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`sample`](Sampler::sample). The default declines every model
+    /// with a `DeviceFault`, because a sampler that lists `IQM_SAMPLE` must
+    /// override it.
+    fn sample_iqm(
+        &self,
+        _model: &IqmModel,
+        _params: &SampleParams,
+    ) -> Result<Vec<Vec<u32>>, SampleError> {
+        Err(SampleError::DeviceFault(
+            "sample_iqm called on a sampler that does not accept IQM_SAMPLE".into(),
+        ))
     }
 
     /// Whether this backend uses warm-start states (`IsingProblem` fields 9 to

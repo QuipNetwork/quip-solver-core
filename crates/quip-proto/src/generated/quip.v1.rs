@@ -196,6 +196,37 @@ pub mod ising_problem {
         Edges(super::EdgeList),
     }
 }
+/// Integer quadratic model for IQM_SAMPLE. Variable i takes an integer value
+/// from 0 to upper_bounds\[i\], inclusive. The energy is
+/// E(x) = sum_i h_i x_i + sum_k j_k x_u x_v over the pairs (u, v) in edges.
+/// No term couples a variable to itself.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct IqmProblem {
+    /// Dense variable indices into upper_bounds and h. u != v for every pair.
+    #[prost(message, optional, tag = "1")]
+    pub edges: ::core::option::Option<EdgeList>,
+    /// One inclusive upper bound per variable. The lower bound is always 0.
+    #[prost(uint32, repeated, tag = "2")]
+    pub upper_bounds: ::prost::alloc::vec::Vec<u32>,
+    /// h and j use the IsingProblem coefficient rules: little-endian elements
+    /// of encoding's type, one per variable and per pair, integer values stored
+    /// / scale, float encodings with scale 0, and every value exact in i32
+    /// milli-units.
+    #[prost(enumeration = "CoefficientEncoding", tag = "3")]
+    pub encoding: i32,
+    #[prost(uint32, tag = "4")]
+    pub scale: u32,
+    #[prost(bytes = "vec", tag = "5")]
+    pub h: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes = "vec", tag = "6")]
+    pub j: ::prost::alloc::vec::Vec<u8>,
+    /// per-job override; 0 = unset -> SetTarget
+    #[prost(uint32, tag = "7")]
+    pub num_reads: u32,
+    /// per-job override; 0 = unset
+    #[prost(uint32, tag = "8")]
+    pub num_sweeps: u32,
+}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Provenance {
     #[prost(bool, tag = "1")]
@@ -222,6 +253,9 @@ pub struct Job {
     /// ISING_GENERATE only
     #[prost(message, optional, tag = "7")]
     pub generator: ::core::option::Option<IsingProblemGenerator>,
+    /// IQM_SAMPLE only
+    #[prost(message, optional, tag = "8")]
+    pub iqm: ::core::option::Option<IqmProblem>,
 }
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
 pub struct JobRequest {
@@ -248,6 +282,10 @@ pub struct Solution {
     /// Exactly ceil(num_nodes / 8) bytes, with zero padding bits.
     #[prost(bytes = "vec", tag = "3")]
     pub spins: ::prost::alloc::vec::Vec<u8>,
+    /// IQM_SAMPLE only: the value of each variable, in IqmProblem order. Empty
+    /// for the Ising kinds, and spins is empty for IQM_SAMPLE.
+    #[prost(uint32, repeated, tag = "4")]
+    pub values: ::prost::alloc::vec::Vec<u32>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct SamplerMeta {
@@ -704,6 +742,8 @@ pub enum JobKind {
     /// reserved
     GateCircuit = 2,
     IsingGenerate = 3,
+    /// integer quadratic model, IqmProblem
+    IqmSample = 4,
 }
 impl JobKind {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -716,6 +756,7 @@ impl JobKind {
             Self::IsingSample => "ISING_SAMPLE",
             Self::GateCircuit => "GATE_CIRCUIT",
             Self::IsingGenerate => "ISING_GENERATE",
+            Self::IqmSample => "IQM_SAMPLE",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -725,6 +766,7 @@ impl JobKind {
             "ISING_SAMPLE" => Some(Self::IsingSample),
             "GATE_CIRCUIT" => Some(Self::GateCircuit),
             "ISING_GENERATE" => Some(Self::IsingGenerate),
+            "IQM_SAMPLE" => Some(Self::IqmSample),
             _ => None,
         }
     }

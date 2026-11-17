@@ -33,6 +33,32 @@ test("energy matches the golden vectors", () => {
   }
 });
 
+test("IQM energy scores integer values like the Rust and Python bindings", () => {
+  // Mirrors conformance/test_pyo3_parity.py test_iqm_energy_milli_small_cases.
+  const cases = [
+    [[2, 3], [1.0, -0.5], [0.25], [0, 1], 2000n],
+    [[0, 7], [1.0, 0.001], [-9.0], [0, 1], 7n],
+    [Array(10).fill(1), Array(10).fill(0.1), [], [], 1000n],
+  ];
+  for (const [index, [values, h, j, edges, expected]] of cases.entries()) {
+    const got = consensus.iqmEnergyMilli(
+      Uint32Array.from(values),
+      Float64Array.from(h),
+      Float64Array.from(j),
+      Uint32Array.from(edges),
+    );
+    assert.equal(got, expected, `iqm case ${index}`);
+  }
+  assert.throws(() =>
+    consensus.iqmEnergyMilli(
+      Uint32Array.from([1, 1]),
+      Float64Array.from([0, 0]),
+      Float64Array.from([1, 1]),
+      Uint32Array.from([0, 1]),
+    ),
+  );
+});
+
 test("diversity matches the golden vectors", () => {
   for (const [index, c] of golden.diversity.entries()) {
     const width = c.solutions[0].length;

@@ -894,6 +894,7 @@ fn package_result(
         .map(|s| Solution {
             spins: quip_protocol::wire::encode_spins_packed(&s.spins),
             energy_milli: s.energy_milli,
+            values: vec![],
         })
         .collect();
     Some(miner(miner_msg::Msg::Result(quip_proto::v1::Result {

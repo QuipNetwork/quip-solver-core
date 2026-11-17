@@ -242,6 +242,28 @@ async def test_rejects_malformed_coefficients(field, value):
     assert [r.reason for r in rejects] == [miner_pb2.MALFORMED]
 
 
+@pytest.mark.asyncio
+async def test_an_iqm_job_is_rejected_as_unsupported():
+    # The mock does not list IQM_SAMPLE, so the conformance walk's IQM job
+    # must draw UNSUPPORTED_KIND and a credit.
+    job = miner_pb2.Job(
+        job_id=b"job-iqm",
+        kind=miner_pb2.IQM_SAMPLE,
+        generation=0,
+        iqm=miner_pb2.IqmProblem(
+            upper_bounds=[3, 1],
+            encoding=miner_pb2.COEFFICIENT_ENCODING_I32,
+            scale=1000,
+            h=bytes(wire.encode_i32_le([1000, -500])),
+            j=bytes(wire.encode_i32_le([250])),
+            edges=miner_pb2.EdgeList(u=[0], v=[1]),
+        ),
+    )
+    written = [msg for msg in await _run_job(job) if msg != "done_writing"]
+    assert [msg.WhichOneof("msg") for msg in written] == ["reject", "job_request"]
+    assert written[0].reject.reason == miner_pb2.UNSUPPORTED_KIND
+
+
 def test_capabilities_flag_prints_lowercase_identity_names():
     proc = subprocess.run(
         [

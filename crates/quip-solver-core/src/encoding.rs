@@ -118,14 +118,17 @@ fn stored_milli(
     }
 }
 
-pub(crate) fn decode_problem<C: Coefficient>(
-    ising: &IsingProblem,
-) -> Result<Decoded<C>, RejectReason> {
-    let encoding =
-        CoefficientEncoding::try_from(ising.encoding).map_err(|_| RejectReason::Malformed)?;
+/// The element type, width in bytes, and wire form of `encoding` at `scale`,
+/// or `Malformed` for an unspecified encoding, an integer encoding at scale
+/// 0, or a float encoding at any other scale.
+fn layout(
+    encoding: i32,
+    scale: u32,
+) -> Result<(CoefficientEncoding, usize, WireForm), RejectReason> {
+    let encoding = CoefficientEncoding::try_from(encoding).map_err(|_| RejectReason::Malformed)?;
     let (width, form) = match encoding {
         CoefficientEncoding::I8 | CoefficientEncoding::I16 | CoefficientEncoding::I32 => {
-            if ising.scale == 0 {
+            if scale == 0 {
                 return Err(RejectReason::Malformed);
             }
             let width = match encoding {
@@ -133,16 +136,10 @@ pub(crate) fn decode_problem<C: Coefficient>(
                 CoefficientEncoding::I16 => 2,
                 _ => 4,
             };
-            (
-                width,
-                WireForm::Int {
-                    encoding,
-                    scale: ising.scale,
-                },
-            )
+            (width, WireForm::Int { encoding, scale })
         }
         CoefficientEncoding::F16 | CoefficientEncoding::F32 | CoefficientEncoding::F64 => {
-            if ising.scale != 0 {
+            if scale != 0 {
                 return Err(RejectReason::Malformed);
             }
             let width = match encoding {
@@ -154,6 +151,30 @@ pub(crate) fn decode_problem<C: Coefficient>(
         }
         CoefficientEncoding::Unspecified => return Err(RejectReason::Malformed),
     };
+    Ok((encoding, width, form))
+}
+
+/// Decode little-endian `bytes` of `encoding` at `scale` into exact milli
+/// values, under the `IsingProblem` coefficient rules.
+pub(crate) fn decode_milli_bytes(
+    encoding: i32,
+    scale: u32,
+    bytes: &[u8],
+) -> Result<Vec<i32>, RejectReason> {
+    let (encoding, width, _) = layout(encoding, scale)?;
+    if !bytes.len().is_multiple_of(width) {
+        return Err(RejectReason::Malformed);
+    }
+    bytes
+        .chunks_exact(width)
+        .map(|chunk| stored_milli(encoding, scale, chunk))
+        .collect()
+}
+
+pub(crate) fn decode_problem<C: Coefficient>(
+    ising: &IsingProblem,
+) -> Result<Decoded<C>, RejectReason> {
+    let (encoding, width, form) = layout(ising.encoding, ising.scale)?;
     if !ising.h.len().is_multiple_of(width) || !ising.j.len().is_multiple_of(width) {
         return Err(RejectReason::Malformed);
     }
@@ -173,12 +194,7 @@ pub(crate) fn decode_problem<C: Coefficient>(
             exact_milli: None,
         });
     }
-    let decode = |bytes: &[u8]| {
-        bytes
-            .chunks_exact(width)
-            .map(|chunk| stored_milli(encoding, ising.scale, chunk))
-            .collect::<Result<Vec<_>, _>>()
-    };
+    let decode = |bytes: &[u8]| decode_milli_bytes(ising.encoding, ising.scale, bytes);
     let (h, j, exact_milli) = convert_milli(decode(&ising.h)?, decode(&ising.j)?);
     Ok(Decoded { h, j, exact_milli })
 }

@@ -131,6 +131,7 @@ fn job() -> Job {
             is_pow: true,
             order_id: vec![0xDE, 0xAD],
         }),
+        iqm: None,
     }
 }
 
@@ -143,6 +144,7 @@ fn result() -> JobResult {
             // +1, -1, +1, packed least-significant bit first.
             spins: vec![0x05],
             energy_milli: -1_250,
+            values: vec![],
         }],
         meta: Some(SamplerMeta {
             reads: 128,

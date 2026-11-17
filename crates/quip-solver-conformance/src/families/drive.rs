@@ -2094,6 +2094,7 @@ mod tests {
             solutions: vec![Solution {
                 energy_milli: energy,
                 spins: encode_spins_packed(&spins),
+                values: vec![],
             }],
             salt: expected.spec.salt(slot).expect("in lease").to_vec(),
             nonce: expected.spec.nonce(slot).expect("in lease").to_vec(),
@@ -2764,6 +2765,7 @@ mod tests {
             solutions: vec![Solution {
                 energy_milli: energy,
                 spins: encode_spins_packed(&spins),
+                values: vec![],
             }],
             ..quip_proto::v1::Result::default()
         })

@@ -9,6 +9,8 @@
 //! `exactResolutionMilli`. A solver that
 //! advertises nothing optional skips those cases rather than failing them.
 
+mod iqm;
+
 use quip_protocol::scoring::energy_milli;
 use serde_json::{json, Value};
 use std::fmt::Write as _;
@@ -150,6 +152,9 @@ struct Advertised {
     /// `(name, type)` of each option in `solveOptions`, the type spelled as
     /// the protobuf JSON mapping does, such as `OPTION_TYPE_INT`.
     solve_options: Vec<(String, String)>,
+    /// `supportedKinds`, each spelled as the protobuf JSON mapping does, such
+    /// as `IQM_SAMPLE`.
+    supported_kinds: Vec<String>,
 }
 
 impl Advertised {
@@ -189,6 +194,19 @@ impl Advertised {
                 .ok_or("a feature is not a string")
         })
         .collect::<Result<Vec<_>, _>>()?;
+        let supported_kinds = match json.get("supportedKinds") {
+            None => &[][..],
+            Some(v) => v
+                .as_array()
+                .ok_or("--capabilities supportedKinds is not an array")?,
+        }
+        .iter()
+        .map(|k| {
+            k.as_str()
+                .map(str::to_owned)
+                .ok_or("a supported kind is not a string")
+        })
+        .collect::<Result<Vec<_>, _>>()?;
         let solve_options = match json.get("solveOptions") {
             None => &[][..],
             Some(v) => v
@@ -216,11 +234,16 @@ impl Advertised {
             max_local_field_milli: optional("maxLocalFieldMilli")?,
             exact_resolution_milli: optional("exactResolutionMilli")?,
             solve_options,
+            supported_kinds,
         })
     }
 
     fn lists(&self, feature: &str) -> bool {
         self.features.iter().any(|f| f == feature)
+    }
+
+    fn lists_kind(&self, kind: &str) -> bool {
+        self.supported_kinds.iter().any(|k| k == kind)
     }
 
     /// A bounded limit: `Some(n)` with `n > 0`.
@@ -654,6 +677,7 @@ pub async fn drive_solve(bin_path: &str) -> SolveReport {
     anneal_time_case(bin_path, &adv, &base, &mut report).await;
     embed_case(bin_path, &adv, &mut report).await;
     option_cases(bin_path, &adv, &base, &mut report).await;
+    iqm::iqm_cases(bin_path, &adv, &mut report).await;
     report
 }
 

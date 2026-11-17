@@ -555,6 +555,26 @@ fn check_family<S: Sampler<C>, C: Coefficient>(
     }
 }
 
+/// Whether a job's `deadline_ms` has passed. `0` means no deadline (only
+/// mempool and chain jobs carry one).
+pub(crate) fn deadline_passed(deadline_ms: u64) -> bool {
+    if deadline_ms == 0 {
+        return false;
+    }
+    // Fail closed on an unusable clock: it cannot say the job is still live,
+    // and sampling work that has already expired spends device time on
+    // results the coordinator discards.
+    now_unix_ms().map_or_else(
+        || {
+            tracing::error!(
+                "system clock is before the Unix epoch; rejecting deadlined jobs as Expired"
+            );
+            true
+        },
+        |now| deadline_ms < now,
+    )
+}
+
 /// Validate + resolve one job: reject reasons short-circuit; otherwise resolve
 /// the sampling budget (per-job override > `SetTarget` override > adapt > default)
 /// and return a [`StreamJob`] for the streaming sampler. An explicit family
@@ -578,23 +598,8 @@ pub(crate) fn prepare_job<S: Sampler<C>, C: Coefficient>(
     if job.kind != JobKind::IsingSample as i32 {
         return Prepared::Reject(reject(job_id, RejectReason::UnsupportedKind));
     }
-    // deadline_ms == 0 means "no deadline" (only mempool/chain jobs carry one).
-    if job.deadline_ms != 0 {
-        // Fail closed on an unusable clock: it cannot say the job is still
-        // live, and sampling work that has already expired spends device time
-        // on results the coordinator discards.
-        let expired = now_unix_ms().map_or_else(
-            || {
-                tracing::error!(
-                    "system clock is before the Unix epoch; rejecting deadlined jobs as Expired"
-                );
-                true
-            },
-            |now| job.deadline_ms < now,
-        );
-        if expired {
-            return Prepared::Reject(reject(job_id, RejectReason::Expired));
-        }
+    if deadline_passed(job.deadline_ms) {
+        return Prepared::Reject(reject(job_id, RejectReason::Expired));
     }
     let Some(ising) = job.ising else {
         return Prepared::Reject(reject(job_id, RejectReason::Malformed));
@@ -745,6 +750,7 @@ pub(crate) fn finalize_result(
         .map(|r| Solution {
             spins: encode_spins_packed(&r.spins),
             energy_milli: r.energy_milli,
+            values: vec![],
         })
         .collect();
 
@@ -837,6 +843,7 @@ mod tests {
     fn edges_job(job_id: u8) -> Job {
         Job {
             generator: None,
+            iqm: None,
             job_id: vec![job_id],
             kind: JobKind::IsingSample as i32,
             generation: 0,
@@ -947,6 +954,26 @@ mod tests {
     fn generator_job() -> Job {
         let mut job = edges_job(1);
         job.kind = JobKind::IsingGenerate as i32;
+        job
+    }
+
+    /// A sampler that declines `IQM_SAMPLE` reaches `prepare_job` with it, and
+    /// the kind alone refuses it, whatever the problem.
+    #[test]
+    fn an_iqm_job_reaching_prepare_job_is_unsupported() {
+        assert_eq!(
+            reject_reason_for("an IQM job", iqm_job(), &StubSampler, &identity("sa")),
+            Some(RejectReason::UnsupportedKind as i32)
+        );
+    }
+
+    fn iqm_job() -> Job {
+        let mut job = edges_job(1);
+        job.kind = JobKind::IqmSample as i32;
+        job.iqm = Some(quip_proto::v1::IqmProblem {
+            upper_bounds: vec![3, 3],
+            ..Default::default()
+        });
         job
     }
 

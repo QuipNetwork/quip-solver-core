@@ -18,8 +18,9 @@ type GateRow = (
 );
 
 const GATE_ROWS: &[GateRow] = &[
-    // A solver that advertises nothing optional passes the base cases, refuses
-    // a linear schedule, and skips every limit case.
+    // A solver that advertises no optional feature passes the base cases,
+    // refuses a linear schedule, and skips every limit case. It lists
+    // IQM_SAMPLE, so it solves the IQM form.
     (
         "mock_sampler_miner",
         true,
@@ -31,6 +32,8 @@ const GATE_ROWS: &[GateRow] = &[
             "linear-schedule",
             "anneal-time",
             "option-undeclared",
+            "iqm-solve",
+            "iqm-bounds-mismatch",
         ],
         &[
             "degree-limit-inside",
@@ -41,7 +44,7 @@ const GATE_ROWS: &[GateRow] = &[
         &[],
     ),
     // Every optional case runs and passes against a solver that advertises all
-    // of them.
+    // of them. It does not list IQM_SAMPLE, so it refuses the IQM form.
     (
         "mock_sampler_limits",
         true,
@@ -56,8 +59,9 @@ const GATE_ROWS: &[GateRow] = &[
             "option-valid",
             "option-undeclared",
             "option-wrong-type",
+            "iqm-unsupported",
         ],
-        &[],
+        &["iqm-solve", "iqm-bounds-mismatch"],
         &[],
     ),
     // The gate fails a solver whose sampler errors on every problem.

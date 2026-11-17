@@ -73,6 +73,14 @@ async fn a_solver_that_declines_leases_rejects_one_with_unsupported_kind() {
         report.rejects
     );
     assert!(report.lease_conformant(), "{}", report.summary());
+    // It does not list IQM_SAMPLE either, so the IQM job is refused too.
+    assert!(report.iqm.is_none(), "no IQM scenario ran: {report:?}");
+    assert!(
+        report.has_reject(b"job-iqm", RejectReason::UnsupportedKind),
+        "missing UNSUPPORTED_KIND reject for job-iqm: {:?}",
+        report.rejects
+    );
+    assert!(report.iqm_conformant(), "{}", report.summary());
     assert!(report.is_conformant(), "{}", report.summary());
 }
 
@@ -121,6 +129,15 @@ async fn mock_sampler_passes_loop_conformance() {
         report.rejects
     );
     assert_eq!(report.exit_code, 0, "clean shutdown expected");
+    // The mock lists IQM_SAMPLE: its IQM Result is scored within the bounds.
+    assert!(
+        report
+            .iqm
+            .as_ref()
+            .is_some_and(|iqm| iqm.solutions > 0 && iqm.defect.is_none()),
+        "IQM job not served: {:?}",
+        report.iqm
+    );
 
     // The granular assertions above are a diagnostic aid, not the gate: each
     // one names the axis that broke. `is_conformant()` is the gate a
