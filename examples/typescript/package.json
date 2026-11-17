@@ -17,7 +17,7 @@
     "test": "npm run build && node --test dist/*.test.js"
   },
   "dependencies": {
-    "@grpc/grpc-js": "^1.14.4",
+    "@grpc/grpc-js": "^1.14.7",
     "@quip.network/quip-solver-core": "file:../../npm/quip.network-quip-solver-core-0.0.16.tgz"
   },
   "devDependencies": {

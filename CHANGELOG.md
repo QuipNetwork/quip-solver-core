@@ -5,6 +5,15 @@ This file documents changes to the Quip solver contract.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Security
+
+- The npm package requires `@grpc/grpc-js` 1.14.7 or later. Versions 1.14.0
+  to 1.14.4 carry GHSA-m9gg-hp2v-232j and GHSA-f596-whhp-79r4. Both affect a
+  grpc-js server, and this package ships a client, but the old range let a
+  consumer resolve to an affected version.
+
 ## 0.0.16
 
 ### Added
