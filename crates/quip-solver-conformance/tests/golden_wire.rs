@@ -221,6 +221,8 @@ fn status() -> Status {
         jobs_done: 42,
         abandoned_generation: 7,
         sampler_stats: one_entry("queue", "2"),
+        headroom: None,
+        limit_reached: false,
     }
 }
 

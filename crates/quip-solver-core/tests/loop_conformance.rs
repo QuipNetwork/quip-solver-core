@@ -268,3 +268,34 @@ async fn a_device_fault_ends_the_session_instead_of_requesting_more_work() {
     );
     assert!(report.stderr.contains("test: wedged"), "{}", report.stderr);
 }
+
+#[tokio::test]
+async fn a_solver_that_refuses_work_at_its_limit_with_overloaded_passes_the_walk() {
+    let bin = example_bin("mock_sampler_limit")
+        .to_string_lossy()
+        .into_owned();
+    let socket = unique_socket("limit");
+    let report = drive_miner(&bin, &format!("unix://{socket}")).await;
+
+    assert!(report.limit_probe_sent, "{}", report.summary());
+    assert!(
+        report.has_reject(b"job-limit", RejectReason::Overloaded),
+        "{}",
+        report.summary()
+    );
+    assert!(report.headroom_conformant(), "{}", report.summary());
+    assert!(report.is_conformant(), "{}", report.summary());
+}
+
+#[tokio::test]
+async fn a_solver_that_keeps_serving_at_its_limit_fails_the_walk() {
+    let bin = example_bin("mock_sampler_limit_ignored")
+        .to_string_lossy()
+        .into_owned();
+    let socket = unique_socket("limit-ignored");
+    let report = drive_miner(&bin, &format!("unix://{socket}")).await;
+
+    assert!(report.limit_probe_sent, "{}", report.summary());
+    assert!(!report.limit_conformant(), "{}", report.summary());
+    assert!(!report.is_conformant(), "{}", report.summary());
+}

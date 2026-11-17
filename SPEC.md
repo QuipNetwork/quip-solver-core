@@ -630,6 +630,41 @@ The session calls `sample_stream_warm` instead of `sample_stream` only when
 `accepts_warm_start` and `sample_warm`. A solver that keeps more than one
 model in flight overrides `sample_stream_warm` instead of `sample_warm`.
 
+### Per-job cost and budget reporting
+
+`SamplerMeta` reports the device time of one job:
+
+| Field | Meaning |
+|---|---|
+| `device_access_time_us` | Device time the job used, in microseconds, for any backend. |
+| `qpu_access_us` | QPU time only, in microseconds. Zero for every other backend. |
+
+A job that the solver cancels or rejects can still cost money, because a
+device may bill the time it ran before it stopped. Such a job has no `Result`
+and so has no `SamplerMeta`. The solver reports the cost in `Status`. Every
+`Status` carries the `headroom` of that moment. Time billed for a cancelled or
+rejected job lowers the `headroom` in the next `Status`. The coordinator reads
+it from the `Status` that answers a `Ping`. The protocol has no per-job cost
+field in `Status`.
+
+`Status` has two fields for the budget:
+
+| Field | Meaning |
+|---|---|
+| `headroom` | The fraction of the spending or capacity budget still available, from `0.0` to `1.0`. It is unset when the solver reports none. |
+| `limit_reached` | The solver has hit a limit. Default `false`. |
+
+A solver that sends `headroom` keeps it within `0.0` to `1.0`. A solver that
+sends `limit_reached` as `true` refuses every new job with `OVERLOADED` until
+the limit resets, and then sends `limit_reached` as `false` in a later `Status`.
+
+In the Rust binding, `Sampler::headroom` returns `Option<Headroom>`. The
+session copies `Headroom.fraction` and `Headroom.limit_reached` into each
+`Status` without change. The default is `None`: `headroom` stays unset and
+`limit_reached` stays `false`. The session does not refuse jobs for the solver.
+A solver that reports `limit_reached` as `true` returns `SampleError::DeviceBusy`
+from `sample` until the limit resets, which sends `OVERLOADED`.
+
 ## 5. Cancellation
 
 These wire rules apply to every language. The Rust binding follows.
@@ -695,6 +730,11 @@ A solver is conformant when all of these hold:
 - `quip-solver-drive --solve <solver-binary>` reports no failed case.
 - A solver that lists `generated_families` passes the family gate, `quip-solver-drive --family <solver-binary> unix://<socket>`, as [Family conformance](docs/family-conformance.md) defines it.
 - The adaptive parameters of the solver match the `golden_adapt.json` cases.
+- Every `Status.headroom` the solver sends is within `0.0` to `1.0`.
+- A solver that sends `limit_reached` as `true` refuses the next job with
+  `OVERLOADED`. The driver checks this with a final `Ping`. When the answering
+  `Status` has `limit_reached`, the driver sends one more job and expects
+  `Reject` with `OVERLOADED` and no `Result`.
 
 The driver spawns any executable. The driver speaks the proto over the
 socket. This definition holds for a solver written in any language.

@@ -27,6 +27,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The conformance driver sends one lease to a solver that does not advertise
   `ISING_GENERATE`. It expects `Reject` with `UNSUPPORTED_KIND`.
 
+- `Status` has two typed budget fields: `optional double headroom = 6`, the
+  fraction of the budget still available from `0.0` to `1.0`, and
+  `bool limit_reached = 7`. A Rust solver reports them through the new
+  `Sampler::headroom` method, which returns `Option<Headroom>` and defaults to
+  `None`. The session copies both fields into each `Status` without change, so
+  it never clamps `fraction`. The conformance driver fails a solver that sends a `headroom`
+  outside `0.0..=1.0`. It also fails a solver that reports `limit_reached` and
+  then accepts the next job instead of refusing it with `OVERLOADED` (QUI-1661).
+- `SPEC.md` section 4 states how `SamplerMeta.device_access_time_us` and
+  `qpu_access_us` differ, how a solver reports the cost of a cancelled or
+  rejected job, and what `headroom` and `limit_reached` mean (QUI-1661).
+
 ### Changed
 
 - `SPEC.md` section 3 defines the default start of a seeded SA run. When

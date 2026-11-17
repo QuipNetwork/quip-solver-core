@@ -5,6 +5,7 @@ use crate::adapt::adapt_params;
 use crate::backend::BackendIdentity;
 use crate::coefficient::Coefficient;
 use crate::families::{FamilyContext, FamilyTable};
+use crate::headroom::Headroom;
 use crate::ising::{IsingGraph, SampleParams, WarmStart};
 use crate::Sampler;
 use crate::{StreamJob, StreamOutcome, StreamResult};
@@ -200,6 +201,7 @@ pub(crate) fn status_msg(
     jobs_done: u64,
     utilization: f64,
     abandoned_generation: u64,
+    headroom: Option<Headroom>,
 ) -> MinerMsg {
     miner(miner_msg::Msg::Status(Status {
         miner_id: miner_id.into(),
@@ -207,6 +209,8 @@ pub(crate) fn status_msg(
         jobs_done,
         abandoned_generation,
         sampler_stats: HashMap::default(),
+        headroom: headroom.map(|h| h.fraction),
+        limit_reached: headroom.is_some_and(|h| h.limit_reached),
     }))
 }
 
@@ -1677,8 +1681,29 @@ mod tests {
     }
 
     #[test]
+    fn status_carries_the_headroom_fields_only_when_the_sampler_reports_them() {
+        let Some(miner_msg::Msg::Status(status)) = status_msg("miner", 3, 0.5, 0, None).msg else {
+            panic!("expected Status");
+        };
+        assert_eq!(status.headroom, None, "no report leaves headroom unset");
+        assert!(!status.limit_reached);
+
+        let reported = Headroom {
+            fraction: 0.25,
+            limit_reached: true,
+        };
+        let Some(miner_msg::Msg::Status(status)) =
+            status_msg("miner", 3, 0.5, 0, Some(reported)).msg
+        else {
+            panic!("expected Status");
+        };
+        assert_eq!(status.headroom, Some(0.25));
+        assert!(status.limit_reached);
+    }
+
+    #[test]
     fn status_carries_the_abandoned_watermark() {
-        let Some(miner_msg::Msg::Status(status)) = status_msg("miner", 3, 0.5, 7).msg else {
+        let Some(miner_msg::Msg::Status(status)) = status_msg("miner", 3, 0.5, 7, None).msg else {
             panic!("expected Status");
         };
         assert_eq!(
@@ -1686,7 +1711,7 @@ mod tests {
             "a non-zero watermark must be carried into Status"
         );
 
-        let Some(miner_msg::Msg::Status(status)) = status_msg("miner", 3, 0.5, 0).msg else {
+        let Some(miner_msg::Msg::Status(status)) = status_msg("miner", 3, 0.5, 0, None).msg else {
             panic!("expected Status");
         };
         assert_eq!(

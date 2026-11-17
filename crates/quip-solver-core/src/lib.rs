@@ -18,6 +18,7 @@ pub mod driver;
 mod encoding;
 pub mod error;
 pub mod families;
+mod headroom;
 pub mod ising;
 mod job;
 mod lease;
@@ -32,6 +33,7 @@ pub use backend::{BackendIdentity, EXACT_COEFFICIENTS_FEATURE, LINEAR_SCHEDULE_F
 pub use cli::CommonArgs;
 pub use csr::CsrGraph;
 pub use error::SampleError;
+pub use headroom::Headroom;
 pub use ising::{
     Algorithm, BetaLadder, BetaSchedule, IsingGraph, SampleParams, SamplerResult, WarmStart,
 };
@@ -453,6 +455,17 @@ pub trait Sampler<C: Coefficient = f64>: Send + Sync + 'static {
     /// Current utilization for Status messages. `0.0` when no governor.
     fn utilization(&self) -> f64 {
         0.0
+    }
+
+    /// The budget this solver has left, copied into `Status.headroom` and
+    /// `Status.limit_reached` on every `Status` the session sends. The session
+    /// calls it for each `Status`, so it must be cheap.
+    ///
+    /// Default `None`: `headroom` stays unset and `limit_reached` is false. A
+    /// solver that reports `limit_reached` as true must refuse every job it
+    /// receives with `OVERLOADED` until the limit resets. See SPEC section 4.
+    fn headroom(&self) -> Option<Headroom> {
+        None
     }
 
     /// Whether to briefly back off before the next job (governor backpressure).

@@ -1513,6 +1513,7 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
                                 jobs_done.load(Ordering::Relaxed),
                                 sampler.utilization(),
                                 cancel.abandoned(),
+                                sampler.headroom(),
                             )
                             .into(),
                         )
@@ -1530,6 +1531,7 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
                                 jobs_done.load(Ordering::Relaxed),
                                 sampler.utilization(),
                                 cancel.abandoned(),
+                                sampler.headroom(),
                             )
                             .into(),
                         )
@@ -2726,7 +2728,7 @@ mod tests {
             res_tx.send(completed_result(i)).await.expect("send result");
         }
         ctrl_tx
-            .send(status_msg("miner", 0, 0.0, 0).into())
+            .send(status_msg("miner", 0, 0.0, 0, None).into())
             .await
             .expect("send status");
 
