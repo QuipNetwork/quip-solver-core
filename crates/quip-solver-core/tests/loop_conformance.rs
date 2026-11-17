@@ -6,7 +6,7 @@
 use quip_proto::v1::RejectReason;
 use quip_solver_conformance::driver::{
     drive_miner, drive_miner_bad_welcome, drive_miner_close_after_welcome,
-    drive_miner_close_before_welcome, drive_miner_one_job,
+    drive_miner_close_before_welcome, drive_miner_one_job, drive_miner_with_args,
 };
 mod common;
 
@@ -289,11 +289,12 @@ async fn a_solver_that_refuses_work_at_its_limit_with_overloaded_passes_the_walk
 
 #[tokio::test]
 async fn a_solver_that_keeps_serving_at_its_limit_fails_the_walk() {
-    let bin = example_bin("mock_sampler_limit_ignored")
+    let bin = example_bin("mock_sampler_limit")
         .to_string_lossy()
         .into_owned();
     let socket = unique_socket("limit-ignored");
-    let report = drive_miner(&bin, &format!("unix://{socket}")).await;
+    let report =
+        drive_miner_with_args(&bin, &["--ignore-limit"], &format!("unix://{socket}")).await;
 
     assert!(report.limit_probe_sent, "{}", report.summary());
     assert!(!report.limit_conformant(), "{}", report.summary());

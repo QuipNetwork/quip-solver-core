@@ -1539,7 +1539,7 @@ async fn run_script(
     }
 
     // 12. Limit probe. A solver that reports `limit_reached` refuses new work
-    //      with OVERLOADED, so this Ping reads the flag and, when it is set,
+    //      with OVERLOADED, so this final Ping reads the flag and, when it is set,
     //      one more job must draw that Reject. Sent after every job the walk
     //      needs a Result or a lease for, so a solver that has reached a
     //      limit still serves them.
@@ -1861,10 +1861,15 @@ pub(crate) async fn run_miner(
 ///
 /// `socket` is a `unix://<path>` URI; the same value is passed to the miner via
 /// `--quip-coordinator`.
-async fn drive_miner_with_script(bin_path: &str, socket: &str, script: ScriptKind) -> DriverReport {
+async fn drive_miner_with_script(
+    bin_path: &str,
+    extra_args: &[&str],
+    socket: &str,
+    script: ScriptKind,
+) -> DriverReport {
     let (outcome, exit_code, stderr) = run_miner(
         bin_path,
-        &[],
+        extra_args,
         socket,
         script.into_script(),
         CHILD_TIMEOUT,
@@ -1896,32 +1901,42 @@ async fn drive_miner_with_script(bin_path: &str, socket: &str, script: ScriptKin
 
 /// Run the full conformance walk against `bin_path`.
 pub async fn drive_miner(bin_path: &str, socket: &str) -> DriverReport {
-    drive_miner_with_script(bin_path, socket, ScriptKind::Full).await
+    drive_miner_with_script(bin_path, &[], socket, ScriptKind::Full).await
+}
+
+/// Run the full conformance walk against `bin_path`, which the driver starts
+/// with `extra_args` before its own `--quip-coordinator` argument.
+pub async fn drive_miner_with_args(
+    bin_path: &str,
+    extra_args: &[&str],
+    socket: &str,
+) -> DriverReport {
+    drive_miner_with_script(bin_path, extra_args, socket, ScriptKind::Full).await
 }
 
 /// Send a `Welcome` with an unsupported `protocol_version` and observe how
 /// `bin_path` rejects it. A conformant miner exits `ConfigInvalid` (64) and
 /// sends a `Fatal` before disconnecting.
 pub async fn drive_miner_bad_welcome(bin_path: &str, socket: &str) -> DriverReport {
-    drive_miner_with_script(bin_path, socket, ScriptKind::BadWelcome).await
+    drive_miner_with_script(bin_path, &[], socket, ScriptKind::BadWelcome).await
 }
 
 /// Handshake, one valid job, then wait. Does not send `Shutdown`.
 pub async fn drive_miner_one_job(bin_path: &str, socket: &str) -> DriverReport {
-    drive_miner_with_script(bin_path, socket, ScriptKind::OneJobThenWait).await
+    drive_miner_with_script(bin_path, &[], socket, ScriptKind::OneJobThenWait).await
 }
 
 /// Answer `Hello` with `Welcome`, then drop the stream without `Shutdown`.
 /// A conformant miner treats the vanished coordinator as a failure and exits
 /// `InternalFatal` (70), not `Clean`.
 pub async fn drive_miner_close_after_welcome(bin_path: &str, socket: &str) -> DriverReport {
-    drive_miner_with_script(bin_path, socket, ScriptKind::CloseAfterWelcome).await
+    drive_miner_with_script(bin_path, &[], socket, ScriptKind::CloseAfterWelcome).await
 }
 
 /// Read `Hello`, then drop the stream without ever sending `Welcome`.
 /// A conformant miner exits `TokenRejected` (77).
 pub async fn drive_miner_close_before_welcome(bin_path: &str, socket: &str) -> DriverReport {
-    drive_miner_with_script(bin_path, socket, ScriptKind::CloseBeforeWelcome).await
+    drive_miner_with_script(bin_path, &[], socket, ScriptKind::CloseBeforeWelcome).await
 }
 
 /// Exit code a miner must use when it refuses a `Welcome` it cannot speak.

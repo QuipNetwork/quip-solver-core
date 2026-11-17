@@ -731,10 +731,11 @@ A solver is conformant when all of these hold:
 - A solver that lists `generated_families` passes the family gate, `quip-solver-drive --family <solver-binary> unix://<socket>`, as [Family conformance](docs/family-conformance.md) defines it.
 - The adaptive parameters of the solver match the `golden_adapt.json` cases.
 - Every `Status.headroom` the solver sends is within `0.0` to `1.0`.
-- A solver that sends `limit_reached` as `true` refuses the next job with
-  `OVERLOADED`. The driver checks this with a final `Ping`. When the answering
-  `Status` has `limit_reached`, the driver sends one more job and expects
-  `Reject` with `OVERLOADED` and no `Result`.
+- A solver whose final `Status` has `limit_reached` set to `true` refuses the
+  next job with `OVERLOADED`. The driver sends a `Ping` after every other job
+  of its walk. When the answering `Status` has `limit_reached`, the driver sends
+  one more job and expects `Reject` with `OVERLOADED` and no `Result`. A solver
+  that clears `limit_reached` before that `Ping` gets no probe.
 
 The driver spawns any executable. The driver speaks the proto over the
 socket. This definition holds for a solver written in any language.
