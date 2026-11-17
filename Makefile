@@ -67,7 +67,7 @@ check-crate-publish:
 .PHONY: check-python-dist
 check-python-dist:
 	rm -rf dist/python && mkdir -p dist/python
-	maturin build --release --out dist/python
+	maturin build --locked --release --out dist/python
 	maturin sdist --out dist/python
 	twine check dist/python/*
 	# twine check validates that the metadata is well formed, not that the
@@ -98,7 +98,7 @@ check-npm-dist:
 # path and belongs in the same gate as the three registries.
 .PHONY: check-clib
 check-clib:
-	cargo build -p quip-solver-c --release
+	cargo build --locked -p quip-solver-c --release
 	rm -f dist/quip-solver-clib-*
 	rm -rf dist/clib && mkdir -p dist/clib/include
 	cp target/release/libquip_solver_c.so dist/clib/
@@ -143,12 +143,12 @@ family-vectors:
 .PHONY: test
 test:
 	cargo fmt --all -- --check
-	cargo clippy --workspace --exclude quip-protocol-py --all-targets -- -D warnings
-	cargo clippy -p quip-protocol-py --all-targets -- -D warnings
-	cargo test --workspace --exclude quip-protocol-py
-	cargo clippy -p ising-generators --all-targets --features cli -- -D warnings
-	cargo test -p ising-generators --features cli --test topology_cli
-	cargo build -p ising-generators --no-default-features --features blob
+	cargo clippy --locked --workspace --exclude quip-protocol-py --all-targets -- -D warnings
+	cargo clippy --locked -p quip-protocol-py --all-targets -- -D warnings
+	cargo test --locked --workspace --exclude quip-protocol-py
+	cargo clippy --locked -p ising-generators --all-targets --features cli -- -D warnings
+	cargo test --locked -p ising-generators --features cli --test topology_cli
+	cargo build --locked -p ising-generators --no-default-features --features blob
 
 # -- Lint -------------------------------------------------------------------
 

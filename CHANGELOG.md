@@ -7,6 +7,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
 
+### Changed
+
+- Every cargo, maturin, and wasm-pack build in CI and the Makefile now uses
+  `--locked`. A build fails if `Cargo.lock` would change. It no longer picks a
+  new set of dependencies. The one exception is `examples/rust`. CI patches it
+  to the unpacked crates at run time, so it has no lockfile.
+
 ### Security
 
 - The npm package requires `@grpc/grpc-js` 1.14.7 or later. Versions 1.14.0
