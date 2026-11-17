@@ -5,36 +5,10 @@ This file documents changes to the Quip solver contract.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## 0.0.17-rc1
+## 0.0.17-rc2
 
 ### Added
 
-- A Rust solver can decline `ISING_GENERATE` leases. The new `Sampler::accepts_leases`
-  method defaults to `true`. When it returns `false`, the solver lists only
-  `ISING_SAMPLE`, advertises no generators and no generated families, and
-  rejects a lease with `UNSUPPORTED_KIND`.
-- The `--solve` output `sampler` object carries `beta_ladder`, with the `kind`,
-  the `betas` the solve ran, and `reported_by`. `reported_by` is `"sampler"`
-  when the sampler overrides the new `Sampler::beta_ladder` method, and `"sdk"`
-  when the SDK built the ladder from the request. `beta_schedule_type` now
-  equals the reported kind. A solver that lists `linear-schedule` must override
-  the method. The `linear-schedule` conformance case requires
-  `reported_by == "sampler"` and the linear ladder of the request, so a solver
-  that lists the feature and runs another ladder, or reports none of its own,
-  fails it (QUI-1833).
-- A declaration that lists `generated` families is invalid for a sampler that
-  declines leases. It fails with `DeclarationError::GeneratedWithoutLeases`.
-- The conformance driver sends one lease to a solver that does not advertise
-  `ISING_GENERATE`. It expects `Reject` with `UNSUPPORTED_KIND`.
-- `Status` has two typed budget fields: `optional double headroom = 6`, the
-  fraction of the budget still available from `0.0` to `1.0`, and
-  `bool limit_reached = 7`. A Rust solver reports them through the new
-  `Sampler::headroom` method, which returns `Option<Headroom>` and defaults to
-  `None`. The session copies both fields into each `Status` without change, so
-  it never clamps `fraction`. The conformance driver fails a solver that sends
-  a `headroom` outside `0.0..=1.0`. It also fails a solver whose final `Status`
-  reports `limit_reached` and that then accepts the next job instead of
-  refusing it with `OVERLOADED` (QUI-1661).
 - `--solve` accepts an optional `options` object. A solver lists the options it
   accepts, each with a name and a scalar type, in the new
   `Capabilities.solve_options` field 20. The field uses the new `SolveOption`
@@ -65,9 +39,6 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   It expects `UNSUPPORTED_KIND` from any other solver. The `--solve` gate has
   the cases `iqm-solve`, `iqm-bounds-mismatch`, and `iqm-unsupported`
   (QUI-1663).
-- `SPEC.md` section 4 states how `SamplerMeta.device_access_time_us` and
-  `qpu_access_us` differ, how a solver reports the cost of a cancelled or
-  rejected job, and what `headroom` and `limit_reached` mean (QUI-1661).
 - The protocol has a calibrate exchange. A solver that lists the `calibrate`
   feature can get a `Calibrate`, `CoordMsg` field 10, after `Topology` and
   before the first job. It carries the family parameters, the reference
@@ -84,6 +55,45 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `calibrate` and expects exactly one `CalibrateDone` by the deadline. The new
   `drive_miner_unlisted_calibrate` sends one to a solver without the feature
   and expects outcome failed (QUI-2420).
+- A solver may refuse an option value of the listed type that it does not
+  support. It exits 64 with a message that names the option and the value, or
+  it runs and warns on stderr. The new `Sampler::check_option` method refuses a
+  value with exit 64. The `option-valid` conformance case passes on a
+  successful run or on exit 64 with a message on stderr (QUI-2428).
+
+## 0.0.17-rc1
+
+### Added
+
+- A Rust solver can decline `ISING_GENERATE` leases. The new `Sampler::accepts_leases`
+  method defaults to `true`. When it returns `false`, the solver lists only
+  `ISING_SAMPLE`, advertises no generators and no generated families, and
+  rejects a lease with `UNSUPPORTED_KIND`.
+- The `--solve` output `sampler` object carries `beta_ladder`, with the `kind`,
+  the `betas` the solve ran, and `reported_by`. `reported_by` is `"sampler"`
+  when the sampler overrides the new `Sampler::beta_ladder` method, and `"sdk"`
+  when the SDK built the ladder from the request. `beta_schedule_type` now
+  equals the reported kind. A solver that lists `linear-schedule` must override
+  the method. The `linear-schedule` conformance case requires
+  `reported_by == "sampler"` and the linear ladder of the request, so a solver
+  that lists the feature and runs another ladder, or reports none of its own,
+  fails it (QUI-1833).
+- A declaration that lists `generated` families is invalid for a sampler that
+  declines leases. It fails with `DeclarationError::GeneratedWithoutLeases`.
+- The conformance driver sends one lease to a solver that does not advertise
+  `ISING_GENERATE`. It expects `Reject` with `UNSUPPORTED_KIND`.
+- `Status` has two typed budget fields: `optional double headroom = 6`, the
+  fraction of the budget still available from `0.0` to `1.0`, and
+  `bool limit_reached = 7`. A Rust solver reports them through the new
+  `Sampler::headroom` method, which returns `Option<Headroom>` and defaults to
+  `None`. The session copies both fields into each `Status` without change, so
+  it never clamps `fraction`. The conformance driver fails a solver that sends
+  a `headroom` outside `0.0..=1.0`. It also fails a solver whose final `Status`
+  reports `limit_reached` and that then accepts the next job instead of
+  refusing it with `OVERLOADED` (QUI-1661).
+- `SPEC.md` section 4 states how `SamplerMeta.device_access_time_us` and
+  `qpu_access_us` differ, how a solver reports the cost of a cancelled or
+  rejected job, and what `headroom` and `limit_reached` mean (QUI-1661).
 
 ### Changed
 
