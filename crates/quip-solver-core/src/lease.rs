@@ -331,7 +331,7 @@ fn local_delivery(
 }
 pub(crate) struct LeaseLink {
     pub(crate) state: Arc<LeaseState>,
-    index: u64,
+    pub(crate) index: u64,
     // Kept until the writer finishes this salt, including its wire send.
     _permit: OwnedSemaphorePermit,
 }

@@ -58,13 +58,40 @@ pub(crate) fn format_duration_ms(ms: u64) -> String {
     format_hours_minutes(hours, mins)
 }
 
+/// One debug line for a finished lease salt: effort spent and best energy.
+#[must_use]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a flat record of independent log fields; a struct would only be built to be formatted"
+)]
+pub(crate) fn lease_salt_line(
+    backend: &str,
+    job: &str,
+    salt_index: u64,
+    best_energy_milli: Option<i64>,
+    samples: usize,
+    reads: u32,
+    sweeps: u32,
+    wall_ms: u64,
+    device_ms: u64,
+) -> String {
+    let energy =
+        best_energy_milli.map_or_else(|| "n/a".to_owned(), |e| energy_units(e).to_string());
+    let wall = format_duration_ms(wall_ms);
+    let device = format_duration_ms(device_ms);
+    format!(
+        "[quip-solver-{backend}] lease {job} salt {salt_index}: energy {energy}, samples {samples} \
+         | reads={reads} sweeps={sweeps} | {wall} wall, {device} device"
+    )
+}
+
 fn format_hours_minutes(hours: u64, mins: u64) -> String {
     format!("{hours}h {mins}m")
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{energy_units, format_duration_ms};
+    use super::{energy_units, format_duration_ms, lease_salt_line};
 
     #[test]
     fn energy_units_floors_the_spec_table() {
@@ -99,5 +126,29 @@ mod tests {
         for (ms, text) in rows {
             assert_eq!(format_duration_ms(ms), text, "{ms} ms");
         }
+    }
+
+    #[test]
+    fn lease_salt_line_reports_effort_and_energy() {
+        assert_eq!(
+            lease_salt_line(
+                "cpu",
+                "ab12cd34..",
+                7,
+                Some(-4_957_000),
+                64,
+                64,
+                4096,
+                1_700,
+                1_650
+            ),
+            "[quip-solver-cpu] lease ab12cd34.. salt 7: energy -4957, samples 64 \
+             | reads=64 sweeps=4096 | 1.7s wall, 1.7s device"
+        );
+        assert_eq!(
+            lease_salt_line("cpu", "ab12cd34..", 8, None, 0, 64, 4096, 889, 0),
+            "[quip-solver-cpu] lease ab12cd34.. salt 8: energy n/a, samples 0 \
+             | reads=64 sweeps=4096 | 889ms wall, 0ms device"
+        );
     }
 }

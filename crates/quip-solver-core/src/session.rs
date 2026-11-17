@@ -7,7 +7,7 @@
 use crate::backend::BackendIdentity;
 use crate::cli::CommonArgs;
 use crate::coefficient::Coefficient;
-use crate::display::{energy_units, format_duration_ms};
+use crate::display::{energy_units, format_duration_ms, lease_salt_line};
 use crate::families::{DeclarationError, FamilyTable};
 use crate::job::{
     finalize_result, miner, num_sweeps_from_toml, prepare_job, status_msg, Prepared, SessionTarget,
@@ -777,6 +777,27 @@ async fn outbound_writer<C: Coefficient>(
                             return;
                         }
                         tracing::warn!(%error, "lease salt failed");
+                    }
+                    if let StreamOutcome::Completed(Ok(samples)) = &sr.outcome {
+                        #[expect(
+                            clippy::cast_possible_truncation,
+                            reason = "salt wall time in ms fits u64 for any realistic job"
+                        )]
+                        let wall_ms = entry.as_ref().map_or(0, |e| e.started.elapsed().as_millis() as u64);
+                        tracing::debug!(
+                            "{}",
+                            lease_salt_line(
+                                backend,
+                                &short_job_id(&sr.job_id),
+                                link.index,
+                                samples.iter().map(|r| r.energy_milli).min(),
+                                samples.len(),
+                                reads,
+                                sweeps,
+                                wall_ms,
+                                sr.device_access_time_us / 1000,
+                            )
+                        );
                     }
                     let reply = lease::handle_result(link, sr, reads, sweeps);
                     if let Some(reply) = reply {
