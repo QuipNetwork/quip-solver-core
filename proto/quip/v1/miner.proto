@@ -106,6 +106,7 @@ message MinerMsg {
     Fatal      fatal       = 7;
     Capabilities capabilities = 8;
     LeaseDone lease_done = 9;
+    CalibrateDone calibrate_done = 10;
   }
 }
 
@@ -120,6 +121,7 @@ message CoordMsg {
     Shutdown  shutdown  = 7;
     SetTarget set_target = 8;
     GetCapabilities get_capabilities = 9;
+    Calibrate calibrate = 10;
   }
 }
 
@@ -371,6 +373,35 @@ message IsingProblemGenerator {
   uint64 salt_count = 7;
   FamilyDescriptor family = 8;       // required iff algorithm == FAMILY_CHACHA8_V1 (FAM-48, FAM-49)
   bytes  topology_order_digest = 9;  // 32 bytes, required iff family is set (FAM-49, FAM-50)
+}
+
+// Tune the solver against reference instances before the workload. Sent only
+// to a solver that lists the `calibrate` feature, after Topology and before
+// the first Job. The solver answers with exactly one CalibrateDone.
+message Calibrate {
+  FamilyDescriptor family = 1; // the family parameters, as a job carries them
+  repeated CalibrationInstance instances = 2;
+  uint64 deadline_ms = 3; // Unix time in ms, as Job.deadline_ms; 0 = none
+}
+
+// One reference instance of the calibration family.
+message CalibrationInstance {
+  string id = 1;
+  bytes  nonce = 2;                 // 32 bytes
+  int64  achieved_energy_milli = 3; // the energy a reference run achieved
+  int64  max_energy_milli = 4;      // the acceptance ceiling, as SetTarget
+}
+
+enum CalibrateOutcome {
+  CALIBRATE_OUTCOME_UNSPECIFIED = 0;
+  CALIBRATE_OUTCOME_DONE = 1;            // the new tuning is in effect
+  CALIBRATE_OUTCOME_FAILED = 2;          // the solver keeps its current tuning
+  CALIBRATE_OUTCOME_DEADLINE_PASSED = 3; // the solver keeps its current tuning
+}
+
+message CalibrateDone {
+  CalibrateOutcome outcome = 1;
+  optional string summary = 2; // free text for the operator
 }
 
 message LeaseDone {

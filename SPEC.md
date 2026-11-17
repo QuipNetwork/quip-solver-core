@@ -216,7 +216,10 @@ Messages flow in this order:
 4. The solver sends `Ready`.
 5. The coordinator may send `Topology` and `SetTarget` before or after
    `Ready`. A round that never sends them is valid.
-6. The solver and the coordinator exchange `JobRequest` and `Job` until
+6. The coordinator may send `Calibrate` to a solver that lists `calibrate`,
+   after `Topology` and before the first `Job`. It waits for
+   `CalibrateDone` before it sends a job. See [Calibration](#calibration).
+7. The solver and the coordinator exchange `JobRequest` and `Job` until
    `Shutdown`.
 
 `Hello.capabilities` holds the protocol version, identity enums, limits, and supported features.
@@ -252,6 +255,8 @@ M is the solver. C is the coordinator.
 | `Fatal` | M→C | Report a fatal reason before exit. |
 | `GetCapabilities` | C→M | Ask for the `Capabilities` message. |
 | `Capabilities` | M→C | Reply with what this solver supports. |
+| `Calibrate` | C→M | Tune the solver against reference instances before the workload. |
+| `CalibrateDone` | M→C | Report the outcome of one `Calibrate`. |
 
 ### Coefficients and solutions
 
@@ -503,6 +508,50 @@ The solver applies these rules:
 The Rust session applies the two `MALFORMED` rules to every job, whether or
 not the solver lists the feature.
 
+### Calibration
+
+A solver can tune itself against reference instances before it mines.
+Calibration runs outside the workload: at boot, or as an offline tuning run.
+This contract carries the exchange only. The coordinator chooses the
+instances and when to calibrate. The solver chooses how to tune.
+
+A solver that serves the exchange lists the feature string `calibrate` in
+`Capabilities.features`. The coordinator sends `Calibrate` only to a solver
+that lists it. It sends `Calibrate` after `Topology` and before the first
+`Job`, and waits for `CalibrateDone` before it sends a job.
+
+`Calibrate` is `CoordMsg` field 10. It holds these fields:
+
+| Field | Meaning |
+|---|---|
+| `family`, 1 | The family parameters, a `FamilyDescriptor` as a job carries it. |
+| `instances`, 2 | One `CalibrationInstance` per reference instance. |
+| `deadline_ms`, 3 | Unix time in milliseconds, as `Job.deadline_ms`. `0` sets no deadline. |
+
+Each `CalibrationInstance` holds an `id`, the `nonce`, the
+`achieved_energy_milli` of a reference run, and the target
+`max_energy_milli`. The topology is the latest `Topology` of the session.
+
+The solver answers each `Calibrate` with exactly one `CalibrateDone`,
+`MinerMsg` field 10. It holds an `outcome` and an optional free-text
+`summary` for the operator:
+
+| Outcome | Meaning |
+|---|---|
+| `CALIBRATE_OUTCOME_DONE` | The new tuning is in effect. |
+| `CALIBRATE_OUTCOME_FAILED` | The calibration failed. The solver keeps its current tuning. |
+| `CALIBRATE_OUTCOME_DEADLINE_PASSED` | The deadline passed first. The solver keeps its current tuning. |
+
+The solver enforces the deadline. When the deadline passes, the solver sends
+`DEADLINE_PASSED` at once and keeps its current tuning, even if the work
+finishes later. A `Calibrate` that arrives after its deadline gets
+`DEADLINE_PASSED`. No outcome ends the session.
+
+The Rust session also answers `FAILED` to a `Calibrate` that arrives before
+any `Topology`, or that reaches a solver without the feature. Solvers in
+other languages need not answer a `Calibrate` that the coordinator must not
+send them.
+
 ## 4. The sampler contract
 
 This section is the Rust binding of the language-neutral contract. This
@@ -713,6 +762,35 @@ longer than the grace deadline. For a
 session job, the sweep budget comes from the same sources as for an Ising
 job, and the seed from the OS.
 
+### Calibration hook
+
+A solver serves the `Calibrate` exchange by returning `true` from
+`accepts_calibrate()` and overriding this method:
+
+```rust
+fn calibrate(
+    &self,
+    request: &Calibrate,
+    topology: &Topology,
+) -> Result<Calibration<Self>, SampleError>;
+```
+
+`accepts_calibrate()` defaults to `false`. The session then removes
+`calibrate` from the advertised features and answers each `Calibrate` with
+`FAILED`. A `true` value adds `calibrate` to the features.
+`calibrate` defaults to `SampleError::Declined`.
+
+The session calls `calibrate` on a blocking thread, one call at a time, with
+the latest `Topology`. The hook must not change the tuning itself. It returns
+the change as a `Calibration`, which holds a summary and a function that
+applies the change. The session applies it only when the hook returns `Ok`
+before the deadline, and then answers `DONE`. An `Err` or a panic answers
+`FAILED` with the error text. A hook still running at the deadline answers
+`DEADLINE_PASSED`, and the session drops its change when it returns. The
+session cannot stop the thread, so a long search should check the deadline
+itself. After `Shutdown`, a running call delays the session no longer than
+the grace deadline.
+
 ### Sampling errors
 
 `SampleError` has four variants. Plain jobs use these wire responses:
@@ -836,6 +914,12 @@ A solver is conformant when all of these hold:
 - A solver that lists `generated_families` passes the family gate, `quip-solver-drive --family <solver-binary> unix://<socket>`, as [Family conformance](docs/family-conformance.md) defines it.
 - The adaptive parameters of the solver match the `golden_adapt.json` cases.
 - Every `Status.headroom` the solver sends is within `0.0` to `1.0`.
+- A solver that lists `calibrate` gets one `Calibrate`, after `Topology` and
+  before the first job, with a deadline two seconds ahead. The driver
+  expects exactly one `CalibrateDone`. A `DONE` or `FAILED` answer arrives by
+  the deadline. A `DEADLINE_PASSED` answer arrives at the deadline. The
+  driver allows one second for delivery. A solver that does not list the feature gets no `Calibrate` and
+  must send no `CalibrateDone`.
 - Every session sends one `IQM_SAMPLE` job at generation 0. When the solver
   lists the kind, the driver requires a `Result` whose values are within the
   bounds and whose energies are the scores of those values. Otherwise the

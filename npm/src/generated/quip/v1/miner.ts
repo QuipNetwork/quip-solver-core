@@ -603,6 +603,54 @@ export function optionTypeToJSON(object: OptionType): string {
   }
 }
 
+export enum CalibrateOutcome {
+  CALIBRATE_OUTCOME_UNSPECIFIED = 0,
+  /** CALIBRATE_OUTCOME_DONE - the new tuning is in effect */
+  CALIBRATE_OUTCOME_DONE = 1,
+  /** CALIBRATE_OUTCOME_FAILED - the solver keeps its current tuning */
+  CALIBRATE_OUTCOME_FAILED = 2,
+  /** CALIBRATE_OUTCOME_DEADLINE_PASSED - the solver keeps its current tuning */
+  CALIBRATE_OUTCOME_DEADLINE_PASSED = 3,
+  UNRECOGNIZED = -1,
+}
+
+export function calibrateOutcomeFromJSON(object: any): CalibrateOutcome {
+  switch (object) {
+    case 0:
+    case "CALIBRATE_OUTCOME_UNSPECIFIED":
+      return CalibrateOutcome.CALIBRATE_OUTCOME_UNSPECIFIED;
+    case 1:
+    case "CALIBRATE_OUTCOME_DONE":
+      return CalibrateOutcome.CALIBRATE_OUTCOME_DONE;
+    case 2:
+    case "CALIBRATE_OUTCOME_FAILED":
+      return CalibrateOutcome.CALIBRATE_OUTCOME_FAILED;
+    case 3:
+    case "CALIBRATE_OUTCOME_DEADLINE_PASSED":
+      return CalibrateOutcome.CALIBRATE_OUTCOME_DEADLINE_PASSED;
+    case -1:
+    case "UNRECOGNIZED":
+    default:
+      return CalibrateOutcome.UNRECOGNIZED;
+  }
+}
+
+export function calibrateOutcomeToJSON(object: CalibrateOutcome): string {
+  switch (object) {
+    case CalibrateOutcome.CALIBRATE_OUTCOME_UNSPECIFIED:
+      return "CALIBRATE_OUTCOME_UNSPECIFIED";
+    case CalibrateOutcome.CALIBRATE_OUTCOME_DONE:
+      return "CALIBRATE_OUTCOME_DONE";
+    case CalibrateOutcome.CALIBRATE_OUTCOME_FAILED:
+      return "CALIBRATE_OUTCOME_FAILED";
+    case CalibrateOutcome.CALIBRATE_OUTCOME_DEADLINE_PASSED:
+      return "CALIBRATE_OUTCOME_DEADLINE_PASSED";
+    case CalibrateOutcome.UNRECOGNIZED:
+    default:
+      return "UNRECOGNIZED";
+  }
+}
+
 export interface MinerMsg {
   hello?: Hello | undefined;
   ready?: Ready | undefined;
@@ -613,6 +661,7 @@ export interface MinerMsg {
   fatal?: Fatal | undefined;
   capabilities?: Capabilities | undefined;
   leaseDone?: LeaseDone | undefined;
+  calibrateDone?: CalibrateDone | undefined;
 }
 
 export interface CoordMsg {
@@ -625,6 +674,7 @@ export interface CoordMsg {
   shutdown?: Shutdown | undefined;
   setTarget?: SetTarget | undefined;
   getCapabilities?: GetCapabilities | undefined;
+  calibrate?: Calibrate | undefined;
 }
 
 export interface Hello {
@@ -966,6 +1016,36 @@ export interface IsingProblemGenerator {
   topologyOrderDigest: Uint8Array;
 }
 
+/**
+ * Tune the solver against reference instances before the workload. Sent only
+ * to a solver that lists the `calibrate` feature, after Topology and before
+ * the first Job. The solver answers with exactly one CalibrateDone.
+ */
+export interface Calibrate {
+  /** the family parameters, as a job carries them */
+  family: FamilyDescriptor | undefined;
+  instances: CalibrationInstance[];
+  /** Unix time in ms, as Job.deadline_ms; 0 = none */
+  deadlineMs: bigint;
+}
+
+/** One reference instance of the calibration family. */
+export interface CalibrationInstance {
+  id: string;
+  /** 32 bytes */
+  nonce: Uint8Array;
+  /** the energy a reference run achieved */
+  achievedEnergyMilli: bigint;
+  /** the acceptance ceiling, as SetTarget */
+  maxEnergyMilli: bigint;
+}
+
+export interface CalibrateDone {
+  outcome: CalibrateOutcome;
+  /** free text for the operator */
+  summary?: string | undefined;
+}
+
 export interface LeaseDone {
   jobId: Uint8Array;
   saltsDone: bigint;
@@ -1018,6 +1098,7 @@ function createBaseMinerMsg(): MinerMsg {
     fatal: undefined,
     capabilities: undefined,
     leaseDone: undefined,
+    calibrateDone: undefined,
   };
 }
 
@@ -1049,6 +1130,9 @@ export const MinerMsg: MessageFns<MinerMsg> = {
     }
     if (message.leaseDone !== undefined) {
       LeaseDone.encode(message.leaseDone, writer.uint32(74).fork()).join();
+    }
+    if (message.calibrateDone !== undefined) {
+      CalibrateDone.encode(message.calibrateDone, writer.uint32(82).fork()).join();
     }
     return writer;
   },
@@ -1132,6 +1216,14 @@ export const MinerMsg: MessageFns<MinerMsg> = {
           message.leaseDone = LeaseDone.decode(reader, reader.uint32());
           continue;
         }
+        case 10: {
+          if (tag !== 82) {
+            break;
+          }
+
+          message.calibrateDone = CalibrateDone.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -1159,6 +1251,11 @@ export const MinerMsg: MessageFns<MinerMsg> = {
         ? LeaseDone.fromJSON(object.leaseDone)
         : isSet(object.lease_done)
         ? LeaseDone.fromJSON(object.lease_done)
+        : undefined,
+      calibrateDone: isSet(object.calibrateDone)
+        ? CalibrateDone.fromJSON(object.calibrateDone)
+        : isSet(object.calibrate_done)
+        ? CalibrateDone.fromJSON(object.calibrate_done)
         : undefined,
     };
   },
@@ -1192,6 +1289,9 @@ export const MinerMsg: MessageFns<MinerMsg> = {
     if (message.leaseDone !== undefined) {
       obj.leaseDone = LeaseDone.toJSON(message.leaseDone);
     }
+    if (message.calibrateDone !== undefined) {
+      obj.calibrateDone = CalibrateDone.toJSON(message.calibrateDone);
+    }
     return obj;
   },
 
@@ -1221,6 +1321,9 @@ export const MinerMsg: MessageFns<MinerMsg> = {
     message.leaseDone = (object.leaseDone !== undefined && object.leaseDone !== null)
       ? LeaseDone.fromPartial(object.leaseDone)
       : undefined;
+    message.calibrateDone = (object.calibrateDone !== undefined && object.calibrateDone !== null)
+      ? CalibrateDone.fromPartial(object.calibrateDone)
+      : undefined;
     return message;
   },
 };
@@ -1236,6 +1339,7 @@ function createBaseCoordMsg(): CoordMsg {
     shutdown: undefined,
     setTarget: undefined,
     getCapabilities: undefined,
+    calibrate: undefined,
   };
 }
 
@@ -1267,6 +1371,9 @@ export const CoordMsg: MessageFns<CoordMsg> = {
     }
     if (message.getCapabilities !== undefined) {
       GetCapabilities.encode(message.getCapabilities, writer.uint32(74).fork()).join();
+    }
+    if (message.calibrate !== undefined) {
+      Calibrate.encode(message.calibrate, writer.uint32(82).fork()).join();
     }
     return writer;
   },
@@ -1350,6 +1457,14 @@ export const CoordMsg: MessageFns<CoordMsg> = {
           message.getCapabilities = GetCapabilities.decode(reader, reader.uint32());
           continue;
         }
+        case 10: {
+          if (tag !== 82) {
+            break;
+          }
+
+          message.calibrate = Calibrate.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -1378,6 +1493,7 @@ export const CoordMsg: MessageFns<CoordMsg> = {
         : isSet(object.get_capabilities)
         ? GetCapabilities.fromJSON(object.get_capabilities)
         : undefined,
+      calibrate: isSet(object.calibrate) ? Calibrate.fromJSON(object.calibrate) : undefined,
     };
   },
 
@@ -1410,6 +1526,9 @@ export const CoordMsg: MessageFns<CoordMsg> = {
     if (message.getCapabilities !== undefined) {
       obj.getCapabilities = GetCapabilities.toJSON(message.getCapabilities);
     }
+    if (message.calibrate !== undefined) {
+      obj.calibrate = Calibrate.toJSON(message.calibrate);
+    }
     return obj;
   },
 
@@ -1440,6 +1559,9 @@ export const CoordMsg: MessageFns<CoordMsg> = {
       : undefined;
     message.getCapabilities = (object.getCapabilities !== undefined && object.getCapabilities !== null)
       ? GetCapabilities.fromPartial(object.getCapabilities)
+      : undefined;
+    message.calibrate = (object.calibrate !== undefined && object.calibrate !== null)
+      ? Calibrate.fromPartial(object.calibrate)
       : undefined;
     return message;
   },
@@ -5077,6 +5199,313 @@ export const IsingProblemGenerator: MessageFns<IsingProblemGenerator> = {
       ? FamilyDescriptor.fromPartial(object.family)
       : undefined;
     message.topologyOrderDigest = object.topologyOrderDigest ?? new Uint8Array(0);
+    return message;
+  },
+};
+
+function createBaseCalibrate(): Calibrate {
+  return { family: undefined, instances: [], deadlineMs: 0n };
+}
+
+export const Calibrate: MessageFns<Calibrate> = {
+  encode(message: Calibrate, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.family !== undefined) {
+      FamilyDescriptor.encode(message.family, writer.uint32(10).fork()).join();
+    }
+    for (const v of message.instances) {
+      CalibrationInstance.encode(v!, writer.uint32(18).fork()).join();
+    }
+    if (message.deadlineMs !== 0n) {
+      if (BigInt.asUintN(64, message.deadlineMs) !== message.deadlineMs) {
+        throw new globalThis.Error("value provided for field message.deadlineMs of type uint64 too large");
+      }
+      writer.uint32(24).uint64(message.deadlineMs);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): Calibrate {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseCalibrate();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.family = FamilyDescriptor.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.instances.push(CalibrationInstance.decode(reader, reader.uint32()));
+          continue;
+        }
+        case 3: {
+          if (tag !== 24) {
+            break;
+          }
+
+          message.deadlineMs = reader.uint64() as bigint;
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): Calibrate {
+    return {
+      family: isSet(object.family) ? FamilyDescriptor.fromJSON(object.family) : undefined,
+      instances: globalThis.Array.isArray(object?.instances)
+        ? object.instances.map((e: any) => CalibrationInstance.fromJSON(e))
+        : [],
+      deadlineMs: isSet(object.deadlineMs)
+        ? BigInt(object.deadlineMs)
+        : isSet(object.deadline_ms)
+        ? BigInt(object.deadline_ms)
+        : 0n,
+    };
+  },
+
+  toJSON(message: Calibrate): unknown {
+    const obj: any = {};
+    if (message.family !== undefined) {
+      obj.family = FamilyDescriptor.toJSON(message.family);
+    }
+    if (message.instances?.length) {
+      obj.instances = message.instances.map((e) => CalibrationInstance.toJSON(e));
+    }
+    if (message.deadlineMs !== 0n) {
+      obj.deadlineMs = message.deadlineMs.toString();
+    }
+    return obj;
+  },
+
+  create(base?: DeepPartial<Calibrate>): Calibrate {
+    return Calibrate.fromPartial(base ?? {});
+  },
+  fromPartial(object: DeepPartial<Calibrate>): Calibrate {
+    const message = createBaseCalibrate();
+    message.family = (object.family !== undefined && object.family !== null)
+      ? FamilyDescriptor.fromPartial(object.family)
+      : undefined;
+    message.instances = object.instances?.map((e) => CalibrationInstance.fromPartial(e)) || [];
+    message.deadlineMs = (object.deadlineMs !== undefined && object.deadlineMs !== null)
+      ? BigInt(object.deadlineMs)
+      : 0n;
+    return message;
+  },
+};
+
+function createBaseCalibrationInstance(): CalibrationInstance {
+  return { id: "", nonce: new Uint8Array(0), achievedEnergyMilli: 0n, maxEnergyMilli: 0n };
+}
+
+export const CalibrationInstance: MessageFns<CalibrationInstance> = {
+  encode(message: CalibrationInstance, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.id !== "") {
+      writer.uint32(10).string(message.id);
+    }
+    if (message.nonce.length !== 0) {
+      writer.uint32(18).bytes(message.nonce);
+    }
+    if (message.achievedEnergyMilli !== 0n) {
+      if (BigInt.asIntN(64, message.achievedEnergyMilli) !== message.achievedEnergyMilli) {
+        throw new globalThis.Error("value provided for field message.achievedEnergyMilli of type int64 too large");
+      }
+      writer.uint32(24).int64(message.achievedEnergyMilli);
+    }
+    if (message.maxEnergyMilli !== 0n) {
+      if (BigInt.asIntN(64, message.maxEnergyMilli) !== message.maxEnergyMilli) {
+        throw new globalThis.Error("value provided for field message.maxEnergyMilli of type int64 too large");
+      }
+      writer.uint32(32).int64(message.maxEnergyMilli);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): CalibrationInstance {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseCalibrationInstance();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.id = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.nonce = reader.bytes();
+          continue;
+        }
+        case 3: {
+          if (tag !== 24) {
+            break;
+          }
+
+          message.achievedEnergyMilli = reader.int64() as bigint;
+          continue;
+        }
+        case 4: {
+          if (tag !== 32) {
+            break;
+          }
+
+          message.maxEnergyMilli = reader.int64() as bigint;
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): CalibrationInstance {
+    return {
+      id: isSet(object.id) ? globalThis.String(object.id) : "",
+      nonce: isSet(object.nonce) ? bytesFromBase64(object.nonce) : new Uint8Array(0),
+      achievedEnergyMilli: isSet(object.achievedEnergyMilli)
+        ? BigInt(object.achievedEnergyMilli)
+        : isSet(object.achieved_energy_milli)
+        ? BigInt(object.achieved_energy_milli)
+        : 0n,
+      maxEnergyMilli: isSet(object.maxEnergyMilli)
+        ? BigInt(object.maxEnergyMilli)
+        : isSet(object.max_energy_milli)
+        ? BigInt(object.max_energy_milli)
+        : 0n,
+    };
+  },
+
+  toJSON(message: CalibrationInstance): unknown {
+    const obj: any = {};
+    if (message.id !== "") {
+      obj.id = message.id;
+    }
+    if (message.nonce.length !== 0) {
+      obj.nonce = base64FromBytes(message.nonce);
+    }
+    if (message.achievedEnergyMilli !== 0n) {
+      obj.achievedEnergyMilli = message.achievedEnergyMilli.toString();
+    }
+    if (message.maxEnergyMilli !== 0n) {
+      obj.maxEnergyMilli = message.maxEnergyMilli.toString();
+    }
+    return obj;
+  },
+
+  create(base?: DeepPartial<CalibrationInstance>): CalibrationInstance {
+    return CalibrationInstance.fromPartial(base ?? {});
+  },
+  fromPartial(object: DeepPartial<CalibrationInstance>): CalibrationInstance {
+    const message = createBaseCalibrationInstance();
+    message.id = object.id ?? "";
+    message.nonce = object.nonce ?? new Uint8Array(0);
+    message.achievedEnergyMilli = (object.achievedEnergyMilli !== undefined && object.achievedEnergyMilli !== null)
+      ? BigInt(object.achievedEnergyMilli)
+      : 0n;
+    message.maxEnergyMilli = (object.maxEnergyMilli !== undefined && object.maxEnergyMilli !== null)
+      ? BigInt(object.maxEnergyMilli)
+      : 0n;
+    return message;
+  },
+};
+
+function createBaseCalibrateDone(): CalibrateDone {
+  return { outcome: 0, summary: undefined };
+}
+
+export const CalibrateDone: MessageFns<CalibrateDone> = {
+  encode(message: CalibrateDone, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.outcome !== 0) {
+      writer.uint32(8).int32(message.outcome);
+    }
+    if (message.summary !== undefined) {
+      writer.uint32(18).string(message.summary);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): CalibrateDone {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseCalibrateDone();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.outcome = reader.int32() as any;
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.summary = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): CalibrateDone {
+    return {
+      outcome: isSet(object.outcome) ? calibrateOutcomeFromJSON(object.outcome) : 0,
+      summary: isSet(object.summary) ? globalThis.String(object.summary) : undefined,
+    };
+  },
+
+  toJSON(message: CalibrateDone): unknown {
+    const obj: any = {};
+    if (message.outcome !== 0) {
+      obj.outcome = calibrateOutcomeToJSON(message.outcome);
+    }
+    if (message.summary !== undefined) {
+      obj.summary = message.summary;
+    }
+    return obj;
+  },
+
+  create(base?: DeepPartial<CalibrateDone>): CalibrateDone {
+    return CalibrateDone.fromPartial(base ?? {});
+  },
+  fromPartial(object: DeepPartial<CalibrateDone>): CalibrateDone {
+    const message = createBaseCalibrateDone();
+    message.outcome = object.outcome ?? 0;
+    message.summary = object.summary ?? undefined;
     return message;
   },
 };

@@ -3,10 +3,11 @@
 //! Exercises the loop without any real backend: handshake, Ready, credits, job
 //! results, each Reject reason, and clean exit.
 
-use quip_proto::v1::RejectReason;
+use quip_proto::v1::{CalibrateOutcome, RejectReason};
 use quip_solver_conformance::driver::{
     drive_miner, drive_miner_bad_welcome, drive_miner_close_after_welcome,
-    drive_miner_close_before_welcome, drive_miner_one_job, drive_miner_with_args,
+    drive_miner_close_before_welcome, drive_miner_one_job, drive_miner_unlisted_calibrate,
+    drive_miner_with_args, DriverReport,
 };
 mod common;
 
@@ -145,6 +146,9 @@ async fn mock_sampler_passes_loop_conformance() {
     // it let requirements (the Cancel ack, the job-bad-j reject) drift
     // unchecked. Assert the whole verdict too, so the two can never diverge.
     assert!(report.is_conformant(), "{report:?}");
+    // The mock does not list `calibrate`, so the walk sends no `Calibrate`.
+    assert_eq!(report.calibrate_deadline_ms, None, "{}", report.summary());
+    assert!(report.calibrate_dones.is_empty(), "{}", report.summary());
 }
 
 #[tokio::test]
@@ -316,4 +320,73 @@ async fn a_solver_that_keeps_serving_at_its_limit_fails_the_walk() {
     assert!(report.limit_probe_sent, "{}", report.summary());
     assert!(!report.limit_conformant(), "{}", report.summary());
     assert!(!report.is_conformant(), "{}", report.summary());
+}
+
+/// Run the full walk against the calibrating mock in `mode`.
+async fn calibrate_walk(mode: &str) -> DriverReport {
+    let bin = example_bin("mock_sampler_calibrate")
+        .to_string_lossy()
+        .into_owned();
+    let socket = unique_socket(&format!("calibrate-{mode}"));
+    drive_miner_with_args(&bin, &["--calibrate", mode], &format!("unix://{socket}")).await
+}
+
+/// The outcomes of every `CalibrateDone` of a walk, in arrival order.
+fn calibrate_outcomes(report: &DriverReport) -> Vec<i32> {
+    report.calibrate_dones.iter().map(|d| d.outcome).collect()
+}
+
+#[tokio::test]
+async fn a_calibration_that_succeeds_passes_the_walk() {
+    let report = calibrate_walk("done").await;
+    assert_eq!(calibrate_outcomes(&report), [CalibrateOutcome::Done as i32]);
+    assert_eq!(
+        report
+            .calibrate_dones
+            .first()
+            .and_then(|d| d.summary.as_deref()),
+        Some("mock tuning 2"),
+        "{}",
+        report.summary()
+    );
+    assert!(report.is_conformant(), "{}", report.summary());
+}
+
+#[tokio::test]
+async fn a_calibration_that_fails_passes_the_walk() {
+    let report = calibrate_walk("fail").await;
+    assert_eq!(
+        calibrate_outcomes(&report),
+        [CalibrateOutcome::Failed as i32]
+    );
+    assert!(report.is_conformant(), "{}", report.summary());
+}
+
+/// The hook overruns the deadline. The session answers at the deadline and
+/// keeps serving the walk.
+#[tokio::test]
+async fn a_calibration_past_its_deadline_passes_the_walk() {
+    let report = calibrate_walk("slow").await;
+    assert_eq!(
+        calibrate_outcomes(&report),
+        [CalibrateOutcome::DeadlinePassed as i32]
+    );
+    assert!(report.calibrate_conformant(), "{}", report.summary());
+    assert!(report.is_conformant(), "{}", report.summary());
+}
+
+/// The walk never sends `Calibrate` to a solver without the feature. One sent
+/// anyway is answered with `FAILED`, and the session continues to a clean end.
+#[tokio::test]
+async fn a_solver_without_calibrate_answers_one_sent_anyway_with_failed() {
+    let bin = example_bin("mock_sampler_miner")
+        .to_string_lossy()
+        .into_owned();
+    let socket = unique_socket("calibrate-unlisted");
+    let report = drive_miner_unlisted_calibrate(&bin, &format!("unix://{socket}")).await;
+    assert!(
+        report.unlisted_calibrate_conformant(),
+        "{}",
+        report.summary()
+    );
 }

@@ -9,6 +9,7 @@
 pub mod adapt;
 mod backend;
 pub mod beta;
+mod calibrate;
 pub mod cli;
 pub mod coefficient;
 pub mod config;
@@ -32,6 +33,7 @@ mod task;
 mod topology;
 
 pub use backend::{BackendIdentity, EXACT_COEFFICIENTS_FEATURE, LINEAR_SCHEDULE_FEATURE};
+pub use calibrate::Calibration;
 pub use cli::CommonArgs;
 pub use csr::CsrGraph;
 pub use error::SampleError;
@@ -45,7 +47,8 @@ pub use limits::ModelLimits;
 pub use options::{OptionDecl, OptionValue, SolveOptions};
 pub use quip_protocol::lease::TopologyView;
 pub use session::{
-    capabilities, capabilities_for, run, run_code, OpenError, INITIAL_SPINS_FEATURE,
+    capabilities, capabilities_for, run, run_code, OpenError, CALIBRATE_FEATURE,
+    INITIAL_SPINS_FEATURE,
 };
 pub use topology::{NativeTopology, TopologyFit};
 
@@ -359,6 +362,52 @@ pub trait Sampler<C: Coefficient = f64>: Send + Sync + 'static {
     ) -> Result<Vec<Vec<u32>>, SampleError> {
         Err(SampleError::DeviceFault(
             "sample_iqm called on a sampler that does not accept IQM_SAMPLE".into(),
+        ))
+    }
+
+    /// Whether this backend serves the `Calibrate` exchange. Answered without
+    /// a device, like [`accepts_leases`](Sampler::accepts_leases), because
+    /// `--capabilities` reads it too.
+    ///
+    /// Default `false`: the session advertises no `calibrate` feature and
+    /// answers every `Calibrate` with `CalibrateDone` outcome `FAILED`. Return
+    /// `true` together with an override of [`calibrate`](Sampler::calibrate);
+    /// the session then adds [`CALIBRATE_FEATURE`] to the advertised features.
+    #[must_use]
+    fn accepts_calibrate() -> bool
+    where
+        Self: Sized,
+    {
+        false
+    }
+
+    /// Tune the solver against the reference instances of one `Calibrate`.
+    /// Called only when [`accepts_calibrate`](Sampler::accepts_calibrate) is
+    /// `true`, on a blocking thread of its own, one call at a time.
+    /// `topology` is the session's latest `Topology`.
+    ///
+    /// Do not change the tuning the solver runs with here. Return the change
+    /// as a [`Calibration`]: the session applies it only when this call
+    /// returns `Ok` before `request.deadline_ms`, and answers `DONE`. An `Err`
+    /// answers `FAILED`, and a call still running at the deadline answers
+    /// `DEADLINE_PASSED`; in both cases the solver keeps its current tuning
+    /// and the session continues. The session does not stop a call that
+    /// overruns its deadline, so a long search should read the deadline
+    /// itself.
+    ///
+    /// # Errors
+    ///
+    /// Any [`SampleError`]: the session answers `FAILED` with the error text
+    /// as the summary, and does not end the session. The default declines
+    /// every request, because a sampler that lists `calibrate` must override
+    /// it.
+    fn calibrate(
+        &self,
+        _request: &quip_proto::v1::Calibrate,
+        _topology: &quip_proto::v1::Topology,
+    ) -> Result<Calibration<Self>, SampleError> {
+        Err(SampleError::Declined(
+            "calibrate called on a sampler that does not accept Calibrate".into(),
         ))
     }
 

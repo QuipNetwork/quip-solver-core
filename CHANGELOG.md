@@ -68,6 +68,22 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `SPEC.md` section 4 states how `SamplerMeta.device_access_time_us` and
   `qpu_access_us` differ, how a solver reports the cost of a cancelled or
   rejected job, and what `headroom` and `limit_reached` mean (QUI-1661).
+- The protocol has a calibrate exchange. A solver that lists the `calibrate`
+  feature can get a `Calibrate`, `CoordMsg` field 10, after `Topology` and
+  before the first job. It carries the family parameters, the reference
+  instances, and a deadline. The solver answers with one `CalibrateDone`,
+  `MinerMsg` field 10. It reports one of three outcomes, `DONE`, `FAILED`, or
+  `DEADLINE_PASSED`, with an optional summary (QUI-2420).
+- A Rust solver serves the exchange with the new `Sampler::accepts_calibrate`
+  and `Sampler::calibrate` methods. The hook returns a `Calibration`, and the
+  session applies it only when the hook returns before the deadline. A failure
+  or a passed deadline keeps the current tuning, and the session continues. A
+  solver without the feature answers `Calibrate` with outcome failed
+  (QUI-2420).
+- The conformance driver sends one `Calibrate` to a solver that lists
+  `calibrate` and expects exactly one `CalibrateDone` by the deadline. The new
+  `drive_miner_unlisted_calibrate` sends one to a solver without the feature
+  and expects outcome failed (QUI-2420).
 
 ### Changed
 

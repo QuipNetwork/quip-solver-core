@@ -105,6 +105,7 @@ fn coord_msg_name(msg: Option<&coord_msg::Msg>) -> &'static str {
         Some(coord_msg::Msg::Cancel(_)) => "Cancel",
         Some(coord_msg::Msg::Ping(_)) => "Ping",
         Some(coord_msg::Msg::GetCapabilities(_)) => "GetCapabilities",
+        Some(coord_msg::Msg::Calibrate(_)) => "Calibrate",
         Some(coord_msg::Msg::Shutdown(_)) => "Shutdown",
         None => "unset",
     }
@@ -303,14 +304,23 @@ fn advertised_capabilities<S: Sampler<C>, C: Coefficient>(
 /// Feature string for a solver that uses `IsingProblem.initial_spins`.
 pub const INITIAL_SPINS_FEATURE: &str = "initial-spins";
 
+/// Feature string for a solver that serves the `Calibrate` exchange.
+pub const CALIBRATE_FEATURE: &str = "calibrate";
+
 /// The features `Hello` and `Capabilities` carry: the identity's own list, plus
 /// [`INITIAL_SPINS_FEATURE`] when [`Sampler::accepts_warm_start`] is true.
-/// Deriving it from the trait keeps the advertisement and the behaviour from
-/// drifting apart.
+/// [`CALIBRATE_FEATURE`] is listed exactly when
+/// [`Sampler::accepts_calibrate`] is true. Deriving it from the trait keeps the
+/// advertisement and the behaviour from drifting apart.
 fn advertised_features<S: Sampler<C>, C: Coefficient>(id: &BackendIdentity) -> Vec<&'static str> {
     let mut features = id.features.to_vec();
     if S::accepts_warm_start() && !features.contains(&INITIAL_SPINS_FEATURE) {
         features.push(INITIAL_SPINS_FEATURE);
+    }
+    if !S::accepts_calibrate() {
+        features.retain(|&f| f != CALIBRATE_FEATURE);
+    } else if !features.contains(&CALIBRATE_FEATURE) {
+        features.push(CALIBRATE_FEATURE);
     }
     features
 }
@@ -1078,6 +1088,13 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
     // are joined at shutdown against the grace deadline.
     let mut iqm_tasks = tokio::task::JoinSet::new();
     let iqm_permits = Arc::new(Semaphore::new(width));
+    // `Calibrate` answers run apart from the read loop, so `Ping` and
+    // `Shutdown` stay live, and are joined at shutdown like IQM jobs. One
+    // permit: calibrations of one solver run one at a time.
+    let mut calibrate_tasks = tokio::task::JoinSet::new();
+    let calibrate_permits = Arc::new(Semaphore::new(1));
+    // The latest `Topology` as sent, for the calibrate hook.
+    let mut last_topology: Option<Arc<quip_proto::v1::Topology>> = None;
     let mut lease_threads: Vec<std::thread::JoinHandle<()>> = Vec::new();
     let mut shutdown_requested = false;
     let mut credit_window = cap;
@@ -1164,6 +1181,13 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
                 // An IQM job that hit a device fault has sent `Fatal`; stop
                 // reading jobs the device cannot serve.
                 if device_faulted.load(Ordering::Relaxed) {
+                    break;
+                }
+                continue;
+            }
+            joined = calibrate_tasks.join_next(), if !calibrate_tasks.is_empty() => {
+                if let Some(Err(error)) = joined {
+                    writer_failure = Some(format!("calibrate task failed: {error}"));
                     break;
                 }
                 continue;
@@ -1320,6 +1344,7 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
                     }
                     topology = Some(cache);
                     lease_topology = Some(Arc::new(lease_cache));
+                    last_topology = Some(Arc::new(t));
                 }
                 Some(coord_msg::Msg::SetTarget(s)) => {
                     let _ = target_tx.send_replace(Some(SessionTarget::from_proto(&s)));
@@ -1631,6 +1656,17 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
                         break;
                     }
                 }
+                Some(coord_msg::Msg::Calibrate(request)) => {
+                    // Answered from a task, with exactly one `CalibrateDone`,
+                    // whatever the sampler supports.
+                    let _ = calibrate_tasks.spawn(crate::calibrate::run(
+                        Arc::clone(&sampler),
+                        request,
+                        last_topology.clone(),
+                        Arc::clone(&calibrate_permits),
+                        ctrl_tx.clone(),
+                    ));
+                }
                 Some(coord_msg::Msg::Shutdown(s)) => {
                     shutdown_requested = true;
                     grace_ms = if s.grace_ms == 0 {
@@ -1673,6 +1709,11 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
     // bound them by this one.
     if let Some(error) = join_expanders(&mut iqm_tasks, deadline, "IQM job task").await {
         aborted.store(true, Ordering::Relaxed);
+        writer_failure = Some(error);
+    }
+    // A calibrate call has no grace deadline of its own either. Its answer is
+    // sent before the control channel closes below, or not at all.
+    if let Some(error) = join_expanders(&mut calibrate_tasks, deadline, "calibrate task").await {
         writer_failure = Some(error);
     }
     if S::generates_locally() {
@@ -2431,6 +2472,145 @@ mod tests {
         );
     }
 
+    /// Drive one `Calibrate` through a session, then a `Ping`. Returns every
+    /// `CalibrateDone` and whether a `Status` answered the `Ping`.
+    async fn calibrate_round<S: Sampler<crate::coefficient::Milli>>(
+        sampler: S,
+    ) -> (Vec<quip_proto::v1::CalibrateDone>, bool) {
+        let (input, incoming) = mpsc::channel(8);
+        let (out, mut replies) = mpsc::channel(64);
+        let identity = test_identity();
+        let families = generic_table();
+        let mut shutdown_deadline = None;
+        let session = run_connected_session(
+            ReceiverStream::new(incoming),
+            out,
+            "test",
+            &identity,
+            &families,
+            Arc::new(sampler),
+            None,
+            None,
+            &mut shutdown_deadline,
+        );
+        let coordinator = async move {
+            let send = |msg| input.send(Ok(CoordMsg { msg: Some(msg) }));
+            send(coord_msg::Msg::Welcome(quip_proto::v1::Welcome {
+                protocol_version: 2,
+            }))
+            .await
+            .unwrap();
+            send(coord_msg::Msg::Configure(
+                quip_proto::v1::Configure::default(),
+            ))
+            .await
+            .unwrap();
+            send(coord_msg::Msg::Topology(quip_proto::v1::Topology {
+                hash: vec![7; 32],
+                nodes: vec![1],
+                ..Default::default()
+            }))
+            .await
+            .unwrap();
+            send(coord_msg::Msg::Calibrate(
+                quip_proto::v1::Calibrate::default(),
+            ))
+            .await
+            .unwrap();
+            let mut done = Vec::new();
+            while done.is_empty() {
+                if let Some(miner_msg::Msg::CalibrateDone(d)) = replies.recv().await.unwrap().msg {
+                    done.push(d);
+                }
+            }
+            send(coord_msg::Msg::Ping(quip_proto::v1::Ping {}))
+                .await
+                .unwrap();
+            let mut status = false;
+            while !status {
+                match replies.recv().await.unwrap().msg {
+                    Some(miner_msg::Msg::CalibrateDone(d)) => done.push(d),
+                    Some(miner_msg::Msg::Status(_)) => status = true,
+                    _ => {}
+                }
+            }
+            send(coord_msg::Msg::Shutdown(quip_proto::v1::Shutdown {
+                grace_ms: 200,
+            }))
+            .await
+            .unwrap();
+            while let Some(reply) = replies.recv().await {
+                if let Some(miner_msg::Msg::CalibrateDone(d)) = reply.msg {
+                    done.push(d);
+                }
+            }
+            (done, status)
+        };
+        let (result, answered) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(session, coordinator)
+        })
+        .await
+        .unwrap();
+        result.unwrap();
+        answered
+    }
+
+    struct Calibrating;
+    impl Sampler<crate::coefficient::Milli> for Calibrating {
+        fn sample(
+            &self,
+            _: &crate::IsingGraph<crate::coefficient::Milli>,
+            _: &crate::SampleParams,
+        ) -> Result<Vec<crate::SamplerResult>, crate::SampleError> {
+            Ok(Vec::new())
+        }
+        fn accepts_calibrate() -> bool {
+            true
+        }
+        fn calibrate(
+            &self,
+            _: &quip_proto::v1::Calibrate,
+            _: &quip_proto::v1::Topology,
+        ) -> Result<crate::Calibration<Self>, crate::SampleError> {
+            Ok(crate::Calibration::new("tuned", |_: &Self| {}))
+        }
+    }
+
+    struct NotCalibrating;
+    impl Sampler<crate::coefficient::Milli> for NotCalibrating {
+        fn sample(
+            &self,
+            _: &crate::IsingGraph<crate::coefficient::Milli>,
+            _: &crate::SampleParams,
+        ) -> Result<Vec<crate::SamplerResult>, crate::SampleError> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_session_answers_calibrate_once_and_keeps_serving() {
+        let (done, status) = calibrate_round(Calibrating).await;
+        let outcomes: Vec<i32> = done.iter().map(|d| d.outcome).collect();
+        assert_eq!(
+            outcomes,
+            [quip_proto::v1::CalibrateOutcome::Done as i32],
+            "exactly one CalibrateDone"
+        );
+        assert!(status, "the session answers Ping after the exchange");
+    }
+
+    #[tokio::test]
+    async fn a_session_without_the_feature_answers_calibrate_failed() {
+        let (done, status) = calibrate_round(NotCalibrating).await;
+        let outcomes: Vec<i32> = done.iter().map(|d| d.outcome).collect();
+        assert_eq!(
+            outcomes,
+            [quip_proto::v1::CalibrateOutcome::Failed as i32],
+            "exactly one CalibrateDone"
+        );
+        assert!(status, "the session answers Ping after the exchange");
+    }
+
     struct Sampled(StdMutex<Option<tokio::sync::oneshot::Sender<()>>>);
     impl Sampler<crate::coefficient::Milli> for Sampled {
         fn sample(
@@ -3116,6 +3296,58 @@ mod tests {
         assert_eq!(
             advertised_features::<Warm, f64>(&listed),
             vec![INITIAL_SPINS_FEATURE]
+        );
+    }
+
+    /// `calibrate` follows `accepts_calibrate` alone: added once when the
+    /// sampler serves the exchange, and dropped from an identity that lists it
+    /// for a sampler that does not.
+    #[test]
+    fn the_calibrate_feature_follows_accepts_calibrate() {
+        struct Calibrating;
+        impl Sampler for Calibrating {
+            fn sample(
+                &self,
+                _graph: &crate::IsingGraph,
+                _params: &crate::ising::SampleParams,
+            ) -> Result<Vec<crate::SamplerResult>, crate::SampleError> {
+                Ok(vec![])
+            }
+            fn accepts_calibrate() -> bool {
+                true
+            }
+        }
+        struct Plain;
+        impl Sampler for Plain {
+            fn sample(
+                &self,
+                _graph: &crate::IsingGraph,
+                _params: &crate::ising::SampleParams,
+            ) -> Result<Vec<crate::SamplerResult>, crate::SampleError> {
+                Ok(vec![])
+            }
+        }
+
+        let id = test_identity();
+        assert_eq!(
+            advertised_capabilities::<Calibrating, f64>(&id, &generic_table()).features,
+            vec!["streaming", CALIBRATE_FEATURE]
+        );
+        assert_eq!(
+            advertised_capabilities::<Plain, f64>(&id, &generic_table()).features,
+            vec!["streaming"]
+        );
+        let listed = BackendIdentity {
+            features: &[CALIBRATE_FEATURE, "streaming"],
+            ..test_identity()
+        };
+        assert_eq!(
+            advertised_features::<Calibrating, f64>(&listed),
+            vec![CALIBRATE_FEATURE, "streaming"]
+        );
+        assert_eq!(
+            advertised_features::<Plain, f64>(&listed),
+            vec!["streaming"]
         );
     }
 
