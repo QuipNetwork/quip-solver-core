@@ -5,7 +5,7 @@ This file documents changes to the Quip solver contract.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## 0.0.16-rc2
+## 0.0.16
 
 ### Added
 
@@ -18,16 +18,6 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- `families.generate`, `Instance.digest`, and `Instance.canonical_bytes`
-  release the Python global interpreter lock while they build.
-- With the `std` feature, a `BaseTopology` keeps the ice tile structure of each
-  lattice after the first use, and later salts of the four ice families reuse
-  it. The instances stay byte for byte the same.
-
-## 0.0.16-rc1
-
-### Changed
-
 - The solver contract does not change in this release. Generated instances and
   public Rust paths also stay the same.
 - Shared types and helpers move into leaf modules, which removes the circular
@@ -35,6 +25,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `quip-solver-conformance`, and the Python family oracle.
 - The family vector files carry new source hashes, because the oracle's
   `canonical_json` moved to `conformance/family_oracle/canonical.py`.
+- `families.generate`, `Instance.digest`, and `Instance.canonical_bytes`
+  release the Python global interpreter lock while they build.
+- With the `std` feature, a `BaseTopology` keeps the ice tile structure of each
+  lattice after the first use, and later salts of the four ice families reuse
+  it. The instances stay byte for byte the same.
 
 ## 0.0.15
 
