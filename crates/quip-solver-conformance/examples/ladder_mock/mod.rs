@@ -1,9 +1,9 @@
-//! Shared body of the two ladder mock solvers. Each lists `linear-schedule`,
-//! returns all `+1` reads, and reports a `beta_ladder` of the kind it is given.
-//! `mock_ladder_linear` runs the ladder it was asked for; `mock_ladder_geometric`
-//! lists the feature but reports a geometric ladder; `mock_ladder_sdk` lists it
-//! but reports the right ladder as the SDK default, with no override, as a kernel that ignores
-//! the schedule would.
+//! Shared body of the three ladder mock solvers. Each lists `linear-schedule`,
+//! returns all `+1` reads, and reports a `beta_ladder`.
+//! `mock_ladder_linear` runs the linear ladder it was asked for.
+//! `mock_ladder_geometric` reports a geometric ladder, as a kernel that ignores
+//! the schedule would. `mock_ladder_sdk` reports the right ladder as the SDK
+//! default, as a solver that never overrides `Sampler::beta_ladder`.
 #![expect(
     clippy::print_stdout,
     clippy::print_stderr,

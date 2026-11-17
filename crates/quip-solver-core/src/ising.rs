@@ -70,10 +70,9 @@ pub struct BetaLadder {
 impl BetaLadder {
     /// The ladder [`BetaSchedule::build`] makes from `params`: the requested
     /// kind, from the requested `beta_range` or the one chosen from `graph`,
-    /// with `num_sweeps` divided by `sweeps_per_beta`, rounded down and at least
-    /// one, rungs. This
-    /// is what a [`Sampler`](crate::Sampler) that builds its ladder this way
-    /// ran, and what `--solve` reports for it.
+    /// with `num_sweeps / sweeps_per_beta` rungs, rounded down and at least
+    /// one. A [`Sampler`](crate::Sampler) that builds its ladder this way ran
+    /// this ladder, and `--solve` reports it for a sampler that states none.
     #[must_use]
     pub fn from_params<C: Coefficient>(graph: &IsingGraph<C>, params: &SampleParams) -> Self {
         let (hot, cold) = params

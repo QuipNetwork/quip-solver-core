@@ -22,6 +22,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `reported_by == "sampler"` and the linear ladder of the request, so a solver
   that lists the feature and runs another ladder, or reports none of its own,
   fails it (QUI-1833).
+- A declaration that lists `generated` families is invalid for a sampler that
+  declines leases. It fails with `DeclarationError::GeneratedWithoutLeases`.
+- The conformance driver sends one lease to a solver that does not advertise
+  `ISING_GENERATE`. It expects `Reject` with `UNSUPPORTED_KIND`.
 
 ### Changed
 
