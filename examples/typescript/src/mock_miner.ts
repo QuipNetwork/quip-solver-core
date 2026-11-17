@@ -133,6 +133,7 @@ function capabilities(): Capabilities {
     solverId: "",
     generatedFamilies: [],
     acceptedFamilies: [],
+    solveOptions: [],
   };
 }
 
@@ -397,6 +398,7 @@ class Session {
         solutions: solutions.map((s) => ({
           spins: consensus.encodeSpinsPacked(s.spins),
           energyMilli: s.energy,
+          values: [],
         })),
         meta: {
           reads: numReads,
