@@ -1,7 +1,8 @@
 //! Shared body of the two ladder mock solvers. Each lists `linear-schedule`,
 //! returns all `+1` reads, and reports a `beta_ladder` of the kind it is given.
 //! `mock_ladder_linear` runs the ladder it was asked for; `mock_ladder_geometric`
-//! lists the feature but reports a geometric ladder, as a kernel that ignores
+//! lists the feature but reports a geometric ladder; `mock_ladder_sdk` lists it
+//! but reports the right ladder as the SDK default, with no override, as a kernel that ignores
 //! the schedule would.
 #![expect(
     clippy::print_stdout,
@@ -42,14 +43,14 @@ fn ladder(kind: &str, (hot, cold): (f64, f64), rungs: usize) -> Vec<f64> {
         .collect()
 }
 
-fn solve(input: &[u8], ran_kind: &str) -> Result<Value, String> {
+fn solve(input: &[u8], ran_kind: &str, reported_by: &str) -> Result<Value, String> {
     let p: Problem = serde_json::from_slice(input).map_err(|e| e.to_string())?;
     if p.j.len() != p.edges.len() || p.num_reads == 0 || p.sweeps_per_beta == 0 {
         return Err("malformed problem".into());
     }
     let asked = p.beta_schedule_type.as_deref().unwrap_or("geometric");
     let range = p.beta_range.unwrap_or((0.1, 1.0));
-    let rungs = p.num_sweeps.div_ceil(p.sweeps_per_beta);
+    let rungs = (p.num_sweeps / p.sweeps_per_beta).max(1);
     let spins = vec![1_i8; p.h.len()];
     let read = json!({
         "spins": spins,
@@ -64,15 +65,20 @@ fn solve(input: &[u8], ran_kind: &str) -> Result<Value, String> {
             "beta_range": p.beta_range,
             // An echo of the request, so only the ladder tells what ran.
             "beta_schedule_type": asked,
-            "beta_ladder": {"kind": ran_kind, "betas": ladder(ran_kind, range, rungs)},
+            "beta_ladder": {
+                "kind": ran_kind,
+                "betas": ladder(ran_kind, range, rungs),
+                "reported_by": reported_by,
+            },
             "seed": p.seed,
         },
     });
     Ok(Value::Array(vec![read; p.num_reads]))
 }
 
-/// Run the mock. `ran_kind` is the ladder kind it reports for a linear request.
-pub(crate) fn run(ran_kind: &str) -> ExitCode {
+/// Run the mock. `ran_kind` is the ladder kind it reports, and `reported_by`
+/// says who stated it, `"sampler"` or `"sdk"`.
+pub(crate) fn run(ran_kind: &str, reported_by: &str) -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--capabilities") {
         println!(
@@ -91,7 +97,7 @@ pub(crate) fn run(ran_kind: &str) -> ExitCode {
     if !args.iter().any(|a| a == "--solve") || std::io::stdin().read_to_end(&mut input).is_err() {
         return ExitCode::from(64);
     }
-    match solve(&input, ran_kind) {
+    match solve(&input, ran_kind, reported_by) {
         Ok(reads) => {
             println!("{reads}");
             ExitCode::SUCCESS

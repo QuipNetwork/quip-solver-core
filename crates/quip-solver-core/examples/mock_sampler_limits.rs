@@ -7,8 +7,8 @@ use clap::Parser;
 use quip_solver_core::coefficient::Fixed;
 use quip_solver_core::quip_protocol::scoring::energy_milli;
 use quip_solver_core::{
-    run, BackendIdentity, CommonArgs, IsingGraph, ModelLimits, SampleError, SampleParams, Sampler,
-    SamplerResult, EXACT_COEFFICIENTS_FEATURE, LINEAR_SCHEDULE_FEATURE,
+    run, BackendIdentity, BetaLadder, CommonArgs, IsingGraph, ModelLimits, SampleError,
+    SampleParams, Sampler, SamplerResult, EXACT_COEFFICIENTS_FEATURE, LINEAR_SCHEDULE_FEATURE,
 };
 use std::process::ExitCode;
 
@@ -17,6 +17,12 @@ type Int8 = Fixed<i8, 1>;
 struct LimitedSampler;
 
 impl Sampler<Int8> for LimitedSampler {
+    // It lists `linear-schedule`, so it states its own ladder. This mock has no
+    // kernel, so the ladder it ran is the one the request asks for.
+    fn beta_ladder(&self, graph: &IsingGraph<Int8>, params: &SampleParams) -> Option<BetaLadder> {
+        Some(BetaLadder::from_params(graph, params))
+    }
+
     fn sample(
         &self,
         graph: &IsingGraph<Int8>,

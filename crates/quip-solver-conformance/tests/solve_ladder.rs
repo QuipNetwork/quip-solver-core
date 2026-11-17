@@ -55,3 +55,13 @@ async fn a_solver_that_lists_linear_but_reports_a_geometric_ladder_fails() {
         other => panic!("expected a failure, got {other:?}\n{}", report.summary()),
     }
 }
+
+#[tokio::test]
+async fn a_solver_that_lists_linear_but_leaves_the_ladder_to_the_sdk_fails() {
+    let bin = example("mock_ladder_sdk");
+    let report = drive_solve(&bin.to_string_lossy()).await;
+    match report.outcome("linear-schedule") {
+        Some(CaseOutcome::Failed(why)) => assert!(why.contains("reported_by"), "{why}"),
+        other => panic!("expected a failure, got {other:?}\n{}", report.summary()),
+    }
+}

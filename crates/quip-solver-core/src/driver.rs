@@ -90,9 +90,38 @@ pub struct SamplerJson {
     pub beta_schedule_type: &'static str,
     /// The ladder the solve ran, as the sampler reported it or as built from
     /// the request. Its `kind` equals `beta_schedule_type`.
-    pub beta_ladder: BetaLadder,
+    pub beta_ladder: ReportedLadder,
     /// PRNG seed.
     pub seed: u64,
+}
+
+/// A ladder and who stated it.
+#[derive(Clone, Debug, Serialize)]
+pub struct ReportedLadder {
+    /// The kind and rungs.
+    #[serde(flatten)]
+    pub ladder: BetaLadder,
+    /// `"sampler"` when [`Sampler::beta_ladder`] supplied the ladder, `"sdk"`
+    /// when the SDK built it from the request.
+    pub reported_by: &'static str,
+}
+
+/// The ladder `sampler` states for this job, or the one built from the request.
+fn reported_ladder<S: Sampler<C>, C: Coefficient>(
+    sampler: &S,
+    graph: &IsingGraph<C>,
+    params: &SampleParams,
+) -> ReportedLadder {
+    match sampler.beta_ladder(graph, params) {
+        Some(ladder) => ReportedLadder {
+            ladder,
+            reported_by: "sampler",
+        },
+        None => ReportedLadder {
+            ladder: BetaLadder::from_params(graph, params),
+            reported_by: "sdk",
+        },
+    }
 }
 
 /// Why [`solve`] could not produce solutions.
@@ -328,9 +357,7 @@ pub fn solve<S: Sampler<C>, C: Coefficient>(
         sample_us,
         total_us: micros_since(started),
     };
-    let beta_ladder = sampler
-        .beta_ladder(&graph, &params)
-        .unwrap_or_else(|| BetaLadder::from_params(&graph, &params));
+    let beta_ladder = reported_ladder(sampler, &graph, &params);
     let sampler_json = SamplerJson {
         backend: backend_name(id.backend),
         algorithm: algorithm_name(id.algorithm),
@@ -338,7 +365,7 @@ pub fn solve<S: Sampler<C>, C: Coefficient>(
         num_sweeps: params.num_sweeps,
         sweeps_per_beta: params.sweeps_per_beta,
         beta_range: params.beta_range,
-        beta_schedule_type: beta_ladder.kind.name(),
+        beta_schedule_type: beta_ladder.ladder.kind.name(),
         beta_ladder,
         seed: params.seed,
     };
@@ -592,10 +619,10 @@ mod tests {
     #[test]
     fn a_sampler_that_builds_no_ladder_reports_the_one_built_from_the_request() {
         let sampler = reported_sampler(&OneRead);
-        // 5 sweeps at 2 per rung is 3 rungs.
+        // 5 sweeps at 2 per rung is 2 rungs, rounded down.
         assert_eq!(
             sampler.get("beta_ladder"),
-            Some(&serde_json::json!({"kind": "linear", "betas": [0.5, 1.25, 2.0]}))
+            Some(&serde_json::json!({"kind": "linear", "betas": [0.5, 2.0], "reported_by": "sdk"}))
         );
         assert_eq!(sampler.get("beta_schedule_type"), Some(&"linear".into()));
     }
@@ -605,7 +632,9 @@ mod tests {
         let sampler = reported_sampler(&OwnLadder);
         assert_eq!(
             sampler.get("beta_ladder"),
-            Some(&serde_json::json!({"kind": "geometric", "betas": [0.5, 1.0]}))
+            Some(
+                &serde_json::json!({"kind": "geometric", "betas": [0.5, 1.0], "reported_by": "sampler"})
+            )
         );
         assert_eq!(
             sampler.get("beta_schedule_type"),

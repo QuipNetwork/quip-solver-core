@@ -742,6 +742,13 @@ fn check_linear_ladder(reads: &Value) -> Result<(), String> {
         let ladder = read
             .pointer("/sampler/beta_ladder")
             .ok_or_else(|| format!("solution {index} reports no sampler.beta_ladder"))?;
+        if ladder.get("reported_by") != Some(&json!("sampler")) {
+            return Err(format!(
+                "solution {index} beta_ladder.reported_by is {}, not \"sampler\": \
+                 a solver that lists linear-schedule must state its own ladder",
+                ladder.get("reported_by").unwrap_or(&Value::Null)
+            ));
+        }
         if ladder.get("kind") != Some(&json!("linear")) {
             return Err(format!(
                 "solution {index} ran a ladder of kind {}, not \"linear\"",

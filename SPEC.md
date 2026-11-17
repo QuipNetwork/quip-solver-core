@@ -67,15 +67,21 @@ The output is one JSON array with one object per read, and a trailing newline.
 
 `beta_ladder` is an object that reports the ladder the solve ran, not an echo
 of the input. `kind` is `"geometric"` or `"linear"`. `betas` is an array of
-numbers, the beta at each rung in the order the solve visited them. For a
-solver that builds the ladder from the request, the rung count is `num_sweeps`
-divided by `sweeps_per_beta`, rounded up. `beta_schedule_type` equals
-`beta_ladder.kind`, so a solver that ran a different kind than the one asked
-reports the kind it ran. A solver that lists `linear-schedule` must report
-`beta_ladder`, and for a `"linear"` request its `betas` must be the evenly
-spaced ladder from the hot to the cold end of `beta_range`. A solver that
-cannot run the requested schedule still refuses with exit 64. A solver that
-does not list `linear-schedule` may omit `beta_ladder`.
+numbers, the beta at each rung in the order the solve visited them.
+`reported_by` is `"sampler"` when the solver's own sampler stated the ladder,
+and `"sdk"` when the SDK built it from the request because the sampler did not
+state one. For a ladder built from the request, the rung count is `num_sweeps`
+divided by `sweeps_per_beta`, rounded down, and at least 1.
+`beta_schedule_type` equals `beta_ladder.kind`, so a solver that ran a
+different kind than the one asked reports the kind it ran. A solver that
+cannot run the requested schedule still refuses with exit 64.
+
+A solver that lists `linear-schedule` must state its own ladder, so its
+`reported_by` is `"sampler"`. For a `"linear"` request its `betas` must be the
+evenly spaced ladder from the hot to the cold end of `beta_range`. A ladder
+with `reported_by` `"sdk"` proves only what was asked, so the conformance gate
+fails a solver that lists the feature and reports it. A solver that does not
+list `linear-schedule` may omit `beta_ladder` or report `"sdk"`.
 
 A solver that lists `embed` accepts the `--embed` flag beside `--solve`.
 Without it, the solver samples the model on its working graph as given, and

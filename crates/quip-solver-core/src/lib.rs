@@ -238,13 +238,19 @@ pub trait Sampler<C: Coefficient = f64>: Send + Sync + 'static {
         params: &SampleParams,
     ) -> Result<Vec<SamplerResult>, SampleError>;
 
-    /// The beta ladder the last [`sample`](Sampler::sample) call ran, when the
-    /// sampler builds its own. `--solve` reports it in the `sampler` output.
+    /// The beta ladder this sampler runs for a job with these `params`.
+    /// `--solve` reports it in the `sampler` output as `beta_ladder`, with
+    /// `reported_by` set to `"sampler"`.
     ///
-    /// The default is `None`: the sampler ran the ladder
-    /// [`BetaLadder::from_params`] builds from `params`, and `--solve` reports
-    /// that. Override it when the kernel builds a different ladder, so the
-    /// output states what ran and not what was asked.
+    /// A solver that lists [`LINEAR_SCHEDULE_FEATURE`] must override this, and
+    /// return the ladder its kernel builds, so the output states what ran. The
+    /// conformance gate fails a solver that lists the feature and does not.
+    /// Derive the answer from `graph` and `params` alone, not from the state of
+    /// an earlier call.
+    ///
+    /// The default is `None`: `--solve` reports the ladder
+    /// [`BetaLadder::from_params`] builds from the request, with `reported_by`
+    /// set to `"sdk"`. That is only the request, not proof of what ran.
     fn beta_ladder(&self, _graph: &IsingGraph<C>, _params: &SampleParams) -> Option<BetaLadder> {
         None
     }

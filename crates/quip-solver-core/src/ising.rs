@@ -70,7 +70,8 @@ pub struct BetaLadder {
 impl BetaLadder {
     /// The ladder [`BetaSchedule::build`] makes from `params`: the requested
     /// kind, from the requested `beta_range` or the one chosen from `graph`,
-    /// with `num_sweeps` divided by `sweeps_per_beta`, rounded up, rungs. This
+    /// with `num_sweeps` divided by `sweeps_per_beta`, rounded down and at least
+    /// one, rungs. This
     /// is what a [`Sampler`](crate::Sampler) that builds its ladder this way
     /// ran, and what `--solve` reports for it.
     #[must_use]
@@ -78,7 +79,7 @@ impl BetaLadder {
         let (hot, cold) = params
             .beta_range
             .unwrap_or_else(|| crate::beta::default_ising_beta_range(graph));
-        let rungs = params.num_sweeps.div_ceil(params.sweeps_per_beta.max(1));
+        let rungs = (params.num_sweeps / params.sweeps_per_beta.max(1)).max(1);
         Self {
             kind: params.schedule,
             betas: params.schedule.build(hot, cold, rungs),

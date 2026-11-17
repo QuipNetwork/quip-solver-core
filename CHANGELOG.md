@@ -13,17 +13,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   method defaults to `true`. When it returns `false`, the solver lists only
   `ISING_SAMPLE`, advertises no generators and no generated families, and
   rejects a lease with `UNSUPPORTED_KIND`.
-- The `--solve` output `sampler` object carries `beta_ladder`, with the `kind`
-  and the `betas` the solve ran. A Rust solver reports the ladder built from the
-  request without extra code. One that builds its own overrides the new
-  `Sampler::beta_ladder` method. `beta_schedule_type` now equals the reported
-  kind. The `linear-schedule` conformance case compares the reported ladder
-  with the linear ladder of the request, so a solver that lists the feature
-  and runs a different ladder fails it (QUI-1833).
-- A declaration that lists `generated` families is invalid for a sampler that
-  declines leases. It fails with `DeclarationError::GeneratedWithoutLeases`.
-- The conformance driver sends one lease to a solver that does not advertise
-  `ISING_GENERATE`. It expects `Reject` with `UNSUPPORTED_KIND`.
+- The `--solve` output `sampler` object carries `beta_ladder`, with the `kind`,
+  the `betas` the solve ran, and `reported_by`. `reported_by` is `"sampler"`
+  when the sampler overrides the new `Sampler::beta_ladder` method, and `"sdk"`
+  when the SDK built the ladder from the request. `beta_schedule_type` now
+  equals the reported kind. A solver that lists `linear-schedule` must override
+  the method. The `linear-schedule` conformance case requires
+  `reported_by == "sampler"` and the linear ladder of the request, so a solver
+  that lists the feature and runs another ladder, or reports none of its own,
+  fails it (QUI-1833).
 
 ### Changed
 

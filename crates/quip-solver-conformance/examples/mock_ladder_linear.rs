@@ -4,5 +4,5 @@
 mod ladder_mock;
 
 fn main() -> std::process::ExitCode {
-    ladder_mock::run("linear")
+    ladder_mock::run("linear", "sampler")
 }
