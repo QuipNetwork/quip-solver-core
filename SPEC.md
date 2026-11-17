@@ -60,10 +60,22 @@ The output is one JSON array with one object per read, and a trailing newline.
 | `spins` | array of -1 and +1 | One spin per node. |
 | `energy_milli` | integer | Exact energy of `spins` under the input model, in milli units. |
 | `timing` | object | `sample_us`, the time inside the sampler, and `total_us`, the whole solve. Both are integers in microseconds. |
-| `sampler` | object | `backend` and `algorithm` as `--capabilities` names them, then `num_reads`, `num_sweeps`, `sweeps_per_beta`, `beta_range`, `beta_schedule_type`, and `seed` as the solve used them, and `anneal_time_us` when the input carried it. |
+| `sampler` | object | `backend` and `algorithm` as `--capabilities` names them, then `num_reads`, `num_sweeps`, `sweeps_per_beta`, `beta_range`, `beta_schedule_type`, and `seed` as the solve used them, `beta_ladder`, and `anneal_time_us` when the input carried it. |
 | `embedding` | object | Only under `--embed`. `embedded` is `true`, `chain_break_fraction` is the fraction of chains broken in this read, from 0 to 1, and `max_chain_length` is the longest chain in the embedding, an integer of at least 1. |
 
 `timing` and `sampler` are the same for every read of one solve.
+
+`beta_ladder` is an object that reports the ladder the solve ran, not an echo
+of the input. `kind` is `"geometric"` or `"linear"`. `betas` is an array of
+numbers, the beta at each rung in the order the solve visited them. For a
+solver that builds the ladder from the request, the rung count is `num_sweeps`
+divided by `sweeps_per_beta`, rounded up. `beta_schedule_type` equals
+`beta_ladder.kind`, so a solver that ran a different kind than the one asked
+reports the kind it ran. A solver that lists `linear-schedule` must report
+`beta_ladder`, and for a `"linear"` request its `betas` must be the evenly
+spaced ladder from the hot to the cold end of `beta_range`. A solver that
+cannot run the requested schedule still refuses with exit 64. A solver that
+does not list `linear-schedule` may omit `beta_ladder`.
 
 A solver that lists `embed` accepts the `--embed` flag beside `--solve`.
 Without it, the solver samples the model on its working graph as given, and

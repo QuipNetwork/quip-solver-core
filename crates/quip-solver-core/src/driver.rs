@@ -8,7 +8,7 @@
 use crate::backend::{BackendIdentity, EXACT_COEFFICIENTS_FEATURE, LINEAR_SCHEDULE_FEATURE};
 use crate::coefficient::Coefficient;
 use crate::error::SampleError;
-use crate::ising::{BetaSchedule, IsingGraph, SampleParams};
+use crate::ising::{BetaLadder, BetaSchedule, IsingGraph, SampleParams};
 use crate::Sampler;
 use quip_protocol::session::{algorithm_name, backend_name};
 use serde::{Deserialize, Serialize};
@@ -88,6 +88,9 @@ pub struct SamplerJson {
     pub beta_range: Option<(f64, f64)>,
     /// `"geometric"` or `"linear"`.
     pub beta_schedule_type: &'static str,
+    /// The ladder the solve ran, as the sampler reported it or as built from
+    /// the request. Its `kind` equals `beta_schedule_type`.
+    pub beta_ladder: BetaLadder,
     /// PRNG seed.
     pub seed: u64,
 }
@@ -325,6 +328,9 @@ pub fn solve<S: Sampler<C>, C: Coefficient>(
         sample_us,
         total_us: micros_since(started),
     };
+    let beta_ladder = sampler
+        .beta_ladder(&graph, &params)
+        .unwrap_or_else(|| BetaLadder::from_params(&graph, &params));
     let sampler_json = SamplerJson {
         backend: backend_name(id.backend),
         algorithm: algorithm_name(id.algorithm),
@@ -332,7 +338,8 @@ pub fn solve<S: Sampler<C>, C: Coefficient>(
         num_sweeps: params.num_sweeps,
         sweeps_per_beta: params.sweeps_per_beta,
         beta_range: params.beta_range,
-        beta_schedule_type: params.schedule.name(),
+        beta_schedule_type: beta_ladder.kind.name(),
+        beta_ladder,
         seed: params.seed,
     };
     let out: Vec<SolutionJson<'_>> = reads
@@ -354,7 +361,9 @@ pub fn solve<S: Sampler<C>, C: Coefficient>(
 #[cfg(test)]
 mod tests {
     use super::{solve, SolveError};
+    use crate::backend::LINEAR_SCHEDULE_FEATURE;
     use crate::error::SampleError;
+    use crate::ising::BetaSchedule;
     use crate::ising::{IsingGraph, SampleParams, SamplerResult};
     use crate::Sampler;
 
@@ -526,6 +535,92 @@ mod tests {
                 Err(SolveError::Malformed(_))
             ));
         }
+    }
+
+    /// One all-`+1` read, with the default ladder report.
+    struct OneRead;
+    impl Sampler for OneRead {
+        fn sample(
+            &self,
+            graph: &IsingGraph,
+            _: &SampleParams,
+        ) -> Result<Vec<SamplerResult>, SampleError> {
+            Ok(vec![SamplerResult {
+                spins: vec![1; graph.num_nodes()],
+                energy_milli: 0,
+            }])
+        }
+    }
+
+    /// A kernel that ignores the schedule kind and keeps a geometric ladder.
+    struct OwnLadder;
+    impl Sampler for OwnLadder {
+        fn sample(
+            &self,
+            graph: &IsingGraph,
+            params: &SampleParams,
+        ) -> Result<Vec<SamplerResult>, SampleError> {
+            OneRead.sample(graph, params)
+        }
+
+        fn beta_ladder(&self, _: &IsingGraph, _: &SampleParams) -> Option<crate::BetaLadder> {
+            Some(crate::BetaLadder {
+                kind: BetaSchedule::Geometric,
+                betas: vec![0.5, 1.0],
+            })
+        }
+    }
+
+    fn ladder_input(schedule: &str) -> Vec<u8> {
+        format!(
+            r#"{{"h":[0.0],"j":[],"edges":[],"num_reads":1,"num_sweeps":5,
+            "sweeps_per_beta":2,"beta_range":[0.5,2.0],"beta_schedule_type":"{schedule}","seed":0}}"#
+        )
+        .into_bytes()
+    }
+
+    fn reported_sampler<S: Sampler>(sampler: &S) -> serde_json::Value {
+        let id = crate::BackendIdentity {
+            features: &[LINEAR_SCHEDULE_FEATURE],
+            ..id()
+        };
+        let out = solve(sampler, &id, &ladder_input("linear")).expect("solve");
+        let reads: serde_json::Value = serde_json::from_slice(&out).expect("json");
+        reads.pointer("/0/sampler").cloned().expect("sampler")
+    }
+
+    #[test]
+    fn a_sampler_that_builds_no_ladder_reports_the_one_built_from_the_request() {
+        let sampler = reported_sampler(&OneRead);
+        // 5 sweeps at 2 per rung is 3 rungs.
+        assert_eq!(
+            sampler.get("beta_ladder"),
+            Some(&serde_json::json!({"kind": "linear", "betas": [0.5, 1.25, 2.0]}))
+        );
+        assert_eq!(sampler.get("beta_schedule_type"), Some(&"linear".into()));
+    }
+
+    #[test]
+    fn a_sampler_that_builds_its_own_ladder_reports_it_and_its_kind() {
+        let sampler = reported_sampler(&OwnLadder);
+        assert_eq!(
+            sampler.get("beta_ladder"),
+            Some(&serde_json::json!({"kind": "geometric", "betas": [0.5, 1.0]}))
+        );
+        assert_eq!(
+            sampler.get("beta_schedule_type"),
+            Some(&"geometric".into()),
+            "the echo states what ran, not what was asked"
+        );
+    }
+
+    #[test]
+    fn the_gate_ladder_is_the_linear_ladder_of_the_core() {
+        use quip_solver_conformance::solve::{expected_linear_ladder, LADDER_RANGE, LADDER_RUNGS};
+        assert_eq!(
+            expected_linear_ladder(),
+            BetaSchedule::Linear.build(LADDER_RANGE.0, LADDER_RANGE.1, LADDER_RUNGS)
+        );
     }
 }
 

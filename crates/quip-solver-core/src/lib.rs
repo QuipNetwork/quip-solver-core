@@ -32,7 +32,9 @@ pub use backend::{BackendIdentity, EXACT_COEFFICIENTS_FEATURE, LINEAR_SCHEDULE_F
 pub use cli::CommonArgs;
 pub use csr::CsrGraph;
 pub use error::SampleError;
-pub use ising::{Algorithm, BetaSchedule, IsingGraph, SampleParams, SamplerResult, WarmStart};
+pub use ising::{
+    Algorithm, BetaLadder, BetaSchedule, IsingGraph, SampleParams, SamplerResult, WarmStart,
+};
 pub use lease::{FamilyLease, Lease, LeaseSink, LeaseStopped};
 pub use limits::ModelLimits;
 pub use quip_protocol::lease::TopologyView;
@@ -235,6 +237,17 @@ pub trait Sampler<C: Coefficient = f64>: Send + Sync + 'static {
         graph: &IsingGraph<C>,
         params: &SampleParams,
     ) -> Result<Vec<SamplerResult>, SampleError>;
+
+    /// The beta ladder the last [`sample`](Sampler::sample) call ran, when the
+    /// sampler builds its own. `--solve` reports it in the `sampler` output.
+    ///
+    /// The default is `None`: the sampler ran the ladder
+    /// [`BetaLadder::from_params`] builds from `params`, and `--solve` reports
+    /// that. Override it when the kernel builds a different ladder, so the
+    /// output states what ran and not what was asked.
+    fn beta_ladder(&self, _graph: &IsingGraph<C>, _params: &SampleParams) -> Option<BetaLadder> {
+        None
+    }
 
     /// Stream-process jobs: pull from `jobs`, keep up to [`stream_width`] models
     /// in flight, emit each result to `out` in completion order. Blocks until

@@ -318,8 +318,22 @@ fn the_reference_problem_reaches_the_sampler_with_its_defaults() {
         let sample_us = timing.get("sample_us").and_then(serde_json::Value::as_u64);
         let total_us = timing.get("total_us").and_then(serde_json::Value::as_u64);
         assert!(sample_us <= total_us, "{timing}");
+        let mut echoed = read.get("sampler").cloned().expect("sampler");
+        let ladder = echoed
+            .as_object_mut()
+            .and_then(|o| o.remove("beta_ladder"))
+            .expect("the sampler reports the ladder it ran");
+        assert_eq!(ladder.get("kind"), Some(&serde_json::json!("geometric")));
         assert_eq!(
-            read.get("sampler"),
+            ladder
+                .get("betas")
+                .and_then(serde_json::Value::as_array)
+                .map(Vec::len),
+            Some(8),
+            "8 sweeps at 1 per rung"
+        );
+        assert_eq!(
+            Some(&echoed),
             Some(&serde_json::json!({
                 "backend": "mock",
                 "algorithm": "sa",

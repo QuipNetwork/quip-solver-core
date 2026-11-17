@@ -55,6 +55,37 @@ impl BetaSchedule {
     }
 }
 
+/// The beta ladder one solve ran: its kind and its rungs, hot to cold.
+///
+/// `--solve` writes it as the `beta_ladder` object of the `sampler` output, so
+/// a caller can tell what the kernel did apart from what was asked.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct BetaLadder {
+    /// The ladder's spacing, the same names as `beta_schedule_type`.
+    pub kind: BetaSchedule,
+    /// Beta at each rung, in the order the solve visited them.
+    pub betas: Vec<f64>,
+}
+
+impl BetaLadder {
+    /// The ladder [`BetaSchedule::build`] makes from `params`: the requested
+    /// kind, from the requested `beta_range` or the one chosen from `graph`,
+    /// with `num_sweeps` divided by `sweeps_per_beta`, rounded up, rungs. This
+    /// is what a [`Sampler`](crate::Sampler) that builds its ladder this way
+    /// ran, and what `--solve` reports for it.
+    #[must_use]
+    pub fn from_params<C: Coefficient>(graph: &IsingGraph<C>, params: &SampleParams) -> Self {
+        let (hot, cold) = params
+            .beta_range
+            .unwrap_or_else(|| crate::beta::default_ising_beta_range(graph));
+        let rungs = params.num_sweeps.div_ceil(params.sweeps_per_beta.max(1));
+        Self {
+            kind: params.schedule,
+            betas: params.schedule.build(hot, cold, rungs),
+        }
+    }
+}
+
 /// Per-job sampling knobs.
 #[derive(Clone, Debug)]
 pub struct SampleParams {
