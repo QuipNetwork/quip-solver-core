@@ -155,7 +155,7 @@ A solver refuses the IQM form as malformed, exit 64, when any rule for the
 Ising form fails, or when any of these holds:
 
 - The solver does not list `IQM_SAMPLE` in `supportedKinds`.
-- `bounds` is missing, or it has a different length than `h`.
+- `bounds` is missing or empty, or it has a different length than `h`.
 - A coefficient is not a whole number of milli.
 
 `maxNodes` and `maxEdges` bound the variables and the pairs, and a model over
@@ -412,7 +412,7 @@ The solver rejects an `IQM_SAMPLE` job with these reasons:
 | Reason | When |
 |---|---|
 | `EXPIRED` | The deadline has passed. |
-| `MALFORMED` | `iqm` is missing, `edges.u` and `edges.v` differ in length, `h` and `upper_bounds` differ in length, `j` and the pairs differ in length, a pair names a variable outside `upper_bounds`, a pair joins a variable to itself, or a coefficient breaks the coefficient rules of this section. |
+| `MALFORMED` | `iqm` is missing, `upper_bounds` is empty, `edges.u` and `edges.v` differ in length, `h` and `upper_bounds` differ in length, `j` and the pairs differ in length, a pair names a variable outside `upper_bounds`, a pair joins a variable to itself, or a coefficient breaks the coefficient rules of this section. |
 | `TOO_LARGE` | The variables exceed `max_nodes`, the pairs exceed `max_edges`, or `num_reads` exceeds the read limit. |
 
 The model limits below do not apply to this kind. A job at generation 0 is
@@ -701,10 +701,15 @@ fn sample_iqm(
 `accepts_iqm()` defaults to `false`, and the session then lists no
 `IQM_SAMPLE` and rejects the kind. `sample_iqm` defaults to a `DeviceFault`.
 `IqmModel` holds `upper_bounds`, `h_milli`, `j_milli`, and `edges`.
-`sample_iqm` returns one assignment per read. The session and `--solve` call
-it on a blocking thread, check that each assignment has one value per
-variable within its bound, and score it with `IqmModel::energy_milli`. The
-SDK reports an assignment that fails the check as a `DeviceFault`. For a
+`sample_iqm` returns exactly one assignment per read. The session and
+`--solve` call it on a blocking thread. They check the count, check that
+each assignment has one value per variable within its bound, and score it
+with `IqmModel::energy_milli`. The SDK reports output that fails a check as
+a `DeviceFault`. The session runs at most `stream_width` calls of
+`sample_iqm` at once. These calls can overlap the Ising `sample_stream`.
+A backend that serves both kinds on one device must serialize its
+own device access. After `Shutdown`, a running call delays the session no
+longer than the grace deadline. For a
 session job, the sweep budget comes from the same sources as for an Ising
 job, and the seed from the OS.
 

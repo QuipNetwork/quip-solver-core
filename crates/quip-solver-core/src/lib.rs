@@ -335,11 +335,17 @@ pub trait Sampler<C: Coefficient = f64>: Send + Sync + 'static {
     /// [`accepts_iqm`](Sampler::accepts_iqm) is `true`, on a blocking thread
     /// of its own.
     ///
-    /// Return one assignment per read, `params.num_reads` in all, each with
-    /// one value per variable no greater than its bound. The SDK checks each
-    /// assignment and scores it with
-    /// [`IqmModel::energy_milli`](iqm::IqmModel::energy_milli); an assignment
-    /// of the wrong length or outside a bound is a device fault.
+    /// The session runs at most [`stream_width`](Sampler::stream_width) calls
+    /// of `sample_iqm` at once. Those calls can overlap the Ising pipeline
+    /// ([`sample_stream`](Sampler::sample_stream) and its `sample` calls), so a
+    /// backend that serves both kinds on one device must serialize its own
+    /// device access.
+    ///
+    /// Return one assignment per read, exactly `params.num_reads` in all, each
+    /// with one value per variable no greater than its bound. The SDK checks
+    /// the count and each assignment and scores it with
+    /// [`IqmModel::energy_milli`](iqm::IqmModel::energy_milli); any other
+    /// output is a device fault.
     ///
     /// # Errors
     ///

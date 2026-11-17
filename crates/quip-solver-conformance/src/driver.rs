@@ -1189,10 +1189,8 @@ fn iqm_problem() -> IqmProblem {
     }
 }
 
-/// Check one IQM `Result`: a `SamplerMeta`, at least one solution, and each
-/// solution's values within the bounds and scoring to its reported energy.
-/// Returns the solution count.
-fn grade_iqm_result(r: &quip_proto::v1::Result) -> Result<usize, String> {
+/// The consensus energy of `values` under [`iqm_problem`], in milli.
+fn iqm_score(values: &[u32]) -> Result<i64, String> {
     let problem = iqm_problem();
     let h = decode_i32_le(&problem.h).map_err(|e| e.to_string())?;
     let j = decode_i32_le(&problem.j).map_err(|e| e.to_string())?;
@@ -1202,6 +1200,14 @@ fn grade_iqm_result(r: &quip_proto::v1::Result) -> Result<usize, String> {
             .map(|(&u, &v)| (u as usize, v as usize))
             .collect()
     });
+    Ok(iqm_energy_from_milli(values, &h, &j, &edges))
+}
+
+/// Check one IQM `Result`: a `SamplerMeta`, at least one solution, and each
+/// solution's values within the bounds and scoring to its reported energy.
+/// Returns the solution count.
+fn grade_iqm_result(r: &quip_proto::v1::Result) -> Result<usize, String> {
+    let problem = iqm_problem();
     if r.meta.is_none() {
         return Err("the IQM Result has no SamplerMeta".into());
     }
@@ -1226,7 +1232,7 @@ fn grade_iqm_result(r: &quip_proto::v1::Result) -> Result<usize, String> {
                 "solution {index} sets variable {variable} above its bound"
             ));
         }
-        let rescored = iqm_energy_from_milli(&solution.values, &h, &j, &edges);
+        let rescored = iqm_score(&solution.values)?;
         if solution.energy_milli != rescored {
             return Err(format!(
                 "solution {index} reports energy_milli {}, its values score {rescored}",
@@ -2518,20 +2524,11 @@ mod tests {
     /// The `Result` a correct IQM solver returns: every variable at its
     /// bound, with the consensus energy.
     fn iqm_result() -> quip_proto::v1::Result {
-        let problem = iqm_problem();
-        let h = decode_i32_le(&problem.h).unwrap();
-        let j = decode_i32_le(&problem.j).unwrap();
-        let edges = problem.edges.as_ref().map_or_else(Vec::new, |e| {
-            e.u.iter()
-                .zip(&e.v)
-                .map(|(&u, &v)| (u as usize, v as usize))
-                .collect()
-        });
-        let values = problem.upper_bounds;
+        let values = iqm_problem().upper_bounds;
         quip_proto::v1::Result {
             job_id: IQM_JOB_ID.to_vec(),
             solutions: vec![quip_proto::v1::Solution {
-                energy_milli: iqm_energy_from_milli(&values, &h, &j, &edges),
+                energy_milli: iqm_score(&values).unwrap(),
                 spins: vec![],
                 values,
             }],

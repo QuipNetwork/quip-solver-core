@@ -80,6 +80,9 @@ impl IqmModel {
     /// The shape every model must have: one bias per bound, one coupling per
     /// pair, and every pair two distinct variables inside the model.
     pub(crate) fn check_shape(&self) -> Result<(), String> {
+        if self.num_vars() == 0 {
+            return Err("the model has no variables".into());
+        }
         if self.h_milli.len() != self.num_vars() {
             return Err(format!(
                 "h has {} entries for {} bounds",
@@ -93,13 +96,7 @@ impl IqmModel {
     /// Parse and check a wire problem. Every defect is `Malformed`.
     pub(crate) fn from_proto(problem: &IqmProblem) -> Result<Self, RejectReason> {
         let edges = match &problem.edges {
-            Some(e) if e.u.len() != e.v.len() => return Err(RejectReason::Malformed),
-            Some(e) => {
-                e.u.iter()
-                    .zip(&e.v)
-                    .map(|(&u, &v)| (u as usize, v as usize))
-                    .collect()
-            }
+            Some(e) => crate::job::dense_pairs(e)?,
             None => Vec::new(),
         };
         let decode = |bytes: &[u8]| {
@@ -120,15 +117,23 @@ impl IqmModel {
 ///
 /// # Errors
 ///
-/// Returns the sampler's error, or a `DeviceFault` when it returned an
-/// assignment of the wrong length or outside a bound: the sampler is broken.
+/// Returns the sampler's error, or a `DeviceFault` when it returned other
+/// than `params.num_reads` assignments, or an assignment of the wrong length
+/// or outside a bound: the sampler is broken.
 pub(crate) fn sample<S: Sampler<C>, C: Coefficient>(
     sampler: &S,
     model: &IqmModel,
     params: &SampleParams,
 ) -> Result<Vec<(Vec<u32>, i64)>, SampleError> {
-    sampler
-        .sample_iqm(model, params)?
+    let assignments = sampler.sample_iqm(model, params)?;
+    if assignments.len() != params.num_reads {
+        return Err(SampleError::DeviceFault(format!(
+            "sample_iqm returned {} assignments for num_reads {}",
+            assignments.len(),
+            params.num_reads
+        )));
+    }
+    assignments
         .into_iter()
         .map(|values| {
             model
@@ -261,6 +266,8 @@ fn replies(
 
 /// The session state one IQM job reports into.
 pub(crate) struct IqmSession {
+    /// One permit per `sample_iqm` call allowed at once: the stream width.
+    pub(crate) permits: Arc<tokio::sync::Semaphore>,
     pub(crate) ctrl: mpsc::Sender<Control>,
     pub(crate) cancel: CancelToken,
     pub(crate) jobs_done: Arc<AtomicU64>,
@@ -290,7 +297,12 @@ pub(crate) async fn run<S: Sampler<C>, C: Coefficient>(
         }
     };
     let worker = Arc::clone(&job);
+    let Ok(permit) = Arc::clone(&session.permits).acquire_owned().await else {
+        return;
+    };
     let (outcome, device_us) = tokio::task::spawn_blocking(move || {
+        // Held until the call returns, even when shutdown aborts this task.
+        let _permit = permit;
         let started = Instant::now();
         let outcome = sample(&*sampler, &worker.model, &worker.params);
         let device_us = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
@@ -423,6 +435,19 @@ mod tests {
         no_edges.edges = None;
         no_edges.j.clear();
         assert!(IqmModel::from_proto(&no_edges).is_ok());
+        // A model with no variables has nothing to sample, and its solutions
+        // would look like empty Ising ones: refused.
+        let empty = IqmProblem {
+            upper_bounds: vec![],
+            h: vec![],
+            j: vec![],
+            edges: None,
+            ..problem()
+        };
+        assert_eq!(
+            IqmModel::from_proto(&empty).err(),
+            Some(RejectReason::Malformed)
+        );
     }
 
     #[test]
@@ -555,6 +580,43 @@ mod tests {
             sample(&OutOfBounds, &model, &params),
             Err(SampleError::DeviceFault(_))
         ));
+        // An assignment count other than num_reads is broken output too.
+        for num_reads in [1, 3] {
+            let other = SampleParams {
+                num_reads,
+                ..SampleParams::default()
+            };
+            assert!(
+                matches!(
+                    sample(&TwoReads, &model, &other),
+                    Err(SampleError::DeviceFault(_))
+                ),
+                "{num_reads} reads"
+            );
+        }
+        assert!(sample(&TwoReads, &model, &params).is_ok());
+    }
+
+    /// Answers every model with two all-zero assignments, whatever it is asked.
+    struct TwoReads;
+    impl Sampler for TwoReads {
+        fn sample(
+            &self,
+            _: &crate::IsingGraph,
+            _: &SampleParams,
+        ) -> Result<Vec<crate::SamplerResult>, SampleError> {
+            Ok(vec![])
+        }
+        fn accepts_iqm() -> bool {
+            true
+        }
+        fn sample_iqm(
+            &self,
+            model: &IqmModel,
+            _: &SampleParams,
+        ) -> Result<Vec<Vec<u32>>, SampleError> {
+            Ok(vec![vec![0; model.num_vars()]; 2])
+        }
     }
 
     /// The trait default declines: a sampler that lists `IQM_SAMPLE` must

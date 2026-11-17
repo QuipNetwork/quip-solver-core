@@ -227,16 +227,7 @@ fn resolve_edges(
 ) -> Result<Vec<(usize, usize)>, RejectReason> {
     match &ising.graph {
         // Inline edges use dense 0..n-1 ids straight off the wire.
-        Some(ising_problem::Graph::Edges(e)) => {
-            if e.u.len() != e.v.len() {
-                return Err(RejectReason::Malformed);
-            }
-            Ok(e.u
-                .iter()
-                .zip(&e.v)
-                .map(|(&u, &v)| (u as usize, v as usize))
-                .collect())
-        }
+        Some(ising_problem::Graph::Edges(e)) => dense_pairs(e),
         // Topology-hash jobs resolve against the session-cached topology,
         // mapping native (possibly sparse) node ids to dense positions.
         Some(ising_problem::Graph::TopologyHash(h)) => {
@@ -260,6 +251,21 @@ fn resolve_edges(
         }
         None => Ok(Vec::new()),
     }
+}
+
+/// The `(u, v)` pairs of an inline edge list, or `Malformed` when `u` and `v`
+/// differ in length.
+pub(crate) fn dense_pairs(
+    e: &quip_proto::v1::EdgeList,
+) -> Result<Vec<(usize, usize)>, RejectReason> {
+    if e.u.len() != e.v.len() {
+        return Err(RejectReason::Malformed);
+    }
+    Ok(e.u
+        .iter()
+        .zip(&e.v)
+        .map(|(&u, &v)| (u as usize, v as usize))
+        .collect())
 }
 
 /// The shape invariant every Ising problem must satisfy, whichever entry point

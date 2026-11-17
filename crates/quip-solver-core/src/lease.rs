@@ -1621,7 +1621,7 @@ mod tests {
         let start = tokio::time::Instant::now();
         let ended = tokio::time::timeout(
             grace + std::time::Duration::from_millis(50),
-            crate::task::join_expanders(&mut expanders, start + grace),
+            crate::task::join_expanders(&mut expanders, start + grace, "lease expander"),
         )
         .await;
         assert!(

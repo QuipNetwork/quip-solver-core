@@ -1074,6 +1074,10 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
     let (shutdown_tx, shutdown_rx) = watch::channel(None);
     let aborted = Arc::new(AtomicBool::new(false));
     let mut expanders = tokio::task::JoinSet::new();
+    // IQM jobs run apart from the Ising pipeline, at most `width` at once, and
+    // are joined at shutdown against the grace deadline.
+    let mut iqm_tasks = tokio::task::JoinSet::new();
+    let iqm_permits = Arc::new(Semaphore::new(width));
     let mut lease_threads: Vec<std::thread::JoinHandle<()>> = Vec::new();
     let mut shutdown_requested = false;
     let mut credit_window = cap;
@@ -1148,6 +1152,13 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
             joined = expanders.join_next(), if !expanders.is_empty() => {
                 if let Some(Err(error)) = joined {
                     writer_failure = Some(format!("lease expander failed: {error}"));
+                    break;
+                }
+                continue;
+            }
+            joined = iqm_tasks.join_next(), if !iqm_tasks.is_empty() => {
+                if let Some(Err(error)) = joined {
+                    writer_failure = Some(format!("IQM job task failed: {error}"));
                     break;
                 }
                 // An IQM job that hit a device fault has sent `Fatal`; stop
@@ -1327,13 +1338,14 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
                             target.as_ref(),
                         );
                         let session = crate::iqm::IqmSession {
+                            permits: Arc::clone(&iqm_permits),
                             ctrl: ctrl_tx.clone(),
                             cancel: cancel.clone(),
                             jobs_done: Arc::clone(&jobs_done),
                             device_faulted: Arc::clone(&device_faulted),
                             aborted: Arc::clone(&aborted),
                         };
-                        let _ = expanders.spawn(crate::iqm::run(
+                        let _ = iqm_tasks.spawn(crate::iqm::run(
                             Arc::clone(&sampler),
                             prepared,
                             session,
@@ -1657,6 +1669,12 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
         close: deadline - summary_margin(grace),
         teardown: deadline,
     }));
+    // IQM calls have no grace deadline of their own, so both branches below
+    // bound them by this one.
+    if let Some(error) = join_expanders(&mut iqm_tasks, deadline, "IQM job task").await {
+        aborted.store(true, Ordering::Relaxed);
+        writer_failure = Some(error);
+    }
     if S::generates_locally() {
         // Local monitors enforce their own grace deadline, including blocked
         // sends. Let them send terminal summaries before ending the writer.
@@ -1666,7 +1684,7 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
                 writer_failure = Some(format!("local lease monitor failed: {error}"));
             }
         }
-    } else if let Some(error) = join_expanders(&mut expanders, deadline).await {
+    } else if let Some(error) = join_expanders(&mut expanders, deadline, "lease expander").await {
         aborted.store(true, Ordering::Relaxed);
         writer_failure = Some(error);
     }
@@ -3989,6 +4007,139 @@ mod tests {
             assert_eq!(
                 replies.first().and_then(reject_of),
                 Some((b"bad".to_vec(), RejectReason::Malformed as i32))
+            );
+            assert!(
+                matches!(replies.get(1).and_then(|m| m.msg.as_ref()), Some(miner_msg::Msg::JobRequest(c)) if c.credits == 1)
+            );
+        }
+
+        /// Holds each IQM call for `hold`, and records the most calls that
+        /// ran at once. `LOCAL` is what `generates_locally` answers, which
+        /// selects the shutdown branch.
+        struct Slow<const LOCAL: bool> {
+            hold: Duration,
+            running: Arc<std::sync::atomic::AtomicUsize>,
+            peak: Arc<std::sync::atomic::AtomicUsize>,
+        }
+        impl<const LOCAL: bool> Sampler for Slow<LOCAL> {
+            fn sample(
+                &self,
+                _: &crate::IsingGraph,
+                _: &crate::SampleParams,
+            ) -> Result<Vec<crate::SamplerResult>, crate::SampleError> {
+                Ok(vec![])
+            }
+            fn generates_locally() -> bool {
+                LOCAL
+            }
+            fn accepts_iqm() -> bool {
+                true
+            }
+            fn sample_iqm(
+                &self,
+                model: &IqmModel,
+                params: &crate::SampleParams,
+            ) -> Result<Vec<Vec<u32>>, crate::SampleError> {
+                let now = self.running.fetch_add(1, Ordering::SeqCst) + 1;
+                let _ = self.peak.fetch_max(now, Ordering::SeqCst);
+                std::thread::sleep(self.hold);
+                let _ = self.running.fetch_sub(1, Ordering::SeqCst);
+                Ok(vec![vec![0; model.num_vars()]; params.num_reads])
+            }
+        }
+
+        fn slow<const LOCAL: bool>(
+            hold: Duration,
+        ) -> (Slow<LOCAL>, Arc<std::sync::atomic::AtomicUsize>) {
+            let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let sampler = Slow {
+                hold,
+                running: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                peak: Arc::clone(&peak),
+            };
+            (sampler, peak)
+        }
+
+        /// The default stream width is 1, so IQM calls never overlap, however
+        /// many credits are outstanding.
+        #[tokio::test]
+        async fn iqm_calls_stay_within_the_stream_width() {
+            let (sampler, peak) = slow::<false>(Duration::from_millis(50));
+            let jobs = (0..3_u8).map(|i| iqm_job(&[b'q', i], problem())).collect();
+            // Three Results and three credits.
+            let (replies, result) = Box::pin(session(sampler, jobs, 6)).await;
+            result.expect("clean shutdown");
+            let results = replies
+                .iter()
+                .filter(|m| matches!(m.msg, Some(miner_msg::Msg::Result(_))))
+                .count();
+            assert_eq!(results, 3);
+            assert_eq!(peak.load(Ordering::SeqCst), 1, "IQM calls overlapped");
+        }
+
+        /// A `sample_iqm` call still running at `Shutdown` does not hold the
+        /// session past its grace window, on either shutdown branch.
+        #[tokio::test]
+        async fn a_slow_iqm_call_does_not_overrun_the_shutdown_grace() {
+            overrun_check::<true>().await;
+            overrun_check::<false>().await;
+        }
+
+        async fn overrun_check<const LOCAL: bool>() {
+            let (sampler, _) = slow::<LOCAL>(Duration::from_secs(3));
+            let (input, incoming) = mpsc::channel(8);
+            let (out, mut replies) = mpsc::channel(32);
+            let identity = test_identity();
+            let families = generic_table();
+            let mut shutdown_deadline = None;
+            let run = run_connected_session(
+                ReceiverStream::new(incoming),
+                out,
+                "test",
+                &identity,
+                &families,
+                Arc::new(sampler),
+                None,
+                None,
+                &mut shutdown_deadline,
+            );
+            let coordinator = async move {
+                let send = |msg| input.send(Ok(CoordMsg { msg: Some(msg) }));
+                send(coord_msg::Msg::Welcome(quip_proto::v1::Welcome {
+                    protocol_version: 2,
+                }))
+                .await
+                .unwrap();
+                send(coord_msg::Msg::Configure(
+                    quip_proto::v1::Configure::default(),
+                ))
+                .await
+                .unwrap();
+                for _ in 0..2 {
+                    let _ = replies.recv().await;
+                }
+                send(coord_msg::Msg::Job(iqm_job(b"slow", problem())))
+                    .await
+                    .unwrap();
+                // Let the call start before asking the session to stop.
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                send(coord_msg::Msg::Shutdown(quip_proto::v1::Shutdown {
+                    grace_ms: 200,
+                }))
+                .await
+                .unwrap();
+                while replies.recv().await.is_some() {}
+            };
+            let started = std::time::Instant::now();
+            let _ = tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::join!(run, coordinator)
+            })
+            .await
+            .expect("the session ends");
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "local {LOCAL}: the session waited {:?} for the call",
+                started.elapsed()
             );
         }
 

@@ -996,7 +996,12 @@ mod tests {
     #[test]
     fn each_malformed_iqm_input_is_refused_with_exit_64() {
         type Edit = fn(&mut serde_json::Map<String, serde_json::Value>);
-        let rows: [(&str, Edit); 7] = [
+        let rows: [(&str, Edit); 8] = [
+            ("no variables", |o| {
+                for key in ["bounds", "h", "j", "edges"] {
+                    let _ = o.insert(key.into(), serde_json::json!([]));
+                }
+            }),
             ("no bounds", |o| {
                 let _ = o.remove("bounds");
             }),
