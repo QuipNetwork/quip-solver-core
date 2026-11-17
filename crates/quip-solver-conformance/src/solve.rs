@@ -620,6 +620,20 @@ async fn expect_solved(bin: &str, adv: &Advertised, problem: &Problem) -> Result
     check_solutions(adv, problem, &run, false)
 }
 
+/// Grade one in-type option value. The solver may solve with it, or refuse a
+/// value it does not support with exit 64 and a message on stderr. A silent
+/// refusal fails.
+fn grade_valid_option(adv: &Advertised, problem: &Problem, run: &Run) -> Result<(), String> {
+    if run.code == Some(EXIT_CONFIG_INVALID) {
+        check_refused(run, EXIT_CONFIG_INVALID)?;
+        if run.stderr.trim().is_empty() {
+            return Err("refused an in-type value with exit 64 and nothing on stderr".into());
+        }
+        return Ok(());
+    }
+    check_solutions(adv, problem, run, false).map(|_| ())
+}
+
 /// Send `input` and require exit `code` with nothing on stdout.
 async fn expect_refused(bin: &str, input: &[u8], code: i32) -> Result<(), String> {
     let run = run(bin, &["--solve"], input).await?;
@@ -894,7 +908,7 @@ async fn option_cases(bin: &str, adv: &Advertised, base: &Problem, report: &mut 
             )
             .await
             {
-                Ok(run) => check_solutions(adv, base, &run, false).map(|_| ()),
+                Ok(run) => grade_valid_option(adv, base, &run),
                 Err(why) => Err(why),
             },
             Err(why) => Err(why),
@@ -1219,6 +1233,33 @@ mod tests {
         assert_eq!(v.get("j"), Some(&json!([-1.0])));
         assert_eq!(v.get("beta_schedule_type"), Some(&json!("linear")));
         assert!(pair(0.0, 0.0).to_json().get("beta_schedule_type").is_none());
+    }
+
+    #[test]
+    fn an_in_type_option_value_may_be_refused_only_with_a_message() {
+        let adv = adv();
+        let problem = base_problem(&adv);
+        let refused = |code: i32, stdout: &str, stderr: &str| Run {
+            code: Some(code),
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: stderr.to_owned(),
+        };
+        let message = "option restarts value 1 is not supported";
+        assert_eq!(
+            grade_valid_option(&adv, &problem, &refused(64, "", message)),
+            Ok(())
+        );
+        // (label, run) pairs that must fail.
+        for (label, run) in [
+            ("silent refusal", refused(64, "", "  \n")),
+            ("refusal that wrote solutions", refused(64, "[]", message)),
+            ("refusal with another code", refused(65, "", message)),
+        ] {
+            assert!(
+                grade_valid_option(&adv, &problem, &run).is_err(),
+                "{label} must fail"
+            );
+        }
     }
 
     fn ok_run(stdout: &Value) -> Run {

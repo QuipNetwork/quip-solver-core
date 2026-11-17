@@ -1,8 +1,10 @@
 //! Shared body of the two option mock solvers. Each advertises the `solveOptions`
 //! `restarts` (integer) and `greedy` (boolean) and returns all `+1` reads.
 //! `mock_options_strict` refuses an undeclared name or a wrong-type value with
-//! exit 64, as the SDK does. `mock_options_lax` accepts any `options` object,
-//! as a solver that skips the check would.
+//! exit 64, as the SDK does. It also supports only 2 or more `restarts`, and
+//! refuses a smaller value, with exit 64 and a message naming the option and
+//! the value. `mock_options_lax` accepts any `options` object, as a solver
+//! that skips the check would.
 #![expect(
     clippy::print_stdout,
     clippy::print_stderr,
@@ -29,7 +31,8 @@ struct Problem {
     options: Option<Map<String, Value>>,
 }
 
-/// Refuse a name the mock does not list, or a value of the wrong type.
+/// Refuse a name the mock does not list, a value of the wrong type, or a
+/// `restarts` value below 2, which this mock does not support.
 fn check_options(options: &Map<String, Value>) -> Result<(), String> {
     for (name, value) in options {
         let ok = match name.as_str() {
@@ -39,6 +42,9 @@ fn check_options(options: &Map<String, Value>) -> Result<(), String> {
         };
         if !ok {
             return Err(format!("option {name} has the wrong type"));
+        }
+        if name == "restarts" && value.as_i64().is_some_and(|n| n < 2) {
+            return Err(format!("option restarts value {value} is not supported"));
         }
     }
     Ok(())

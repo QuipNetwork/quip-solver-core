@@ -4142,6 +4142,16 @@ mod tests {
             jobs: Vec<quip_proto::v1::Job>,
             replies_wanted: usize,
         ) -> (Vec<MinerMsg>, Result<(), String>) {
+            let msgs = jobs.into_iter().map(coord_msg::Msg::Job).collect();
+            Box::pin(session_msgs(sampler, msgs, replies_wanted)).await
+        }
+
+        /// [`session`] for any coordinator messages after the handshake.
+        async fn session_msgs<S: Sampler>(
+            sampler: S,
+            msgs: Vec<coord_msg::Msg>,
+            replies_wanted: usize,
+        ) -> (Vec<MinerMsg>, Result<(), String>) {
             let (input, incoming) = mpsc::channel(8);
             let (out, mut replies) = mpsc::channel(32);
             let identity = test_identity();
@@ -4174,8 +4184,8 @@ mod tests {
                     // Ready, then the initial JobRequest.
                     let _ = replies.recv().await;
                 }
-                for job in jobs {
-                    send(coord_msg::Msg::Job(job)).await.unwrap();
+                for msg in msgs {
+                    send(msg).await.unwrap();
                 }
                 let mut seen = Vec::new();
                 while seen.len() < replies_wanted {
@@ -4290,6 +4300,64 @@ mod tests {
                 peak: Arc::clone(&peak),
             };
             (sampler, peak)
+        }
+
+        /// An IQM job at a generation an earlier `Cancel` covers is stale: it
+        /// gets its credit back, no `Result`, no `Reject`, and no device call.
+        #[tokio::test]
+        async fn a_stale_iqm_job_returns_its_credit_without_a_call() {
+            let (sampler, peak) = slow::<false>(Duration::ZERO);
+            let mut stale = iqm_job(b"stale", problem());
+            stale.generation = 5;
+            let msgs = vec![
+                coord_msg::Msg::Cancel(quip_proto::v1::Cancel { max_generation: 5 }),
+                coord_msg::Msg::Job(stale),
+            ];
+            // The Cancel's Status, then the job's credit.
+            let (replies, result) = Box::pin(session_msgs(sampler, msgs, 2)).await;
+            result.expect("clean shutdown");
+            assert!(
+                matches!(
+                    replies.first().and_then(|m| m.msg.as_ref()),
+                    Some(miner_msg::Msg::Status(_))
+                ),
+                "{replies:?}"
+            );
+            assert!(
+                matches!(replies.get(1).and_then(|m| m.msg.as_ref()), Some(miner_msg::Msg::JobRequest(c)) if c.credits == 1),
+                "{replies:?}"
+            );
+            assert_eq!(
+                peak.load(Ordering::SeqCst),
+                0,
+                "the stale job reached the sampler"
+            );
+        }
+
+        /// The deadline is checked again once the job holds its permit: a job
+        /// that expired while an earlier call ran is refused `EXPIRED`, not
+        /// sampled.
+        #[tokio::test]
+        async fn an_iqm_job_that_expires_while_waiting_is_rejected_expired() {
+            let (sampler, _) = slow::<false>(Duration::from_millis(400));
+            let mut late = iqm_job(b"late", problem());
+            late.deadline_ms = crate::job::now_unix_ms().unwrap() + 150;
+            let jobs = vec![iqm_job(b"first", problem()), late];
+            // The first job's Result and credit, then the late job's two replies.
+            let (replies, result) = Box::pin(session(sampler, jobs, 4)).await;
+            result.expect("clean shutdown");
+            assert!(
+                replies
+                    .iter()
+                    .filter_map(reject_of)
+                    .any(|r| r == (b"late".to_vec(), RejectReason::Expired as i32)),
+                "{replies:?}"
+            );
+            let results = replies
+                .iter()
+                .filter(|m| matches!(m.msg, Some(miner_msg::Msg::Result(_))))
+                .count();
+            assert_eq!(results, 1, "{replies:?}");
         }
 
         /// The default stream width is 1, so IQM calls never overlap, however

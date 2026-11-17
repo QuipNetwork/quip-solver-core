@@ -1019,7 +1019,8 @@ export interface IsingProblemGenerator {
 /**
  * Tune the solver against reference instances before the workload. Sent only
  * to a solver that lists the `calibrate` feature, after Topology and before
- * the first Job. The solver answers with exactly one CalibrateDone.
+ * the first Job. The solver answers with exactly one CalibrateDone, unless
+ * Shutdown ends the session first.
  */
 export interface Calibrate {
   /** the family parameters, as a job carries them */

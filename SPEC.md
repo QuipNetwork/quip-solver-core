@@ -33,6 +33,18 @@ type is `OPTION_TYPE_BOOL`, `OPTION_TYPE_INT`, `OPTION_TYPE_NUMBER`, or
 Rust `Sampler::solve_options` method declares the list. Hello and
 `GetCapabilities` carry the same list.
 
+A solver may refuse an option value of the listed type that it does not
+support. The user must learn of each such value, so the solver does one of
+two things:
+
+- It exits 64 and writes a message on stderr that names the option and the
+  value.
+- It runs, and writes a warning on stderr that names the option and the value
+  it did not apply.
+
+A solver must never ignore an option value without a message. The Rust
+`Sampler::check_option` method refuses a value with exit 64.
+
 ### `--solve`
 
 This mode reads one problem as JSON on stdin. It writes the solutions as JSON
@@ -123,6 +135,8 @@ The input is malformed, exit 64, when any of these holds:
 - An option value has a type other than the one `solve_options` lists for it.
   `OPTION_TYPE_NUMBER` takes any JSON number, `OPTION_TYPE_INT` takes only an
   integer, and `null` is never valid.
+- The solver does not support an option value of the listed type, and it
+  refuses that value.
 - `problem` is not `"ising"` or `"iqm"`, or `bounds` is present and `problem`
   is not `"iqm"`.
 
@@ -533,8 +547,8 @@ Each `CalibrationInstance` holds an `id`, the `nonce`, the
 `max_energy_milli`. The topology is the latest `Topology` of the session.
 
 The solver answers each `Calibrate` with exactly one `CalibrateDone`,
-`MinerMsg` field 10. It holds an `outcome` and an optional free-text
-`summary` for the operator:
+`MinerMsg` field 10, unless `Shutdown` ends the session first. It holds an
+`outcome` and an optional free-text `summary` for the operator:
 
 | Outcome | Meaning |
 |---|---|
@@ -616,19 +630,26 @@ Use `Backend::Cpu` and `Algorithm::Sa` for a CPU simulated annealer.
 The [migration name table](MIGRATING.md#identity-names) lists all supported names.
 The fixed map in `quip_protocol::session` keeps command-line identity strings lowercase.
 
-The seventeen defaulted methods are:
+The twenty-five defaulted methods are:
 
 | Method | Default |
 |---|---|
 | `sample_stream` | Serial loop over `sample`. Polls the cancel token at dequeue. |
+| `beta_ladder` | `None`. `--solve` reports the ladder that the SDK builds from the request, with `reported_by` set to `"sdk"`. A solver that lists `linear-schedule` must override it. |
 | `accepts_leases` | `true`. `false` lists only `ISING_SAMPLE`, advertises no generators and no generated families, and rejects every `ISING_GENERATE` job with `UNSUPPORTED_KIND`. |
+| `accepts_iqm` | `false`. The session does not list `IQM_SAMPLE` and rejects every `IQM_SAMPLE` job with `UNSUPPORTED_KIND`. `true` lists the kind and sends its jobs to `sample_iqm`. |
+| `sample_iqm` | Returns `DeviceFault` if called without an override. |
+| `accepts_calibrate` | `false`. The session answers every `Calibrate` with `FAILED`. `true` adds `calibrate` to the advertised features. |
+| `calibrate` | Returns `Declined` if called without an override. |
 | `solve_options` | None. Lists the `--solve` options the solver accepts, each with a name and a type. The SDK refuses an undeclared option or a value of the wrong type with exit 64 before it samples. The sampler reads the validated values from `SampleParams::options`. |
+| `check_option` | `Ok`. Accepts every value of the listed type. An `Err` refuses the value before sampling, with exit 64 and a message that names the option and the value. |
 | `accepts_warm_start` | `false`. `true` adds `initial-spins` to the advertised features. |
 | `sample_warm` | Ignores the `WarmStart` and calls `sample`. |
 | `sample_stream_warm` | Serial loop over `sample_warm` for a seeded job and `sample` for a cold one. |
 | `stream_width` | `1` |
 | `declared_stream_width` | `1`. `0` declares a device-dependent width, resolved when the device opens. |
 | `utilization` | `0.0` |
+| `headroom` | `None`. Each `Status` leaves `headroom` unset and sets `limit_reached` to `false`. |
 | `should_throttle` | `false` |
 | `max_reads` | `u32::MAX` |
 | `apply_config` | No action. |
@@ -791,6 +812,10 @@ session cannot stop the thread, so a long search should check the deadline
 itself. After `Shutdown`, a running call delays the session no longer than
 the grace deadline.
 
+Jobs are not held while a calibration runs. If a coordinator sends a job
+before `CalibrateDone`, the hook and its `apply` run alongside `sample`, so
+both must be safe in that case.
+
 ### Sampling errors
 
 `SampleError` has four variants. Plain jobs use these wire responses:
@@ -918,12 +943,14 @@ A solver is conformant when all of these hold:
   before the first job, with a deadline two seconds ahead. The driver
   expects exactly one `CalibrateDone`. A `DONE` or `FAILED` answer arrives by
   the deadline. A `DEADLINE_PASSED` answer arrives at the deadline. The
-  driver allows one second for delivery. A solver that does not list the feature gets no `Calibrate` and
-  must send no `CalibrateDone`.
+  driver allows one second for delivery. A solver that does not list the
+  feature gets no `Calibrate` and must send no `CalibrateDone`.
 - Every session sends one `IQM_SAMPLE` job at generation 0. When the solver
   lists the kind, the driver requires a `Result` whose values are within the
   bounds and whose energies are the scores of those values. Otherwise the
   solver must reject the job with `UNSUPPORTED_KIND`.
+- Every session sends one `ISING_GENERATE` lease. A solver that does not list
+  the kind must reject it with `UNSUPPORTED_KIND`.
 - A solver whose final `Status` has `limit_reached` set to `true` refuses the
   next job with `OVERLOADED`. The driver sends a `Ping` after every other job
   of its walk. When the answering `Status` has `limit_reached`, the driver sends
@@ -946,12 +973,14 @@ Every solver must pass the base cases:
 - An eight-node ring solves, with the output fields that section 2 lists and energies that score correctly.
 - The same seed gives the same samples.
 - Each malformed input in section 2 exits 64 and writes nothing.
+- `option-undeclared`: an option that the solver does not list exits 64.
 
 Other cases run only when the solver advertises the behaviour:
 
 | Advertised | Case |
 |---|---|
-| `linear-schedule` | A linear schedule solves. Without the feature, it exits 64. |
+| `linear-schedule` | A linear schedule solves. Every read reports a `beta_ladder` with `reported_by` set to `"sampler"`, kind `linear`, and the linear ladder of the request. Without the feature, it exits 64. |
+| `solveOptions` not empty | `option-valid` sends each listed option alone with a value of its type: `true`, `1`, `1.5`, or `"default"`. The ring must solve, or the solver exits 64 with a message on stderr. `option-wrong-type` sends each listed option with a value of another type, which exits 64. |
 | `maxDegree` | A star at the limit solves. One more leaf exits 65. |
 | `maxLocalFieldMilli` | A local field at the limit solves. One step more exits 65. |
 | `exact-coefficients` and `exactResolutionMilli` | A coefficient on the step solves. One off the step exits 65. |

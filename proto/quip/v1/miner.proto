@@ -377,7 +377,8 @@ message IsingProblemGenerator {
 
 // Tune the solver against reference instances before the workload. Sent only
 // to a solver that lists the `calibrate` feature, after Topology and before
-// the first Job. The solver answers with exactly one CalibrateDone.
+// the first Job. The solver answers with exactly one CalibrateDone, unless
+// Shutdown ends the session first.
 message Calibrate {
   FamilyDescriptor family = 1; // the family parameters, as a job carries them
   repeated CalibrationInstance instances = 2;

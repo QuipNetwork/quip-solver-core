@@ -153,6 +153,9 @@ pub(crate) struct PreparedIqm {
     /// The job's generation, or `None` for generation 0, which no `Cancel`
     /// abandons.
     pub(crate) watermark: Option<u64>,
+    /// The job's deadline, Unix milliseconds, 0 for none. Checked again once
+    /// the job holds its permit.
+    pub(crate) deadline_ms: u64,
 }
 
 /// Check one `IQM_SAMPLE` job and resolve its budget: per-job override, then
@@ -210,6 +213,7 @@ pub(crate) fn prepare(
             ..SampleParams::default()
         },
         watermark: (job.generation != 0).then_some(job.generation),
+        deadline_ms: job.deadline_ms,
     })
 }
 
@@ -300,6 +304,29 @@ pub(crate) async fn run<S: Sampler<C>, C: Coefficient>(
     let Ok(permit) = Arc::clone(&session.permits).acquire_owned().await else {
         return;
     };
+    // The wait for a permit can outlast a `Cancel` or the deadline. A stale
+    // job gets only its credit back; an expired one is refused. Neither
+    // reaches the device.
+    let credit = || miner(miner_msg::Msg::JobRequest(JobRequest { credits: 1 }));
+    let refusal = if session.cancel.is_cancelled(job.watermark) {
+        Some(vec![credit()])
+    } else if deadline_passed(job.deadline_ms) {
+        Some(vec![
+            crate::job::reject(job.job_id.clone(), RejectReason::Expired),
+            credit(),
+        ])
+    } else {
+        None
+    };
+    if let Some(replies) = refusal {
+        drop(permit);
+        for reply in replies {
+            if session.ctrl.send(reply.into()).await.is_err() {
+                return;
+            }
+        }
+        return;
+    }
     let (outcome, device_us) = tokio::task::spawn_blocking(move || {
         // Held until the call returns, even when shutdown aborts this task.
         let _permit = permit;

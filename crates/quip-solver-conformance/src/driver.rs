@@ -43,7 +43,7 @@ pub(crate) const PHASE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Expressed in phase budgets rather than as a flat number: a walk in which
 /// every phase times out must still run to completion, so the report names all
 /// the phases that failed instead of reporting a single kill.
-const CHILD_TIMEOUT: Duration = Duration::from_secs(PHASE_TIMEOUT.as_secs() * 14);
+const CHILD_TIMEOUT: Duration = Duration::from_secs(PHASE_TIMEOUT.as_secs() * 15);
 
 /// How long the harness waits for the session handler to hand back its outcome
 /// once the child has exited.

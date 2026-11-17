@@ -241,14 +241,25 @@ fn convert_units<C: Coefficient>(name: &str, values: &[f64]) -> Result<Vec<C>, S
         .collect()
 }
 
-/// The `options` object checked against what `S` declares, or none.
+/// The `options` object checked against what `S` declares and supports, or
+/// none.
 fn checked_options<S: Sampler<C>, C: Coefficient>(
     raw: Option<&serde_json::Map<String, serde_json::Value>>,
 ) -> Result<crate::options::SolveOptions, SolveError> {
-    raw.map_or_else(
-        || Ok(crate::options::SolveOptions::new()),
-        |raw| crate::options::validate(raw, S::solve_options()).map_err(SolveError::Malformed),
-    )
+    let Some(raw) = raw else {
+        return Ok(crate::options::SolveOptions::new());
+    };
+    let options =
+        crate::options::validate(raw, S::solve_options()).map_err(SolveError::Malformed)?;
+    for (name, value) in &options {
+        S::check_option(name, value).map_err(|why| {
+            let shown = raw.get(name).map(ToString::to_string).unwrap_or_default();
+            SolveError::Malformed(format!(
+                "option \"{name}\" value {shown} is not supported: {why}"
+            ))
+        })?;
+    }
+    Ok(options)
 }
 
 /// Microseconds since `start`, saturating.
@@ -634,6 +645,15 @@ mod tests {
                 },
             ]
         }
+
+        fn check_option(name: &str, value: &crate::OptionValue) -> Result<(), String> {
+            match (name, value) {
+                ("restarts", crate::OptionValue::Int(n)) if *n > 3 => {
+                    Err("at most 3 restarts".into())
+                }
+                _ => Ok(()),
+            }
+        }
     }
 
     fn problem_with(options: &str) -> Vec<u8> {
@@ -685,6 +705,23 @@ mod tests {
             assert!(matches!(err, SolveError::Malformed(_)), "{extra}: {err:?}");
             assert_eq!(err.exit_code(), crate::ExitCode::ConfigInvalid);
         }
+    }
+
+    #[test]
+    fn an_unsupported_value_of_the_declared_type_is_refused_by_name_and_value() {
+        let err = solve(
+            &OptionsProbe,
+            &id(),
+            &problem_with(r#","options":{"restarts":7}"#),
+        )
+        .expect_err("the sampler refuses 7 restarts");
+        assert!(matches!(err, SolveError::Malformed(_)), "{err:?}");
+        assert_eq!(err.exit_code(), crate::ExitCode::ConfigInvalid);
+        let message = err.to_string();
+        assert!(
+            message.contains("restarts") && message.contains('7'),
+            "{message}"
+        );
     }
 
     #[test]

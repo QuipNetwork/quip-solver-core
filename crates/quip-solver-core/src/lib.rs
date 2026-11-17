@@ -296,6 +296,26 @@ pub trait Sampler<C: Coefficient = f64>: Send + Sync + 'static {
         &[]
     }
 
+    /// Whether this solver supports `value` for the declared option `name`.
+    /// `--solve` calls it for each option, after the type check and before
+    /// sampling.
+    ///
+    /// Default: every value of the declared type is supported. Override it to
+    /// refuse a value the solver cannot apply, for example a string outside an
+    /// enumerated set. A refused value exits 64, with a message that names the
+    /// option and the value. A solver that runs anyway must warn on stderr
+    /// instead; it must never ignore the value silently.
+    ///
+    /// # Errors
+    ///
+    /// A reason for the operator when the value is not supported.
+    fn check_option(_name: &str, _value: &OptionValue) -> Result<(), String>
+    where
+        Self: Sized,
+    {
+        Ok(())
+    }
+
     /// Whether this backend serves `ISING_GENERATE` leases. Answered without a
     /// device, like [`declared_stream_width`](Sampler::declared_stream_width),
     /// because `--capabilities` reads it too.
@@ -394,6 +414,10 @@ pub trait Sampler<C: Coefficient = f64>: Send + Sync + 'static {
     /// and the session continues. The session does not stop a call that
     /// overruns its deadline, so a long search should read the deadline
     /// itself.
+    ///
+    /// The session does not hold jobs during a calibration, so this hook and
+    /// the [`Calibration`] apply step must be safe alongside
+    /// [`sample`](Sampler::sample) if a coordinator breaks the order.
     ///
     /// # Errors
     ///
