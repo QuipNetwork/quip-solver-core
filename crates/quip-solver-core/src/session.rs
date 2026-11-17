@@ -24,7 +24,7 @@ use base64::Engine as _;
 use quip_proto::v1::miner_service_client::MinerServiceClient;
 use quip_proto::v1::{
     coord_msg, miner_msg, Capabilities, CoefficientEncoding, CoordMsg, FamilySupport, Fatal,
-    GeneratorAlgorithm, JobKind, JobRequest, MinerMsg, Ready,
+    GeneratorAlgorithm, JobKind, JobRequest, MinerMsg, Ready, SolveOption,
 };
 use quip_protocol::session::{
     algorithm_name, backend_name, build_hello, check_welcome, ExitCode, SessionConfig, SessionError,
@@ -105,6 +105,7 @@ fn coord_msg_name(msg: Option<&coord_msg::Msg>) -> &'static str {
         Some(coord_msg::Msg::Cancel(_)) => "Cancel",
         Some(coord_msg::Msg::Ping(_)) => "Ping",
         Some(coord_msg::Msg::GetCapabilities(_)) => "GetCapabilities",
+        Some(coord_msg::Msg::Calibrate(_)) => "Calibrate",
         Some(coord_msg::Msg::Shutdown(_)) => "Shutdown",
         None => "unset",
     }
@@ -136,6 +137,7 @@ pub fn capabilities(id: &BackendIdentity, stream_width: u32) -> Capabilities {
         solver_id: String::new(),
         generated_families: vec![],
         accepted_families: vec![],
+        solve_options: vec![],
     }
 }
 
@@ -173,6 +175,16 @@ struct CapabilitiesJson<'a> {
     generated_families: Vec<FamilySupportJson<'a>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     accepted_families: Vec<FamilySupportJson<'a>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    solve_options: Vec<SolveOptionJson<'a>>,
+}
+
+/// Protobuf JSON view of a [`SolveOption`].
+#[derive(Serialize)]
+struct SolveOptionJson<'a> {
+    name: &'a str,
+    #[serde(rename = "type")]
+    kind: &'static str,
 }
 
 /// Protobuf JSON view of a [`FamilySupport`].
@@ -262,10 +274,21 @@ fn advertised_capabilities<S: Sampler<C>, C: Coefficient>(
         .collect();
     families.solver_id().clone_into(&mut caps.solver_id);
     caps.accepted_families = families.accepted().to_vec();
+    caps.solve_options = S::solve_options()
+        .iter()
+        .map(|o| SolveOption {
+            name: o.name.to_owned(),
+            r#type: o.kind as i32,
+        })
+        .collect();
+    if S::accepts_iqm() {
+        caps.supported_kinds.push(JobKind::IqmSample as i32);
+    }
     if !S::accepts_leases() {
         // A solver that declines leases expands none, so it lists no
-        // generators and no generated families, and serves only ISING_SAMPLE.
-        caps.supported_kinds = vec![JobKind::IsingSample as i32];
+        // generators and no generated families.
+        caps.supported_kinds
+            .retain(|&kind| kind != JobKind::IsingGenerate as i32);
         caps.generators.clear();
         return caps;
     }
@@ -281,14 +304,23 @@ fn advertised_capabilities<S: Sampler<C>, C: Coefficient>(
 /// Feature string for a solver that uses `IsingProblem.initial_spins`.
 pub const INITIAL_SPINS_FEATURE: &str = "initial-spins";
 
+/// Feature string for a solver that serves the `Calibrate` exchange.
+pub const CALIBRATE_FEATURE: &str = "calibrate";
+
 /// The features `Hello` and `Capabilities` carry: the identity's own list, plus
 /// [`INITIAL_SPINS_FEATURE`] when [`Sampler::accepts_warm_start`] is true.
-/// Deriving it from the trait keeps the advertisement and the behaviour from
-/// drifting apart.
+/// [`CALIBRATE_FEATURE`] is listed exactly when
+/// [`Sampler::accepts_calibrate`] is true. Deriving it from the trait keeps the
+/// advertisement and the behaviour from drifting apart.
 fn advertised_features<S: Sampler<C>, C: Coefficient>(id: &BackendIdentity) -> Vec<&'static str> {
     let mut features = id.features.to_vec();
     if S::accepts_warm_start() && !features.contains(&INITIAL_SPINS_FEATURE) {
         features.push(INITIAL_SPINS_FEATURE);
+    }
+    if !S::accepts_calibrate() {
+        features.retain(|&f| f != CALIBRATE_FEATURE);
+    } else if !features.contains(&CALIBRATE_FEATURE) {
+        features.push(CALIBRATE_FEATURE);
     }
     features
 }
@@ -368,6 +400,14 @@ fn capabilities_json_from(c: &Capabilities) -> String {
         solver_id: &c.solver_id,
         generated_families: family_support_json(&c.generated_families),
         accepted_families: family_support_json(&c.accepted_families),
+        solve_options: c
+            .solve_options
+            .iter()
+            .map(|o| SolveOptionJson {
+                name: &o.name,
+                kind: o.r#type().as_str_name(),
+            })
+            .collect(),
     };
     #[expect(
         clippy::expect_used,
@@ -1044,6 +1084,17 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
     let (shutdown_tx, shutdown_rx) = watch::channel(None);
     let aborted = Arc::new(AtomicBool::new(false));
     let mut expanders = tokio::task::JoinSet::new();
+    // IQM jobs run apart from the Ising pipeline, at most `width` at once, and
+    // are joined at shutdown against the grace deadline.
+    let mut iqm_tasks = tokio::task::JoinSet::new();
+    let iqm_permits = Arc::new(Semaphore::new(width));
+    // `Calibrate` answers run apart from the read loop, so `Ping` and
+    // `Shutdown` stay live, and are joined at shutdown like IQM jobs. One
+    // permit: calibrations of one solver run one at a time.
+    let mut calibrate_tasks = tokio::task::JoinSet::new();
+    let calibrate_permits = Arc::new(Semaphore::new(1));
+    // The latest `Topology` as sent, for the calibrate hook.
+    let mut last_topology: Option<Arc<quip_proto::v1::Topology>> = None;
     let mut lease_threads: Vec<std::thread::JoinHandle<()>> = Vec::new();
     let mut shutdown_requested = false;
     let mut credit_window = cap;
@@ -1118,6 +1169,25 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
             joined = expanders.join_next(), if !expanders.is_empty() => {
                 if let Some(Err(error)) = joined {
                     writer_failure = Some(format!("lease expander failed: {error}"));
+                    break;
+                }
+                continue;
+            }
+            joined = iqm_tasks.join_next(), if !iqm_tasks.is_empty() => {
+                if let Some(Err(error)) = joined {
+                    writer_failure = Some(format!("IQM job task failed: {error}"));
+                    break;
+                }
+                // An IQM job that hit a device fault has sent `Fatal`; stop
+                // reading jobs the device cannot serve.
+                if device_faulted.load(Ordering::Relaxed) {
+                    break;
+                }
+                continue;
+            }
+            joined = calibrate_tasks.join_next(), if !calibrate_tasks.is_empty() => {
+                if let Some(Err(error)) = joined {
+                    writer_failure = Some(format!("calibrate task failed: {error}"));
                     break;
                 }
                 continue;
@@ -1274,12 +1344,39 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
                     }
                     topology = Some(cache);
                     lease_topology = Some(Arc::new(lease_cache));
+                    last_topology = Some(Arc::new(t));
                 }
                 Some(coord_msg::Msg::SetTarget(s)) => {
                     let _ = target_tx.send_replace(Some(SessionTarget::from_proto(&s)));
                 }
                 Some(coord_msg::Msg::Job(job)) => {
                     let target = target_tx.borrow().clone();
+                    if job.kind == JobKind::IqmSample as i32 && S::accepts_iqm() {
+                        // No await here: the job, its replies, and any refusal
+                        // live in the spawned task, not in this future.
+                        let prepared = crate::iqm::prepare(
+                            job,
+                            id,
+                            sampler.max_reads(),
+                            num_sweeps,
+                            sweeps_per_beta,
+                            target.as_ref(),
+                        );
+                        let session = crate::iqm::IqmSession {
+                            permits: Arc::clone(&iqm_permits),
+                            ctrl: ctrl_tx.clone(),
+                            cancel: cancel.clone(),
+                            jobs_done: Arc::clone(&jobs_done),
+                            device_faulted: Arc::clone(&device_faulted),
+                            aborted: Arc::clone(&aborted),
+                        };
+                        let _ = iqm_tasks.spawn(crate::iqm::run(
+                            Arc::clone(&sampler),
+                            prepared,
+                            session,
+                        ));
+                        continue;
+                    }
                     if job.kind == JobKind::IsingGenerate as i32 {
                         let prepared = if S::accepts_leases() {
                             lease::prepare(
@@ -1559,6 +1656,17 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
                         break;
                     }
                 }
+                Some(coord_msg::Msg::Calibrate(request)) => {
+                    // Answered from a task, with exactly one `CalibrateDone`,
+                    // whatever the sampler supports.
+                    let _ = calibrate_tasks.spawn(crate::calibrate::run(
+                        Arc::clone(&sampler),
+                        request,
+                        last_topology.clone(),
+                        Arc::clone(&calibrate_permits),
+                        ctrl_tx.clone(),
+                    ));
+                }
                 Some(coord_msg::Msg::Shutdown(s)) => {
                     shutdown_requested = true;
                     grace_ms = if s.grace_ms == 0 {
@@ -1597,6 +1705,17 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
         close: deadline - summary_margin(grace),
         teardown: deadline,
     }));
+    // IQM calls have no grace deadline of their own, so both branches below
+    // bound them by this one.
+    if let Some(error) = join_expanders(&mut iqm_tasks, deadline, "IQM job task").await {
+        aborted.store(true, Ordering::Relaxed);
+        writer_failure = Some(error);
+    }
+    // A calibrate call has no grace deadline of its own either. Its answer is
+    // sent before the control channel closes below, or not at all.
+    if let Some(error) = join_expanders(&mut calibrate_tasks, deadline, "calibrate task").await {
+        writer_failure = Some(error);
+    }
     if S::generates_locally() {
         // Local monitors enforce their own grace deadline, including blocked
         // sends. Let them send terminal summaries before ending the writer.
@@ -1606,7 +1725,7 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
                 writer_failure = Some(format!("local lease monitor failed: {error}"));
             }
         }
-    } else if let Some(error) = join_expanders(&mut expanders, deadline).await {
+    } else if let Some(error) = join_expanders(&mut expanders, deadline, "lease expander").await {
         aborted.store(true, Ordering::Relaxed);
         writer_failure = Some(error);
     }
@@ -2353,6 +2472,145 @@ mod tests {
         );
     }
 
+    /// Drive one `Calibrate` through a session, then a `Ping`. Returns every
+    /// `CalibrateDone` and whether a `Status` answered the `Ping`.
+    async fn calibrate_round<S: Sampler<crate::coefficient::Milli>>(
+        sampler: S,
+    ) -> (Vec<quip_proto::v1::CalibrateDone>, bool) {
+        let (input, incoming) = mpsc::channel(8);
+        let (out, mut replies) = mpsc::channel(64);
+        let identity = test_identity();
+        let families = generic_table();
+        let mut shutdown_deadline = None;
+        let session = run_connected_session(
+            ReceiverStream::new(incoming),
+            out,
+            "test",
+            &identity,
+            &families,
+            Arc::new(sampler),
+            None,
+            None,
+            &mut shutdown_deadline,
+        );
+        let coordinator = async move {
+            let send = |msg| input.send(Ok(CoordMsg { msg: Some(msg) }));
+            send(coord_msg::Msg::Welcome(quip_proto::v1::Welcome {
+                protocol_version: 2,
+            }))
+            .await
+            .unwrap();
+            send(coord_msg::Msg::Configure(
+                quip_proto::v1::Configure::default(),
+            ))
+            .await
+            .unwrap();
+            send(coord_msg::Msg::Topology(quip_proto::v1::Topology {
+                hash: vec![7; 32],
+                nodes: vec![1],
+                ..Default::default()
+            }))
+            .await
+            .unwrap();
+            send(coord_msg::Msg::Calibrate(
+                quip_proto::v1::Calibrate::default(),
+            ))
+            .await
+            .unwrap();
+            let mut done = Vec::new();
+            while done.is_empty() {
+                if let Some(miner_msg::Msg::CalibrateDone(d)) = replies.recv().await.unwrap().msg {
+                    done.push(d);
+                }
+            }
+            send(coord_msg::Msg::Ping(quip_proto::v1::Ping {}))
+                .await
+                .unwrap();
+            let mut status = false;
+            while !status {
+                match replies.recv().await.unwrap().msg {
+                    Some(miner_msg::Msg::CalibrateDone(d)) => done.push(d),
+                    Some(miner_msg::Msg::Status(_)) => status = true,
+                    _ => {}
+                }
+            }
+            send(coord_msg::Msg::Shutdown(quip_proto::v1::Shutdown {
+                grace_ms: 200,
+            }))
+            .await
+            .unwrap();
+            while let Some(reply) = replies.recv().await {
+                if let Some(miner_msg::Msg::CalibrateDone(d)) = reply.msg {
+                    done.push(d);
+                }
+            }
+            (done, status)
+        };
+        let (result, answered) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(session, coordinator)
+        })
+        .await
+        .unwrap();
+        result.unwrap();
+        answered
+    }
+
+    struct Calibrating;
+    impl Sampler<crate::coefficient::Milli> for Calibrating {
+        fn sample(
+            &self,
+            _: &crate::IsingGraph<crate::coefficient::Milli>,
+            _: &crate::SampleParams,
+        ) -> Result<Vec<crate::SamplerResult>, crate::SampleError> {
+            Ok(Vec::new())
+        }
+        fn accepts_calibrate() -> bool {
+            true
+        }
+        fn calibrate(
+            &self,
+            _: &quip_proto::v1::Calibrate,
+            _: &quip_proto::v1::Topology,
+        ) -> Result<crate::Calibration<Self>, crate::SampleError> {
+            Ok(crate::Calibration::new("tuned", |_: &Self| {}))
+        }
+    }
+
+    struct NotCalibrating;
+    impl Sampler<crate::coefficient::Milli> for NotCalibrating {
+        fn sample(
+            &self,
+            _: &crate::IsingGraph<crate::coefficient::Milli>,
+            _: &crate::SampleParams,
+        ) -> Result<Vec<crate::SamplerResult>, crate::SampleError> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_session_answers_calibrate_once_and_keeps_serving() {
+        let (done, status) = calibrate_round(Calibrating).await;
+        let outcomes: Vec<i32> = done.iter().map(|d| d.outcome).collect();
+        assert_eq!(
+            outcomes,
+            [quip_proto::v1::CalibrateOutcome::Done as i32],
+            "exactly one CalibrateDone"
+        );
+        assert!(status, "the session answers Ping after the exchange");
+    }
+
+    #[tokio::test]
+    async fn a_session_without_the_feature_answers_calibrate_failed() {
+        let (done, status) = calibrate_round(NotCalibrating).await;
+        let outcomes: Vec<i32> = done.iter().map(|d| d.outcome).collect();
+        assert_eq!(
+            outcomes,
+            [quip_proto::v1::CalibrateOutcome::Failed as i32],
+            "exactly one CalibrateDone"
+        );
+        assert!(status, "the session answers Ping after the exchange");
+    }
+
     struct Sampled(StdMutex<Option<tokio::sync::oneshot::Sender<()>>>);
     impl Sampler<crate::coefficient::Milli> for Sampled {
         fn sample(
@@ -2597,6 +2855,53 @@ mod tests {
         assert_eq!(
             hex,
             "1a020103206428c801320973747265616d696e6738024001520201065a020102600768019201150a10717569702f636861726765642d6963651201019201180a13717569702f646566656374732d7374617469631201019201150a10717569702f666c6f772d7374617469631201019201140a0f717569702f6963652d6669656c64731201019201130a0e717569702f6963652d676c61737312010192011a0a15717569702f706f6c617269746f6e2d73746174696312010192011b0a16717569702f747769737465642d6963652d64696d657212010192011f0a1a717569702f74776f2d636f6d6d6f646974792d726f7574696e67120101"
+        );
+    }
+
+    #[test]
+    fn declared_solve_options_reach_the_message_and_the_printer() {
+        use crate::OptionDecl;
+        use quip_proto::v1::OptionType;
+        struct WithOptions;
+        impl Sampler for WithOptions {
+            fn sample(
+                &self,
+                _graph: &crate::ising::IsingGraph,
+                _params: &crate::SampleParams,
+            ) -> Result<Vec<crate::SamplerResult>, crate::SampleError> {
+                Ok(vec![])
+            }
+            fn solve_options() -> &'static [OptionDecl] {
+                &[
+                    OptionDecl {
+                        name: "restarts",
+                        kind: OptionType::Int,
+                    },
+                    OptionDecl {
+                        name: "mode",
+                        kind: OptionType::String,
+                    },
+                ]
+            }
+        }
+        let caps = capabilities_for::<WithOptions, f64>(&test_identity()).expect("valid");
+        let listed: Vec<_> = caps
+            .solve_options
+            .iter()
+            .map(|o| (o.name.as_str(), o.r#type()))
+            .collect();
+        assert_eq!(
+            listed,
+            [("restarts", OptionType::Int), ("mode", OptionType::String)]
+        );
+        let v: serde_json::Value =
+            serde_json::from_str(&capabilities_json_from(&caps)).expect("printer emits JSON");
+        assert_eq!(
+            v.get("solveOptions").expect("solveOptions"),
+            &serde_json::json!([
+                {"name": "restarts", "type": "OPTION_TYPE_INT"},
+                {"name": "mode", "type": "OPTION_TYPE_STRING"}
+            ])
         );
     }
 
@@ -2991,6 +3296,58 @@ mod tests {
         assert_eq!(
             advertised_features::<Warm, f64>(&listed),
             vec![INITIAL_SPINS_FEATURE]
+        );
+    }
+
+    /// `calibrate` follows `accepts_calibrate` alone: added once when the
+    /// sampler serves the exchange, and dropped from an identity that lists it
+    /// for a sampler that does not.
+    #[test]
+    fn the_calibrate_feature_follows_accepts_calibrate() {
+        struct Calibrating;
+        impl Sampler for Calibrating {
+            fn sample(
+                &self,
+                _graph: &crate::IsingGraph,
+                _params: &crate::ising::SampleParams,
+            ) -> Result<Vec<crate::SamplerResult>, crate::SampleError> {
+                Ok(vec![])
+            }
+            fn accepts_calibrate() -> bool {
+                true
+            }
+        }
+        struct Plain;
+        impl Sampler for Plain {
+            fn sample(
+                &self,
+                _graph: &crate::IsingGraph,
+                _params: &crate::ising::SampleParams,
+            ) -> Result<Vec<crate::SamplerResult>, crate::SampleError> {
+                Ok(vec![])
+            }
+        }
+
+        let id = test_identity();
+        assert_eq!(
+            advertised_capabilities::<Calibrating, f64>(&id, &generic_table()).features,
+            vec!["streaming", CALIBRATE_FEATURE]
+        );
+        assert_eq!(
+            advertised_capabilities::<Plain, f64>(&id, &generic_table()).features,
+            vec!["streaming"]
+        );
+        let listed = BackendIdentity {
+            features: &[CALIBRATE_FEATURE, "streaming"],
+            ..test_identity()
+        };
+        assert_eq!(
+            advertised_features::<Calibrating, f64>(&listed),
+            vec![CALIBRATE_FEATURE, "streaming"]
+        );
+        assert_eq!(
+            advertised_features::<Plain, f64>(&listed),
+            vec!["streaming"]
         );
     }
 
@@ -3672,6 +4029,447 @@ mod tests {
                 !opened.load(Ordering::SeqCst),
                 "--capabilities opened the device"
             );
+        }
+    }
+
+    mod iqm_session {
+        use super::*;
+        use crate::iqm::IqmModel;
+        use quip_proto::v1::{CoefficientEncoding, EdgeList, IqmProblem, MinerMsg, RejectReason};
+        use quip_protocol::wire::encode_i32_le;
+
+        /// Answers every IQM job with each variable at its bound, or one
+        /// above it when `OVER` is set.
+        struct Iqm<const OVER: bool, const LEASES: bool>;
+        impl<const OVER: bool, const LEASES: bool> Sampler for Iqm<OVER, LEASES> {
+            fn sample(
+                &self,
+                _: &crate::IsingGraph,
+                _: &crate::SampleParams,
+            ) -> Result<Vec<crate::SamplerResult>, crate::SampleError> {
+                Ok(vec![])
+            }
+            fn accepts_leases() -> bool {
+                LEASES
+            }
+            fn accepts_iqm() -> bool {
+                true
+            }
+            fn sample_iqm(
+                &self,
+                model: &IqmModel,
+                params: &crate::SampleParams,
+            ) -> Result<Vec<Vec<u32>>, crate::SampleError> {
+                let values = model
+                    .upper_bounds
+                    .iter()
+                    .map(|&b| b + u32::from(OVER))
+                    .collect();
+                Ok(vec![values; params.num_reads])
+            }
+        }
+        type Serves = Iqm<false, true>;
+        type ServesWithoutLeases = Iqm<false, false>;
+        type Broken = Iqm<true, true>;
+
+        struct Declines;
+        impl Sampler for Declines {
+            fn sample(
+                &self,
+                _: &crate::IsingGraph,
+                _: &crate::SampleParams,
+            ) -> Result<Vec<crate::SamplerResult>, crate::SampleError> {
+                Ok(vec![])
+            }
+        }
+
+        fn kinds<S: Sampler>() -> Vec<i32> {
+            capabilities_for::<S, f64>(&test_identity())
+                .expect("valid declaration")
+                .supported_kinds
+        }
+
+        #[test]
+        fn iqm_is_advertised_only_by_a_sampler_that_accepts_it() {
+            let (sample, generate, iqm) = (
+                JobKind::IsingSample as i32,
+                JobKind::IsingGenerate as i32,
+                JobKind::IqmSample as i32,
+            );
+            assert_eq!(kinds::<Declines>(), [sample, generate]);
+            assert_eq!(kinds::<Serves>(), [sample, generate, iqm]);
+            assert_eq!(kinds::<ServesWithoutLeases>(), [sample, iqm]);
+            let caps = capabilities_for::<ServesWithoutLeases, f64>(&test_identity())
+                .expect("valid declaration");
+            let v: serde_json::Value =
+                serde_json::from_str(&capabilities_json_from(&caps)).expect("JSON");
+            assert_eq!(
+                v.get("supportedKinds"),
+                Some(&serde_json::json!(["ISING_SAMPLE", "IQM_SAMPLE"]))
+            );
+        }
+
+        fn problem() -> IqmProblem {
+            IqmProblem {
+                edges: Some(EdgeList {
+                    u: vec![0],
+                    v: vec![1],
+                }),
+                upper_bounds: vec![2, 3],
+                encoding: CoefficientEncoding::I32 as i32,
+                scale: 1000,
+                h: encode_i32_le(&[1000, -500]),
+                j: encode_i32_le(&[250]),
+                num_reads: 2,
+                num_sweeps: 0,
+            }
+        }
+
+        fn iqm_job(job_id: &[u8], problem: IqmProblem) -> quip_proto::v1::Job {
+            quip_proto::v1::Job {
+                job_id: job_id.to_vec(),
+                kind: JobKind::IqmSample as i32,
+                iqm: Some(problem),
+                ..Default::default()
+            }
+        }
+
+        /// Run a session that receives `jobs` after the handshake, then a
+        /// `Shutdown` unless the session ends first. Returns every reply after
+        /// the initial grant and the session's result.
+        async fn session<S: Sampler>(
+            sampler: S,
+            jobs: Vec<quip_proto::v1::Job>,
+            replies_wanted: usize,
+        ) -> (Vec<MinerMsg>, Result<(), String>) {
+            let msgs = jobs.into_iter().map(coord_msg::Msg::Job).collect();
+            Box::pin(session_msgs(sampler, msgs, replies_wanted)).await
+        }
+
+        /// [`session`] for any coordinator messages after the handshake.
+        async fn session_msgs<S: Sampler>(
+            sampler: S,
+            msgs: Vec<coord_msg::Msg>,
+            replies_wanted: usize,
+        ) -> (Vec<MinerMsg>, Result<(), String>) {
+            let (input, incoming) = mpsc::channel(8);
+            let (out, mut replies) = mpsc::channel(32);
+            let identity = test_identity();
+            let families = generic_table();
+            let mut shutdown_deadline = None;
+            let run = run_connected_session(
+                ReceiverStream::new(incoming),
+                out,
+                "test",
+                &identity,
+                &families,
+                Arc::new(sampler),
+                None,
+                None,
+                &mut shutdown_deadline,
+            );
+            let coordinator = async move {
+                let send = |msg| input.send(Ok(CoordMsg { msg: Some(msg) }));
+                send(coord_msg::Msg::Welcome(quip_proto::v1::Welcome {
+                    protocol_version: 2,
+                }))
+                .await
+                .unwrap();
+                send(coord_msg::Msg::Configure(
+                    quip_proto::v1::Configure::default(),
+                ))
+                .await
+                .unwrap();
+                for _ in 0..2 {
+                    // Ready, then the initial JobRequest.
+                    let _ = replies.recv().await;
+                }
+                for msg in msgs {
+                    send(msg).await.unwrap();
+                }
+                let mut seen = Vec::new();
+                while seen.len() < replies_wanted {
+                    match replies.recv().await {
+                        Some(reply) => seen.push(reply),
+                        None => return seen,
+                    }
+                }
+                let _ = send(coord_msg::Msg::Shutdown(quip_proto::v1::Shutdown {
+                    grace_ms: 200,
+                }))
+                .await;
+                while replies.recv().await.is_some() {}
+                seen
+            };
+            let (result, seen) = tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::join!(run, coordinator)
+            })
+            .await
+            .expect("the session ends");
+            (seen, result.map_err(|e| e.to_string()))
+        }
+
+        #[tokio::test]
+        async fn an_iqm_job_gets_scored_values_and_one_credit() {
+            let (replies, result) =
+                Box::pin(session(Serves {}, vec![iqm_job(b"iqm", problem())], 2)).await;
+            result.expect("clean shutdown");
+            let Some(miner_msg::Msg::Result(r)) = replies.first().and_then(|m| m.msg.as_ref())
+            else {
+                panic!("expected a Result, got {replies:?}");
+            };
+            assert_eq!(r.job_id, b"iqm");
+            assert_eq!(r.solutions.len(), 2);
+            for solution in &r.solutions {
+                assert_eq!(solution.values, [2, 3]);
+                assert!(solution.spins.is_empty());
+                // 1000*2 - 500*3 + 250*2*3 = 2000
+                assert_eq!(solution.energy_milli, 2000);
+            }
+            assert_eq!(r.meta.as_ref().map(|m| m.reads), Some(2));
+            assert!(
+                matches!(replies.get(1).and_then(|m| m.msg.as_ref()), Some(miner_msg::Msg::JobRequest(c)) if c.credits == 1)
+            );
+        }
+
+        fn reject_of(reply: &MinerMsg) -> Option<(Vec<u8>, i32)> {
+            match &reply.msg {
+                Some(miner_msg::Msg::Reject(r)) => Some((r.job_id.clone(), r.reason)),
+                _ => None,
+            }
+        }
+
+        #[tokio::test]
+        async fn a_malformed_iqm_job_is_rejected() {
+            let mut bad = problem();
+            bad.upper_bounds.push(1);
+            let (replies, result) =
+                Box::pin(session(Serves {}, vec![iqm_job(b"bad", bad)], 2)).await;
+            result.expect("clean shutdown");
+            assert_eq!(
+                replies.first().and_then(reject_of),
+                Some((b"bad".to_vec(), RejectReason::Malformed as i32))
+            );
+            assert!(
+                matches!(replies.get(1).and_then(|m| m.msg.as_ref()), Some(miner_msg::Msg::JobRequest(c)) if c.credits == 1)
+            );
+        }
+
+        /// Holds each IQM call for `hold`, and records the most calls that
+        /// ran at once. `LOCAL` is what `generates_locally` answers, which
+        /// selects the shutdown branch.
+        struct Slow<const LOCAL: bool> {
+            hold: Duration,
+            running: Arc<std::sync::atomic::AtomicUsize>,
+            peak: Arc<std::sync::atomic::AtomicUsize>,
+        }
+        impl<const LOCAL: bool> Sampler for Slow<LOCAL> {
+            fn sample(
+                &self,
+                _: &crate::IsingGraph,
+                _: &crate::SampleParams,
+            ) -> Result<Vec<crate::SamplerResult>, crate::SampleError> {
+                Ok(vec![])
+            }
+            fn generates_locally() -> bool {
+                LOCAL
+            }
+            fn accepts_iqm() -> bool {
+                true
+            }
+            fn sample_iqm(
+                &self,
+                model: &IqmModel,
+                params: &crate::SampleParams,
+            ) -> Result<Vec<Vec<u32>>, crate::SampleError> {
+                let now = self.running.fetch_add(1, Ordering::SeqCst) + 1;
+                let _ = self.peak.fetch_max(now, Ordering::SeqCst);
+                std::thread::sleep(self.hold);
+                let _ = self.running.fetch_sub(1, Ordering::SeqCst);
+                Ok(vec![vec![0; model.num_vars()]; params.num_reads])
+            }
+        }
+
+        fn slow<const LOCAL: bool>(
+            hold: Duration,
+        ) -> (Slow<LOCAL>, Arc<std::sync::atomic::AtomicUsize>) {
+            let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let sampler = Slow {
+                hold,
+                running: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                peak: Arc::clone(&peak),
+            };
+            (sampler, peak)
+        }
+
+        /// An IQM job at a generation an earlier `Cancel` covers is stale: it
+        /// gets its credit back, no `Result`, no `Reject`, and no device call.
+        #[tokio::test]
+        async fn a_stale_iqm_job_returns_its_credit_without_a_call() {
+            let (sampler, peak) = slow::<false>(Duration::ZERO);
+            let mut stale = iqm_job(b"stale", problem());
+            stale.generation = 5;
+            let msgs = vec![
+                coord_msg::Msg::Cancel(quip_proto::v1::Cancel { max_generation: 5 }),
+                coord_msg::Msg::Job(stale),
+            ];
+            // The Cancel's Status, then the job's credit.
+            let (replies, result) = Box::pin(session_msgs(sampler, msgs, 2)).await;
+            result.expect("clean shutdown");
+            assert!(
+                matches!(
+                    replies.first().and_then(|m| m.msg.as_ref()),
+                    Some(miner_msg::Msg::Status(_))
+                ),
+                "{replies:?}"
+            );
+            assert!(
+                matches!(replies.get(1).and_then(|m| m.msg.as_ref()), Some(miner_msg::Msg::JobRequest(c)) if c.credits == 1),
+                "{replies:?}"
+            );
+            assert_eq!(
+                peak.load(Ordering::SeqCst),
+                0,
+                "the stale job reached the sampler"
+            );
+        }
+
+        /// The deadline is checked again once the job holds its permit: a job
+        /// that expired while an earlier call ran is refused `EXPIRED`, not
+        /// sampled.
+        #[tokio::test]
+        async fn an_iqm_job_that_expires_while_waiting_is_rejected_expired() {
+            let (sampler, _) = slow::<false>(Duration::from_millis(400));
+            let mut late = iqm_job(b"late", problem());
+            late.deadline_ms = crate::job::now_unix_ms().unwrap() + 150;
+            let jobs = vec![iqm_job(b"first", problem()), late];
+            // The first job's Result and credit, then the late job's two replies.
+            let (replies, result) = Box::pin(session(sampler, jobs, 4)).await;
+            result.expect("clean shutdown");
+            assert!(
+                replies
+                    .iter()
+                    .filter_map(reject_of)
+                    .any(|r| r == (b"late".to_vec(), RejectReason::Expired as i32)),
+                "{replies:?}"
+            );
+            let results = replies
+                .iter()
+                .filter(|m| matches!(m.msg, Some(miner_msg::Msg::Result(_))))
+                .count();
+            assert_eq!(results, 1, "{replies:?}");
+        }
+
+        /// The default stream width is 1, so IQM calls never overlap, however
+        /// many credits are outstanding.
+        #[tokio::test]
+        async fn iqm_calls_stay_within_the_stream_width() {
+            let (sampler, peak) = slow::<false>(Duration::from_millis(50));
+            let jobs = (0..3_u8).map(|i| iqm_job(&[b'q', i], problem())).collect();
+            // Three Results and three credits.
+            let (replies, result) = Box::pin(session(sampler, jobs, 6)).await;
+            result.expect("clean shutdown");
+            let results = replies
+                .iter()
+                .filter(|m| matches!(m.msg, Some(miner_msg::Msg::Result(_))))
+                .count();
+            assert_eq!(results, 3);
+            assert_eq!(peak.load(Ordering::SeqCst), 1, "IQM calls overlapped");
+        }
+
+        /// A `sample_iqm` call still running at `Shutdown` does not hold the
+        /// session past its grace window, on either shutdown branch.
+        #[tokio::test]
+        async fn a_slow_iqm_call_does_not_overrun_the_shutdown_grace() {
+            overrun_check::<true>().await;
+            overrun_check::<false>().await;
+        }
+
+        async fn overrun_check<const LOCAL: bool>() {
+            let (sampler, _) = slow::<LOCAL>(Duration::from_secs(3));
+            let (input, incoming) = mpsc::channel(8);
+            let (out, mut replies) = mpsc::channel(32);
+            let identity = test_identity();
+            let families = generic_table();
+            let mut shutdown_deadline = None;
+            let run = run_connected_session(
+                ReceiverStream::new(incoming),
+                out,
+                "test",
+                &identity,
+                &families,
+                Arc::new(sampler),
+                None,
+                None,
+                &mut shutdown_deadline,
+            );
+            let coordinator = async move {
+                let send = |msg| input.send(Ok(CoordMsg { msg: Some(msg) }));
+                send(coord_msg::Msg::Welcome(quip_proto::v1::Welcome {
+                    protocol_version: 2,
+                }))
+                .await
+                .unwrap();
+                send(coord_msg::Msg::Configure(
+                    quip_proto::v1::Configure::default(),
+                ))
+                .await
+                .unwrap();
+                for _ in 0..2 {
+                    let _ = replies.recv().await;
+                }
+                send(coord_msg::Msg::Job(iqm_job(b"slow", problem())))
+                    .await
+                    .unwrap();
+                // Let the call start before asking the session to stop.
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                send(coord_msg::Msg::Shutdown(quip_proto::v1::Shutdown {
+                    grace_ms: 200,
+                }))
+                .await
+                .unwrap();
+                while replies.recv().await.is_some() {}
+            };
+            let started = std::time::Instant::now();
+            let _ = tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::join!(run, coordinator)
+            })
+            .await
+            .expect("the session ends");
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "local {LOCAL}: the session waited {:?} for the call",
+                started.elapsed()
+            );
+        }
+
+        #[tokio::test]
+        async fn a_sampler_that_declines_iqm_rejects_it_as_unsupported() {
+            let (replies, result) =
+                Box::pin(session(Declines, vec![iqm_job(b"iqm", problem())], 2)).await;
+            result.expect("clean shutdown");
+            assert_eq!(
+                replies.first().and_then(reject_of),
+                Some((b"iqm".to_vec(), RejectReason::UnsupportedKind as i32))
+            );
+            assert!(
+                matches!(replies.get(1).and_then(|m| m.msg.as_ref()), Some(miner_msg::Msg::JobRequest(c)) if c.credits == 1)
+            );
+        }
+
+        #[tokio::test]
+        async fn values_outside_a_bound_end_the_session() {
+            let (replies, result) =
+                Box::pin(session(Broken {}, vec![iqm_job(b"iqm", problem())], 2)).await;
+            assert_eq!(
+                replies.first().and_then(reject_of),
+                Some((b"iqm".to_vec(), RejectReason::Overloaded as i32))
+            );
+            assert!(matches!(
+                replies.get(1).and_then(|m| m.msg.as_ref()),
+                Some(miner_msg::Msg::Fatal(_))
+            ));
+            assert!(result.is_err(), "a device fault ends the session");
         }
     }
 }

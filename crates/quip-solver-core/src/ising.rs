@@ -5,6 +5,7 @@
 //! list, the GPU miners build [`crate::csr::CsrGraph`].
 
 use crate::coefficient::Coefficient;
+use crate::options::SolveOptions;
 use std::sync::Arc;
 
 /// Sampling algorithm selected by the binary.
@@ -101,6 +102,10 @@ pub struct SampleParams {
     pub schedule: BetaSchedule,
     /// PRNG seed for this job.
     pub seed: u64,
+    /// Per-algorithm options from the `--solve` `options` object, already
+    /// checked against [`Sampler::solve_options`](crate::Sampler::solve_options).
+    /// Empty for a session job.
+    pub options: SolveOptions,
 }
 
 impl Default for SampleParams {
@@ -112,6 +117,7 @@ impl Default for SampleParams {
             beta_range: None,
             schedule: BetaSchedule::Geometric,
             seed: 0,
+            options: SolveOptions::new(),
         }
     }
 }

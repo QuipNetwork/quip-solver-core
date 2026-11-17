@@ -403,6 +403,8 @@ export enum JobKind {
   /** GATE_CIRCUIT - reserved */
   GATE_CIRCUIT = 2,
   ISING_GENERATE = 3,
+  /** IQM_SAMPLE - integer quadratic model, IqmProblem */
+  IQM_SAMPLE = 4,
   UNRECOGNIZED = -1,
 }
 
@@ -420,6 +422,9 @@ export function jobKindFromJSON(object: any): JobKind {
     case 3:
     case "ISING_GENERATE":
       return JobKind.ISING_GENERATE;
+    case 4:
+    case "IQM_SAMPLE":
+      return JobKind.IQM_SAMPLE;
     case -1:
     case "UNRECOGNIZED":
     default:
@@ -437,6 +442,8 @@ export function jobKindToJSON(object: JobKind): string {
       return "GATE_CIRCUIT";
     case JobKind.ISING_GENERATE:
       return "ISING_GENERATE";
+    case JobKind.IQM_SAMPLE:
+      return "IQM_SAMPLE";
     case JobKind.UNRECOGNIZED:
     default:
       return "UNRECOGNIZED";
@@ -542,6 +549,108 @@ export function rejectReasonToJSON(object: RejectReason): string {
   }
 }
 
+/** Scalar type of one `--solve` option value. */
+export enum OptionType {
+  OPTION_TYPE_UNSPECIFIED = 0,
+  OPTION_TYPE_BOOL = 1,
+  /** OPTION_TYPE_INT - a JSON integer */
+  OPTION_TYPE_INT = 2,
+  /** OPTION_TYPE_NUMBER - any JSON number, integer or not */
+  OPTION_TYPE_NUMBER = 3,
+  OPTION_TYPE_STRING = 4,
+  UNRECOGNIZED = -1,
+}
+
+export function optionTypeFromJSON(object: any): OptionType {
+  switch (object) {
+    case 0:
+    case "OPTION_TYPE_UNSPECIFIED":
+      return OptionType.OPTION_TYPE_UNSPECIFIED;
+    case 1:
+    case "OPTION_TYPE_BOOL":
+      return OptionType.OPTION_TYPE_BOOL;
+    case 2:
+    case "OPTION_TYPE_INT":
+      return OptionType.OPTION_TYPE_INT;
+    case 3:
+    case "OPTION_TYPE_NUMBER":
+      return OptionType.OPTION_TYPE_NUMBER;
+    case 4:
+    case "OPTION_TYPE_STRING":
+      return OptionType.OPTION_TYPE_STRING;
+    case -1:
+    case "UNRECOGNIZED":
+    default:
+      return OptionType.UNRECOGNIZED;
+  }
+}
+
+export function optionTypeToJSON(object: OptionType): string {
+  switch (object) {
+    case OptionType.OPTION_TYPE_UNSPECIFIED:
+      return "OPTION_TYPE_UNSPECIFIED";
+    case OptionType.OPTION_TYPE_BOOL:
+      return "OPTION_TYPE_BOOL";
+    case OptionType.OPTION_TYPE_INT:
+      return "OPTION_TYPE_INT";
+    case OptionType.OPTION_TYPE_NUMBER:
+      return "OPTION_TYPE_NUMBER";
+    case OptionType.OPTION_TYPE_STRING:
+      return "OPTION_TYPE_STRING";
+    case OptionType.UNRECOGNIZED:
+    default:
+      return "UNRECOGNIZED";
+  }
+}
+
+export enum CalibrateOutcome {
+  CALIBRATE_OUTCOME_UNSPECIFIED = 0,
+  /** CALIBRATE_OUTCOME_DONE - the new tuning is in effect */
+  CALIBRATE_OUTCOME_DONE = 1,
+  /** CALIBRATE_OUTCOME_FAILED - the solver keeps its current tuning */
+  CALIBRATE_OUTCOME_FAILED = 2,
+  /** CALIBRATE_OUTCOME_DEADLINE_PASSED - the solver keeps its current tuning */
+  CALIBRATE_OUTCOME_DEADLINE_PASSED = 3,
+  UNRECOGNIZED = -1,
+}
+
+export function calibrateOutcomeFromJSON(object: any): CalibrateOutcome {
+  switch (object) {
+    case 0:
+    case "CALIBRATE_OUTCOME_UNSPECIFIED":
+      return CalibrateOutcome.CALIBRATE_OUTCOME_UNSPECIFIED;
+    case 1:
+    case "CALIBRATE_OUTCOME_DONE":
+      return CalibrateOutcome.CALIBRATE_OUTCOME_DONE;
+    case 2:
+    case "CALIBRATE_OUTCOME_FAILED":
+      return CalibrateOutcome.CALIBRATE_OUTCOME_FAILED;
+    case 3:
+    case "CALIBRATE_OUTCOME_DEADLINE_PASSED":
+      return CalibrateOutcome.CALIBRATE_OUTCOME_DEADLINE_PASSED;
+    case -1:
+    case "UNRECOGNIZED":
+    default:
+      return CalibrateOutcome.UNRECOGNIZED;
+  }
+}
+
+export function calibrateOutcomeToJSON(object: CalibrateOutcome): string {
+  switch (object) {
+    case CalibrateOutcome.CALIBRATE_OUTCOME_UNSPECIFIED:
+      return "CALIBRATE_OUTCOME_UNSPECIFIED";
+    case CalibrateOutcome.CALIBRATE_OUTCOME_DONE:
+      return "CALIBRATE_OUTCOME_DONE";
+    case CalibrateOutcome.CALIBRATE_OUTCOME_FAILED:
+      return "CALIBRATE_OUTCOME_FAILED";
+    case CalibrateOutcome.CALIBRATE_OUTCOME_DEADLINE_PASSED:
+      return "CALIBRATE_OUTCOME_DEADLINE_PASSED";
+    case CalibrateOutcome.UNRECOGNIZED:
+    default:
+      return "UNRECOGNIZED";
+  }
+}
+
 export interface MinerMsg {
   hello?: Hello | undefined;
   ready?: Ready | undefined;
@@ -552,6 +661,7 @@ export interface MinerMsg {
   fatal?: Fatal | undefined;
   capabilities?: Capabilities | undefined;
   leaseDone?: LeaseDone | undefined;
+  calibrateDone?: CalibrateDone | undefined;
 }
 
 export interface CoordMsg {
@@ -564,6 +674,7 @@ export interface CoordMsg {
   shutdown?: Shutdown | undefined;
   setTarget?: SetTarget | undefined;
   getCapabilities?: GetCapabilities | undefined;
+  calibrate?: Calibrate | undefined;
 }
 
 export interface Hello {
@@ -681,6 +792,35 @@ export interface IsingProblem {
   reversalPauseUs: number;
 }
 
+/**
+ * Integer quadratic model for IQM_SAMPLE. Variable i takes an integer value
+ * from 0 to upper_bounds[i], inclusive. The energy is
+ * E(x) = sum_i h_i x_i + sum_k j_k x_u x_v over the pairs (u, v) in edges.
+ * No term couples a variable to itself.
+ */
+export interface IqmProblem {
+  /** Dense variable indices into upper_bounds and h. u != v for every pair. */
+  edges:
+    | EdgeList
+    | undefined;
+  /** One inclusive upper bound per variable. The lower bound is always 0. */
+  upperBounds: number[];
+  /**
+   * h and j use the IsingProblem coefficient rules: little-endian elements
+   * of encoding's type, one per variable and per pair, integer values stored
+   * / scale, float encodings with scale 0, and every value exact in i32
+   * milli-units.
+   */
+  encoding: CoefficientEncoding;
+  scale: number;
+  h: Uint8Array;
+  j: Uint8Array;
+  /** per-job override; 0 = unset -> SetTarget */
+  numReads: number;
+  /** per-job override; 0 = unset */
+  numSweeps: number;
+}
+
 export interface Provenance {
   isPow: boolean;
   /** mempool reward attribution; empty for PoW */
@@ -698,7 +838,11 @@ export interface Job {
     | Provenance
     | undefined;
   /** ISING_GENERATE only */
-  generator: IsingProblemGenerator | undefined;
+  generator:
+    | IsingProblemGenerator
+    | undefined;
+  /** IQM_SAMPLE only */
+  iqm: IqmProblem | undefined;
 }
 
 export interface JobRequest {
@@ -723,6 +867,11 @@ export interface Solution {
    * Exactly ceil(num_nodes / 8) bytes, with zero padding bits.
    */
   spins: Uint8Array;
+  /**
+   * IQM_SAMPLE only: the value of each variable, in IqmProblem order. Empty
+   * for the Ising kinds, and spins is empty for IQM_SAMPLE.
+   */
+  values: number[];
 }
 
 export interface SamplerMeta {
@@ -834,6 +983,17 @@ export interface Capabilities {
   solverId: string;
   generatedFamilies: FamilySupport[];
   acceptedFamilies: FamilySupport[];
+  /**
+   * Options `--solve` accepts in its `options` object, each with the scalar
+   * type its value must have. Empty means the solver accepts none.
+   */
+  solveOptions: SolveOption[];
+}
+
+/** One option a solver accepts in `--solve`. */
+export interface SolveOption {
+  name: string;
+  type: OptionType;
 }
 
 export interface IsingProblemGenerator {
@@ -854,6 +1014,37 @@ export interface IsingProblemGenerator {
     | undefined;
   /** 32 bytes, required iff family is set (FAM-49, FAM-50) */
   topologyOrderDigest: Uint8Array;
+}
+
+/**
+ * Tune the solver against reference instances before the workload. Sent only
+ * to a solver that lists the `calibrate` feature, after Topology and before
+ * the first Job. The solver answers with exactly one CalibrateDone, unless
+ * Shutdown ends the session first.
+ */
+export interface Calibrate {
+  /** the family parameters, as a job carries them */
+  family: FamilyDescriptor | undefined;
+  instances: CalibrationInstance[];
+  /** Unix time in ms, as Job.deadline_ms; 0 = none */
+  deadlineMs: bigint;
+}
+
+/** One reference instance of the calibration family. */
+export interface CalibrationInstance {
+  id: string;
+  /** 32 bytes */
+  nonce: Uint8Array;
+  /** the energy a reference run achieved */
+  achievedEnergyMilli: bigint;
+  /** the acceptance ceiling, as SetTarget */
+  maxEnergyMilli: bigint;
+}
+
+export interface CalibrateDone {
+  outcome: CalibrateOutcome;
+  /** free text for the operator */
+  summary?: string | undefined;
 }
 
 export interface LeaseDone {
@@ -908,6 +1099,7 @@ function createBaseMinerMsg(): MinerMsg {
     fatal: undefined,
     capabilities: undefined,
     leaseDone: undefined,
+    calibrateDone: undefined,
   };
 }
 
@@ -939,6 +1131,9 @@ export const MinerMsg: MessageFns<MinerMsg> = {
     }
     if (message.leaseDone !== undefined) {
       LeaseDone.encode(message.leaseDone, writer.uint32(74).fork()).join();
+    }
+    if (message.calibrateDone !== undefined) {
+      CalibrateDone.encode(message.calibrateDone, writer.uint32(82).fork()).join();
     }
     return writer;
   },
@@ -1022,6 +1217,14 @@ export const MinerMsg: MessageFns<MinerMsg> = {
           message.leaseDone = LeaseDone.decode(reader, reader.uint32());
           continue;
         }
+        case 10: {
+          if (tag !== 82) {
+            break;
+          }
+
+          message.calibrateDone = CalibrateDone.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -1049,6 +1252,11 @@ export const MinerMsg: MessageFns<MinerMsg> = {
         ? LeaseDone.fromJSON(object.leaseDone)
         : isSet(object.lease_done)
         ? LeaseDone.fromJSON(object.lease_done)
+        : undefined,
+      calibrateDone: isSet(object.calibrateDone)
+        ? CalibrateDone.fromJSON(object.calibrateDone)
+        : isSet(object.calibrate_done)
+        ? CalibrateDone.fromJSON(object.calibrate_done)
         : undefined,
     };
   },
@@ -1082,6 +1290,9 @@ export const MinerMsg: MessageFns<MinerMsg> = {
     if (message.leaseDone !== undefined) {
       obj.leaseDone = LeaseDone.toJSON(message.leaseDone);
     }
+    if (message.calibrateDone !== undefined) {
+      obj.calibrateDone = CalibrateDone.toJSON(message.calibrateDone);
+    }
     return obj;
   },
 
@@ -1111,6 +1322,9 @@ export const MinerMsg: MessageFns<MinerMsg> = {
     message.leaseDone = (object.leaseDone !== undefined && object.leaseDone !== null)
       ? LeaseDone.fromPartial(object.leaseDone)
       : undefined;
+    message.calibrateDone = (object.calibrateDone !== undefined && object.calibrateDone !== null)
+      ? CalibrateDone.fromPartial(object.calibrateDone)
+      : undefined;
     return message;
   },
 };
@@ -1126,6 +1340,7 @@ function createBaseCoordMsg(): CoordMsg {
     shutdown: undefined,
     setTarget: undefined,
     getCapabilities: undefined,
+    calibrate: undefined,
   };
 }
 
@@ -1157,6 +1372,9 @@ export const CoordMsg: MessageFns<CoordMsg> = {
     }
     if (message.getCapabilities !== undefined) {
       GetCapabilities.encode(message.getCapabilities, writer.uint32(74).fork()).join();
+    }
+    if (message.calibrate !== undefined) {
+      Calibrate.encode(message.calibrate, writer.uint32(82).fork()).join();
     }
     return writer;
   },
@@ -1240,6 +1458,14 @@ export const CoordMsg: MessageFns<CoordMsg> = {
           message.getCapabilities = GetCapabilities.decode(reader, reader.uint32());
           continue;
         }
+        case 10: {
+          if (tag !== 82) {
+            break;
+          }
+
+          message.calibrate = Calibrate.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -1268,6 +1494,7 @@ export const CoordMsg: MessageFns<CoordMsg> = {
         : isSet(object.get_capabilities)
         ? GetCapabilities.fromJSON(object.get_capabilities)
         : undefined,
+      calibrate: isSet(object.calibrate) ? Calibrate.fromJSON(object.calibrate) : undefined,
     };
   },
 
@@ -1300,6 +1527,9 @@ export const CoordMsg: MessageFns<CoordMsg> = {
     if (message.getCapabilities !== undefined) {
       obj.getCapabilities = GetCapabilities.toJSON(message.getCapabilities);
     }
+    if (message.calibrate !== undefined) {
+      obj.calibrate = Calibrate.toJSON(message.calibrate);
+    }
     return obj;
   },
 
@@ -1330,6 +1560,9 @@ export const CoordMsg: MessageFns<CoordMsg> = {
       : undefined;
     message.getCapabilities = (object.getCapabilities !== undefined && object.getCapabilities !== null)
       ? GetCapabilities.fromPartial(object.getCapabilities)
+      : undefined;
+    message.calibrate = (object.calibrate !== undefined && object.calibrate !== null)
+      ? Calibrate.fromPartial(object.calibrate)
       : undefined;
     return message;
   },
@@ -2474,6 +2707,213 @@ export const IsingProblem: MessageFns<IsingProblem> = {
   },
 };
 
+function createBaseIqmProblem(): IqmProblem {
+  return {
+    edges: undefined,
+    upperBounds: [],
+    encoding: 0,
+    scale: 0,
+    h: new Uint8Array(0),
+    j: new Uint8Array(0),
+    numReads: 0,
+    numSweeps: 0,
+  };
+}
+
+export const IqmProblem: MessageFns<IqmProblem> = {
+  encode(message: IqmProblem, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.edges !== undefined) {
+      EdgeList.encode(message.edges, writer.uint32(10).fork()).join();
+    }
+    writer.uint32(18).fork();
+    for (const v of message.upperBounds) {
+      writer.uint32(v);
+    }
+    writer.join();
+    if (message.encoding !== 0) {
+      writer.uint32(24).int32(message.encoding);
+    }
+    if (message.scale !== 0) {
+      writer.uint32(32).uint32(message.scale);
+    }
+    if (message.h.length !== 0) {
+      writer.uint32(42).bytes(message.h);
+    }
+    if (message.j.length !== 0) {
+      writer.uint32(50).bytes(message.j);
+    }
+    if (message.numReads !== 0) {
+      writer.uint32(56).uint32(message.numReads);
+    }
+    if (message.numSweeps !== 0) {
+      writer.uint32(64).uint32(message.numSweeps);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): IqmProblem {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseIqmProblem();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.edges = EdgeList.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag === 16) {
+            message.upperBounds.push(reader.uint32());
+
+            continue;
+          }
+
+          if (tag === 18) {
+            const end2 = reader.uint32() + reader.pos;
+            while (reader.pos < end2) {
+              message.upperBounds.push(reader.uint32());
+            }
+
+            continue;
+          }
+
+          break;
+        }
+        case 3: {
+          if (tag !== 24) {
+            break;
+          }
+
+          message.encoding = reader.int32() as any;
+          continue;
+        }
+        case 4: {
+          if (tag !== 32) {
+            break;
+          }
+
+          message.scale = reader.uint32();
+          continue;
+        }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.h = reader.bytes();
+          continue;
+        }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.j = reader.bytes();
+          continue;
+        }
+        case 7: {
+          if (tag !== 56) {
+            break;
+          }
+
+          message.numReads = reader.uint32();
+          continue;
+        }
+        case 8: {
+          if (tag !== 64) {
+            break;
+          }
+
+          message.numSweeps = reader.uint32();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): IqmProblem {
+    return {
+      edges: isSet(object.edges) ? EdgeList.fromJSON(object.edges) : undefined,
+      upperBounds: globalThis.Array.isArray(object?.upperBounds)
+        ? object.upperBounds.map((e: any) => globalThis.Number(e))
+        : globalThis.Array.isArray(object?.upper_bounds)
+        ? object.upper_bounds.map((e: any) => globalThis.Number(e))
+        : [],
+      encoding: isSet(object.encoding) ? coefficientEncodingFromJSON(object.encoding) : 0,
+      scale: isSet(object.scale) ? globalThis.Number(object.scale) : 0,
+      h: isSet(object.h) ? bytesFromBase64(object.h) : new Uint8Array(0),
+      j: isSet(object.j) ? bytesFromBase64(object.j) : new Uint8Array(0),
+      numReads: isSet(object.numReads)
+        ? globalThis.Number(object.numReads)
+        : isSet(object.num_reads)
+        ? globalThis.Number(object.num_reads)
+        : 0,
+      numSweeps: isSet(object.numSweeps)
+        ? globalThis.Number(object.numSweeps)
+        : isSet(object.num_sweeps)
+        ? globalThis.Number(object.num_sweeps)
+        : 0,
+    };
+  },
+
+  toJSON(message: IqmProblem): unknown {
+    const obj: any = {};
+    if (message.edges !== undefined) {
+      obj.edges = EdgeList.toJSON(message.edges);
+    }
+    if (message.upperBounds?.length) {
+      obj.upperBounds = message.upperBounds.map((e) => Math.round(e));
+    }
+    if (message.encoding !== 0) {
+      obj.encoding = coefficientEncodingToJSON(message.encoding);
+    }
+    if (message.scale !== 0) {
+      obj.scale = Math.round(message.scale);
+    }
+    if (message.h.length !== 0) {
+      obj.h = base64FromBytes(message.h);
+    }
+    if (message.j.length !== 0) {
+      obj.j = base64FromBytes(message.j);
+    }
+    if (message.numReads !== 0) {
+      obj.numReads = Math.round(message.numReads);
+    }
+    if (message.numSweeps !== 0) {
+      obj.numSweeps = Math.round(message.numSweeps);
+    }
+    return obj;
+  },
+
+  create(base?: DeepPartial<IqmProblem>): IqmProblem {
+    return IqmProblem.fromPartial(base ?? {});
+  },
+  fromPartial(object: DeepPartial<IqmProblem>): IqmProblem {
+    const message = createBaseIqmProblem();
+    message.edges = (object.edges !== undefined && object.edges !== null)
+      ? EdgeList.fromPartial(object.edges)
+      : undefined;
+    message.upperBounds = object.upperBounds?.map((e) => e) || [];
+    message.encoding = object.encoding ?? 0;
+    message.scale = object.scale ?? 0;
+    message.h = object.h ?? new Uint8Array(0);
+    message.j = object.j ?? new Uint8Array(0);
+    message.numReads = object.numReads ?? 0;
+    message.numSweeps = object.numSweeps ?? 0;
+    return message;
+  },
+};
+
 function createBaseProvenance(): Provenance {
   return { isPow: false, orderId: new Uint8Array(0) };
 }
@@ -2567,6 +3007,7 @@ function createBaseJob(): Job {
     ising: undefined,
     provenance: undefined,
     generator: undefined,
+    iqm: undefined,
   };
 }
 
@@ -2598,6 +3039,9 @@ export const Job: MessageFns<Job> = {
     }
     if (message.generator !== undefined) {
       IsingProblemGenerator.encode(message.generator, writer.uint32(58).fork()).join();
+    }
+    if (message.iqm !== undefined) {
+      IqmProblem.encode(message.iqm, writer.uint32(66).fork()).join();
     }
     return writer;
   },
@@ -2665,6 +3109,14 @@ export const Job: MessageFns<Job> = {
           message.generator = IsingProblemGenerator.decode(reader, reader.uint32());
           continue;
         }
+        case 8: {
+          if (tag !== 66) {
+            break;
+          }
+
+          message.iqm = IqmProblem.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -2691,6 +3143,7 @@ export const Job: MessageFns<Job> = {
       ising: isSet(object.ising) ? IsingProblem.fromJSON(object.ising) : undefined,
       provenance: isSet(object.provenance) ? Provenance.fromJSON(object.provenance) : undefined,
       generator: isSet(object.generator) ? IsingProblemGenerator.fromJSON(object.generator) : undefined,
+      iqm: isSet(object.iqm) ? IqmProblem.fromJSON(object.iqm) : undefined,
     };
   },
 
@@ -2717,6 +3170,9 @@ export const Job: MessageFns<Job> = {
     if (message.generator !== undefined) {
       obj.generator = IsingProblemGenerator.toJSON(message.generator);
     }
+    if (message.iqm !== undefined) {
+      obj.iqm = IqmProblem.toJSON(message.iqm);
+    }
     return obj;
   },
 
@@ -2742,6 +3198,7 @@ export const Job: MessageFns<Job> = {
     message.generator = (object.generator !== undefined && object.generator !== null)
       ? IsingProblemGenerator.fromPartial(object.generator)
       : undefined;
+    message.iqm = (object.iqm !== undefined && object.iqm !== null) ? IqmProblem.fromPartial(object.iqm) : undefined;
     return message;
   },
 };
@@ -2981,7 +3438,7 @@ export const Shutdown: MessageFns<Shutdown> = {
 };
 
 function createBaseSolution(): Solution {
-  return { energyMilli: 0n, spins: new Uint8Array(0) };
+  return { energyMilli: 0n, spins: new Uint8Array(0), values: [] };
 }
 
 export const Solution: MessageFns<Solution> = {
@@ -2995,6 +3452,11 @@ export const Solution: MessageFns<Solution> = {
     if (message.spins.length !== 0) {
       writer.uint32(26).bytes(message.spins);
     }
+    writer.uint32(34).fork();
+    for (const v of message.values) {
+      writer.uint32(v);
+    }
+    writer.join();
     return writer;
   },
 
@@ -3021,6 +3483,24 @@ export const Solution: MessageFns<Solution> = {
           message.spins = reader.bytes();
           continue;
         }
+        case 4: {
+          if (tag === 32) {
+            message.values.push(reader.uint32());
+
+            continue;
+          }
+
+          if (tag === 34) {
+            const end2 = reader.uint32() + reader.pos;
+            while (reader.pos < end2) {
+              message.values.push(reader.uint32());
+            }
+
+            continue;
+          }
+
+          break;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -3038,6 +3518,7 @@ export const Solution: MessageFns<Solution> = {
         ? BigInt(object.energy_milli)
         : 0n,
       spins: isSet(object.spins) ? bytesFromBase64(object.spins) : new Uint8Array(0),
+      values: globalThis.Array.isArray(object?.values) ? object.values.map((e: any) => globalThis.Number(e)) : [],
     };
   },
 
@@ -3048,6 +3529,9 @@ export const Solution: MessageFns<Solution> = {
     }
     if (message.spins.length !== 0) {
       obj.spins = base64FromBytes(message.spins);
+    }
+    if (message.values?.length) {
+      obj.values = message.values.map((e) => Math.round(e));
     }
     return obj;
   },
@@ -3061,6 +3545,7 @@ export const Solution: MessageFns<Solution> = {
       ? BigInt(object.energyMilli)
       : 0n;
     message.spins = object.spins ?? new Uint8Array(0);
+    message.values = object.values?.map((e) => e) || [];
     return message;
   },
 };
@@ -3985,6 +4470,7 @@ function createBaseCapabilities(): Capabilities {
     solverId: "",
     generatedFamilies: [],
     acceptedFamilies: [],
+    solveOptions: [],
   };
 }
 
@@ -4046,6 +4532,9 @@ export const Capabilities: MessageFns<Capabilities> = {
     }
     for (const v of message.acceptedFamilies) {
       FamilySupport.encode(v!, writer.uint32(154).fork()).join();
+    }
+    for (const v of message.solveOptions) {
+      SolveOption.encode(v!, writer.uint32(162).fork()).join();
     }
     return writer;
   },
@@ -4223,6 +4712,14 @@ export const Capabilities: MessageFns<Capabilities> = {
           message.acceptedFamilies.push(FamilySupport.decode(reader, reader.uint32()));
           continue;
         }
+        case 20: {
+          if (tag !== 162) {
+            break;
+          }
+
+          message.solveOptions.push(SolveOption.decode(reader, reader.uint32()));
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -4303,6 +4800,11 @@ export const Capabilities: MessageFns<Capabilities> = {
         : globalThis.Array.isArray(object?.accepted_families)
         ? object.accepted_families.map((e: any) => FamilySupport.fromJSON(e))
         : [],
+      solveOptions: globalThis.Array.isArray(object?.solveOptions)
+        ? object.solveOptions.map((e: any) => SolveOption.fromJSON(e))
+        : globalThis.Array.isArray(object?.solve_options)
+        ? object.solve_options.map((e: any) => SolveOption.fromJSON(e))
+        : [],
     };
   },
 
@@ -4359,6 +4861,9 @@ export const Capabilities: MessageFns<Capabilities> = {
     if (message.acceptedFamilies?.length) {
       obj.acceptedFamilies = message.acceptedFamilies.map((e) => FamilySupport.toJSON(e));
     }
+    if (message.solveOptions?.length) {
+      obj.solveOptions = message.solveOptions.map((e) => SolveOption.toJSON(e));
+    }
     return obj;
   },
 
@@ -4384,6 +4889,83 @@ export const Capabilities: MessageFns<Capabilities> = {
     message.solverId = object.solverId ?? "";
     message.generatedFamilies = object.generatedFamilies?.map((e) => FamilySupport.fromPartial(e)) || [];
     message.acceptedFamilies = object.acceptedFamilies?.map((e) => FamilySupport.fromPartial(e)) || [];
+    message.solveOptions = object.solveOptions?.map((e) => SolveOption.fromPartial(e)) || [];
+    return message;
+  },
+};
+
+function createBaseSolveOption(): SolveOption {
+  return { name: "", type: 0 };
+}
+
+export const SolveOption: MessageFns<SolveOption> = {
+  encode(message: SolveOption, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.name !== "") {
+      writer.uint32(10).string(message.name);
+    }
+    if (message.type !== 0) {
+      writer.uint32(16).int32(message.type);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): SolveOption {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseSolveOption();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.name = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.type = reader.int32() as any;
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): SolveOption {
+    return {
+      name: isSet(object.name) ? globalThis.String(object.name) : "",
+      type: isSet(object.type) ? optionTypeFromJSON(object.type) : 0,
+    };
+  },
+
+  toJSON(message: SolveOption): unknown {
+    const obj: any = {};
+    if (message.name !== "") {
+      obj.name = message.name;
+    }
+    if (message.type !== 0) {
+      obj.type = optionTypeToJSON(message.type);
+    }
+    return obj;
+  },
+
+  create(base?: DeepPartial<SolveOption>): SolveOption {
+    return SolveOption.fromPartial(base ?? {});
+  },
+  fromPartial(object: DeepPartial<SolveOption>): SolveOption {
+    const message = createBaseSolveOption();
+    message.name = object.name ?? "";
+    message.type = object.type ?? 0;
     return message;
   },
 };
@@ -4618,6 +5200,313 @@ export const IsingProblemGenerator: MessageFns<IsingProblemGenerator> = {
       ? FamilyDescriptor.fromPartial(object.family)
       : undefined;
     message.topologyOrderDigest = object.topologyOrderDigest ?? new Uint8Array(0);
+    return message;
+  },
+};
+
+function createBaseCalibrate(): Calibrate {
+  return { family: undefined, instances: [], deadlineMs: 0n };
+}
+
+export const Calibrate: MessageFns<Calibrate> = {
+  encode(message: Calibrate, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.family !== undefined) {
+      FamilyDescriptor.encode(message.family, writer.uint32(10).fork()).join();
+    }
+    for (const v of message.instances) {
+      CalibrationInstance.encode(v!, writer.uint32(18).fork()).join();
+    }
+    if (message.deadlineMs !== 0n) {
+      if (BigInt.asUintN(64, message.deadlineMs) !== message.deadlineMs) {
+        throw new globalThis.Error("value provided for field message.deadlineMs of type uint64 too large");
+      }
+      writer.uint32(24).uint64(message.deadlineMs);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): Calibrate {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseCalibrate();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.family = FamilyDescriptor.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.instances.push(CalibrationInstance.decode(reader, reader.uint32()));
+          continue;
+        }
+        case 3: {
+          if (tag !== 24) {
+            break;
+          }
+
+          message.deadlineMs = reader.uint64() as bigint;
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): Calibrate {
+    return {
+      family: isSet(object.family) ? FamilyDescriptor.fromJSON(object.family) : undefined,
+      instances: globalThis.Array.isArray(object?.instances)
+        ? object.instances.map((e: any) => CalibrationInstance.fromJSON(e))
+        : [],
+      deadlineMs: isSet(object.deadlineMs)
+        ? BigInt(object.deadlineMs)
+        : isSet(object.deadline_ms)
+        ? BigInt(object.deadline_ms)
+        : 0n,
+    };
+  },
+
+  toJSON(message: Calibrate): unknown {
+    const obj: any = {};
+    if (message.family !== undefined) {
+      obj.family = FamilyDescriptor.toJSON(message.family);
+    }
+    if (message.instances?.length) {
+      obj.instances = message.instances.map((e) => CalibrationInstance.toJSON(e));
+    }
+    if (message.deadlineMs !== 0n) {
+      obj.deadlineMs = message.deadlineMs.toString();
+    }
+    return obj;
+  },
+
+  create(base?: DeepPartial<Calibrate>): Calibrate {
+    return Calibrate.fromPartial(base ?? {});
+  },
+  fromPartial(object: DeepPartial<Calibrate>): Calibrate {
+    const message = createBaseCalibrate();
+    message.family = (object.family !== undefined && object.family !== null)
+      ? FamilyDescriptor.fromPartial(object.family)
+      : undefined;
+    message.instances = object.instances?.map((e) => CalibrationInstance.fromPartial(e)) || [];
+    message.deadlineMs = (object.deadlineMs !== undefined && object.deadlineMs !== null)
+      ? BigInt(object.deadlineMs)
+      : 0n;
+    return message;
+  },
+};
+
+function createBaseCalibrationInstance(): CalibrationInstance {
+  return { id: "", nonce: new Uint8Array(0), achievedEnergyMilli: 0n, maxEnergyMilli: 0n };
+}
+
+export const CalibrationInstance: MessageFns<CalibrationInstance> = {
+  encode(message: CalibrationInstance, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.id !== "") {
+      writer.uint32(10).string(message.id);
+    }
+    if (message.nonce.length !== 0) {
+      writer.uint32(18).bytes(message.nonce);
+    }
+    if (message.achievedEnergyMilli !== 0n) {
+      if (BigInt.asIntN(64, message.achievedEnergyMilli) !== message.achievedEnergyMilli) {
+        throw new globalThis.Error("value provided for field message.achievedEnergyMilli of type int64 too large");
+      }
+      writer.uint32(24).int64(message.achievedEnergyMilli);
+    }
+    if (message.maxEnergyMilli !== 0n) {
+      if (BigInt.asIntN(64, message.maxEnergyMilli) !== message.maxEnergyMilli) {
+        throw new globalThis.Error("value provided for field message.maxEnergyMilli of type int64 too large");
+      }
+      writer.uint32(32).int64(message.maxEnergyMilli);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): CalibrationInstance {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseCalibrationInstance();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.id = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.nonce = reader.bytes();
+          continue;
+        }
+        case 3: {
+          if (tag !== 24) {
+            break;
+          }
+
+          message.achievedEnergyMilli = reader.int64() as bigint;
+          continue;
+        }
+        case 4: {
+          if (tag !== 32) {
+            break;
+          }
+
+          message.maxEnergyMilli = reader.int64() as bigint;
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): CalibrationInstance {
+    return {
+      id: isSet(object.id) ? globalThis.String(object.id) : "",
+      nonce: isSet(object.nonce) ? bytesFromBase64(object.nonce) : new Uint8Array(0),
+      achievedEnergyMilli: isSet(object.achievedEnergyMilli)
+        ? BigInt(object.achievedEnergyMilli)
+        : isSet(object.achieved_energy_milli)
+        ? BigInt(object.achieved_energy_milli)
+        : 0n,
+      maxEnergyMilli: isSet(object.maxEnergyMilli)
+        ? BigInt(object.maxEnergyMilli)
+        : isSet(object.max_energy_milli)
+        ? BigInt(object.max_energy_milli)
+        : 0n,
+    };
+  },
+
+  toJSON(message: CalibrationInstance): unknown {
+    const obj: any = {};
+    if (message.id !== "") {
+      obj.id = message.id;
+    }
+    if (message.nonce.length !== 0) {
+      obj.nonce = base64FromBytes(message.nonce);
+    }
+    if (message.achievedEnergyMilli !== 0n) {
+      obj.achievedEnergyMilli = message.achievedEnergyMilli.toString();
+    }
+    if (message.maxEnergyMilli !== 0n) {
+      obj.maxEnergyMilli = message.maxEnergyMilli.toString();
+    }
+    return obj;
+  },
+
+  create(base?: DeepPartial<CalibrationInstance>): CalibrationInstance {
+    return CalibrationInstance.fromPartial(base ?? {});
+  },
+  fromPartial(object: DeepPartial<CalibrationInstance>): CalibrationInstance {
+    const message = createBaseCalibrationInstance();
+    message.id = object.id ?? "";
+    message.nonce = object.nonce ?? new Uint8Array(0);
+    message.achievedEnergyMilli = (object.achievedEnergyMilli !== undefined && object.achievedEnergyMilli !== null)
+      ? BigInt(object.achievedEnergyMilli)
+      : 0n;
+    message.maxEnergyMilli = (object.maxEnergyMilli !== undefined && object.maxEnergyMilli !== null)
+      ? BigInt(object.maxEnergyMilli)
+      : 0n;
+    return message;
+  },
+};
+
+function createBaseCalibrateDone(): CalibrateDone {
+  return { outcome: 0, summary: undefined };
+}
+
+export const CalibrateDone: MessageFns<CalibrateDone> = {
+  encode(message: CalibrateDone, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.outcome !== 0) {
+      writer.uint32(8).int32(message.outcome);
+    }
+    if (message.summary !== undefined) {
+      writer.uint32(18).string(message.summary);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): CalibrateDone {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseCalibrateDone();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.outcome = reader.int32() as any;
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.summary = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): CalibrateDone {
+    return {
+      outcome: isSet(object.outcome) ? calibrateOutcomeFromJSON(object.outcome) : 0,
+      summary: isSet(object.summary) ? globalThis.String(object.summary) : undefined,
+    };
+  },
+
+  toJSON(message: CalibrateDone): unknown {
+    const obj: any = {};
+    if (message.outcome !== 0) {
+      obj.outcome = calibrateOutcomeToJSON(message.outcome);
+    }
+    if (message.summary !== undefined) {
+      obj.summary = message.summary;
+    }
+    return obj;
+  },
+
+  create(base?: DeepPartial<CalibrateDone>): CalibrateDone {
+    return CalibrateDone.fromPartial(base ?? {});
+  },
+  fromPartial(object: DeepPartial<CalibrateDone>): CalibrateDone {
+    const message = createBaseCalibrateDone();
+    message.outcome = object.outcome ?? 0;
+    message.summary = object.summary ?? undefined;
     return message;
   },
 };

@@ -44,6 +44,36 @@ fn energy_milli(
     Ok(quip_protocol::scoring::energy_milli(&spins, &h, &j, &edges))
 }
 
+/// Integer quadratic model energy in milli-units for the given values,
+/// linear coefficients, pair coefficients, and pairs (`IQM_SAMPLE`).
+///
+/// # Errors
+///
+/// Returns a Python `ValueError` when `edges` and `j` differ in length, as
+/// [`energy_milli`] does.
+#[pyfunction]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "PyO3 extracts owned Vec arguments from Python objects"
+)]
+fn iqm_energy_milli(
+    values: Vec<u32>,
+    h: Vec<f64>,
+    j: Vec<f64>,
+    edges: Vec<(usize, usize)>,
+) -> PyResult<i64> {
+    if edges.len() != j.len() {
+        return Err(PyValueError::new_err(format!(
+            "edges holds {} pairs but j holds {} couplings; they must match",
+            edges.len(),
+            j.len()
+        )));
+    }
+    Ok(quip_protocol::scoring::iqm_energy_milli(
+        &values, &h, &j, &edges,
+    ))
+}
+
 /// Pairwise solution-set diversity in \[0, 1\].
 ///
 /// `PyO3` extracts an owned `Vec` of spin vectors from Python. Each inner
@@ -165,6 +195,7 @@ fn decode_spins_packed(b: Vec<u8>, num_spins: usize) -> PyResult<Vec<i8>> {
 fn _core(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     let scoring = PyModule::new(py, "scoring")?;
     scoring.add_function(wrap_pyfunction!(energy_milli, &scoring)?)?;
+    scoring.add_function(wrap_pyfunction!(iqm_energy_milli, &scoring)?)?;
     scoring.add_function(wrap_pyfunction!(set_diversity, &scoring)?)?;
     m.add_submodule(&scoring)?;
 

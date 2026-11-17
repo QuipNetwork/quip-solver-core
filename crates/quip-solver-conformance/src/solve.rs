@@ -9,6 +9,8 @@
 //! `exactResolutionMilli`. A solver that
 //! advertises nothing optional skips those cases rather than failing them.
 
+mod iqm;
+
 use quip_protocol::scoring::energy_milli;
 use serde_json::{json, Value};
 use std::fmt::Write as _;
@@ -147,6 +149,12 @@ struct Advertised {
     max_degree: Option<u64>,
     max_local_field_milli: Option<u64>,
     exact_resolution_milli: Option<u64>,
+    /// `(name, type)` of each option in `solveOptions`, the type spelled as
+    /// the protobuf JSON mapping does, such as `OPTION_TYPE_INT`.
+    solve_options: Vec<(String, String)>,
+    /// `supportedKinds`, each spelled as the protobuf JSON mapping does, such
+    /// as `IQM_SAMPLE`.
+    supported_kinds: Vec<String>,
 }
 
 impl Advertised {
@@ -186,6 +194,36 @@ impl Advertised {
                 .ok_or("a feature is not a string")
         })
         .collect::<Result<Vec<_>, _>>()?;
+        let supported_kinds = match json.get("supportedKinds") {
+            None => &[][..],
+            Some(v) => v
+                .as_array()
+                .ok_or("--capabilities supportedKinds is not an array")?,
+        }
+        .iter()
+        .map(|k| {
+            k.as_str()
+                .map(str::to_owned)
+                .ok_or("a supported kind is not a string")
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+        let solve_options = match json.get("solveOptions") {
+            None => &[][..],
+            Some(v) => v
+                .as_array()
+                .ok_or("--capabilities solveOptions is not an array")?,
+        }
+        .iter()
+        .map(|o| {
+            let field = |key: &str| {
+                o.get(key)
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                    .ok_or_else(|| format!("a solveOptions entry has no string {key}"))
+            };
+            Ok((field("name")?, field("type")?))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
         Ok(Self {
             backend: text("backend")?,
             algorithm: text("algorithm")?,
@@ -195,11 +233,17 @@ impl Advertised {
             max_degree: optional("maxDegree")?,
             max_local_field_milli: optional("maxLocalFieldMilli")?,
             exact_resolution_milli: optional("exactResolutionMilli")?,
+            solve_options,
+            supported_kinds,
         })
     }
 
     fn lists(&self, feature: &str) -> bool {
         self.features.iter().any(|f| f == feature)
+    }
+
+    fn lists_kind(&self, kind: &str) -> bool {
+        self.supported_kinds.iter().any(|k| k == kind)
     }
 
     /// A bounded limit: `Some(n)` with `n > 0`.
@@ -576,6 +620,20 @@ async fn expect_solved(bin: &str, adv: &Advertised, problem: &Problem) -> Result
     check_solutions(adv, problem, &run, false)
 }
 
+/// Grade one in-type option value. The solver may solve with it, or refuse a
+/// value it does not support with exit 64 and a message on stderr. A silent
+/// refusal fails.
+fn grade_valid_option(adv: &Advertised, problem: &Problem, run: &Run) -> Result<(), String> {
+    if run.code == Some(EXIT_CONFIG_INVALID) {
+        check_refused(run, EXIT_CONFIG_INVALID)?;
+        if run.stderr.trim().is_empty() {
+            return Err("refused an in-type value with exit 64 and nothing on stderr".into());
+        }
+        return Ok(());
+    }
+    check_solutions(adv, problem, run, false).map(|_| ())
+}
+
 /// Send `input` and require exit `code` with nothing on stdout.
 async fn expect_refused(bin: &str, input: &[u8], code: i32) -> Result<(), String> {
     let run = run(bin, &["--solve"], input).await?;
@@ -632,6 +690,8 @@ pub async fn drive_solve(bin_path: &str) -> SolveReport {
     resolution_cases(bin_path, &adv, &mut report).await;
     anneal_time_case(bin_path, &adv, &base, &mut report).await;
     embed_case(bin_path, &adv, &mut report).await;
+    option_cases(bin_path, &adv, &base, &mut report).await;
+    iqm::iqm_cases(bin_path, &adv, &mut report).await;
     report
 }
 
@@ -804,6 +864,92 @@ async fn schedule_case(bin: &str, adv: &Advertised, base: &Problem, report: &mut
         expect_refused(bin, &linear.bytes(), EXIT_CONFIG_INVALID).await
     };
     report.grade("linear-schedule", result);
+}
+
+/// A value of the type `kind` names, for the valid-option case. The gate
+/// cannot know a solver's range, so it sends the plainest value of the type.
+fn valid_option_value(kind: &str) -> Result<Value, String> {
+    match kind {
+        "OPTION_TYPE_BOOL" => Ok(json!(true)),
+        "OPTION_TYPE_INT" => Ok(json!(1)),
+        "OPTION_TYPE_NUMBER" => Ok(json!(1.5)),
+        "OPTION_TYPE_STRING" => Ok(json!("default")),
+        other => Err(format!("solveOptions lists the unknown type {other}")),
+    }
+}
+
+/// A value that is not of the type `kind` names.
+fn wrong_option_value(kind: &str) -> Value {
+    if kind == "OPTION_TYPE_STRING" {
+        json!(1)
+    } else {
+        json!("not-the-declared-type")
+    }
+}
+
+/// The base problem with `options` as its `options` object.
+fn with_options(base: &Problem, options: Value) -> Vec<u8> {
+    edited(base, |o| {
+        let _ = o.insert("options".into(), options);
+    })
+}
+
+/// Options: every advertised option takes a valid value, an unadvertised
+/// name is refused, and a value of the wrong type is refused. The refusals
+/// are exit 64 with nothing on stdout, as for any malformed request.
+async fn option_cases(bin: &str, adv: &Advertised, base: &Problem, report: &mut SolveReport) {
+    let mut valid = Ok(());
+    for (name, kind) in &adv.solve_options {
+        let attempt = match valid_option_value(kind) {
+            Ok(value) => match run(
+                bin,
+                &["--solve"],
+                &with_options(base, json!({ name: value })),
+            )
+            .await
+            {
+                Ok(run) => grade_valid_option(adv, base, &run),
+                Err(why) => Err(why),
+            },
+            Err(why) => Err(why),
+        };
+        if let Err(why) = attempt {
+            valid = Err(format!("option {name}: {why}"));
+            break;
+        }
+    }
+    if adv.solve_options.is_empty() {
+        report.push(
+            "option-valid",
+            CaseOutcome::Skipped("the solver advertises no solveOptions".into()),
+        );
+    } else {
+        report.grade("option-valid", valid);
+    }
+
+    // A name no solver advertises, so it is undeclared for every solver.
+    let undeclared = with_options(base, json!({"quip-conformance-undeclared": true}));
+    report.grade(
+        "option-undeclared",
+        expect_refused(bin, &undeclared, EXIT_CONFIG_INVALID).await,
+    );
+
+    let mut wrong = Ok(());
+    for (name, kind) in &adv.solve_options {
+        let input = with_options(base, json!({ name: wrong_option_value(kind) }));
+        if let Err(why) = expect_refused(bin, &input, EXIT_CONFIG_INVALID).await {
+            wrong = Err(format!("option {name}: {why}"));
+            break;
+        }
+    }
+    if adv.solve_options.is_empty() {
+        report.push(
+            "option-wrong-type",
+            CaseOutcome::Skipped("the solver advertises no solveOptions".into()),
+        );
+    } else {
+        report.grade("option-wrong-type", wrong);
+    }
 }
 
 /// A model just inside the limits solves; one just outside is capacity.
@@ -1087,6 +1233,33 @@ mod tests {
         assert_eq!(v.get("j"), Some(&json!([-1.0])));
         assert_eq!(v.get("beta_schedule_type"), Some(&json!("linear")));
         assert!(pair(0.0, 0.0).to_json().get("beta_schedule_type").is_none());
+    }
+
+    #[test]
+    fn an_in_type_option_value_may_be_refused_only_with_a_message() {
+        let adv = adv();
+        let problem = base_problem(&adv);
+        let refused = |code: i32, stdout: &str, stderr: &str| Run {
+            code: Some(code),
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: stderr.to_owned(),
+        };
+        let message = "option restarts value 1 is not supported";
+        assert_eq!(
+            grade_valid_option(&adv, &problem, &refused(64, "", message)),
+            Ok(())
+        );
+        // (label, run) pairs that must fail.
+        for (label, run) in [
+            ("silent refusal", refused(64, "", "  \n")),
+            ("refusal that wrote solutions", refused(64, "[]", message)),
+            ("refusal with another code", refused(65, "", message)),
+        ] {
+            assert!(
+                grade_valid_option(&adv, &problem, &run).is_err(),
+                "{label} must fail"
+            );
+        }
     }
 
     fn ok_run(stdout: &Value) -> Run {

@@ -1,8 +1,8 @@
 //! WebAssembly bindings for the consensus primitives in `quip-protocol`.
 //!
 //! Exposes the same surface as the `PyO3` bindings in `quip-protocol-py`:
-//! `energy_milli`, `set_diversity`, the four wire codecs, and the `ExitCode`
-//! constants. Both bindings call the identical Rust functions, so JavaScript,
+//! `energy_milli`, `iqm_energy_milli`, `set_diversity`, the four wire codecs,
+//! and the `ExitCode` constants. Both bindings call the identical Rust functions, so JavaScript,
 //! Python, and Rust cannot disagree about consensus-critical math.
 // `unsafe-code = "deny"` needs no relaxation here. The #[wasm_bindgen]
 // expansion does carry unsafe extern blocks, but they are attributed to the
@@ -22,6 +22,32 @@ use wasm_bindgen::prelude::*;
 /// match `j`.
 #[wasm_bindgen(js_name = energyMilli)]
 pub fn energy_milli(spins: &[i8], h: &[f64], j: &[f64], edges: &[u32]) -> Result<i64, JsError> {
+    let pairs = pairs_for(edges, j)?;
+    Ok(scoring::energy_milli(spins, h, j, &pairs))
+}
+
+/// Integer quadratic model energy in milli-units for the given values,
+/// linear coefficients, pair coefficients, and pairs (`IQM_SAMPLE`).
+///
+/// `edges` is flat, as for [`energy_milli`].
+///
+/// # Errors
+///
+/// Returns an error when `edges` has an odd length, or when its length does not
+/// match `j`.
+#[wasm_bindgen(js_name = iqmEnergyMilli)]
+pub fn iqm_energy_milli(
+    values: &[u32],
+    h: &[f64],
+    j: &[f64],
+    edges: &[u32],
+) -> Result<i64, JsError> {
+    let pairs = pairs_for(edges, j)?;
+    Ok(scoring::iqm_energy_milli(values, h, j, &pairs))
+}
+
+/// The index pairs of a flat `edges` array, one per entry of `j`.
+fn pairs_for(edges: &[u32], j: &[f64]) -> Result<Vec<(usize, usize)>, JsError> {
     if !edges.len().is_multiple_of(2) {
         return Err(JsError::new(
             "edges must hold vertex index pairs, so its length must be even",
@@ -43,7 +69,7 @@ pub fn energy_milli(spins: &[i8], h: &[f64], j: &[f64], edges: &[u32]) -> Result
             j.len()
         )));
     }
-    Ok(scoring::energy_milli(spins, h, j, &pairs))
+    Ok(pairs)
 }
 
 /// Pairwise solution-set diversity in \[0, 1\].

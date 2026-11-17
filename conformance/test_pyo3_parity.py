@@ -203,3 +203,38 @@ def test_wire_le32_and_spin_encoding():
 )
 def test_energy_milli_saturates(h, expected):
     assert scoring.energy_milli([1], [h], [], []) == expected
+
+
+@pytest.mark.parametrize(
+    ("values", "h", "j", "edges", "expected"),
+    [
+        # 1.0*2 - 0.5*3 + 0.25*2*3 = 2.0 -> 2000 milli
+        pytest.param([2, 3], [1.0, -0.5], [0.25], [(0, 1)], 2000, id="linear-and-pair"),
+        # A zero value removes every term it appears in.
+        pytest.param([0, 7], [1.0, 0.001], [-9.0], [(0, 1)], 7, id="zero-value"),
+        # Ten 0.1 fields at value 1 sum to exactly 1000 milli, as for Ising.
+        pytest.param([1] * 10, [0.1] * 10, [], [], 1000, id="exact-milli"),
+        # An out-of-range pair scores nothing, as for Ising.
+        pytest.param([1], [0.005], [7.0], [(0, 3)], 5, id="out-of-range-pair"),
+    ],
+)
+def test_iqm_energy_milli_small_cases(values, h, j, edges, expected):
+    assert scoring.iqm_energy_milli(values, h, j, edges) == expected
+
+
+@pytest.mark.parametrize(
+    ("args", "errors"),
+    [
+        pytest.param(
+            ([1, 1], [0.0, 0.0], [1.0], [(0, 1), (1, 0)]),
+            ValueError,
+            id="j-edges-mismatch",
+        ),
+        pytest.param(
+            ([-1], [1.0], [], []), (OverflowError, ValueError), id="negative-value"
+        ),
+    ],
+)
+def test_iqm_energy_milli_rejects_malformed_input(args, errors):
+    with pytest.raises(errors):
+        scoring.iqm_energy_milli(*args)

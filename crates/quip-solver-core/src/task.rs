@@ -1,18 +1,20 @@
 //! Helpers for joining spawned tasks and reporting their panics.
 
 // Shared shutdown stage, also exercised with saturated channels in tests.
+// `what` names the tasks in the log line and the failure message.
 pub(crate) async fn join_expanders(
     expanders: &mut tokio::task::JoinSet<()>,
     deadline: tokio::time::Instant,
+    what: &str,
 ) -> Option<String> {
     let mut failure = None;
     loop {
         match tokio::time::timeout_at(deadline, expanders.join_next()).await {
-            Ok(Some(Err(error))) => failure = Some(format!("lease expander failed: {error}")),
+            Ok(Some(Err(error))) => failure = Some(format!("{what} failed: {error}")),
             Ok(Some(Ok(()))) => {}
             Ok(None) => break,
             Err(_) => {
-                tracing::warn!("lease expanders exceeded the shutdown grace window; aborting them");
+                tracing::warn!("{what} exceeded the shutdown grace window; aborting them");
                 expanders.shutdown().await;
                 break;
             }

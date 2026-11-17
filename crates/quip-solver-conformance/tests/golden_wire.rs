@@ -101,6 +101,7 @@ fn hello() -> Hello {
             solver_id: String::new(),
             generated_families: vec![],
             accepted_families: vec![],
+            solve_options: vec![],
         }),
     }
 }
@@ -130,6 +131,7 @@ fn job() -> Job {
             is_pow: true,
             order_id: vec![0xDE, 0xAD],
         }),
+        iqm: None,
     }
 }
 
@@ -142,6 +144,7 @@ fn result() -> JobResult {
             // +1, -1, +1, packed least-significant bit first.
             spins: vec![0x05],
             energy_milli: -1_250,
+            values: vec![],
         }],
         meta: Some(SamplerMeta {
             reads: 128,
@@ -245,6 +248,7 @@ fn capabilities() -> Capabilities {
         solver_id: String::new(),
         generated_families: vec![],
         accepted_families: vec![],
+        solve_options: vec![],
     }
 }
 
@@ -450,6 +454,7 @@ fn family_wire_vectors_cross_the_wire() {
         };
         let accepted = Capabilities {
             accepted_families: entries,
+            solve_options: vec![],
             ..Default::default()
         };
         assert!(roundtrips(&generated).unwrap(), "{name}");

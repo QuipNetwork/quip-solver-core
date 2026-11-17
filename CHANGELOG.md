@@ -5,6 +5,62 @@ This file documents changes to the Quip solver contract.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.0.17-rc2
+
+### Added
+
+- `--solve` accepts an optional `options` object. A solver lists the options it
+  accepts, each with a name and a scalar type, in the new
+  `Capabilities.solve_options` field 20. The field uses the new `SolveOption`
+  and `OptionType` types. `--capabilities`, Hello, and `GetCapabilities` carry
+  it. A Rust solver declares the list with the new `Sampler::solve_options`
+  method, which defaults to none. The SDK exits 64 before sampling when an
+  option is not listed or its value has another type. The sampler reads the
+  checked values from the new `SampleParams::options` field. The conformance
+  gate has the cases `option-valid`, `option-undeclared`, and
+  `option-wrong-type` (QUI-2428).
+- A new job kind, `IQM_SAMPLE = 4`, carries an integer quadratic model in the
+  new `IqmProblem` message, `Job.iqm` field 8. Each variable has an inclusive
+  upper bound and a lower bound of 0. The coefficients use the `IsingProblem`
+  encoding rules. Each `Solution` returns the integer values in the new
+  `values` field 4 (QUI-1663).
+- A Rust solver serves the kind with the new `Sampler::accepts_iqm` and
+  `Sampler::sample_iqm` methods. `accepts_iqm` defaults to `false`, and such a
+  solver rejects an `IQM_SAMPLE` job with `UNSUPPORTED_KIND`. The SDK checks
+  each returned assignment against the bounds and scores it (QUI-1663).
+- `--solve` accepts an IQM form: `"problem": "iqm"` with `bounds`, `h`, `j`,
+  and `edges`. Each read carries `values` in place of `spins`. A solver that
+  does not list `IQM_SAMPLE` refuses the form with exit 64 (QUI-1663).
+- `quip_protocol::scoring` has `iqm_energy_from_milli` and `iqm_energy_milli`.
+  The Python `scoring.iqm_energy_milli` and the WebAssembly `iqmEnergyMilli`
+  expose the second one (QUI-1663).
+- The conformance driver sends one `IQM_SAMPLE` job in every session. It
+  re-scores the values of a solver that lists the kind and checks the bounds.
+  It expects `UNSUPPORTED_KIND` from any other solver. The `--solve` gate has
+  the cases `iqm-solve`, `iqm-bounds-mismatch`, and `iqm-unsupported`
+  (QUI-1663).
+- The protocol has a calibrate exchange. A solver that lists the `calibrate`
+  feature can get a `Calibrate`, `CoordMsg` field 10, after `Topology` and
+  before the first job. It carries the family parameters, the reference
+  instances, and a deadline. The solver answers with one `CalibrateDone`,
+  `MinerMsg` field 10. It reports one of three outcomes, `DONE`, `FAILED`, or
+  `DEADLINE_PASSED`, with an optional summary (QUI-2420).
+- A Rust solver serves the exchange with the new `Sampler::accepts_calibrate`
+  and `Sampler::calibrate` methods. The hook returns a `Calibration`, and the
+  session applies it only when the hook returns before the deadline. A failure
+  or a passed deadline keeps the current tuning, and the session continues. A
+  solver without the feature answers `Calibrate` with outcome failed
+  (QUI-2420).
+- The conformance driver sends one `Calibrate` to a solver that lists
+  `calibrate` and expects exactly one `CalibrateDone` by the deadline. The new
+  `drive_miner_unlisted_calibrate` sends one to a solver without the feature
+  and expects outcome failed (QUI-2420).
+- A solver may refuse an option value of the listed type that it does not
+  support. It exits 64 with a message that names the option and the value, or
+  it runs and warns on stderr. The new `Sampler::check_option` method refuses a
+  value with exit 64. The `option-valid` conformance case passes on a
+  successful run or on exit 64 with a message on stderr (QUI-2428).
+
 ## 0.0.17-rc1
 
 ### Added

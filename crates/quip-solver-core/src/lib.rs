@@ -9,6 +9,7 @@
 pub mod adapt;
 mod backend;
 pub mod beta;
+mod calibrate;
 pub mod cli;
 pub mod coefficient;
 pub mod config;
@@ -19,29 +20,35 @@ mod encoding;
 pub mod error;
 pub mod families;
 mod headroom;
+pub mod iqm;
 pub mod ising;
 mod job;
 mod lease;
 pub mod limits;
 pub mod logging;
+pub mod options;
 mod pipeline;
 mod session;
 mod task;
 mod topology;
 
 pub use backend::{BackendIdentity, EXACT_COEFFICIENTS_FEATURE, LINEAR_SCHEDULE_FEATURE};
+pub use calibrate::Calibration;
 pub use cli::CommonArgs;
 pub use csr::CsrGraph;
 pub use error::SampleError;
 pub use headroom::Headroom;
+pub use iqm::IqmModel;
 pub use ising::{
     Algorithm, BetaLadder, BetaSchedule, IsingGraph, SampleParams, SamplerResult, WarmStart,
 };
 pub use lease::{FamilyLease, Lease, LeaseSink, LeaseStopped};
 pub use limits::ModelLimits;
+pub use options::{OptionDecl, OptionValue, SolveOptions};
 pub use quip_protocol::lease::TopologyView;
 pub use session::{
-    capabilities, capabilities_for, run, run_code, OpenError, INITIAL_SPINS_FEATURE,
+    capabilities, capabilities_for, run, run_code, OpenError, CALIBRATE_FEATURE,
+    INITIAL_SPINS_FEATURE,
 };
 pub use topology::{NativeTopology, TopologyFit};
 
@@ -273,6 +280,42 @@ pub trait Sampler<C: Coefficient = f64>: Send + Sync + 'static {
         serial_stream(self, jobs, &out, &cancel, |j| (j, None, None));
     }
 
+    /// The options `--solve` accepts in its `options` object, each with the
+    /// type its value must have. Answered without a device, because
+    /// `--capabilities` advertises it as `solve_options`.
+    ///
+    /// Default: none. `--solve` refuses, with exit 64 and before sampling, an
+    /// option that is not listed here or whose value has another type. A
+    /// sampler therefore finds only declared names, with values of the declared
+    /// type, in [`SampleParams::options`].
+    #[must_use]
+    fn solve_options() -> &'static [OptionDecl]
+    where
+        Self: Sized,
+    {
+        &[]
+    }
+
+    /// Whether this solver supports `value` for the declared option `name`.
+    /// `--solve` calls it for each option, after the type check and before
+    /// sampling.
+    ///
+    /// Default: every value of the declared type is supported. Override it to
+    /// refuse a value the solver cannot apply, for example a string outside an
+    /// enumerated set. A refused value exits 64, with a message that names the
+    /// option and the value. A solver that runs anyway must warn on stderr
+    /// instead; it must never ignore the value silently.
+    ///
+    /// # Errors
+    ///
+    /// A reason for the operator when the value is not supported.
+    fn check_option(_name: &str, _value: &OptionValue) -> Result<(), String>
+    where
+        Self: Sized,
+    {
+        Ok(())
+    }
+
     /// Whether this backend serves `ISING_GENERATE` leases. Answered without a
     /// device, like [`declared_stream_width`](Sampler::declared_stream_width),
     /// because `--capabilities` reads it too.
@@ -291,6 +334,105 @@ pub trait Sampler<C: Coefficient = f64>: Send + Sync + 'static {
         Self: Sized,
     {
         true
+    }
+
+    /// Whether this backend serves `IQM_SAMPLE` jobs (integer quadratic
+    /// models). Answered without a device, like
+    /// [`accepts_leases`](Sampler::accepts_leases), because `--capabilities`
+    /// reads it too.
+    ///
+    /// Default `false`: the session leaves `IQM_SAMPLE` out of
+    /// `supported_kinds` and answers every `IQM_SAMPLE` job with `Reject`
+    /// reason `UNSUPPORTED_KIND`, and `--solve` refuses the IQM form with exit
+    /// 64. Return `true` together with an override of
+    /// [`sample_iqm`](Sampler::sample_iqm).
+    #[must_use]
+    fn accepts_iqm() -> bool
+    where
+        Self: Sized,
+    {
+        false
+    }
+
+    /// Sample one integer quadratic model. Called only when
+    /// [`accepts_iqm`](Sampler::accepts_iqm) is `true`, on a blocking thread
+    /// of its own.
+    ///
+    /// The session runs at most [`stream_width`](Sampler::stream_width) calls
+    /// of `sample_iqm` at once. Those calls can overlap the Ising pipeline
+    /// ([`sample_stream`](Sampler::sample_stream) and its `sample` calls), so a
+    /// backend that serves both kinds on one device must serialize its own
+    /// device access.
+    ///
+    /// Return one assignment per read, exactly `params.num_reads` in all, each
+    /// with one value per variable no greater than its bound. The SDK checks
+    /// the count and each assignment and scores it with
+    /// [`IqmModel::energy_milli`](iqm::IqmModel::energy_milli); any other
+    /// output is a device fault.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`sample`](Sampler::sample). The default declines every model
+    /// with a `DeviceFault`, because a sampler that lists `IQM_SAMPLE` must
+    /// override it.
+    fn sample_iqm(
+        &self,
+        _model: &IqmModel,
+        _params: &SampleParams,
+    ) -> Result<Vec<Vec<u32>>, SampleError> {
+        Err(SampleError::DeviceFault(
+            "sample_iqm called on a sampler that does not accept IQM_SAMPLE".into(),
+        ))
+    }
+
+    /// Whether this backend serves the `Calibrate` exchange. Answered without
+    /// a device, like [`accepts_leases`](Sampler::accepts_leases), because
+    /// `--capabilities` reads it too.
+    ///
+    /// Default `false`: the session advertises no `calibrate` feature and
+    /// answers every `Calibrate` with `CalibrateDone` outcome `FAILED`. Return
+    /// `true` together with an override of [`calibrate`](Sampler::calibrate);
+    /// the session then adds [`CALIBRATE_FEATURE`] to the advertised features.
+    #[must_use]
+    fn accepts_calibrate() -> bool
+    where
+        Self: Sized,
+    {
+        false
+    }
+
+    /// Tune the solver against the reference instances of one `Calibrate`.
+    /// Called only when [`accepts_calibrate`](Sampler::accepts_calibrate) is
+    /// `true`, on a blocking thread of its own, one call at a time.
+    /// `topology` is the session's latest `Topology`.
+    ///
+    /// Do not change the tuning the solver runs with here. Return the change
+    /// as a [`Calibration`]: the session applies it only when this call
+    /// returns `Ok` before `request.deadline_ms`, and answers `DONE`. An `Err`
+    /// answers `FAILED`, and a call still running at the deadline answers
+    /// `DEADLINE_PASSED`; in both cases the solver keeps its current tuning
+    /// and the session continues. The session does not stop a call that
+    /// overruns its deadline, so a long search should read the deadline
+    /// itself.
+    ///
+    /// The session does not hold jobs during a calibration, so this hook and
+    /// the [`Calibration`] apply step must be safe alongside
+    /// [`sample`](Sampler::sample) if a coordinator breaks the order.
+    ///
+    /// # Errors
+    ///
+    /// Any [`SampleError`]: the session answers `FAILED` with the error text
+    /// as the summary, and does not end the session. The default declines
+    /// every request, because a sampler that lists `calibrate` must override
+    /// it.
+    fn calibrate(
+        &self,
+        _request: &quip_proto::v1::Calibrate,
+        _topology: &quip_proto::v1::Topology,
+    ) -> Result<Calibration<Self>, SampleError> {
+        Err(SampleError::Declined(
+            "calibrate called on a sampler that does not accept Calibrate".into(),
+        ))
     }
 
     /// Whether this backend uses warm-start states (`IsingProblem` fields 9 to

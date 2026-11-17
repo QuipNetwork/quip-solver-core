@@ -894,6 +894,7 @@ fn package_result(
         .map(|s| Solution {
             spins: quip_protocol::wire::encode_spins_packed(&s.spins),
             energy_milli: s.energy_milli,
+            values: vec![],
         })
         .collect();
     Some(miner(miner_msg::Msg::Result(quip_proto::v1::Result {
@@ -1620,7 +1621,7 @@ mod tests {
         let start = tokio::time::Instant::now();
         let ended = tokio::time::timeout(
             grace + std::time::Duration::from_millis(50),
-            crate::task::join_expanders(&mut expanders, start + grace),
+            crate::task::join_expanders(&mut expanders, start + grace, "lease expander"),
         )
         .await;
         assert!(

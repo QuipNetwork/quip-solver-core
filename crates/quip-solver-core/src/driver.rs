@@ -45,6 +45,64 @@ pub struct ProblemJson {
     pub beta_schedule_type: BetaSchedule,
     /// PRNG seed.
     pub seed: u64,
+    /// Per-algorithm options: names the solver lists in `--capabilities`
+    /// under `solveOptions`, each with a JSON scalar of the listed type.
+    /// Optional: absent is no options. A name the solver does not list, or a
+    /// value of another type, is refused before sampling.
+    pub options: Option<serde_json::Map<String, serde_json::Value>>,
+    /// Which model the problem is. Optional: absent is the Ising form.
+    /// `"iqm"` needs a binary that lists `IQM_SAMPLE`.
+    #[serde(default)]
+    pub problem: ProblemKind,
+    /// IQM form only, and required there: the inclusive upper bound of each
+    /// variable, one per entry of `h`. The lower bound is 0.
+    pub bounds: Option<Vec<u32>>,
+}
+
+/// The model a `--solve` problem describes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProblemKind {
+    /// Spins of value -1 or +1 (`ISING_SAMPLE`).
+    #[default]
+    Ising,
+    /// Integer variables from 0 to a bound (`IQM_SAMPLE`).
+    Iqm,
+}
+
+/// One completed read of the IQM form, as written to stdout.
+#[derive(Debug, Serialize)]
+pub struct IqmSolutionJson<'a> {
+    /// The value of each variable, in `h` order.
+    pub values: Vec<u32>,
+    /// Consensus energy in milli units.
+    pub energy_milli: i64,
+    /// How long the solve took. The same for every read of one solve.
+    pub timing: TimingJson,
+    /// Which sampler ran, with which knobs. The same for every read.
+    pub sampler: &'a IqmSamplerJson,
+}
+
+/// The sampler and the knobs one IQM solve ran with: the fields of
+/// [`SamplerJson`] without `beta_ladder`.
+#[derive(Clone, Debug, Serialize)]
+pub struct IqmSamplerJson {
+    /// Backend name, as `--capabilities` spells it.
+    pub backend: &'static str,
+    /// Algorithm name, as `--capabilities` spells it.
+    pub algorithm: &'static str,
+    /// Reads requested.
+    pub num_reads: usize,
+    /// Sweeps per read requested.
+    pub num_sweeps: usize,
+    /// Sweeps per beta rung.
+    pub sweeps_per_beta: usize,
+    /// `(hot_beta, cold_beta)` as sent, or `null` when the binary chose.
+    pub beta_range: Option<(f64, f64)>,
+    /// `"geometric"` or `"linear"`.
+    pub beta_schedule_type: &'static str,
+    /// PRNG seed.
+    pub seed: u64,
 }
 
 /// One completed read, as written to stdout.
@@ -183,6 +241,27 @@ fn convert_units<C: Coefficient>(name: &str, values: &[f64]) -> Result<Vec<C>, S
         .collect()
 }
 
+/// The `options` object checked against what `S` declares and supports, or
+/// none.
+fn checked_options<S: Sampler<C>, C: Coefficient>(
+    raw: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> Result<crate::options::SolveOptions, SolveError> {
+    let Some(raw) = raw else {
+        return Ok(crate::options::SolveOptions::new());
+    };
+    let options =
+        crate::options::validate(raw, S::solve_options()).map_err(SolveError::Malformed)?;
+    for (name, value) in &options {
+        S::check_option(name, value).map_err(|why| {
+            let shown = raw.get(name).map(ToString::to_string).unwrap_or_default();
+            SolveError::Malformed(format!(
+                "option \"{name}\" value {shown} is not supported: {why}"
+            ))
+        })?;
+    }
+    Ok(options)
+}
+
 /// Microseconds since `start`, saturating.
 fn micros_since(start: Instant) -> u64 {
     u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX)
@@ -279,8 +358,26 @@ pub fn solve<S: Sampler<C>, C: Coefficient>(
     let started = Instant::now();
     let p: ProblemJson =
         serde_json::from_slice(input).map_err(|e| SolveError::Malformed(e.to_string()))?;
+    match p.problem {
+        ProblemKind::Ising => solve_ising(sampler, id, p, started),
+        ProblemKind::Iqm => solve_iqm(sampler, id, &p, started),
+    }
+}
 
+/// Solve the Ising form of a problem, the default.
+fn solve_ising<S: Sampler<C>, C: Coefficient>(
+    sampler: &S,
+    id: &BackendIdentity,
+    p: ProblemJson,
+    started: Instant,
+) -> Result<Vec<u8>, SolveError> {
+    if p.bounds.is_some() {
+        return Err(SolveError::Malformed(
+            "bounds belongs to the \"iqm\" problem form".into(),
+        ));
+    }
     check_request(sampler, id, &p)?;
+    let options = checked_options::<S, C>(p.options.as_ref())?;
 
     // JSON also accepts sub-milli values and values outside the wire range.
     // Preserve those inputs, while wire-representable models share the session
@@ -340,6 +437,7 @@ pub fn solve<S: Sampler<C>, C: Coefficient>(
         beta_range: p.beta_range,
         schedule: p.beta_schedule_type,
         seed: p.seed,
+        options,
     };
     let sample_started = Instant::now();
     let mut reads = sampler.sample(&graph, &params)?;
@@ -381,6 +479,84 @@ pub fn solve<S: Sampler<C>, C: Coefficient>(
     #[expect(
         clippy::expect_used,
         reason = "serializing Vec<SolutionJson> has no failure mode"
+    )]
+    Ok(serde_json::to_vec(&out).expect("serialize solutions"))
+}
+
+/// Solve the IQM form of a problem: `problem` is `"iqm"`.
+fn solve_iqm<S: Sampler<C>, C: Coefficient>(
+    sampler: &S,
+    id: &BackendIdentity,
+    p: &ProblemJson,
+    started: Instant,
+) -> Result<Vec<u8>, SolveError> {
+    if !S::accepts_iqm() {
+        return Err(SolveError::Malformed(
+            "problem \"iqm\" needs a solver that lists IQM_SAMPLE".into(),
+        ));
+    }
+    let Some(bounds) = &p.bounds else {
+        return Err(SolveError::Malformed("problem \"iqm\" needs bounds".into()));
+    };
+    check_request(sampler, id, p)?;
+    let options = checked_options::<S, C>(p.options.as_ref())?;
+    // The model is exact milli, as on the wire, so a value off the milli grid
+    // is refused rather than rounded.
+    let milli = |name: &str, values: &[f64]| {
+        values
+            .iter()
+            .enumerate()
+            .map(|(index, &unit)| {
+                crate::encoding::float_milli(unit).map_err(|_| {
+                    SolveError::Malformed(format!("{name}[{index}] is not a whole number of milli"))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()
+    };
+    let model = crate::iqm::IqmModel {
+        upper_bounds: bounds.clone(),
+        h_milli: milli("h", &p.h)?,
+        j_milli: milli("j", &p.j)?,
+        edges: p.edges.clone(),
+    };
+    model.check_shape().map_err(SolveError::Malformed)?;
+    let params = SampleParams {
+        num_reads: p.num_reads,
+        num_sweeps: p.num_sweeps,
+        sweeps_per_beta: p.sweeps_per_beta,
+        beta_range: p.beta_range,
+        schedule: p.beta_schedule_type,
+        seed: p.seed,
+        options,
+    };
+    let sample_started = Instant::now();
+    let reads = crate::iqm::sample(sampler, &model, &params)?;
+    let timing = TimingJson {
+        sample_us: micros_since(sample_started),
+        total_us: micros_since(started),
+    };
+    let sampler_json = IqmSamplerJson {
+        backend: backend_name(id.backend),
+        algorithm: algorithm_name(id.algorithm),
+        num_reads: params.num_reads,
+        num_sweeps: params.num_sweeps,
+        sweeps_per_beta: params.sweeps_per_beta,
+        beta_range: params.beta_range,
+        beta_schedule_type: params.schedule.name(),
+        seed: params.seed,
+    };
+    let out: Vec<IqmSolutionJson<'_>> = reads
+        .into_iter()
+        .map(|(values, energy_milli)| IqmSolutionJson {
+            values,
+            energy_milli,
+            timing,
+            sampler: &sampler_json,
+        })
+        .collect();
+    #[expect(
+        clippy::expect_used,
+        reason = "serializing Vec<IqmSolutionJson> has no failure mode"
     )]
     Ok(serde_json::to_vec(&out).expect("serialize solutions"))
 }
@@ -433,6 +609,130 @@ mod tests {
             matches!(err, SolveError::Malformed(_)),
             "a malformed problem document is a caller error, not {err:?}"
         );
+    }
+
+    /// Records the options it was given, in the first read's `spins`.
+    struct OptionsProbe;
+
+    impl Sampler for OptionsProbe {
+        fn sample(
+            &self,
+            graph: &IsingGraph,
+            params: &SampleParams,
+        ) -> Result<Vec<SamplerResult>, SampleError> {
+            // One read whose spins encode `restarts` as a count of `+1`s.
+            let restarts = match params.options.get("restarts") {
+                Some(crate::OptionValue::Int(n)) => usize::try_from(*n).unwrap_or(0),
+                _ => 0,
+            };
+            let mut spins = vec![-1_i8; graph.h.len()];
+            spins.iter_mut().take(restarts).for_each(|s| *s = 1);
+            Ok(vec![SamplerResult {
+                spins,
+                energy_milli: 0,
+            }])
+        }
+
+        fn solve_options() -> &'static [crate::OptionDecl] {
+            &[
+                crate::OptionDecl {
+                    name: "restarts",
+                    kind: quip_proto::v1::OptionType::Int,
+                },
+                crate::OptionDecl {
+                    name: "greedy",
+                    kind: quip_proto::v1::OptionType::Bool,
+                },
+            ]
+        }
+
+        fn check_option(name: &str, value: &crate::OptionValue) -> Result<(), String> {
+            match (name, value) {
+                ("restarts", crate::OptionValue::Int(n)) if *n > 3 => {
+                    Err("at most 3 restarts".into())
+                }
+                _ => Ok(()),
+            }
+        }
+    }
+
+    fn problem_with(options: &str) -> Vec<u8> {
+        format!(
+            r#"{{"h":[0,0,0],"j":[],"edges":[],"num_reads":1,"num_sweeps":1,
+                "sweeps_per_beta":1,"beta_range":null,"seed":1{options}}}"#
+        )
+        .into_bytes()
+    }
+
+    #[test]
+    fn declared_options_reach_the_sampler() {
+        let out = solve(
+            &OptionsProbe,
+            &id(),
+            &problem_with(r#","options":{"restarts":2}"#),
+        )
+        .expect("declared option is accepted");
+        let v: serde_json::Value = serde_json::from_slice(&out).expect("json");
+        assert_eq!(
+            v.pointer("/0/spins").expect("spins"),
+            &serde_json::json!([1, 1, -1])
+        );
+    }
+
+    #[test]
+    fn absent_null_and_empty_options_are_no_options() {
+        for extra in ["", r#","options":null"#, r#","options":{}"#] {
+            let out = solve(&OptionsProbe, &id(), &problem_with(extra)).expect("accepted");
+            let v: serde_json::Value = serde_json::from_slice(&out).expect("json");
+            assert_eq!(
+                v.pointer("/0/spins").expect("spins"),
+                &serde_json::json!([-1, -1, -1]),
+                "{extra}"
+            );
+        }
+    }
+
+    #[test]
+    fn undeclared_and_wrong_type_options_are_refused_before_sampling() {
+        for extra in [
+            r#","options":{"nope":1}"#,
+            r#","options":{"restarts":"2"}"#,
+            r#","options":{"restarts":1.5}"#,
+            r#","options":{"greedy":1}"#,
+            r#","options":[1]"#,
+        ] {
+            let err = solve(&OptionsProbe, &id(), &problem_with(extra)).expect_err(extra);
+            assert!(matches!(err, SolveError::Malformed(_)), "{extra}: {err:?}");
+            assert_eq!(err.exit_code(), crate::ExitCode::ConfigInvalid);
+        }
+    }
+
+    #[test]
+    fn an_unsupported_value_of_the_declared_type_is_refused_by_name_and_value() {
+        let err = solve(
+            &OptionsProbe,
+            &id(),
+            &problem_with(r#","options":{"restarts":7}"#),
+        )
+        .expect_err("the sampler refuses 7 restarts");
+        assert!(matches!(err, SolveError::Malformed(_)), "{err:?}");
+        assert_eq!(err.exit_code(), crate::ExitCode::ConfigInvalid);
+        let message = err.to_string();
+        assert!(
+            message.contains("restarts") && message.contains('7'),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn a_sampler_that_declares_no_options_refuses_any() {
+        let err = solve(
+            &StubSampler,
+            &id(),
+            &problem_with(r#","options":{"restarts":1}"#),
+        )
+        .expect_err("no options are declared");
+        assert!(matches!(err, SolveError::Malformed(_)), "{err:?}");
     }
 
     struct WrongLossy;
@@ -650,6 +950,131 @@ mod tests {
             expected_linear_ladder(),
             BetaSchedule::Linear.build(LADDER_RANGE.0, LADDER_RANGE.1, LADDER_RUNGS)
         );
+    }
+
+    /// Answers each IQM model with every variable at its bound, plus `EXTRA`.
+    struct IqmAt<const EXTRA: u32>;
+    impl<const EXTRA: u32> Sampler for IqmAt<EXTRA> {
+        fn sample(
+            &self,
+            _: &IsingGraph,
+            _: &SampleParams,
+        ) -> Result<Vec<SamplerResult>, SampleError> {
+            Ok(vec![])
+        }
+        fn accepts_iqm() -> bool {
+            true
+        }
+        fn sample_iqm(
+            &self,
+            model: &crate::IqmModel,
+            params: &SampleParams,
+        ) -> Result<Vec<Vec<u32>>, SampleError> {
+            let values = model.upper_bounds.iter().map(|b| b + EXTRA).collect();
+            Ok(vec![values; params.num_reads])
+        }
+    }
+
+    fn iqm_input(edit: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>)) -> Vec<u8> {
+        let mut v = serde_json::json!({
+            "problem": "iqm",
+            "bounds": [2, 3],
+            "h": [1.0, -0.5],
+            "j": [0.25],
+            "edges": [[0, 1]],
+            "num_reads": 2,
+            "num_sweeps": 64,
+            "sweeps_per_beta": 1,
+            "beta_range": null,
+            "seed": 9,
+        });
+        if let Some(object) = v.as_object_mut() {
+            edit(object);
+        }
+        v.to_string().into_bytes()
+    }
+
+    #[test]
+    fn the_iqm_form_returns_scored_values() {
+        let out = solve(&IqmAt::<0>, &id(), &iqm_input(|_| {})).expect("solves");
+        let v: serde_json::Value = serde_json::from_slice(&out).expect("json");
+        let reads = v.as_array().expect("array");
+        assert_eq!(reads.len(), 2);
+        for read in reads {
+            assert_eq!(read["values"], serde_json::json!([2, 3]));
+            // 1000*2 - 500*3 + 250*2*3 = 2000
+            assert_eq!(read["energy_milli"], 2000);
+            assert!(read.get("spins").is_none(), "{read}");
+            assert_eq!(
+                read["sampler"],
+                serde_json::json!({
+                    "backend": "mock",
+                    "algorithm": "sa",
+                    "num_reads": 2,
+                    "num_sweeps": 64,
+                    "sweeps_per_beta": 1,
+                    "beta_range": null,
+                    "beta_schedule_type": "geometric",
+                    "seed": 9,
+                })
+            );
+        }
+        // The Ising form is the default and is unchanged.
+        assert!(solve(&IqmAt::<0>, &id(), &problem_with("")).is_ok());
+    }
+
+    #[test]
+    fn a_solver_without_iqm_refuses_the_form_with_exit_64() {
+        let err = solve(&StubSampler, &id(), &iqm_input(|_| {})).expect_err("not listed");
+        assert!(matches!(err, SolveError::Malformed(_)), "{err:?}");
+        assert_eq!(err.exit_code(), crate::ExitCode::ConfigInvalid);
+    }
+
+    #[test]
+    fn each_malformed_iqm_input_is_refused_with_exit_64() {
+        type Edit = fn(&mut serde_json::Map<String, serde_json::Value>);
+        let rows: [(&str, Edit); 8] = [
+            ("no variables", |o| {
+                for key in ["bounds", "h", "j", "edges"] {
+                    let _ = o.insert(key.into(), serde_json::json!([]));
+                }
+            }),
+            ("no bounds", |o| {
+                let _ = o.remove("bounds");
+            }),
+            ("one bound short", |o| {
+                let _ = o.insert("bounds".into(), serde_json::json!([2]));
+            }),
+            ("a negative bound", |o| {
+                let _ = o.insert("bounds".into(), serde_json::json!([-1, 3]));
+            }),
+            ("a sub-milli coefficient", |o| {
+                let _ = o.insert("h".into(), serde_json::json!([0.0005, 0.0]));
+            }),
+            ("a self-loop", |o| {
+                let _ = o.insert("edges".into(), serde_json::json!([[1, 1]]));
+            }),
+            ("an unknown problem type", |o| {
+                let _ = o.insert("problem".into(), serde_json::json!("qubo"));
+            }),
+            ("bounds on the Ising form", |o| {
+                let _ = o.insert("problem".into(), serde_json::json!("ising"));
+            }),
+        ];
+        for (label, edit) in rows {
+            let err = solve(&IqmAt::<0>, &id(), &iqm_input(edit)).expect_err(label);
+            assert!(matches!(err, SolveError::Malformed(_)), "{label}: {err:?}");
+        }
+    }
+
+    #[test]
+    fn values_outside_a_bound_are_a_device_fault() {
+        let err = solve(&IqmAt::<1>, &id(), &iqm_input(|_| {})).expect_err("out of bounds");
+        assert!(
+            matches!(err, SolveError::Sample(SampleError::DeviceFault(_))),
+            "{err:?}"
+        );
+        assert_eq!(err.exit_code(), crate::ExitCode::InternalFatal);
     }
 }
 

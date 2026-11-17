@@ -73,6 +73,7 @@ enum JobKind {
   ISING_SAMPLE = 1;
   GATE_CIRCUIT = 2; // reserved
   ISING_GENERATE = 3;
+  IQM_SAMPLE = 4; // integer quadratic model, IqmProblem
 }
 
 enum RejectReason {
@@ -105,6 +106,7 @@ message MinerMsg {
     Fatal      fatal       = 7;
     Capabilities capabilities = 8;
     LeaseDone lease_done = 9;
+    CalibrateDone calibrate_done = 10;
   }
 }
 
@@ -119,6 +121,7 @@ message CoordMsg {
     Shutdown  shutdown  = 7;
     SetTarget set_target = 8;
     GetCapabilities get_capabilities = 9;
+    Calibrate calibrate = 10;
   }
 }
 
@@ -211,6 +214,27 @@ message IsingProblem {
   uint32 reversal_pause_us = 12;
 }
 
+// Integer quadratic model for IQM_SAMPLE. Variable i takes an integer value
+// from 0 to upper_bounds[i], inclusive. The energy is
+// E(x) = sum_i h_i x_i + sum_k j_k x_u x_v over the pairs (u, v) in edges.
+// No term couples a variable to itself.
+message IqmProblem {
+  // Dense variable indices into upper_bounds and h. u != v for every pair.
+  EdgeList edges = 1;
+  // One inclusive upper bound per variable. The lower bound is always 0.
+  repeated uint32 upper_bounds = 2;
+  // h and j use the IsingProblem coefficient rules: little-endian elements
+  // of encoding's type, one per variable and per pair, integer values stored
+  // / scale, float encodings with scale 0, and every value exact in i32
+  // milli-units.
+  CoefficientEncoding encoding = 3;
+  uint32 scale = 4;
+  bytes h = 5;
+  bytes j = 6;
+  uint32 num_reads  = 7; // per-job override; 0 = unset -> SetTarget
+  uint32 num_sweeps = 8; // per-job override; 0 = unset
+}
+
 message Provenance {
   bool   is_pow   = 1;
   bytes  order_id = 2; // mempool reward attribution; empty for PoW
@@ -224,6 +248,7 @@ message Job {
   IsingProblem ising  = 5;
   Provenance provenance = 6;
   IsingProblemGenerator generator = 7; // ISING_GENERATE only
+  IqmProblem iqm = 8; // IQM_SAMPLE only
 }
 
 message JobRequest { uint32 credits = 1; }
@@ -241,6 +266,9 @@ message Solution {
   // Node i is bit i % 8 of byte i / 8, LSB first: 1 = +1, 0 = -1.
   // Exactly ceil(num_nodes / 8) bytes, with zero padding bits.
   bytes spins = 3;
+  // IQM_SAMPLE only: the value of each variable, in IqmProblem order. Empty
+  // for the Ising kinds, and spins is empty for IQM_SAMPLE.
+  repeated uint32 values = 4;
 }
 
 message SamplerMeta {
@@ -315,6 +343,24 @@ message Capabilities {
   string solver_id = 17;
   repeated FamilySupport generated_families = 18;
   repeated FamilySupport accepted_families = 19;
+  // Options `--solve` accepts in its `options` object, each with the scalar
+  // type its value must have. Empty means the solver accepts none.
+  repeated SolveOption solve_options = 20;
+}
+
+// Scalar type of one `--solve` option value.
+enum OptionType {
+  OPTION_TYPE_UNSPECIFIED = 0;
+  OPTION_TYPE_BOOL = 1;
+  OPTION_TYPE_INT = 2;     // a JSON integer
+  OPTION_TYPE_NUMBER = 3;  // any JSON number, integer or not
+  OPTION_TYPE_STRING = 4;
+}
+
+// One option a solver accepts in `--solve`.
+message SolveOption {
+  string name = 1;
+  OptionType type = 2;
 }
 
 message IsingProblemGenerator {
@@ -327,6 +373,36 @@ message IsingProblemGenerator {
   uint64 salt_count = 7;
   FamilyDescriptor family = 8;       // required iff algorithm == FAMILY_CHACHA8_V1 (FAM-48, FAM-49)
   bytes  topology_order_digest = 9;  // 32 bytes, required iff family is set (FAM-49, FAM-50)
+}
+
+// Tune the solver against reference instances before the workload. Sent only
+// to a solver that lists the `calibrate` feature, after Topology and before
+// the first Job. The solver answers with exactly one CalibrateDone, unless
+// Shutdown ends the session first.
+message Calibrate {
+  FamilyDescriptor family = 1; // the family parameters, as a job carries them
+  repeated CalibrationInstance instances = 2;
+  uint64 deadline_ms = 3; // Unix time in ms, as Job.deadline_ms; 0 = none
+}
+
+// One reference instance of the calibration family.
+message CalibrationInstance {
+  string id = 1;
+  bytes  nonce = 2;                 // 32 bytes
+  int64  achieved_energy_milli = 3; // the energy a reference run achieved
+  int64  max_energy_milli = 4;      // the acceptance ceiling, as SetTarget
+}
+
+enum CalibrateOutcome {
+  CALIBRATE_OUTCOME_UNSPECIFIED = 0;
+  CALIBRATE_OUTCOME_DONE = 1;            // the new tuning is in effect
+  CALIBRATE_OUTCOME_FAILED = 2;          // the solver keeps its current tuning
+  CALIBRATE_OUTCOME_DEADLINE_PASSED = 3; // the solver keeps its current tuning
+}
+
+message CalibrateDone {
+  CalibrateOutcome outcome = 1;
+  optional string summary = 2; // free text for the operator
 }
 
 message LeaseDone {

@@ -1,13 +1,15 @@
 //! Test-support miner that advertises everything optional the `--solve` gate
 //! grades: `linear-schedule`, `exact-coefficients`, and all three model
-//! limits. It samples an int8 graph, so the SDK refuses anything off its
+//! limits, plus two `--solve` options, `restarts` (integer) and `greedy`
+//! (boolean). It samples an int8 graph, so the SDK refuses anything off its
 //! one-unit step. Used by `tests/solve_conformance.rs`.
 
 use clap::Parser;
 use quip_solver_core::coefficient::Fixed;
+use quip_solver_core::quip_proto::v1::OptionType;
 use quip_solver_core::quip_protocol::scoring::energy_milli;
 use quip_solver_core::{
-    run, BackendIdentity, BetaLadder, CommonArgs, IsingGraph, ModelLimits, SampleError,
+    run, BackendIdentity, BetaLadder, CommonArgs, IsingGraph, ModelLimits, OptionDecl, SampleError,
     SampleParams, Sampler, SamplerResult, EXACT_COEFFICIENTS_FEATURE, LINEAR_SCHEDULE_FEATURE,
 };
 use std::process::ExitCode;
@@ -17,6 +19,19 @@ type Int8 = Fixed<i8, 1>;
 struct LimitedSampler;
 
 impl Sampler<Int8> for LimitedSampler {
+    fn solve_options() -> &'static [OptionDecl] {
+        &[
+            OptionDecl {
+                name: "restarts",
+                kind: OptionType::Int,
+            },
+            OptionDecl {
+                name: "greedy",
+                kind: OptionType::Bool,
+            },
+        ]
+    }
+
     // It lists `linear-schedule`, so it states its own ladder. This mock has no
     // kernel, so the ladder it ran is the one the request asks for.
     fn beta_ladder(&self, graph: &IsingGraph<Int8>, params: &SampleParams) -> Option<BetaLadder> {

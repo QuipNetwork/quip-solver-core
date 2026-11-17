@@ -1,11 +1,15 @@
 //! Test-support miner: runs the core loop with a trivial sampler that returns
-//! `num_reads` all-`+1` solutions, scored with the consensus scorer. Used by
-//! `tests/loop_conformance.rs` to exercise the session loop without a backend.
+//! `num_reads` all-`+1` solutions, scored with the consensus scorer. It also
+//! lists `IQM_SAMPLE` and answers each integer quadratic model with values that
+//! depend on the seed and the read. Used by `tests/loop_conformance.rs` and
+//! `tests/solve_conformance.rs` to exercise the session loop and `--solve`
+//! without a backend.
 
 use clap::Parser;
 use quip_protocol::scoring::energy_milli;
 use quip_solver_core::{
-    run, BackendIdentity, CommonArgs, IsingGraph, SampleError, SampleParams, Sampler, SamplerResult,
+    run, BackendIdentity, CommonArgs, IqmModel, IsingGraph, SampleError, SampleParams, Sampler,
+    SamplerResult,
 };
 use std::process::ExitCode;
 
@@ -23,6 +27,33 @@ impl Sampler for MockSampler {
             .map(|_| SamplerResult {
                 spins: spins.clone(),
                 energy_milli: energy,
+            })
+            .collect())
+    }
+
+    fn accepts_iqm() -> bool {
+        true
+    }
+
+    fn sample_iqm(
+        &self,
+        model: &IqmModel,
+        params: &SampleParams,
+    ) -> Result<Vec<Vec<u32>>, SampleError> {
+        // Values depend on the seed and the read, all within the bounds, so
+        // the same seed gives the same samples.
+        Ok((0..params.num_reads)
+            .map(|read| {
+                let key = params.seed ^ u64::try_from(read).unwrap_or(u64::MAX);
+                model
+                    .upper_bounds
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &bound)| {
+                        let draw = key.rotate_left(u32::try_from(i % 64).unwrap_or(0));
+                        u32::try_from(draw % (u64::from(bound) + 1)).unwrap_or(bound)
+                    })
+                    .collect()
             })
             .collect())
     }

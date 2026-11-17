@@ -26,6 +26,25 @@ that declines leases lists only `ISING_SAMPLE` and no generators. It answers an
 `ISING_GENERATE` job with `Reject` reason `UNSUPPORTED_KIND`. The Rust
 `Sampler::accepts_leases` switch makes the session do all three.
 
+`solve_options`, `Capabilities` field 20, lists the options that `--solve`
+accepts in its `options` object. Each entry has a `name` and a `type`. The
+type is `OPTION_TYPE_BOOL`, `OPTION_TYPE_INT`, `OPTION_TYPE_NUMBER`, or
+`OPTION_TYPE_STRING`. An empty list means the solver accepts no options. The
+Rust `Sampler::solve_options` method declares the list. Hello and
+`GetCapabilities` carry the same list.
+
+A solver may refuse an option value of the listed type that it does not
+support. The user must learn of each such value, so the solver does one of
+two things:
+
+- It exits 64 and writes a message on stderr that names the option and the
+  value.
+- It runs, and writes a warning on stderr that names the option and the value
+  it did not apply.
+
+A solver must never ignore an option value without a message. The Rust
+`Sampler::check_option` method refuses a value with exit 64.
+
 ### `--solve`
 
 This mode reads one problem as JSON on stdin. It writes the solutions as JSON
@@ -33,8 +52,9 @@ on stdout, then exits.
 
 `XQSA` and IsingMark use `--solve`.
 
-The input is one JSON object. Every key except `beta_schedule_type` and
-`anneal_time_us` is required. A solver rejects any other key.
+The input is one JSON object. A solver requires every key except
+`beta_schedule_type`, `anneal_time_us`, `options`, and the IQM keys `problem`
+and `bounds`, and it rejects any other key.
 
 | Key | Type | Meaning |
 |---|---|---|
@@ -48,6 +68,7 @@ The input is one JSON object. Every key except `beta_schedule_type` and
 | `beta_schedule_type` | `"geometric"` or `"linear"` | Optional. Absent means `"geometric"`. |
 | `seed` | integer from 0 to 2^64 − 1 | Random seed. The same seed gives the same samples. |
 | `anneal_time_us` | integer, at least 1 | Optional. Anneal time of each read in microseconds, for a quantum annealer. Only a solver that lists `anneal-time` accepts it. |
+| `options` | object | Optional. Absent, `null`, or `{}` means no options. Each key is an option name from `solve_options`. Each value is a JSON scalar of the listed type. A solver passes the object to its algorithm without change. |
 
 A quantum annealer has no sweeps, beta ladder, or seed. It still requires
 `num_sweeps`, `sweeps_per_beta`, `beta_range`, and `seed`, and echoes them in
@@ -110,6 +131,14 @@ The input is malformed, exit 64, when any of these holds:
 - `beta_schedule_type` is not `"geometric"` or `"linear"`.
 - `beta_schedule_type` is `"linear"` and the solver does not list `linear-schedule`.
 - `anneal_time_us` is present and the solver does not list `anneal-time`, or it is 0.
+- `options` is not an object, or it has a key that `solve_options` does not list.
+- An option value has a type other than the one `solve_options` lists for it.
+  `OPTION_TYPE_NUMBER` takes any JSON number, `OPTION_TYPE_INT` takes only an
+  integer, and `null` is never valid.
+- The solver does not support an option value of the listed type, and it
+  refuses that value.
+- `problem` is not `"ising"` or `"iqm"`, or `bounds` is present and `problem`
+  is not `"iqm"`.
 
 The model exceeds the solver, exit 65, when any of these holds:
 
@@ -121,6 +150,31 @@ The model exceeds the solver, exit 65, when any of these holds:
 - `--embed` is set and the embedder cannot place the model.
 
 A refused problem writes nothing on stdout.
+
+The IQM form asks for an integer quadratic model, the `IQM_SAMPLE` kind of
+section 3. It adds two keys to the input:
+
+| Key | Type | Meaning |
+|---|---|---|
+| `problem` | `"ising"` or `"iqm"` | Optional. Absent means `"ising"`, the preceding form. `"iqm"` selects the IQM form. |
+| `bounds` | array of integers from 0 to 2^32 − 1 | Required in the IQM form, refused in the Ising form. The inclusive upper bound of each variable, one per entry of `h`. The lower bound is 0. |
+
+In the IQM form, `h` holds the linear coefficients and `j` the pair
+coefficients, both in units. `edges` holds the pairs. Every other key keeps
+its meaning. Each read has `values`, one integer per variable in `h` order,
+in place of `spins`. `energy_milli` is the exact energy of `values`.
+`sampler` has the same fields as in the Ising form, without `beta_ladder`.
+
+A solver refuses the IQM form as malformed, exit 64, when any rule for the
+Ising form fails, or when any of these holds:
+
+- The solver does not list `IQM_SAMPLE` in `supportedKinds`.
+- `bounds` is missing or empty, or it has a different length than `h`.
+- A coefficient is not a whole number of milli.
+
+`maxNodes` and `maxEdges` bound the variables and the pairs, and a model over
+either exits 65. The model limits `maxDegree`, `maxLocalFieldMilli`, and
+`exactResolutionMilli` do not apply to the IQM form.
 
 ### `--check`
 
@@ -176,7 +230,10 @@ Messages flow in this order:
 4. The solver sends `Ready`.
 5. The coordinator may send `Topology` and `SetTarget` before or after
    `Ready`. A round that never sends them is valid.
-6. The solver and the coordinator exchange `JobRequest` and `Job` until
+6. The coordinator may send `Calibrate` to a solver that lists `calibrate`,
+   after `Topology` and before the first `Job`. It waits for
+   `CalibrateDone` before it sends a job. See [Calibration](#calibration).
+7. The solver and the coordinator exchange `JobRequest` and `Job` until
    `Shutdown`.
 
 `Hello.capabilities` holds the protocol version, identity enums, limits, and supported features.
@@ -201,7 +258,7 @@ M is the solver. C is the coordinator.
 | `SetTarget` | C→M | Difficulty target and optional parameter pins. |
 | `Ready` | M→C | Configured and ready to accept jobs. |
 | `JobRequest` | M→C | Grant credits. |
-| `Job` | C→M | One Ising problem or a salt lease. |
+| `Job` | C→M | An Ising problem, a salt lease, or an integer quadratic model. |
 | `Result` | M→C | Plain job solutions or the reads a lease backend chose to report for one salt. |
 | `LeaseDone` | M→C | Finish a lease and report its counts and lowest energy. |
 | `Reject` | M→C | Decline a job, with a reason. |
@@ -212,6 +269,8 @@ M is the solver. C is the coordinator.
 | `Fatal` | M→C | Report a fatal reason before exit. |
 | `GetCapabilities` | C→M | Ask for the `Capabilities` message. |
 | `Capabilities` | M→C | Reply with what this solver supports. |
+| `Calibrate` | C→M | Tune the solver against reference instances before the workload. |
+| `CalibrateDone` | M→C | Report the outcome of one `Calibrate`. |
 
 ### Coefficients and solutions
 
@@ -342,6 +401,42 @@ The default path adds the offset after exact rescoring.
 The normative rules are in [docs/problem-families.md](docs/problem-families.md).
 See [Wire extension](docs/problem-families.md#wire-extension) and [Lease admission](docs/problem-families.md#lease-admission).
 
+### Integer quadratic models
+
+`IQM_SAMPLE` is job kind 4. Its `Job.iqm`, field 8, carries an `IqmProblem`.
+Variable `i` takes an integer value from 0 to `upper_bounds[i]`, inclusive.
+The energy of an assignment `x` is the XQMX energy
+`E(x) = Σ h_i·x_i + Σ j_k·x_u·x_v`. The second sum runs over the pairs
+`(u, v)` in `edges`. No term couples a variable to itself. This kind has no
+constraints.
+
+`IqmProblem` uses the coefficient rules of `IsingProblem`: `encoding`,
+`scale`, and little-endian `h` and `j`, with an exact `i32` milli value for
+each element. `h` has one value per entry of `upper_bounds`. `j` has one
+value per pair. `num_reads` and `num_sweeps` override `SetTarget` as they do
+in `IsingProblem`.
+
+A solver claims the kind by listing `IQM_SAMPLE` in `supported_kinds`. A
+solver that does not list it answers each `IQM_SAMPLE` job with `Reject`
+`UNSUPPORTED_KIND`.
+
+A solver that lists it answers with one `Result`, which holds one `Solution`
+per read. `Solution.values`, field 4, holds the value of each variable in
+`upper_bounds` order, and `Solution.spins` is empty. `energy_milli` is
+`E(values)` in milli. The integer sum is exact and saturates at the ends of
+the `i64` range. `Solution.values` is empty for the Ising kinds.
+
+The solver rejects an `IQM_SAMPLE` job with these reasons:
+
+| Reason | When |
+|---|---|
+| `EXPIRED` | The deadline has passed. |
+| `MALFORMED` | `iqm` is missing, `upper_bounds` is empty, `edges.u` and `edges.v` differ in length, `h` and `upper_bounds` differ in length, `j` and the pairs differ in length, a pair names a variable outside `upper_bounds`, a pair joins a variable to itself, or a coefficient breaks the coefficient rules of this section. |
+| `TOO_LARGE` | The variables exceed `max_nodes`, the pairs exceed `max_edges`, or `num_reads` exceeds the read limit. |
+
+The model limits below do not apply to this kind. A job at generation 0 is
+never cancelled. A job at a higher generation follows section 5.
+
 ### Model limits
 
 `Capabilities` fields 14 to 16 state which models a solver solves correctly, beyond `max_nodes` and `max_edges`.
@@ -427,6 +522,50 @@ The solver applies these rules:
 The Rust session applies the two `MALFORMED` rules to every job, whether or
 not the solver lists the feature.
 
+### Calibration
+
+A solver can tune itself against reference instances before it mines.
+Calibration runs outside the workload: at boot, or as an offline tuning run.
+This contract carries the exchange only. The coordinator chooses the
+instances and when to calibrate. The solver chooses how to tune.
+
+A solver that serves the exchange lists the feature string `calibrate` in
+`Capabilities.features`. The coordinator sends `Calibrate` only to a solver
+that lists it. It sends `Calibrate` after `Topology` and before the first
+`Job`, and waits for `CalibrateDone` before it sends a job.
+
+`Calibrate` is `CoordMsg` field 10. It holds these fields:
+
+| Field | Meaning |
+|---|---|
+| `family`, 1 | The family parameters, a `FamilyDescriptor` as a job carries it. |
+| `instances`, 2 | One `CalibrationInstance` per reference instance. |
+| `deadline_ms`, 3 | Unix time in milliseconds, as `Job.deadline_ms`. `0` sets no deadline. |
+
+Each `CalibrationInstance` holds an `id`, the `nonce`, the
+`achieved_energy_milli` of a reference run, and the target
+`max_energy_milli`. The topology is the latest `Topology` of the session.
+
+The solver answers each `Calibrate` with exactly one `CalibrateDone`,
+`MinerMsg` field 10, unless `Shutdown` ends the session first. It holds an
+`outcome` and an optional free-text `summary` for the operator:
+
+| Outcome | Meaning |
+|---|---|
+| `CALIBRATE_OUTCOME_DONE` | The new tuning is in effect. |
+| `CALIBRATE_OUTCOME_FAILED` | The calibration failed. The solver keeps its current tuning. |
+| `CALIBRATE_OUTCOME_DEADLINE_PASSED` | The deadline passed first. The solver keeps its current tuning. |
+
+The solver enforces the deadline. When the deadline passes, the solver sends
+`DEADLINE_PASSED` at once and keeps its current tuning, even if the work
+finishes later. A `Calibrate` that arrives after its deadline gets
+`DEADLINE_PASSED`. No outcome ends the session.
+
+The Rust session also answers `FAILED` to a `Calibrate` that arrives before
+any `Topology`, or that reaches a solver without the feature. Solvers in
+other languages need not answer a `Calibrate` that the coordinator must not
+send them.
+
 ## 4. The sampler contract
 
 This section is the Rust binding of the language-neutral contract. This
@@ -491,18 +630,26 @@ Use `Backend::Cpu` and `Algorithm::Sa` for a CPU simulated annealer.
 The [migration name table](MIGRATING.md#identity-names) lists all supported names.
 The fixed map in `quip_protocol::session` keeps command-line identity strings lowercase.
 
-The seventeen defaulted methods are:
+The twenty-five defaulted methods are:
 
 | Method | Default |
 |---|---|
 | `sample_stream` | Serial loop over `sample`. Polls the cancel token at dequeue. |
+| `beta_ladder` | `None`. `--solve` reports the ladder that the SDK builds from the request, with `reported_by` set to `"sdk"`. A solver that lists `linear-schedule` must override it. |
 | `accepts_leases` | `true`. `false` lists only `ISING_SAMPLE`, advertises no generators and no generated families, and rejects every `ISING_GENERATE` job with `UNSUPPORTED_KIND`. |
+| `accepts_iqm` | `false`. The session does not list `IQM_SAMPLE` and rejects every `IQM_SAMPLE` job with `UNSUPPORTED_KIND`. `true` lists the kind and sends its jobs to `sample_iqm`. |
+| `sample_iqm` | Returns `DeviceFault` if called without an override. |
+| `accepts_calibrate` | `false`. The session answers every `Calibrate` with `FAILED`. `true` adds `calibrate` to the advertised features. |
+| `calibrate` | Returns `Declined` if called without an override. |
+| `solve_options` | None. Lists the `--solve` options the solver accepts, each with a name and a type. The SDK refuses an undeclared option or a value of the wrong type with exit 64 before it samples. The sampler reads the validated values from `SampleParams::options`. |
+| `check_option` | `Ok`. Accepts every value of the listed type. An `Err` refuses the value before sampling, with exit 64 and a message that names the option and the value. |
 | `accepts_warm_start` | `false`. `true` adds `initial-spins` to the advertised features. |
 | `sample_warm` | Ignores the `WarmStart` and calls `sample`. |
 | `sample_stream_warm` | Serial loop over `sample_warm` for a seeded job and `sample` for a cold one. |
 | `stream_width` | `1` |
 | `declared_stream_width` | `1`. `0` declares a device-dependent width, resolved when the device opens. |
 | `utilization` | `0.0` |
+| `headroom` | `None`. Each `Status` leaves `headroom` unset and sets `limit_reached` to `false`. |
 | `should_throttle` | `false` |
 | `max_reads` | `u32::MAX` |
 | `apply_config` | No action. |
@@ -607,6 +754,67 @@ The backend owns its own device-energy audit.
 The coordinator verifies everything it receives.
 A sampler panic is still a device fault and ends the run.
 C solvers use the default lease path and have no local-generation callback.
+
+### Integer quadratic models
+
+A solver serves `IQM_SAMPLE` by returning `true` from `accepts_iqm()` and
+overriding this method:
+
+```rust
+fn sample_iqm(
+    &self,
+    model: &IqmModel,
+    params: &SampleParams,
+) -> Result<Vec<Vec<u32>>, SampleError>;
+```
+
+`accepts_iqm()` defaults to `false`, and the session then lists no
+`IQM_SAMPLE` and rejects the kind. `sample_iqm` defaults to a `DeviceFault`.
+`IqmModel` holds `upper_bounds`, `h_milli`, `j_milli`, and `edges`.
+`sample_iqm` returns exactly one assignment per read. The session and
+`--solve` call it on a blocking thread. They check the count, check that
+each assignment has one value per variable within its bound, and score it
+with `IqmModel::energy_milli`. The SDK reports output that fails a check as
+a `DeviceFault`. The session runs at most `stream_width` calls of
+`sample_iqm` at once. These calls can overlap the Ising `sample_stream`.
+A backend that serves both kinds on one device must serialize its
+own device access. After `Shutdown`, a running call delays the session no
+longer than the grace deadline. For a
+session job, the sweep budget comes from the same sources as for an Ising
+job, and the seed from the OS.
+
+### Calibration hook
+
+A solver serves the `Calibrate` exchange by returning `true` from
+`accepts_calibrate()` and overriding this method:
+
+```rust
+fn calibrate(
+    &self,
+    request: &Calibrate,
+    topology: &Topology,
+) -> Result<Calibration<Self>, SampleError>;
+```
+
+`accepts_calibrate()` defaults to `false`. The session then removes
+`calibrate` from the advertised features and answers each `Calibrate` with
+`FAILED`. A `true` value adds `calibrate` to the features.
+`calibrate` defaults to `SampleError::Declined`.
+
+The session calls `calibrate` on a blocking thread, one call at a time, with
+the latest `Topology`. The hook must not change the tuning itself. It returns
+the change as a `Calibration`, which holds a summary and a function that
+applies the change. The session applies it only when the hook returns `Ok`
+before the deadline, and then answers `DONE`. An `Err` or a panic answers
+`FAILED` with the error text. A hook still running at the deadline answers
+`DEADLINE_PASSED`, and the session drops its change when it returns. The
+session cannot stop the thread, so a long search should check the deadline
+itself. After `Shutdown`, a running call delays the session no longer than
+the grace deadline.
+
+Jobs are not held while a calibration runs. If a coordinator sends a job
+before `CalibrateDone`, the hook and its `apply` run alongside `sample`, so
+both must be safe in that case.
 
 ### Sampling errors
 
@@ -731,6 +939,18 @@ A solver is conformant when all of these hold:
 - A solver that lists `generated_families` passes the family gate, `quip-solver-drive --family <solver-binary> unix://<socket>`, as [Family conformance](docs/family-conformance.md) defines it.
 - The adaptive parameters of the solver match the `golden_adapt.json` cases.
 - Every `Status.headroom` the solver sends is within `0.0` to `1.0`.
+- A solver that lists `calibrate` gets one `Calibrate`, after `Topology` and
+  before the first job, with a deadline two seconds ahead. The driver
+  expects exactly one `CalibrateDone`. A `DONE` or `FAILED` answer arrives by
+  the deadline. A `DEADLINE_PASSED` answer arrives at the deadline. The
+  driver allows one second for delivery. A solver that does not list the
+  feature gets no `Calibrate` and must send no `CalibrateDone`.
+- Every session sends one `IQM_SAMPLE` job at generation 0. When the solver
+  lists the kind, the driver requires a `Result` whose values are within the
+  bounds and whose energies are the scores of those values. Otherwise the
+  solver must reject the job with `UNSUPPORTED_KIND`.
+- Every session sends one `ISING_GENERATE` lease. A solver that does not list
+  the kind must reject it with `UNSUPPORTED_KIND`.
 - A solver whose final `Status` has `limit_reached` set to `true` refuses the
   next job with `OVERLOADED`. The driver sends a `Ping` after every other job
   of its walk. When the answering `Status` has `limit_reached`, the driver sends
@@ -753,17 +973,20 @@ Every solver must pass the base cases:
 - An eight-node ring solves, with the output fields that section 2 lists and energies that score correctly.
 - The same seed gives the same samples.
 - Each malformed input in section 2 exits 64 and writes nothing.
+- `option-undeclared`: an option that the solver does not list exits 64.
 
 Other cases run only when the solver advertises the behaviour:
 
 | Advertised | Case |
 |---|---|
-| `linear-schedule` | A linear schedule solves. Without the feature, it exits 64. |
+| `linear-schedule` | A linear schedule solves. Every read reports a `beta_ladder` with `reported_by` set to `"sampler"`, kind `linear`, and the linear ladder of the request. Without the feature, it exits 64. |
+| `solveOptions` not empty | `option-valid` sends each listed option alone with a value of its type: `true`, `1`, `1.5`, or `"default"`. The ring must solve, or the solver exits 64 with a message on stderr. `option-wrong-type` sends each listed option with a value of another type, which exits 64. |
 | `maxDegree` | A star at the limit solves. One more leaf exits 65. |
 | `maxLocalFieldMilli` | A local field at the limit solves. One step more exits 65. |
 | `exact-coefficients` and `exactResolutionMilli` | A coefficient on the step solves. One off the step exits 65. |
 | `anneal-time` | The ring with an anneal time solves and echoes it. An anneal time of 0 exits 64. Without the feature, any anneal time exits 64. |
 | `embed` | A complete graph on 24 nodes solves under `--embed`, with an `embedding` object on every read. Without `--embed`, it exits 65. |
+| `IQM_SAMPLE` in `supportedKinds` | The IQM form of a four-variable ring solves. Each value is within its bound, and each energy is the score of its values. One bound short exits 64. Without the kind, the IQM form exits 64. |
 
 No quantum annealer in service has a native degree of 23, so the complete
 graph on 24 nodes is off every working graph.

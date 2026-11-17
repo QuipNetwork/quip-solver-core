@@ -10,14 +10,15 @@
 
 use quip_proto::v1::miner_service_server::{MinerService, MinerServiceServer};
 use quip_proto::v1::{
-    coord_msg, ising_problem, miner_msg, Cancel, Capabilities, Configure, CoordMsg, EdgeList,
-    GetCapabilities, Hello, IsingProblem, IsingProblemGenerator, Job, JobKind, MinerMsg, Ping,
-    RejectReason, SetTarget, Shutdown, Status as MinerStatus, Topology, Welcome,
+    coord_msg, ising_problem, miner_msg, Calibrate, CalibrateOutcome, CalibrationInstance, Cancel,
+    Capabilities, Configure, CoordMsg, EdgeList, GetCapabilities, Hello, IqmProblem, IsingProblem,
+    IsingProblemGenerator, Job, JobKind, MinerMsg, Ping, RejectReason, SetTarget, Shutdown,
+    Status as MinerStatus, Topology, Welcome,
 };
 use quip_protocol::lease::{verify_lease_result, TopologyView};
-use quip_protocol::scoring::energy_milli;
+use quip_protocol::scoring::{energy_milli, iqm_energy_from_milli};
 use quip_protocol::target::Target;
-use quip_protocol::wire::{decode_spins_packed, encode_i32_le, encode_spins_packed};
+use quip_protocol::wire::{decode_i32_le, decode_spins_packed, encode_i32_le, encode_spins_packed};
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -42,7 +43,7 @@ pub(crate) const PHASE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Expressed in phase budgets rather than as a flat number: a walk in which
 /// every phase times out must still run to completion, so the report names all
 /// the phases that failed instead of reporting a single kill.
-const CHILD_TIMEOUT: Duration = Duration::from_secs(PHASE_TIMEOUT.as_secs() * 13);
+const CHILD_TIMEOUT: Duration = Duration::from_secs(PHASE_TIMEOUT.as_secs() * 15);
 
 /// How long the harness waits for the session handler to hand back its outcome
 /// once the child has exited.
@@ -81,7 +82,39 @@ const CANCEL_GENERATION: u64 = 3;
 const LIMIT_JOB_ID: &[u8] = b"job-limit";
 
 const LEASE_JOB_ID: &[u8] = b"job-lease";
+
+/// Id of the one `IQM_SAMPLE` job the walk sends.
+const IQM_JOB_ID: &[u8] = b"job-iqm";
+
+/// Observations from the `IQM_SAMPLE` job, sent to a miner that advertises
+/// the kind.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IqmOutcome {
+    /// Solutions in the miner's `Result`, each checked against the bounds and
+    /// re-scored.
+    pub solutions: usize,
+    /// The first defect found in that `Result`, when there was one.
+    pub defect: Option<String>,
+}
 const LEASE_SALTS: u32 = 4;
+
+/// How far ahead of sending it the walk sets the `Calibrate` deadline.
+const CALIBRATE_BUDGET_MS: u64 = 2_000;
+
+/// How late after the deadline a `CalibrateDone` may arrive. The session
+/// enforces the deadline itself, so this covers only delivery.
+const CALIBRATE_DELIVERY_SLACK_MS: u64 = 1_000;
+
+/// One `CalibrateDone` the miner sent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObservedCalibrateDone {
+    /// The wire `CalibrateOutcome` value.
+    pub outcome: i32,
+    /// The free-text summary, when the miner set one.
+    pub summary: Option<String>,
+    /// Unix time in milliseconds at which the driver read the message.
+    pub received_unix_ms: u64,
+}
 
 /// Observations from the four-salt generation scenario.
 #[derive(Debug, Clone, Default)]
@@ -156,6 +189,13 @@ pub enum Terminal {
 pub struct DriverReport {
     /// Lease observations, populated only when generation is advertised.
     pub lease: Option<LeaseOutcome>,
+    /// `IQM_SAMPLE` observations, populated only when the kind is advertised.
+    pub iqm: Option<IqmOutcome>,
+    /// Unix deadline, in milliseconds, of the `Calibrate` the driver sent.
+    /// `None` when it sent none.
+    pub calibrate_deadline_ms: Option<u64>,
+    /// Every `CalibrateDone` the miner sent, in arrival order.
+    pub calibrate_dones: Vec<ObservedCalibrateDone>,
     /// True when the first inbound message was a valid `Hello`.
     pub handshake_ok: bool,
     /// The `Hello` the miner opened with, when it sent one.
@@ -266,6 +306,8 @@ impl DriverReport {
             && self.has_reject(b"job-old", RejectReason::Expired)
             && self.warm_start_conformant()
             && self.lease_conformant()
+            && self.iqm_conformant()
+            && self.calibrate_conformant()
             && self.cancel_acked
             && self.ping_acked
             && self.capabilities_conformant()
@@ -295,6 +337,66 @@ impl DriverReport {
         } else {
             self.has_reject(LEASE_JOB_ID, RejectReason::UnsupportedKind)
         }
+    }
+
+    /// Grade the `IQM_SAMPLE` job. A miner that advertises the kind must return
+    /// a `Result` whose values respect the bounds and score to the energies it
+    /// reports. A miner that does not must answer with `Reject`
+    /// `UNSUPPORTED_KIND`.
+    #[must_use]
+    pub fn iqm_conformant(&self) -> bool {
+        if advertises_iqm(self.hello.as_ref()) {
+            self.iqm
+                .as_ref()
+                .is_some_and(|iqm| iqm.solutions > 0 && iqm.defect.is_none())
+                && !self.rejects.iter().any(|r| r.job_id == IQM_JOB_ID)
+        } else {
+            self.has_reject(IQM_JOB_ID, RejectReason::UnsupportedKind)
+        }
+    }
+
+    /// Grade the `Calibrate` exchange. A miner that lists `calibrate` gets one
+    /// `Calibrate` and must answer with exactly one `CalibrateDone`: `DONE` or
+    /// `FAILED` by the deadline, or `DEADLINE_PASSED` at the deadline. Each may
+    /// arrive up to one second late. A miner that does not
+    /// list it gets none and must send none.
+    #[must_use]
+    pub fn calibrate_conformant(&self) -> bool {
+        if !advertises_calibrate(self.hello.as_ref()) {
+            return self.calibrate_deadline_ms.is_none() && self.calibrate_dones.is_empty();
+        }
+        let Some(deadline) = self.calibrate_deadline_ms else {
+            return false;
+        };
+        let [done] = self.calibrate_dones.as_slice() else {
+            return false;
+        };
+        let latest = deadline.saturating_add(CALIBRATE_DELIVERY_SLACK_MS);
+        match CalibrateOutcome::try_from(done.outcome) {
+            Ok(CalibrateOutcome::Done | CalibrateOutcome::Failed) => {
+                done.received_unix_ms <= latest
+            }
+            Ok(CalibrateOutcome::DeadlinePassed) => {
+                (deadline..=latest).contains(&done.received_unix_ms)
+            }
+            Ok(CalibrateOutcome::Unspecified) | Err(_) => false,
+        }
+    }
+
+    /// Verdict for [`drive_miner_unlisted_calibrate`]: a miner that does not
+    /// list `calibrate` answers the one `Calibrate` it gets with exactly one
+    /// `CalibrateDone` outcome `FAILED`, then shuts down cleanly.
+    #[must_use]
+    pub fn unlisted_calibrate_conformant(&self) -> bool {
+        self.handshake_ok
+            && !advertises_calibrate(self.hello.as_ref())
+            && self.calibrate_deadline_ms.is_some()
+            && matches!(
+                self.calibrate_dones.as_slice(),
+                [done] if done.outcome == CalibrateOutcome::Failed as i32
+            )
+            && self.terminal == Terminal::Closed
+            && self.exit_code == 0
     }
 
     /// Every required `Result` present, no unexpected one, and each carrying
@@ -536,6 +638,22 @@ impl DriverReport {
                 },
                 self.lease_conformant(),
             ),
+            (
+                if advertises_iqm(self.hello.as_ref()) {
+                    "IQM job scored"
+                } else {
+                    "IQM job (not advertised, must be rejected)"
+                },
+                self.iqm_conformant(),
+            ),
+            (
+                if advertises_calibrate(self.hello.as_ref()) {
+                    "calibrate answered once"
+                } else {
+                    "calibrate (not advertised, not sent)"
+                },
+                self.calibrate_conformant(),
+            ),
             ("clean stream end", self.terminal == Terminal::Closed),
             ("no phase timed out", self.timed_out_phases.is_empty()),
             ("exit code 0", self.exit_code == 0),
@@ -545,6 +663,12 @@ impl DriverReport {
         let _ = writeln!(out, "  stream ended: {:?}", self.terminal);
         if let Some(lease) = &self.lease {
             let _ = writeln!(out, "  lease: {lease:?}");
+        }
+        if let Some(iqm) = &self.iqm {
+            let _ = writeln!(out, "  iqm: {iqm:?}");
+        }
+        for done in &self.calibrate_dones {
+            let _ = writeln!(out, "  calibrate: {done:?}");
         }
         if !self.timed_out_phases.is_empty() {
             let _ = writeln!(
@@ -589,6 +713,9 @@ pub(crate) struct ScoreSpec {
 )]
 pub(crate) struct SessionOutcome {
     lease: Option<LeaseOutcome>,
+    iqm: Option<IqmOutcome>,
+    calibrate_deadline_ms: Option<u64>,
+    calibrate_dones: Vec<ObservedCalibrateDone>,
     lease_salts: HashSet<Vec<u8>>,
     lease_refund_messages: u32,
     handshake_ok: bool,
@@ -658,6 +785,9 @@ pub(crate) enum ScriptKind {
     /// coordinator that refused the session token (expected: exit
     /// `TokenRejected`).
     CloseBeforeWelcome,
+    /// Handshake, then one `Calibrate` even to a miner that does not list the
+    /// feature, then `Shutdown`.
+    Calibrate,
 }
 
 /// A scripted session that `MockCoordinator` plays against each connecting
@@ -681,6 +811,7 @@ impl ScriptKind {
                     Self::Full => run_script(&mut inbound, &tx).await,
                     Self::BadWelcome => run_script_bad_welcome(&mut inbound, &tx).await,
                     Self::OneJobThenWait => run_script_one_job(&mut inbound, &tx).await,
+                    Self::Calibrate => run_script_calibrate(&mut inbound, &tx).await,
                     // These two take the sender by value: dropping it is the whole
                     // point of the script, and a borrow cannot close the stream.
                     Self::CloseAfterWelcome => {
@@ -965,6 +1096,7 @@ fn job_at(job_id: &[u8], deadline_ms: u64, generation: u64, ising: IsingProblem)
         deadline_ms,
         ising: Some(ising),
         provenance: None,
+        iqm: None,
     }
 }
 
@@ -981,6 +1113,7 @@ fn job_kind(job_id: &[u8], deadline_ms: u64, kind: JobKind, ising: IsingProblem)
         deadline_ms,
         ising: Some(ising),
         provenance: None,
+        iqm: None,
     }
 }
 
@@ -1056,6 +1189,16 @@ fn fold(outcome: &mut SessionOutcome, m: miner_msg::Msg) {
                 }
             }
         }
+        miner_msg::Msg::Result(r) if r.job_id == IQM_JOB_ID && outcome.iqm.is_some() => {
+            if let Some(iqm) = &mut outcome.iqm {
+                match grade_iqm_result(&r) {
+                    Ok(solutions) => iqm.solutions += solutions,
+                    Err(defect) => {
+                        let _ = iqm.defect.get_or_insert(defect);
+                    }
+                }
+            }
+        }
         miner_msg::Msg::Result(r) => {
             let spec = outcome.expected.get(&r.job_id);
             let rescored = spec.map(|s| {
@@ -1104,8 +1247,184 @@ fn fold(outcome: &mut SessionOutcome, m: miner_msg::Msg) {
                 }
             }
         }
+        miner_msg::Msg::CalibrateDone(done) => {
+            outcome.calibrate_dones.push(ObservedCalibrateDone {
+                outcome: done.outcome,
+                summary: done.summary,
+                received_unix_ms: now_unix_ms(),
+            });
+        }
         miner_msg::Msg::Hello(_) => {}
     }
+}
+
+/// The feature string a solver lists in `Capabilities.features` when it serves
+/// the `Calibrate` exchange. Mirrors `quip_solver_core::CALIBRATE_FEATURE`.
+pub const CALIBRATE_FEATURE: &str = "calibrate";
+
+fn advertises_calibrate(hello: Option<&Hello>) -> bool {
+    hello
+        .and_then(|h| h.capabilities.as_ref())
+        .is_some_and(|c| c.features.iter().any(|f| f == CALIBRATE_FEATURE))
+}
+
+/// The walk's `Calibrate`: two reference instances on the session topology.
+/// It carries no family, because the walk grades the exchange and not the
+/// tuning.
+fn calibrate_request(deadline_ms: u64) -> Calibrate {
+    Calibrate {
+        family: None,
+        instances: vec![
+            CalibrationInstance {
+                id: "reference-0".into(),
+                nonce: vec![1; 32],
+                achieved_energy_milli: -9_000,
+                max_energy_milli: -8_000,
+            },
+            CalibrationInstance {
+                id: "reference-1".into(),
+                nonce: vec![2; 32],
+                achieved_energy_milli: -9_500,
+                max_energy_milli: -8_000,
+            },
+        ],
+        deadline_ms,
+    }
+}
+
+/// Send one `Calibrate` and wait for its `CalibrateDone`.
+async fn run_calibrate(
+    tx: &mpsc::Sender<Result<CoordMsg, Status>>,
+    inbound: &mut Streaming<MinerMsg>,
+    outcome: &mut SessionOutcome,
+) {
+    let deadline_ms = now_unix_ms() + CALIBRATE_BUDGET_MS;
+    outcome.calibrate_deadline_ms = Some(deadline_ms);
+    let _ = send(
+        tx,
+        coord_msg::Msg::Calibrate(calibrate_request(deadline_ms)),
+    )
+    .await;
+    let _ = read_until(inbound, outcome, "calibrate->calibrate-done", |o| {
+        !o.calibrate_dones.is_empty()
+    })
+    .await;
+}
+
+fn advertises_iqm(hello: Option<&Hello>) -> bool {
+    hello
+        .and_then(|h| h.capabilities.as_ref())
+        .is_some_and(|c| c.supported_kinds.contains(&(JobKind::IqmSample as i32)))
+}
+
+/// The walk's integer quadratic model: three variables on a path, mixed
+/// signs, I32 milli coefficients.
+fn iqm_problem() -> IqmProblem {
+    IqmProblem {
+        edges: Some(EdgeList {
+            u: vec![0, 1],
+            v: vec![1, 2],
+        }),
+        upper_bounds: vec![3, 1, 5],
+        encoding: quip_proto::v1::CoefficientEncoding::I32 as i32,
+        scale: 1000,
+        h: encode_i32_le(&[-1000, 500, -250]),
+        j: encode_i32_le(&[750, -1500]),
+        num_reads: 2,
+        num_sweeps: 0,
+    }
+}
+
+/// The consensus energy of `values` under [`iqm_problem`], in milli.
+fn iqm_score(values: &[u32]) -> Result<i64, String> {
+    let problem = iqm_problem();
+    let h = decode_i32_le(&problem.h).map_err(|e| e.to_string())?;
+    let j = decode_i32_le(&problem.j).map_err(|e| e.to_string())?;
+    let edges: Vec<(usize, usize)> = problem.edges.as_ref().map_or_else(Vec::new, |e| {
+        e.u.iter()
+            .zip(&e.v)
+            .map(|(&u, &v)| (u as usize, v as usize))
+            .collect()
+    });
+    Ok(iqm_energy_from_milli(values, &h, &j, &edges))
+}
+
+/// Check one IQM `Result`: a `SamplerMeta`, at least one solution, and each
+/// solution's values within the bounds and scoring to its reported energy.
+/// Returns the solution count.
+fn grade_iqm_result(r: &quip_proto::v1::Result) -> Result<usize, String> {
+    let problem = iqm_problem();
+    if r.meta.is_none() {
+        return Err("the IQM Result has no SamplerMeta".into());
+    }
+    if r.solutions.is_empty() {
+        return Err("the IQM Result has no solutions".into());
+    }
+    for (index, solution) in r.solutions.iter().enumerate() {
+        if solution.values.len() != problem.upper_bounds.len() {
+            return Err(format!(
+                "solution {index} has {} values for {} variables",
+                solution.values.len(),
+                problem.upper_bounds.len()
+            ));
+        }
+        if let Some(variable) = solution
+            .values
+            .iter()
+            .zip(&problem.upper_bounds)
+            .position(|(x, bound)| x > bound)
+        {
+            return Err(format!(
+                "solution {index} sets variable {variable} above its bound"
+            ));
+        }
+        let rescored = iqm_score(&solution.values)?;
+        if solution.energy_milli != rescored {
+            return Err(format!(
+                "solution {index} reports energy_milli {}, its values score {rescored}",
+                solution.energy_milli
+            ));
+        }
+    }
+    Ok(r.solutions.len())
+}
+
+/// Send one `IQM_SAMPLE` job and wait for its terminal reply and its credit.
+/// A miner that advertises the kind must solve it; any other must reject it
+/// with `UNSUPPORTED_KIND`. Generation 0, so the earlier `Cancel` cannot
+/// cover it.
+async fn run_iqm(
+    tx: &mpsc::Sender<Result<CoordMsg, Status>>,
+    inbound: &mut Streaming<MinerMsg>,
+    outcome: &mut SessionOutcome,
+    deadline_ms: u64,
+) {
+    if advertises_iqm(outcome.hello.as_ref()) {
+        outcome.iqm = Some(IqmOutcome::default());
+    }
+    let _ = dispatch(
+        tx,
+        outcome,
+        Job {
+            job_id: IQM_JOB_ID.to_vec(),
+            kind: JobKind::IqmSample as i32,
+            generation: 0,
+            deadline_ms,
+            iqm: Some(iqm_problem()),
+            ..Default::default()
+        },
+        None,
+    )
+    .await;
+    let expect_credits = outcome.jobs_dispatched as u64;
+    let _ = read_until(inbound, outcome, "iqm-job", |o| {
+        let answered = o.rejects.iter().any(|r| r.job_id == IQM_JOB_ID)
+            || o.iqm
+                .as_ref()
+                .is_some_and(|iqm| iqm.solutions > 0 || iqm.defect.is_some());
+        answered && o.credits_refunded() >= expect_credits
+    })
+    .await;
 }
 
 fn advertises_lease(hello: Option<&Hello>) -> bool {
@@ -1340,6 +1659,12 @@ async fn run_script(
         return outcome;
     }
 
+    // 2b. Calibrate, only to a miner that lists the feature: after Topology
+    //     and before the first job, the driver waits for the CalibrateDone.
+    if advertises_calibrate(outcome.hello.as_ref()) {
+        run_calibrate(tx, inbound, &mut outcome).await;
+    }
+
     // 3. GetCapabilities -> Capabilities. Sent on its own so the reply cannot
     //    be confused with an unprompted mid-session capability update.
     let _ = send(tx, coord_msg::Msg::GetCapabilities(GetCapabilities {})).await;
@@ -1531,6 +1856,11 @@ async fn run_script(
     })
     .await;
 
+    // 10b. One IQM_SAMPLE job: solved by a miner that advertises the kind,
+    //      rejected as UNSUPPORTED_KIND by any other. Before the lease, whose
+    //      refund accounting counts every credit after `LeaseDone`.
+    run_iqm(tx, inbound, &mut outcome, future).await;
+
     // 11. Generation runs above the cancellation watermark from the plain jobs.
     if advertises_lease(outcome.hello.as_ref()) {
         run_lease(tx, inbound, &mut outcome, PHASE_TIMEOUT).await;
@@ -1643,6 +1973,39 @@ async fn run_script_one_job(
     )
     .await;
 
+    drain_to_end(inbound, &mut outcome).await;
+    outcome
+}
+
+/// Handshake, one `Calibrate` whatever the miner lists, then `Shutdown`.
+async fn run_script_calibrate(
+    inbound: &mut Streaming<MinerMsg>,
+    tx: &mpsc::Sender<Result<CoordMsg, Status>>,
+) -> SessionOutcome {
+    let mut outcome = SessionOutcome::default();
+
+    if !read_hello(inbound, &mut outcome).await {
+        return outcome;
+    }
+
+    if !send(
+        tx,
+        coord_msg::Msg::Welcome(Welcome {
+            protocol_version: 2,
+        }),
+    )
+    .await
+    {
+        return outcome;
+    }
+    let _ = send(tx, coord_msg::Msg::Configure(configure())).await;
+    let _ = send(tx, coord_msg::Msg::Topology(dense_topology())).await;
+    let _ = read_until(inbound, &mut outcome, "configure->ready", |o| {
+        o.ready_received && !o.job_request_credits.is_empty()
+    })
+    .await;
+    run_calibrate(tx, inbound, &mut outcome).await;
+    let _ = send(tx, coord_msg::Msg::Shutdown(Shutdown { grace_ms: 1000 })).await;
     drain_to_end(inbound, &mut outcome).await;
     outcome
 }
@@ -1878,6 +2241,9 @@ async fn drive_miner_with_script(
     .await;
     DriverReport {
         lease: outcome.lease,
+        iqm: outcome.iqm,
+        calibrate_deadline_ms: outcome.calibrate_deadline_ms,
+        calibrate_dones: outcome.calibrate_dones,
         handshake_ok: outcome.handshake_ok,
         hello: outcome.hello,
         ready_received: outcome.ready_received,
@@ -1937,6 +2303,14 @@ pub async fn drive_miner_close_after_welcome(bin_path: &str, socket: &str) -> Dr
 /// A conformant miner exits `TokenRejected` (77).
 pub async fn drive_miner_close_before_welcome(bin_path: &str, socket: &str) -> DriverReport {
     drive_miner_with_script(bin_path, &[], socket, ScriptKind::CloseBeforeWelcome).await
+}
+
+/// Send one `Calibrate` to `bin_path` even when it does not list the
+/// `calibrate` feature, which the full walk never does. Grade it with
+/// [`DriverReport::unlisted_calibrate_conformant`]: the Rust SDK answers such a
+/// `Calibrate` with outcome `FAILED`.
+pub async fn drive_miner_unlisted_calibrate(bin_path: &str, socket: &str) -> DriverReport {
+    drive_miner_with_script(bin_path, &[], socket, ScriptKind::Calibrate).await
 }
 
 /// Exit code a miner must use when it refuses a `Welcome` it cannot speak.
@@ -2003,6 +2377,9 @@ mod tests {
     fn bare_report() -> DriverReport {
         DriverReport {
             lease: None,
+            iqm: None,
+            calibrate_deadline_ms: None,
+            calibrate_dones: vec![],
             handshake_ok: true,
             hello: None,
             ready_received: false,
@@ -2051,6 +2428,7 @@ mod tests {
             solver_id: String::new(),
             generated_families: vec![],
             accepted_families: vec![],
+            solve_options: vec![],
         }
     }
 
@@ -2104,8 +2482,8 @@ mod tests {
         r.hello = Some(hello("mock"));
         r.ready_received = true;
         // Grant of 3, then one refund per dispatched job.
-        r.job_request_credits = vec![3, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1];
-        r.jobs_dispatched = 11;
+        r.job_request_credits = vec![3, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1];
+        r.jobs_dispatched = 12;
         r.results = full_results();
         r.rejects = vec![
             ObservedReject {
@@ -2127,6 +2505,11 @@ mod tests {
             // The report advertises no lease, so the driver sent one anyway.
             ObservedReject {
                 job_id: LEASE_JOB_ID.to_vec(),
+                reason: RejectReason::UnsupportedKind as i32,
+            },
+            // Nor IQM_SAMPLE, so the driver sent one IQM job anyway.
+            ObservedReject {
+                job_id: IQM_JOB_ID.to_vec(),
                 reason: RejectReason::UnsupportedKind as i32,
             },
         ];
@@ -2316,6 +2699,212 @@ mod tests {
         assert!(conformant_report().lease_conformant());
     }
 
+    #[test]
+    fn an_unadvertised_iqm_job_must_be_rejected_as_unsupported() {
+        assert!(conformant_report().iqm_conformant());
+        assert!(conformant_report().is_conformant());
+
+        let mut served = conformant_report();
+        served.rejects.retain(|reject| reject.job_id != IQM_JOB_ID);
+        assert!(!served.iqm_conformant(), "no reject: {served:?}");
+        assert!(!served.is_conformant());
+
+        let mut wrong = conformant_report();
+        for reject in &mut wrong.rejects {
+            if reject.job_id == IQM_JOB_ID {
+                reject.reason = RejectReason::Malformed as i32;
+            }
+        }
+        assert!(!wrong.iqm_conformant(), "wrong reason: {wrong:?}");
+    }
+
+    fn calibrate_done(outcome: CalibrateOutcome, received_unix_ms: u64) -> ObservedCalibrateDone {
+        ObservedCalibrateDone {
+            outcome: outcome as i32,
+            summary: None,
+            received_unix_ms,
+        }
+    }
+
+    #[test]
+    fn an_unadvertised_calibrate_is_never_sent_or_answered() {
+        assert!(conformant_report().calibrate_conformant());
+        assert!(conformant_report().is_conformant());
+
+        let mut unsolicited = conformant_report();
+        unsolicited.calibrate_dones = vec![calibrate_done(CalibrateOutcome::Failed, 5)];
+        assert!(!unsolicited.calibrate_conformant(), "{unsolicited:?}");
+        assert!(!unsolicited.is_conformant());
+    }
+
+    #[test]
+    fn an_advertised_calibrate_needs_one_answer_on_time() {
+        let deadline = 10_000;
+        let late = deadline + CALIBRATE_DELIVERY_SLACK_MS + 1;
+        // (label, answers, conformant)
+        let rows = [
+            ("no answer", vec![], false),
+            (
+                "done early",
+                vec![calibrate_done(CalibrateOutcome::Done, 9_000)],
+                true,
+            ),
+            (
+                "failed early",
+                vec![calibrate_done(CalibrateOutcome::Failed, 9_000)],
+                true,
+            ),
+            (
+                "done within the delivery slack",
+                vec![calibrate_done(CalibrateOutcome::Done, deadline + 10)],
+                true,
+            ),
+            (
+                "done too late",
+                vec![calibrate_done(CalibrateOutcome::Done, late)],
+                false,
+            ),
+            (
+                "deadline passed at the deadline",
+                vec![calibrate_done(
+                    CalibrateOutcome::DeadlinePassed,
+                    deadline + 5,
+                )],
+                true,
+            ),
+            (
+                "deadline passed before the deadline",
+                vec![calibrate_done(
+                    CalibrateOutcome::DeadlinePassed,
+                    deadline - 1,
+                )],
+                false,
+            ),
+            (
+                "deadline passed too late",
+                vec![calibrate_done(CalibrateOutcome::DeadlinePassed, late)],
+                false,
+            ),
+            (
+                "unspecified outcome",
+                vec![calibrate_done(CalibrateOutcome::Unspecified, 9_000)],
+                false,
+            ),
+            (
+                "two answers",
+                vec![
+                    calibrate_done(CalibrateOutcome::Done, 9_000),
+                    calibrate_done(CalibrateOutcome::Done, 9_001),
+                ],
+                false,
+            ),
+        ];
+        for (label, answers, conformant) in rows {
+            let mut report = conformant_report();
+            if let Some(caps) = report.hello.as_mut().and_then(|h| h.capabilities.as_mut()) {
+                caps.features.push(CALIBRATE_FEATURE.to_owned());
+            }
+            report.calibrate_deadline_ms = Some(deadline);
+            report.calibrate_dones = answers;
+            assert_eq!(report.calibrate_conformant(), conformant, "{label}");
+        }
+
+        let mut unsent = conformant_report();
+        if let Some(caps) = unsent.hello.as_mut().and_then(|h| h.capabilities.as_mut()) {
+            caps.features.push(CALIBRATE_FEATURE.to_owned());
+        }
+        assert!(!unsent.calibrate_conformant(), "advertised but never sent");
+    }
+
+    /// The `Result` a correct IQM solver returns: every variable at its
+    /// bound, with the consensus energy.
+    fn iqm_result() -> quip_proto::v1::Result {
+        let values = iqm_problem().upper_bounds;
+        quip_proto::v1::Result {
+            job_id: IQM_JOB_ID.to_vec(),
+            solutions: vec![quip_proto::v1::Solution {
+                energy_milli: iqm_score(&values).unwrap(),
+                spins: vec![],
+                values,
+            }],
+            meta: Some(quip_proto::v1::SamplerMeta::default()),
+            ..Default::default()
+        }
+    }
+
+    /// A conformant report from a miner that advertises `IQM_SAMPLE`, before
+    /// its IQM `Result` is folded in.
+    fn iqm_report() -> DriverReport {
+        let mut r = conformant_report();
+        r.rejects.retain(|reject| reject.job_id != IQM_JOB_ID);
+        let caps = r.hello.as_mut().unwrap().capabilities.as_mut().unwrap();
+        caps.supported_kinds.push(JobKind::IqmSample as i32);
+        r.capabilities_received = Some(caps.clone());
+        r
+    }
+
+    #[test]
+    fn an_advertised_iqm_job_needs_values_within_bounds_and_their_energy() {
+        type Edit = fn(&mut quip_proto::v1::Result);
+        let rows: [(&str, Edit, bool); 6] = [
+            ("correct", |_| {}, true),
+            (
+                "energy off by one",
+                |r| {
+                    if let Some(s) = r.solutions.first_mut() {
+                        s.energy_milli += 1;
+                    }
+                },
+                false,
+            ),
+            (
+                "a value above its bound",
+                |r| {
+                    if let Some(s) = r.solutions.first_mut() {
+                        if let Some(x) = s.values.first_mut() {
+                            *x += 1;
+                        }
+                    }
+                },
+                false,
+            ),
+            (
+                "one value short",
+                |r| {
+                    if let Some(s) = r.solutions.first_mut() {
+                        let _ = s.values.pop();
+                    }
+                },
+                false,
+            ),
+            ("no solutions", |r| r.solutions.clear(), false),
+            ("no meta", |r| r.meta = None, false),
+        ];
+        for (label, edit, ok) in rows {
+            let mut outcome = SessionOutcome {
+                iqm: Some(IqmOutcome::default()),
+                ..SessionOutcome::default()
+            };
+            let mut result = iqm_result();
+            edit(&mut result);
+            fold(&mut outcome, miner_msg::Msg::Result(result));
+            assert!(outcome.results.is_empty(), "{label}: graded apart");
+            let mut report = iqm_report();
+            report.iqm = outcome.iqm;
+            assert_eq!(report.iqm_conformant(), ok, "{label}: {:?}", report.iqm);
+            assert_eq!(report.is_conformant(), ok, "{label}");
+        }
+
+        // An advertised kind must not be refused.
+        let mut refused = iqm_report();
+        refused.iqm = Some(IqmOutcome::default());
+        refused.rejects.push(ObservedReject {
+            job_id: IQM_JOB_ID.to_vec(),
+            reason: RejectReason::UnsupportedKind as i32,
+        });
+        assert!(!refused.iqm_conformant());
+    }
+
     fn lease_result(index: u64) -> quip_proto::v1::Result {
         let generator = lease_generator();
         let spec = quip_protocol::lease::LeaseSpec::from_proto(&generator).unwrap();
@@ -2335,6 +2924,7 @@ mod tests {
                     &j,
                     &topology.edges,
                 ),
+                values: vec![],
             }],
             ..Default::default()
         }

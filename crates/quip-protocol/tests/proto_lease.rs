@@ -91,6 +91,7 @@ fn proto_result_verifies_and_rejects_malformed_fields() {
         solutions: vec![Solution {
             spins: encode_spins_packed(&spins),
             energy_milli,
+            values: vec![],
         }],
         ..Default::default()
     };
