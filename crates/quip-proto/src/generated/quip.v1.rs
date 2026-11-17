@@ -303,6 +303,14 @@ pub struct Status {
         ::prost::alloc::string::String,
         ::prost::alloc::string::String,
     >,
+    /// Fraction of the spending or capacity budget still available, 0.0 to 1.0.
+    /// Unset when the solver does not report one.
+    #[prost(double, optional, tag = "6")]
+    pub headroom: ::core::option::Option<f64>,
+    /// The solver has hit a limit and refuses new work with OVERLOADED until it
+    /// resets.
+    #[prost(bool, tag = "7")]
+    pub limit_reached: bool,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Fatal {

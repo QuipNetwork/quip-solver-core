@@ -77,6 +77,9 @@ const LIVE_GENERATION: u64 = 2;
 /// ordinary jobs — every one of those is already settled behind a barrier.
 const CANCEL_GENERATION: u64 = 3;
 
+/// Id of the job the walk sends to a solver that reported `limit_reached`.
+const LIMIT_JOB_ID: &[u8] = b"job-limit";
+
 const LEASE_JOB_ID: &[u8] = b"job-lease";
 const LEASE_SALTS: u32 = 4;
 
@@ -176,6 +179,10 @@ pub struct DriverReport {
     pub cancel_acked: bool,
     /// True when a `Status` arrived in the `Ping` phase.
     pub ping_acked: bool,
+    /// True when the walk sent the limit probe job. It does so after a probing
+    /// `Ping` whose `Status` carried `limit_reached`, to check that the solver
+    /// refuses the next job with `OVERLOADED`.
+    pub limit_probe_sent: bool,
     /// The `Capabilities` the miner returned for `GetCapabilities`.
     pub capabilities_received: Option<Capabilities>,
     /// Highest generation the script cancelled, or `0` when it cancelled none.
@@ -263,17 +270,21 @@ impl DriverReport {
             && self.ping_acked
             && self.capabilities_conformant()
             && self.live_cancel_conformant()
+            && self.headroom_conformant()
+            && self.limit_conformant()
             && self.credit_ledger_balanced()
             && self.terminal == Terminal::Closed
             && self.timed_out_phases.is_empty()
             && self.exit_code == 0
     }
 
-    /// Grade salt leases only when the miner advertises `ISING_GENERATE`.
+    /// Grade salt leases. A miner that advertises `ISING_GENERATE` must serve
+    /// the four-salt lease. A miner that does not must answer one lease with
+    /// `Reject` `UNSUPPORTED_KIND`.
     #[must_use]
     pub fn lease_conformant(&self) -> bool {
-        !advertises_lease(self.hello.as_ref())
-            || self.lease.as_ref().is_some_and(|lease| {
+        if advertises_lease(self.hello.as_ref()) {
+            self.lease.as_ref().is_some_and(|lease| {
                 lease.results == LEASE_SALTS
                     && lease.results_verified == LEASE_SALTS
                     && lease
@@ -281,6 +292,9 @@ impl DriverReport {
                         .is_some_and(|(salts, _)| salts == u64::from(LEASE_SALTS))
                     && lease.credit_refunded
             })
+        } else {
+            self.has_reject(LEASE_JOB_ID, RejectReason::UnsupportedKind)
+        }
     }
 
     /// Every required `Result` present, no unexpected one, and each carrying
@@ -422,6 +436,26 @@ impl DriverReport {
             })
     }
 
+    /// Every `Status.headroom` the solver sent is a finite fraction in
+    /// `0.0..=1.0`. An unset headroom passes: reporting it is optional.
+    #[must_use]
+    pub fn headroom_conformant(&self) -> bool {
+        self.statuses
+            .iter()
+            .filter_map(|s| s.headroom)
+            .all(|h| (0.0..=1.0).contains(&h))
+    }
+
+    /// A solver whose `Status` carried `limit_reached` refused the next job
+    /// with `OVERLOADED`: the probe job drew that `Reject` and no `Result`.
+    /// Passes when the walk never saw `limit_reached` and sent no probe.
+    #[must_use]
+    pub fn limit_conformant(&self) -> bool {
+        !self.limit_probe_sent
+            || (self.has_reject(LIMIT_JOB_ID, RejectReason::Overloaded)
+                && !self.results.iter().any(|r| r.job_id == LIMIT_JOB_ID))
+    }
+
     /// Highest `abandoned_generation` any `Status` reported.
     #[must_use]
     pub fn abandoned_watermark(&self) -> u64 {
@@ -484,12 +518,21 @@ impl DriverReport {
             ("ping ack", self.ping_acked),
             ("cancel ack", self.cancel_acked),
             ("cancellation honoured", self.live_cancel_conformant()),
+            ("headroom in range", self.headroom_conformant()),
+            (
+                if self.limit_probe_sent {
+                    "limit refuses with OVERLOADED"
+                } else {
+                    "limit refuses with OVERLOADED (no limit reported)"
+                },
+                self.limit_conformant(),
+            ),
             ("credit ledger", self.credit_ledger_balanced()),
             (
                 if advertises_lease(self.hello.as_ref()) {
                     "salt lease"
                 } else {
-                    "salt lease (not advertised, skipped)"
+                    "salt lease (not advertised, must be rejected)"
                 },
                 self.lease_conformant(),
             ),
@@ -558,6 +601,7 @@ pub(crate) struct SessionOutcome {
     pub(crate) statuses: Vec<MinerStatus>,
     cancel_acked: bool,
     ping_acked: bool,
+    limit_probe_sent: bool,
     capabilities_received: Option<Capabilities>,
     cancelled_watermark: u64,
     fatal: Option<(i32, String)>,
@@ -985,8 +1029,10 @@ fn fold(outcome: &mut SessionOutcome, m: miner_msg::Msg) {
         miner_msg::Msg::Ready(_) => outcome.ready_received = true,
         miner_msg::Msg::JobRequest(jr) => {
             outcome.job_request_credits.push(jr.credits);
+            // The refund after `LeaseDone` is the lease's own. The limit probe
+            // runs after the lease phase and draws a refund of its own.
             if let Some(lease) = &mut outcome.lease {
-                if lease.lease_done.is_some() {
+                if lease.lease_done.is_some() && !outcome.limit_probe_sent {
                     outcome.lease_refund_messages += 1;
                     lease.credit_refunded = jr.credits == 1 && outcome.lease_refund_messages == 1;
                 }
@@ -1145,6 +1191,44 @@ async fn run_lease(
     .is_err()
     {
         outcome.timed_out_phases.push("salt-lease".to_owned());
+    }
+}
+
+/// Send one lease to a miner that does not advertise `ISING_GENERATE` and wait
+/// for its `Reject`. The lease is valid in every other respect, so the only
+/// ground to refuse it is its kind.
+async fn run_declined_lease(
+    tx: &mpsc::Sender<Result<CoordMsg, Status>>,
+    inbound: &mut Streaming<MinerMsg>,
+    outcome: &mut SessionOutcome,
+    budget: Duration,
+) {
+    let _ = send(tx, coord_msg::Msg::Topology(lease_topology())).await;
+    let _ = send(tx, coord_msg::Msg::SetTarget(lease_target())).await;
+    let _ = dispatch(
+        tx,
+        outcome,
+        Job {
+            job_id: LEASE_JOB_ID.to_vec(),
+            kind: JobKind::IsingGenerate as i32,
+            generation: CANCEL_GENERATION + 1,
+            generator: Some(lease_generator()),
+            deadline_ms: 0,
+            ..Default::default()
+        },
+        None,
+    )
+    .await;
+    if tokio::time::timeout(
+        budget,
+        read_until(inbound, outcome, "declined-lease", |o| {
+            o.rejects.iter().any(|r| r.job_id == LEASE_JOB_ID)
+        }),
+    )
+    .await
+    .is_err()
+    {
+        outcome.timed_out_phases.push("declined-lease".to_owned());
     }
 }
 
@@ -1450,9 +1534,42 @@ async fn run_script(
     // 11. Generation runs above the cancellation watermark from the plain jobs.
     if advertises_lease(outcome.hello.as_ref()) {
         run_lease(tx, inbound, &mut outcome, PHASE_TIMEOUT).await;
+    } else {
+        run_declined_lease(tx, inbound, &mut outcome, PHASE_TIMEOUT).await;
     }
 
-    // 12. Shutdown -> miner flushes and exits 0, closing its send stream.
+    // 12. Limit probe. A solver that reports `limit_reached` refuses new work
+    //      with OVERLOADED, so this final Ping reads the flag and, when it is set,
+    //      one more job must draw that Reject. Sent after every job the walk
+    //      needs a Result or a lease for, so a solver that has reached a
+    //      limit still serves them.
+    let before = outcome.statuses.len();
+    let _ = send(tx, coord_msg::Msg::Ping(Ping {})).await;
+    let _ = read_until(inbound, &mut outcome, "limit-probe->status", |o| {
+        o.statuses.len() > before
+    })
+    .await;
+    if outcome
+        .statuses
+        .get(before..)
+        .is_some_and(|new| new.iter().any(|s| s.limit_reached))
+    {
+        outcome.limit_probe_sent = true;
+        let _ = dispatch(
+            tx,
+            &mut outcome,
+            job_at(LIMIT_JOB_ID, future, CANCEL_GENERATION + 1, valid_ising()),
+            Some(valid_spec()),
+        )
+        .await;
+        let expect_credits = outcome.jobs_dispatched as u64;
+        let _ = read_until(inbound, &mut outcome, "limit-probe-job", |o| {
+            o.credits_refunded() >= expect_credits
+        })
+        .await;
+    }
+
+    // 13. Shutdown -> miner flushes and exits 0, closing its send stream.
     let _ = send(tx, coord_msg::Msg::Shutdown(Shutdown { grace_ms: 1000 })).await;
     drain_to_end(inbound, &mut outcome).await;
 
@@ -1744,10 +1861,15 @@ pub(crate) async fn run_miner(
 ///
 /// `socket` is a `unix://<path>` URI; the same value is passed to the miner via
 /// `--quip-coordinator`.
-async fn drive_miner_with_script(bin_path: &str, socket: &str, script: ScriptKind) -> DriverReport {
+async fn drive_miner_with_script(
+    bin_path: &str,
+    extra_args: &[&str],
+    socket: &str,
+    script: ScriptKind,
+) -> DriverReport {
     let (outcome, exit_code, stderr) = run_miner(
         bin_path,
-        &[],
+        extra_args,
         socket,
         script.into_script(),
         CHILD_TIMEOUT,
@@ -1766,6 +1888,7 @@ async fn drive_miner_with_script(bin_path: &str, socket: &str, script: ScriptKin
         statuses: outcome.statuses,
         cancel_acked: outcome.cancel_acked,
         ping_acked: outcome.ping_acked,
+        limit_probe_sent: outcome.limit_probe_sent,
         capabilities_received: outcome.capabilities_received,
         cancelled_watermark: outcome.cancelled_watermark,
         fatal: outcome.fatal,
@@ -1778,32 +1901,42 @@ async fn drive_miner_with_script(bin_path: &str, socket: &str, script: ScriptKin
 
 /// Run the full conformance walk against `bin_path`.
 pub async fn drive_miner(bin_path: &str, socket: &str) -> DriverReport {
-    drive_miner_with_script(bin_path, socket, ScriptKind::Full).await
+    drive_miner_with_script(bin_path, &[], socket, ScriptKind::Full).await
+}
+
+/// Run the full conformance walk against `bin_path`, which the driver starts
+/// with `extra_args` before its own `--quip-coordinator` argument.
+pub async fn drive_miner_with_args(
+    bin_path: &str,
+    extra_args: &[&str],
+    socket: &str,
+) -> DriverReport {
+    drive_miner_with_script(bin_path, extra_args, socket, ScriptKind::Full).await
 }
 
 /// Send a `Welcome` with an unsupported `protocol_version` and observe how
 /// `bin_path` rejects it. A conformant miner exits `ConfigInvalid` (64) and
 /// sends a `Fatal` before disconnecting.
 pub async fn drive_miner_bad_welcome(bin_path: &str, socket: &str) -> DriverReport {
-    drive_miner_with_script(bin_path, socket, ScriptKind::BadWelcome).await
+    drive_miner_with_script(bin_path, &[], socket, ScriptKind::BadWelcome).await
 }
 
 /// Handshake, one valid job, then wait. Does not send `Shutdown`.
 pub async fn drive_miner_one_job(bin_path: &str, socket: &str) -> DriverReport {
-    drive_miner_with_script(bin_path, socket, ScriptKind::OneJobThenWait).await
+    drive_miner_with_script(bin_path, &[], socket, ScriptKind::OneJobThenWait).await
 }
 
 /// Answer `Hello` with `Welcome`, then drop the stream without `Shutdown`.
 /// A conformant miner treats the vanished coordinator as a failure and exits
 /// `InternalFatal` (70), not `Clean`.
 pub async fn drive_miner_close_after_welcome(bin_path: &str, socket: &str) -> DriverReport {
-    drive_miner_with_script(bin_path, socket, ScriptKind::CloseAfterWelcome).await
+    drive_miner_with_script(bin_path, &[], socket, ScriptKind::CloseAfterWelcome).await
 }
 
 /// Read `Hello`, then drop the stream without ever sending `Welcome`.
 /// A conformant miner exits `TokenRejected` (77).
 pub async fn drive_miner_close_before_welcome(bin_path: &str, socket: &str) -> DriverReport {
-    drive_miner_with_script(bin_path, socket, ScriptKind::CloseBeforeWelcome).await
+    drive_miner_with_script(bin_path, &[], socket, ScriptKind::CloseBeforeWelcome).await
 }
 
 /// Exit code a miner must use when it refuses a `Welcome` it cannot speak.
@@ -1880,6 +2013,7 @@ mod tests {
             statuses: vec![],
             cancel_acked: false,
             ping_acked: false,
+            limit_probe_sent: false,
             capabilities_received: None,
             cancelled_watermark: 0,
             fatal: None,
@@ -1927,6 +2061,23 @@ mod tests {
             jobs_done: 0,
             abandoned_generation: abandoned,
             sampler_stats: HashMap::new(),
+            headroom: None,
+            limit_reached: false,
+        }
+    }
+
+    fn limited_status(headroom: Option<f64>, limit_reached: bool) -> MinerStatus {
+        MinerStatus {
+            headroom,
+            limit_reached,
+            ..status(0)
+        }
+    }
+
+    fn limit_reject(reason: RejectReason) -> ObservedReject {
+        ObservedReject {
+            job_id: LIMIT_JOB_ID.to_vec(),
+            reason: reason as i32,
         }
     }
 
@@ -1953,8 +2104,8 @@ mod tests {
         r.hello = Some(hello("mock"));
         r.ready_received = true;
         // Grant of 3, then one refund per dispatched job.
-        r.job_request_credits = vec![3, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1];
-        r.jobs_dispatched = 10;
+        r.job_request_credits = vec![3, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1];
+        r.jobs_dispatched = 11;
         r.results = full_results();
         r.rejects = vec![
             ObservedReject {
@@ -1973,6 +2124,11 @@ mod tests {
                 job_id: b"job-old".to_vec(),
                 reason: RejectReason::Expired as i32,
             },
+            // The report advertises no lease, so the driver sent one anyway.
+            ObservedReject {
+                job_id: LEASE_JOB_ID.to_vec(),
+                reason: RejectReason::UnsupportedKind as i32,
+            },
         ];
         r.statuses = vec![status(1), status(CANCEL_GENERATION)];
         r.cancel_acked = true;
@@ -1983,11 +2139,73 @@ mod tests {
         r
     }
 
+    #[test]
+    fn headroom_must_stay_within_the_unit_interval() {
+        // (label, reported headroom, conformant)
+        let rows = [
+            ("unset", None, true),
+            ("empty", Some(0.0), true),
+            ("full", Some(1.0), true),
+            ("half", Some(0.5), true),
+            ("above one", Some(1.5), false),
+            ("below zero", Some(-0.1), false),
+            ("not a number", Some(f64::NAN), false),
+            ("infinite", Some(f64::INFINITY), false),
+        ];
+        for (label, headroom, conformant) in rows {
+            let mut r = conformant_report();
+            r.statuses.push(limited_status(headroom, false));
+            assert_eq!(r.headroom_conformant(), conformant, "{label}");
+            assert_eq!(r.is_conformant(), conformant, "{label}");
+        }
+    }
+
+    #[test]
+    fn a_limit_reached_solver_must_refuse_the_probe_job_with_overloaded() {
+        // (label, probe sent, rejects for the probe job, result for it, conformant)
+        let rows = [
+            ("no probe sent", false, vec![], false, true),
+            (
+                "refused with OVERLOADED",
+                true,
+                vec![limit_reject(RejectReason::Overloaded)],
+                false,
+                true,
+            ),
+            ("no reply to the probe job", true, vec![], false, false),
+            (
+                "refused with another reason",
+                true,
+                vec![limit_reject(RejectReason::Malformed)],
+                false,
+                false,
+            ),
+            ("served the probe job", true, vec![], true, false),
+        ];
+        for (label, probe_sent, rejects, served, conformant) in rows {
+            let mut r = conformant_report();
+            r.limit_probe_sent = probe_sent;
+            if probe_sent {
+                r.statuses.push(limited_status(Some(0.0), true));
+                r.jobs_dispatched += 1;
+                r.job_request_credits.push(1);
+            }
+            r.rejects.extend(rejects);
+            if served {
+                r.results.push(result(LIMIT_JOB_ID, 0, Some(0)));
+            }
+            assert_eq!(r.limit_conformant(), conformant, "{label}");
+            assert_eq!(r.is_conformant(), conformant, "{label}");
+        }
+    }
+
     fn lease_report() -> DriverReport {
         let mut r = conformant_report();
         let caps = r.hello.as_mut().unwrap().capabilities.as_mut().unwrap();
         caps.supported_kinds.push(JobKind::IsingGenerate as i32);
         r.capabilities_received = Some(caps.clone());
+        // An advertised lease is served, not rejected.
+        r.rejects.retain(|reject| reject.job_id != LEASE_JOB_ID);
         r
     }
 
@@ -2050,7 +2268,7 @@ mod tests {
                 false,
             ),
             (
-                "an unadvertised lease without an outcome",
+                "an unadvertised lease rejected as unsupported",
                 false,
                 None,
                 true,
@@ -2076,6 +2294,26 @@ mod tests {
             r.lease = lease;
             assert_eq!(r.is_conformant(), conformant, "{label}: {r:?}");
         }
+    }
+
+    #[test]
+    fn an_unadvertised_lease_must_be_rejected_as_unsupported() {
+        let mut served = conformant_report();
+        served
+            .rejects
+            .retain(|reject| reject.job_id != LEASE_JOB_ID);
+        assert!(!served.lease_conformant(), "no reject: {served:?}");
+        assert!(!served.is_conformant());
+
+        let mut wrong = conformant_report();
+        for reject in &mut wrong.rejects {
+            if reject.job_id == LEASE_JOB_ID {
+                reject.reason = RejectReason::Malformed as i32;
+            }
+        }
+        assert!(!wrong.lease_conformant(), "wrong reason: {wrong:?}");
+
+        assert!(conformant_report().lease_conformant());
     }
 
     fn lease_result(index: u64) -> quip_proto::v1::Result {

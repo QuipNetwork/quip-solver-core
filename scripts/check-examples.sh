@@ -26,7 +26,7 @@ skipped() {
 }
 
 echo "==> building the conformance driver"
-cargo build -p quip-solver-conformance --bin quip-solver-drive --release
+cargo build --locked -p quip-solver-conformance --bin quip-solver-drive --release
 DRIVE="$REPO_ROOT/target/release/quip-solver-drive"
 
 # Runs both gates and reports the language, so a failure names itself rather
@@ -44,14 +44,16 @@ drive() {
 
 if ! skipped rust; then
     echo "==> building the Rust sample"
-    # Resolves quip-solver-core from crates.io, not from this tree.
+    # Resolves quip-solver-core from crates.io, not from this tree. No
+    # --locked: the example commits no lockfile, because CI patches it to the
+    # unpacked crates at run time (see smoke:rust in .gitlab-ci.yml).
     (cd examples/rust && cargo build --release)
     drive rust examples/rust/target/release/mock_miner
 fi
 
 if ! skipped cpp; then
     echo "==> building the C library and the C++ sample"
-    cargo build -p quip-solver-c --release
+    cargo build --locked -p quip-solver-c --release
     make -C examples/cpp mock_miner
     drive cpp examples/cpp/mock_miner
 fi
@@ -68,7 +70,7 @@ if ! skipped python; then
     # shellcheck disable=SC1091  # created just above, so it cannot be followed
     . .venv-examples/bin/activate
     pip install --quiet maturin
-    maturin develop
+    maturin develop --locked
     cat >"$SOCKET_DIR/py_miner" <<EOF
 #!/bin/sh
 exec "$REPO_ROOT/.venv-examples/bin/python" "$REPO_ROOT/examples/python/mock_miner.py" "\$@"

@@ -41,7 +41,10 @@ fi
 MISSING=0
 while IFS= read -r name; do
     [ -n "$name" ] || continue
-    if printf '%s\n' "$CONTENTS" | grep -Fxq "$ROOT/$name"; then
+    # A here-string, not a pipe. grep -q exits at the first match, and a
+    # writer still in a pipe then dies of SIGPIPE, which pipefail reports
+    # as a missing file.
+    if grep -Fxq -- "$ROOT/$name" <<<"$CONTENTS"; then
         echo "  ok      $name"
     else
         echo "  MISSING $name" >&2

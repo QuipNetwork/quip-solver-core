@@ -270,6 +270,12 @@ message Status {
   uint64 jobs_done    = 3;
   uint64 abandoned_generation = 4; // cancelled in-flight work reported here, not in Result
   map<string, string> sampler_stats = 5;
+  // Fraction of the spending or capacity budget still available, 0.0 to 1.0.
+  // Unset when the solver does not report one.
+  optional double headroom = 6;
+  // The solver has hit a limit and refuses new work with OVERLOADED until it
+  // resets.
+  bool limit_reached = 7;
 }
 
 message Fatal {

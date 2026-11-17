@@ -152,7 +152,7 @@ docs:
   extends: .toolchain
   tags: [linux, amd64]
   script:
-    - RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace --exclude quip-protocol-py
+    - RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps --workspace --exclude quip-protocol-py
 
 conformance:
   stage: test
@@ -163,7 +163,7 @@ conformance:
     # image puts /opt/venv on PATH but does not activate it. The image pins
     # grpcio-tools, which keeps the stub drift guard below deterministic.
     - export VIRTUAL_ENV=/opt/venv
-    - maturin develop -E dev
+    - maturin develop --locked -E dev
   script:
     # Proto and stub drift guard: regenerate from the normative .proto and fail
     # if the checked-in copies are stale.
@@ -243,6 +243,8 @@ smoke:rust:
         done
       } >> examples/rust/Cargo.toml
     - tail -8 examples/rust/Cargo.toml
+    # No --locked here: the [patch.crates-io] table above is written at run time,
+    # so the resolved graph differs from any lockfile that could be committed.
     - (cd examples/rust && cargo build --release)
     - ./quip-solver-drive examples/rust/target/release/mock_miner unix:///tmp/rust.sock
     - ./quip-solver-drive --solve examples/rust/target/release/mock_miner
@@ -413,7 +415,7 @@ release:validate:
     - mv dist/quip-solver-clib-*.tar.gz dist/quip-solver-clib-*.tar.gz.sha256 .
     # The smoke jobs drive the samples with this, rather than each rebuilding
     # the Rust workspace.
-    - cargo build -p quip-solver-conformance --bin quip-solver-drive --release
+    - cargo build --locked -p quip-solver-conformance --bin quip-solver-drive --release
     - cp target/release/quip-solver-drive .
   artifacts:
     name: "quip-artifacts-${CI_COMMIT_TAG:-$CI_COMMIT_SHORT_SHA}"
@@ -465,7 +467,7 @@ wheel:linux-aarch64:
     - python3 -m venv /opt/wheelenv
     - /opt/wheelenv/bin/pip install --quiet maturin
   script:
-    - /opt/wheelenv/bin/maturin build --release --out dist/python
+    - /opt/wheelenv/bin/maturin build --locked --release --out dist/python
     - /opt/wheelenv/bin/pip install --quiet dist/python/*.whl
     - /opt/wheelenv/bin/python -c "import quip, quip_solver_core; print(quip_solver_core.__file__)"
   artifacts:
@@ -515,7 +517,7 @@ wheel:macos-arm64:
     # gitignored, so a stale wheel from a previous run would otherwise ride
     # along in the artifacts.
     - rm -rf dist/python
-    - .venv-wheel/bin/maturin build --release --out dist/python
+    - .venv-wheel/bin/maturin build --locked --release --out dist/python
     - .venv-wheel/bin/pip install --quiet dist/python/*.whl
     - .venv-wheel/bin/python -c "import quip, quip_solver_core; print(quip_solver_core.__file__)"
   artifacts:

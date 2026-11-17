@@ -260,6 +260,7 @@ struct Problem {
     edges: Vec<(usize, usize)>,
     num_reads: usize,
     schedule: Option<&'static str>,
+    beta_range: Option<(f64, f64)>,
     anneal_time_us: Option<u64>,
 }
 
@@ -271,6 +272,7 @@ impl Problem {
             edges,
             num_reads: 4,
             schedule: None,
+            beta_range: None,
             anneal_time_us: None,
         }
     }
@@ -287,7 +289,7 @@ impl Problem {
             "num_reads": self.num_reads,
             "num_sweeps": 64,
             "sweeps_per_beta": 1,
-            "beta_range": null,
+            "beta_range": self.beta_range,
             "seed": BASE_SEED,
         });
         if let Some(object) = v.as_object_mut() {
@@ -457,7 +459,7 @@ fn check_solutions(
         "num_reads": problem.num_reads,
         "num_sweeps": 64,
         "sweeps_per_beta": 1,
-        "beta_range": null,
+        "beta_range": problem.beta_range,
         "beta_schedule_type": problem.schedule.unwrap_or("geometric"),
         "seed": BASE_SEED,
     });
@@ -509,10 +511,14 @@ fn check_solutions(
         if micros("sample_us")? > micros("total_us")? {
             return Err(format!("solution {index} sample_us exceeds total_us"));
         }
-        if read.get("sampler") != Some(&expected_sampler) {
+        // `beta_ladder` is optional here and graded by `schedule_case`.
+        let mut sampler = read.get("sampler").cloned().unwrap_or(Value::Null);
+        if let Some(object) = sampler.as_object_mut() {
+            let _ = object.remove("beta_ladder");
+        }
+        if sampler != expected_sampler {
             return Err(format!(
-                "solution {index} sampler is {}, expected {expected_sampler}",
-                read.get("sampler").unwrap_or(&Value::Null)
+                "solution {index} sampler is {sampler}, expected {expected_sampler}"
             ));
         }
         if embedded {
@@ -700,13 +706,98 @@ async fn base_cases(bin: &str, adv: &Advertised, base: &Problem, report: &mut So
     }
 }
 
+/// Hot and cold beta the `linear-schedule` case asks for.
+pub const LADDER_RANGE: (f64, f64) = (0.1, 5.0);
+
+/// Rungs of the ladder the `linear-schedule` case expects: its 64 sweeps at
+/// one sweep per rung.
+pub const LADDER_RUNGS: usize = 64;
+
+/// The ladder the gate expects of a solver that ran the linear request, the
+/// same as `quip_solver_core::BetaSchedule::Linear.build` for
+/// [`LADDER_RANGE`] and [`LADDER_RUNGS`]. This crate cannot depend on the
+/// core crate, so a core test holds the two equal.
+#[must_use]
+pub fn expected_linear_ladder() -> Vec<f64> {
+    let (hot, cold) = LADDER_RANGE;
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "the rung index and count are small"
+    )]
+    let step = |i: usize| i as f64 / (LADDER_RUNGS - 1) as f64;
+    (0..LADDER_RUNGS)
+        .map(|i| hot + step(i) * (cold - hot))
+        .collect()
+}
+
+/// Check that the `beta_ladder` of every read is the linear ladder asked for.
+fn check_linear_ladder(reads: &Value) -> Result<(), String> {
+    let want = expected_linear_ladder();
+    for (index, read) in reads
+        .as_array()
+        .map_or(&[][..], Vec::as_slice)
+        .iter()
+        .enumerate()
+    {
+        let ladder = read
+            .pointer("/sampler/beta_ladder")
+            .ok_or_else(|| format!("solution {index} reports no sampler.beta_ladder"))?;
+        if ladder.get("reported_by") != Some(&json!("sampler")) {
+            return Err(format!(
+                "solution {index} beta_ladder.reported_by is {}, not \"sampler\": \
+                 a solver that lists linear-schedule must state its own ladder",
+                ladder.get("reported_by").unwrap_or(&Value::Null)
+            ));
+        }
+        if ladder.get("kind") != Some(&json!("linear")) {
+            return Err(format!(
+                "solution {index} ran a ladder of kind {}, not \"linear\"",
+                ladder.get("kind").unwrap_or(&Value::Null)
+            ));
+        }
+        let betas: Vec<f64> = ladder
+            .get("betas")
+            .and_then(Value::as_array)
+            .ok_or_else(|| format!("solution {index} beta_ladder has no betas array"))?
+            .iter()
+            .map(|b| {
+                b.as_f64()
+                    .ok_or_else(|| format!("solution {index} has a non-numeric rung {b}"))
+            })
+            .collect::<Result<_, _>>()?;
+        let same = betas.len() == want.len()
+            && betas
+                .iter()
+                .zip(&want)
+                .all(|(got, want)| (got - want).abs() <= 1e-9 * want.abs().max(1.0));
+        if !same {
+            return Err(format!(
+                "solution {index} ran {} rungs that are not the linear ladder from {} to {} in {} rungs",
+                betas.len(),
+                LADDER_RANGE.0,
+                LADDER_RANGE.1,
+                want.len()
+            ));
+        }
+    }
+    Ok(())
+}
+
 async fn schedule_case(bin: &str, adv: &Advertised, base: &Problem, report: &mut SolveReport) {
     let linear = Problem {
         schedule: Some("linear"),
+        beta_range: Some(LADDER_RANGE),
         ..base.clone()
     };
     let result = if adv.lists(LINEAR_SCHEDULE_FEATURE) {
-        expect_solved(bin, adv, &linear).await.map(|_| ())
+        match run(bin, &["--solve"], &linear.bytes()).await {
+            Ok(run) => check_solutions(adv, &linear, &run, false)
+                .and_then(|_| {
+                    serde_json::from_slice::<Value>(&run.stdout).map_err(|e| e.to_string())
+                })
+                .and_then(|reads| check_linear_ladder(&reads)),
+            Err(why) => Err(why),
+        }
     } else {
         // Without the feature the solver would anneal geometric and say
         // nothing, so it must refuse the key as an older binary does.

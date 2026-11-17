@@ -6,7 +6,7 @@
 use quip_proto::v1::RejectReason;
 use quip_solver_conformance::driver::{
     drive_miner, drive_miner_bad_welcome, drive_miner_close_after_welcome,
-    drive_miner_close_before_welcome, drive_miner_one_job,
+    drive_miner_close_before_welcome, drive_miner_one_job, drive_miner_with_args,
 };
 mod common;
 
@@ -55,6 +55,25 @@ async fn a_solver_that_ignores_its_seeds_fails_the_initial_spins_grade() {
     );
     assert!(!report.warm_start_conformant(), "{}", report.summary());
     assert!(!report.is_conformant());
+}
+
+/// A solver that does not advertise `ISING_GENERATE` is graded on refusing a
+/// lease with `UNSUPPORTED_KIND`, and passes the whole walk.
+#[tokio::test]
+async fn a_solver_that_declines_leases_rejects_one_with_unsupported_kind() {
+    let bin = example_bin("mock_sampler_no_lease")
+        .to_string_lossy()
+        .into_owned();
+    let socket = unique_socket("no-lease");
+    let report = drive_miner(&bin, &format!("unix://{socket}")).await;
+    assert!(report.lease.is_none(), "no lease scenario ran: {report:?}");
+    assert!(
+        report.has_reject(b"job-lease", RejectReason::UnsupportedKind),
+        "missing UNSUPPORTED_KIND reject for job-lease: {:?}",
+        report.rejects
+    );
+    assert!(report.lease_conformant(), "{}", report.summary());
+    assert!(report.is_conformant(), "{}", report.summary());
 }
 
 #[tokio::test]
@@ -248,4 +267,36 @@ async fn a_device_fault_ends_the_session_instead_of_requesting_more_work() {
         "a wedged device must exit InternalFatal, not keep accepting jobs"
     );
     assert!(report.stderr.contains("test: wedged"), "{}", report.stderr);
+}
+
+#[tokio::test]
+async fn a_solver_that_refuses_work_at_its_limit_with_overloaded_passes_the_walk() {
+    let bin = example_bin("mock_sampler_limit")
+        .to_string_lossy()
+        .into_owned();
+    let socket = unique_socket("limit");
+    let report = drive_miner(&bin, &format!("unix://{socket}")).await;
+
+    assert!(report.limit_probe_sent, "{}", report.summary());
+    assert!(
+        report.has_reject(b"job-limit", RejectReason::Overloaded),
+        "{}",
+        report.summary()
+    );
+    assert!(report.headroom_conformant(), "{}", report.summary());
+    assert!(report.is_conformant(), "{}", report.summary());
+}
+
+#[tokio::test]
+async fn a_solver_that_keeps_serving_at_its_limit_fails_the_walk() {
+    let bin = example_bin("mock_sampler_limit")
+        .to_string_lossy()
+        .into_owned();
+    let socket = unique_socket("limit-ignored");
+    let report =
+        drive_miner_with_args(&bin, &["--ignore-limit"], &format!("unix://{socket}")).await;
+
+    assert!(report.limit_probe_sent, "{}", report.summary());
+    assert!(!report.limit_conformant(), "{}", report.summary());
+    assert!(!report.is_conformant(), "{}", report.summary());
 }

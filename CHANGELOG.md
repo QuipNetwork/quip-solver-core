@@ -5,6 +5,59 @@ This file documents changes to the Quip solver contract.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.0.17-rc1
+
+### Added
+
+- A Rust solver can decline `ISING_GENERATE` leases. The new `Sampler::accepts_leases`
+  method defaults to `true`. When it returns `false`, the solver lists only
+  `ISING_SAMPLE`, advertises no generators and no generated families, and
+  rejects a lease with `UNSUPPORTED_KIND`.
+- The `--solve` output `sampler` object carries `beta_ladder`, with the `kind`,
+  the `betas` the solve ran, and `reported_by`. `reported_by` is `"sampler"`
+  when the sampler overrides the new `Sampler::beta_ladder` method, and `"sdk"`
+  when the SDK built the ladder from the request. `beta_schedule_type` now
+  equals the reported kind. A solver that lists `linear-schedule` must override
+  the method. The `linear-schedule` conformance case requires
+  `reported_by == "sampler"` and the linear ladder of the request, so a solver
+  that lists the feature and runs another ladder, or reports none of its own,
+  fails it (QUI-1833).
+- A declaration that lists `generated` families is invalid for a sampler that
+  declines leases. It fails with `DeclarationError::GeneratedWithoutLeases`.
+- The conformance driver sends one lease to a solver that does not advertise
+  `ISING_GENERATE`. It expects `Reject` with `UNSUPPORTED_KIND`.
+- `Status` has two typed budget fields: `optional double headroom = 6`, the
+  fraction of the budget still available from `0.0` to `1.0`, and
+  `bool limit_reached = 7`. A Rust solver reports them through the new
+  `Sampler::headroom` method, which returns `Option<Headroom>` and defaults to
+  `None`. The session copies both fields into each `Status` without change, so
+  it never clamps `fraction`. The conformance driver fails a solver that sends
+  a `headroom` outside `0.0..=1.0`. It also fails a solver whose final `Status`
+  reports `limit_reached` and that then accepts the next job instead of
+  refusing it with `OVERLOADED` (QUI-1661).
+- `SPEC.md` section 4 states how `SamplerMeta.device_access_time_us` and
+  `qpu_access_us` differ, how a solver reports the cost of a cancelled or
+  rejected job, and what `headroom` and `limit_reached` mean (QUI-1661).
+
+### Changed
+
+- The release check no longer reports a license file as missing from the
+  sdist when the file is present.
+- `SPEC.md` section 3 defines the default start of a seeded SA run. When
+  `start_beta_milli` is `0`, the run starts at the midpoint of the beta range
+  in its ladder's spacing, and then descends to `beta_cold`.
+- Every cargo, maturin, and wasm-pack build in CI and the Makefile now uses
+  `--locked`. A build fails if `Cargo.lock` would change. It no longer picks a
+  new set of dependencies. The one exception is `examples/rust`. CI patches it
+  to the unpacked crates at run time, so it has no lockfile.
+
+### Security
+
+- The npm package requires `@grpc/grpc-js` 1.14.7 or later. Versions 1.14.0
+  to 1.14.4 carry GHSA-m9gg-hp2v-232j and GHSA-f596-whhp-79r4. Both affect a
+  grpc-js server, and this package ships a client, but the old range let a
+  consumer resolve to an affected version.
+
 ## 0.0.16
 
 ### Added

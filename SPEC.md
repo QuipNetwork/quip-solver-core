@@ -21,6 +21,11 @@ A solver binary supports four modes.
 This mode prints what the solver supports, then exits. It must not open the
 device.
 
+`supported_kinds` and `generators` must match what the solver serves. A solver
+that declines leases lists only `ISING_SAMPLE` and no generators. It answers an
+`ISING_GENERATE` job with `Reject` reason `UNSUPPORTED_KIND`. The Rust
+`Sampler::accepts_leases` switch makes the session do all three.
+
 ### `--solve`
 
 This mode reads one problem as JSON on stdin. It writes the solutions as JSON
@@ -55,10 +60,28 @@ The output is one JSON array with one object per read, and a trailing newline.
 | `spins` | array of -1 and +1 | One spin per node. |
 | `energy_milli` | integer | Exact energy of `spins` under the input model, in milli units. |
 | `timing` | object | `sample_us`, the time inside the sampler, and `total_us`, the whole solve. Both are integers in microseconds. |
-| `sampler` | object | `backend` and `algorithm` as `--capabilities` names them, then `num_reads`, `num_sweeps`, `sweeps_per_beta`, `beta_range`, `beta_schedule_type`, and `seed` as the solve used them, and `anneal_time_us` when the input carried it. |
+| `sampler` | object | `backend` and `algorithm` as `--capabilities` names them, then `num_reads`, `num_sweeps`, `sweeps_per_beta`, `beta_range`, `beta_schedule_type`, and `seed` as the solve used them, `beta_ladder`, and `anneal_time_us` when the input carried it. |
 | `embedding` | object | Only under `--embed`. `embedded` is `true`, `chain_break_fraction` is the fraction of chains broken in this read, from 0 to 1, and `max_chain_length` is the longest chain in the embedding, an integer of at least 1. |
 
 `timing` and `sampler` are the same for every read of one solve.
+
+`beta_ladder` is an object that reports the ladder the solve ran, not an echo
+of the input. `kind` is `"geometric"` or `"linear"`. `betas` is an array of
+numbers, the beta at each rung in the order the solve visited them.
+`reported_by` is `"sampler"` when the solver's own sampler stated the ladder,
+and `"sdk"` when the SDK built it from the request because the sampler did not
+state one. For a ladder built from the request, the rung count is `num_sweeps`
+divided by `sweeps_per_beta`, rounded down, and at least 1.
+`beta_schedule_type` equals `beta_ladder.kind`, so a solver that ran a
+different kind than the one asked reports the kind it ran. A solver that
+cannot run the requested schedule still refuses with exit 64.
+
+A solver that lists `linear-schedule` must state its own ladder, so its
+`reported_by` is `"sampler"`. For a `"linear"` request its `betas` must be the
+evenly spaced ladder from the hot to the cold end of `beta_range`. A ladder
+with `reported_by` `"sdk"` proves only what was asked, so the conformance gate
+fails a solver that lists the feature and reports it. A solver that does not
+list `linear-schedule` may omit `beta_ladder` or report `"sdk"`.
 
 A solver that lists `embed` accepts the `--embed` flag beside `--solve`.
 Without it, the solver samples the model on its working graph as given, and
@@ -369,14 +392,26 @@ Node `i` is bit `i % 8` of byte `i / 8`, lowest bit first. Bit
 `ceil(num_nodes / 8)` bytes, and its padding bits are `0`. The entries come in
 order of energy, lowest first.
 
-Three fields set where a seeded anneal starts. The value `0` in any of
-them means the solver picks.
+Three fields set where a seeded anneal starts. The value `0` in
+`reversal_s_milli` or `reversal_pause_us` means the solver picks. The value
+`0` in `start_beta_milli` selects the default start that follows the table.
 
 | Field | Used by | Meaning |
 |---|---|---|
 | `start_beta_milli`, 10 | Seeded SA | Inverse temperature the anneal starts from, in milli-units. |
 | `reversal_s_milli`, 11 | Seeded quantum processing unit | Anneal fraction `s` that the reverse anneal backs off to, in milli-units, from 1 to 999. |
 | `reversal_pause_us`, 12 | Seeded quantum processing unit | Pause at the reversal point, in microseconds. |
+
+A seeded SA run with `start_beta_milli` set to `0` starts at the midpoint of
+the beta range in the spacing of its own ladder:
+
+| Ladder | Default start |
+|---|---|
+| Geometric | `sqrt(beta_hot * beta_cold)` |
+| Linear | `(beta_hot + beta_cold) / 2` |
+
+The ladder then runs from the start to `beta_cold` over the same number of
+rungs as a cold run. A start larger than `beta_cold` holds the ladder at the start.
 
 The solver applies these rules:
 
@@ -456,11 +491,12 @@ Use `Backend::Cpu` and `Algorithm::Sa` for a CPU simulated annealer.
 The [migration name table](MIGRATING.md#identity-names) lists all supported names.
 The fixed map in `quip_protocol::session` keeps command-line identity strings lowercase.
 
-The sixteen defaulted methods are:
+The seventeen defaulted methods are:
 
 | Method | Default |
 |---|---|
 | `sample_stream` | Serial loop over `sample`. Polls the cancel token at dequeue. |
+| `accepts_leases` | `true`. `false` lists only `ISING_SAMPLE`, advertises no generators and no generated families, and rejects every `ISING_GENERATE` job with `UNSUPPORTED_KIND`. |
 | `accepts_warm_start` | `false`. `true` adds `initial-spins` to the advertised features. |
 | `sample_warm` | Ignores the `WarmStart` and calls `sample`. |
 | `sample_stream_warm` | Serial loop over `sample_warm` for a seeded job and `sample` for a cold one. |
@@ -484,6 +520,8 @@ Each listed parameter set must pass the schema and bounds of every listed revisi
 The session validates the declaration before it runs any mode.
 An invalid declaration logs an error and exits 70 in every mode, before the device opens.
 `capabilities_for::<S, C>(&id)` builds the advertised `Capabilities` and returns `DeclarationError` for an invalid declaration.
+A declaration that lists `generated` claims is also invalid for a sampler whose `accepts_leases` returns `false`.
+`DeclarationError::GeneratedWithoutLeases` reports it.
 
 A sampler that returns `true` from `accepts_family_metadata` receives every job through `sample_stream_warm`, and never through `sample_stream`.
 `WarmStreamJob.family` holds `Some(FamilyContext)` for a job that passed the checks, and `None` for any other job.
@@ -592,6 +630,41 @@ The session calls `sample_stream_warm` instead of `sample_stream` only when
 `accepts_warm_start` and `sample_warm`. A solver that keeps more than one
 model in flight overrides `sample_stream_warm` instead of `sample_warm`.
 
+### Per-job cost and budget reporting
+
+`SamplerMeta` reports the device time of one job:
+
+| Field | Meaning |
+|---|---|
+| `device_access_time_us` | Device time the job used, in microseconds, for any backend. |
+| `qpu_access_us` | QPU time only, in microseconds. Zero for every other backend. |
+
+A job that the solver cancels or rejects can still cost money, because a
+device may bill the time it ran before it stopped. Such a job has no `Result`
+and so has no `SamplerMeta`. The solver reports the cost in `Status`. Every
+`Status` carries the `headroom` of that moment. Time billed for a cancelled or
+rejected job lowers the `headroom` in the next `Status`. The coordinator reads
+it from the `Status` that answers a `Ping`. The protocol has no per-job cost
+field in `Status`.
+
+`Status` has two fields for the budget:
+
+| Field | Meaning |
+|---|---|
+| `headroom` | The fraction of the spending or capacity budget still available, from `0.0` to `1.0`. It is unset when the solver reports none. |
+| `limit_reached` | The solver has hit a limit. Default `false`. |
+
+A solver that sends `headroom` keeps it within `0.0` to `1.0`. A solver that
+sends `limit_reached` as `true` refuses every new job with `OVERLOADED` until
+the limit resets, and then sends `limit_reached` as `false` in a later `Status`.
+
+In the Rust binding, `Sampler::headroom` returns `Option<Headroom>`. The
+session copies `Headroom.fraction` and `Headroom.limit_reached` into each
+`Status` without change. The default is `None`: `headroom` stays unset and
+`limit_reached` stays `false`. The session does not refuse jobs for the solver.
+A solver that reports `limit_reached` as `true` returns `SampleError::DeviceBusy`
+from `sample` until the limit resets, which sends `OVERLOADED`.
+
 ## 5. Cancellation
 
 These wire rules apply to every language. The Rust binding follows.
@@ -657,6 +730,12 @@ A solver is conformant when all of these hold:
 - `quip-solver-drive --solve <solver-binary>` reports no failed case.
 - A solver that lists `generated_families` passes the family gate, `quip-solver-drive --family <solver-binary> unix://<socket>`, as [Family conformance](docs/family-conformance.md) defines it.
 - The adaptive parameters of the solver match the `golden_adapt.json` cases.
+- Every `Status.headroom` the solver sends is within `0.0` to `1.0`.
+- A solver whose final `Status` has `limit_reached` set to `true` refuses the
+  next job with `OVERLOADED`. The driver sends a `Ping` after every other job
+  of its walk. When the answering `Status` has `limit_reached`, the driver sends
+  one more job and expects `Reject` with `OVERLOADED` and no `Result`. A solver
+  that clears `limit_reached` before that `Ping` gets no probe.
 
 The driver spawns any executable. The driver speaks the proto over the
 socket. This definition holds for a solver written in any language.
@@ -785,7 +864,7 @@ For an `f64` CPU sampler, the output has this shape:
 
 The Rust session advertises `I32` plus the solver's own encoding, without duplicates.
 `Fixed<I4, S>` advertises only `I32`.
-Rust and C solvers advertise the default generator even without local generation.
+Rust and C solvers advertise the default generator even without local generation, unless a Rust sampler returns `false` from `accepts_leases`.
 The Python and TypeScript examples advertise only `ISING_SAMPLE` and `I32`, with no generators.
 
 `streamWidth: 0` declares a width that is a property of the opened device,

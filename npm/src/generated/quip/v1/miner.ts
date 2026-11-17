@@ -762,6 +762,18 @@ export interface Status {
   /** cancelled in-flight work reported here, not in Result */
   abandonedGeneration: bigint;
   samplerStats: { [key: string]: string };
+  /**
+   * Fraction of the spending or capacity budget still available, 0.0 to 1.0.
+   * Unset when the solver does not report one.
+   */
+  headroom?:
+    | number
+    | undefined;
+  /**
+   * The solver has hit a limit and refuses new work with OVERLOADED until it
+   * resets.
+   */
+  limitReached: boolean;
 }
 
 export interface Status_SamplerStatsEntry {
@@ -3515,7 +3527,15 @@ export const Reject: MessageFns<Reject> = {
 };
 
 function createBaseStatus(): Status {
-  return { minerId: "", utilization: 0, jobsDone: 0n, abandonedGeneration: 0n, samplerStats: {} };
+  return {
+    minerId: "",
+    utilization: 0,
+    jobsDone: 0n,
+    abandonedGeneration: 0n,
+    samplerStats: {},
+    headroom: undefined,
+    limitReached: false,
+  };
 }
 
 export const Status: MessageFns<Status> = {
@@ -3541,6 +3561,12 @@ export const Status: MessageFns<Status> = {
     globalThis.Object.entries(message.samplerStats).forEach(([key, value]: [string, string]) => {
       Status_SamplerStatsEntry.encode({ key: key as any, value }, writer.uint32(42).fork()).join();
     });
+    if (message.headroom !== undefined) {
+      writer.uint32(49).double(message.headroom);
+    }
+    if (message.limitReached !== false) {
+      writer.uint32(56).bool(message.limitReached);
+    }
     return writer;
   },
 
@@ -3594,6 +3620,22 @@ export const Status: MessageFns<Status> = {
           }
           continue;
         }
+        case 6: {
+          if (tag !== 49) {
+            break;
+          }
+
+          message.headroom = reader.double();
+          continue;
+        }
+        case 7: {
+          if (tag !== 56) {
+            break;
+          }
+
+          message.limitReached = reader.bool();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -3638,6 +3680,12 @@ export const Status: MessageFns<Status> = {
           {},
         )
         : {},
+      headroom: isSet(object.headroom) ? globalThis.Number(object.headroom) : undefined,
+      limitReached: isSet(object.limitReached)
+        ? globalThis.Boolean(object.limitReached)
+        : isSet(object.limit_reached)
+        ? globalThis.Boolean(object.limit_reached)
+        : false,
     };
   },
 
@@ -3664,6 +3712,12 @@ export const Status: MessageFns<Status> = {
         });
       }
     }
+    if (message.headroom !== undefined) {
+      obj.headroom = message.headroom;
+    }
+    if (message.limitReached !== false) {
+      obj.limitReached = message.limitReached;
+    }
     return obj;
   },
 
@@ -3687,6 +3741,8 @@ export const Status: MessageFns<Status> = {
       },
       {},
     );
+    message.headroom = object.headroom ?? undefined;
+    message.limitReached = object.limitReached ?? false;
     return message;
   },
 };

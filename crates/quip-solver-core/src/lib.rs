@@ -18,6 +18,7 @@ pub mod driver;
 mod encoding;
 pub mod error;
 pub mod families;
+mod headroom;
 pub mod ising;
 mod job;
 mod lease;
@@ -32,7 +33,10 @@ pub use backend::{BackendIdentity, EXACT_COEFFICIENTS_FEATURE, LINEAR_SCHEDULE_F
 pub use cli::CommonArgs;
 pub use csr::CsrGraph;
 pub use error::SampleError;
-pub use ising::{Algorithm, BetaSchedule, IsingGraph, SampleParams, SamplerResult, WarmStart};
+pub use headroom::Headroom;
+pub use ising::{
+    Algorithm, BetaLadder, BetaSchedule, IsingGraph, SampleParams, SamplerResult, WarmStart,
+};
 pub use lease::{FamilyLease, Lease, LeaseSink, LeaseStopped};
 pub use limits::ModelLimits;
 pub use quip_protocol::lease::TopologyView;
@@ -236,6 +240,23 @@ pub trait Sampler<C: Coefficient = f64>: Send + Sync + 'static {
         params: &SampleParams,
     ) -> Result<Vec<SamplerResult>, SampleError>;
 
+    /// The beta ladder this sampler runs for a job with these `params`.
+    /// `--solve` reports it in the `sampler` output as `beta_ladder`, with
+    /// `reported_by` set to `"sampler"`.
+    ///
+    /// A solver that lists [`LINEAR_SCHEDULE_FEATURE`] must override this, and
+    /// return the ladder its kernel builds, so the output states what ran. The
+    /// conformance gate fails a solver that lists the feature and does not.
+    /// Derive the answer from `graph` and `params` alone, not from the state of
+    /// an earlier call.
+    ///
+    /// The default is `None`: `--solve` reports the ladder
+    /// [`BetaLadder::from_params`] builds from the request, with `reported_by`
+    /// set to `"sdk"`. That is only the request, not proof of what ran.
+    fn beta_ladder(&self, _graph: &IsingGraph<C>, _params: &SampleParams) -> Option<BetaLadder> {
+        None
+    }
+
     /// Stream-process jobs: pull from `jobs`, keep up to [`stream_width`] models
     /// in flight, emit each result to `out` in completion order. Blocks until
     /// `jobs` closes and all in-flight finish. Runs on a blocking thread (uses
@@ -250,6 +271,26 @@ pub trait Sampler<C: Coefficient = f64>: Send + Sync + 'static {
         cancel: CancelToken,
     ) {
         serial_stream(self, jobs, &out, &cancel, |j| (j, None, None));
+    }
+
+    /// Whether this backend serves `ISING_GENERATE` leases. Answered without a
+    /// device, like [`declared_stream_width`](Sampler::declared_stream_width),
+    /// because `--capabilities` reads it too.
+    ///
+    /// Default `true`. When `false`, the session lists only `ISING_SAMPLE` in
+    /// `supported_kinds`, advertises no `generators`, and answers every
+    /// `ISING_GENERATE` job with `Reject` reason `UNSUPPORTED_KIND`. Return
+    /// `false` for a backend billed per call, or one that only descends from
+    /// start states the coordinator supplies. Such a backend must not list
+    /// `generated` families in its [`declaration`](Sampler::declaration):
+    /// [`DeclarationError::GeneratedWithoutLeases`](families::DeclarationError::GeneratedWithoutLeases)
+    /// reports the mismatch.
+    #[must_use]
+    fn accepts_leases() -> bool
+    where
+        Self: Sized,
+    {
+        true
     }
 
     /// Whether this backend uses warm-start states (`IsingProblem` fields 9 to
@@ -414,6 +455,17 @@ pub trait Sampler<C: Coefficient = f64>: Send + Sync + 'static {
     /// Current utilization for Status messages. `0.0` when no governor.
     fn utilization(&self) -> f64 {
         0.0
+    }
+
+    /// The budget this solver has left, copied into `Status.headroom` and
+    /// `Status.limit_reached` on every `Status` the session sends. The session
+    /// calls it for each `Status`, so it must be cheap.
+    ///
+    /// Default `None`: `headroom` stays unset and `limit_reached` is false. A
+    /// solver that reports `limit_reached` as true must refuse every job it
+    /// receives with `OVERLOADED` until the limit resets. See SPEC section 4.
+    fn headroom(&self) -> Option<Headroom> {
+        None
     }
 
     /// Whether to briefly back off before the next job (governor backpressure).
