@@ -5,7 +5,7 @@ This file documents changes to the Quip solver contract.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## 0.0.17-rc1
 
 ### Added
 
@@ -41,6 +41,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- The release check no longer reports a license file as missing from the
+  sdist when the file is present.
 - `SPEC.md` section 3 defines the default start of a seeded SA run. When
   `start_beta_milli` is `0`, the run starts at the midpoint of the beta range
   in its ladder's spacing, and then descends to `beta_cold`.
