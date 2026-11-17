@@ -335,6 +335,7 @@ class Session {
         jobsDone: this.jobsDone,
         abandonedGeneration: this.abandonedGeneration,
         samplerStats: {},
+        limitReached: false,
       },
     });
   }
