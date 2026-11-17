@@ -269,11 +269,13 @@ impl DriverReport {
             && self.exit_code == 0
     }
 
-    /// Grade salt leases only when the miner advertises `ISING_GENERATE`.
+    /// Grade salt leases. A miner that advertises `ISING_GENERATE` must serve
+    /// the four-salt lease. A miner that does not must answer one lease with
+    /// `Reject` `UNSUPPORTED_KIND`.
     #[must_use]
     pub fn lease_conformant(&self) -> bool {
-        !advertises_lease(self.hello.as_ref())
-            || self.lease.as_ref().is_some_and(|lease| {
+        if advertises_lease(self.hello.as_ref()) {
+            self.lease.as_ref().is_some_and(|lease| {
                 lease.results == LEASE_SALTS
                     && lease.results_verified == LEASE_SALTS
                     && lease
@@ -281,6 +283,9 @@ impl DriverReport {
                         .is_some_and(|(salts, _)| salts == u64::from(LEASE_SALTS))
                     && lease.credit_refunded
             })
+        } else {
+            self.has_reject(LEASE_JOB_ID, RejectReason::UnsupportedKind)
+        }
     }
 
     /// Every required `Result` present, no unexpected one, and each carrying
@@ -489,7 +494,7 @@ impl DriverReport {
                 if advertises_lease(self.hello.as_ref()) {
                     "salt lease"
                 } else {
-                    "salt lease (not advertised, skipped)"
+                    "salt lease (not advertised, must be rejected)"
                 },
                 self.lease_conformant(),
             ),
@@ -1148,6 +1153,44 @@ async fn run_lease(
     }
 }
 
+/// Send one lease to a miner that does not advertise `ISING_GENERATE` and wait
+/// for its `Reject`. The lease is valid in every other respect, so the only
+/// ground to refuse it is its kind.
+async fn run_declined_lease(
+    tx: &mpsc::Sender<Result<CoordMsg, Status>>,
+    inbound: &mut Streaming<MinerMsg>,
+    outcome: &mut SessionOutcome,
+    budget: Duration,
+) {
+    let _ = send(tx, coord_msg::Msg::Topology(lease_topology())).await;
+    let _ = send(tx, coord_msg::Msg::SetTarget(lease_target())).await;
+    let _ = dispatch(
+        tx,
+        outcome,
+        Job {
+            job_id: LEASE_JOB_ID.to_vec(),
+            kind: JobKind::IsingGenerate as i32,
+            generation: CANCEL_GENERATION + 1,
+            generator: Some(lease_generator()),
+            deadline_ms: 0,
+            ..Default::default()
+        },
+        None,
+    )
+    .await;
+    if tokio::time::timeout(
+        budget,
+        read_until(inbound, outcome, "declined-lease", |o| {
+            o.rejects.iter().any(|r| r.job_id == LEASE_JOB_ID)
+        }),
+    )
+    .await
+    .is_err()
+    {
+        outcome.timed_out_phases.push("declined-lease".to_owned());
+    }
+}
+
 /// Read and fold inbound messages until `satisfied` holds, the stream ends, or
 /// the phase budget runs out. Returns whether `satisfied` was reached.
 ///
@@ -1450,6 +1493,8 @@ async fn run_script(
     // 11. Generation runs above the cancellation watermark from the plain jobs.
     if advertises_lease(outcome.hello.as_ref()) {
         run_lease(tx, inbound, &mut outcome, PHASE_TIMEOUT).await;
+    } else {
+        run_declined_lease(tx, inbound, &mut outcome, PHASE_TIMEOUT).await;
     }
 
     // 12. Shutdown -> miner flushes and exits 0, closing its send stream.
@@ -1953,8 +1998,8 @@ mod tests {
         r.hello = Some(hello("mock"));
         r.ready_received = true;
         // Grant of 3, then one refund per dispatched job.
-        r.job_request_credits = vec![3, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1];
-        r.jobs_dispatched = 10;
+        r.job_request_credits = vec![3, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1];
+        r.jobs_dispatched = 11;
         r.results = full_results();
         r.rejects = vec![
             ObservedReject {
@@ -1973,6 +2018,11 @@ mod tests {
                 job_id: b"job-old".to_vec(),
                 reason: RejectReason::Expired as i32,
             },
+            // The report advertises no lease, so the driver sent one anyway.
+            ObservedReject {
+                job_id: LEASE_JOB_ID.to_vec(),
+                reason: RejectReason::UnsupportedKind as i32,
+            },
         ];
         r.statuses = vec![status(1), status(CANCEL_GENERATION)];
         r.cancel_acked = true;
@@ -1988,6 +2038,8 @@ mod tests {
         let caps = r.hello.as_mut().unwrap().capabilities.as_mut().unwrap();
         caps.supported_kinds.push(JobKind::IsingGenerate as i32);
         r.capabilities_received = Some(caps.clone());
+        // An advertised lease is served, not rejected.
+        r.rejects.retain(|reject| reject.job_id != LEASE_JOB_ID);
         r
     }
 
@@ -2050,7 +2102,7 @@ mod tests {
                 false,
             ),
             (
-                "an unadvertised lease without an outcome",
+                "an unadvertised lease rejected as unsupported",
                 false,
                 None,
                 true,
@@ -2076,6 +2128,26 @@ mod tests {
             r.lease = lease;
             assert_eq!(r.is_conformant(), conformant, "{label}: {r:?}");
         }
+    }
+
+    #[test]
+    fn an_unadvertised_lease_must_be_rejected_as_unsupported() {
+        let mut served = conformant_report();
+        served
+            .rejects
+            .retain(|reject| reject.job_id != LEASE_JOB_ID);
+        assert!(!served.lease_conformant(), "no reject: {served:?}");
+        assert!(!served.is_conformant());
+
+        let mut wrong = conformant_report();
+        for reject in &mut wrong.rejects {
+            if reject.job_id == LEASE_JOB_ID {
+                reject.reason = RejectReason::Malformed as i32;
+            }
+        }
+        assert!(!wrong.lease_conformant(), "wrong reason: {wrong:?}");
+
+        assert!(conformant_report().lease_conformant());
     }
 
     fn lease_result(index: u64) -> quip_proto::v1::Result {

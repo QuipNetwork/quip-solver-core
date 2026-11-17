@@ -623,6 +623,10 @@ pub enum DeclarationError {
         /// The `family_id` of the entry.
         family_id: &'static str,
     },
+    /// The declaration lists `generated` families, but the sampler declines
+    /// leases ([`Sampler::accepts_leases`](crate::Sampler::accepts_leases) is
+    /// `false`), so it expands none.
+    GeneratedWithoutLeases,
 }
 
 impl fmt::Display for DeclarationError {
@@ -682,6 +686,10 @@ impl fmt::Display for DeclarationError {
                 f,
                 "{}[{index}] ({family_id:?}) claims nothing under FAM-61",
                 list.field()
+            ),
+            Self::GeneratedWithoutLeases => write!(
+                f,
+                "the declaration lists generated families, but the sampler declines leases"
             ),
         }
     }

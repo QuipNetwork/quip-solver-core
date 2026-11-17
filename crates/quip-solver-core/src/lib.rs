@@ -252,6 +252,26 @@ pub trait Sampler<C: Coefficient = f64>: Send + Sync + 'static {
         serial_stream(self, jobs, &out, &cancel, |j| (j, None, None));
     }
 
+    /// Whether this backend serves `ISING_GENERATE` leases. Answered without a
+    /// device, like [`declared_stream_width`](Sampler::declared_stream_width),
+    /// because `--capabilities` reads it too.
+    ///
+    /// Default `true`. When `false`, the session lists only `ISING_SAMPLE` in
+    /// `supported_kinds`, advertises no `generators`, and answers every
+    /// `ISING_GENERATE` job with `Reject` reason `UNSUPPORTED_KIND`. Return
+    /// `false` for a backend billed per call, or one that only descends from
+    /// start states the coordinator supplies. Such a backend must not list
+    /// `generated` families in its [`declaration`](Sampler::declaration):
+    /// [`DeclarationError::GeneratedWithoutLeases`](families::DeclarationError::GeneratedWithoutLeases)
+    /// reports the mismatch.
+    #[must_use]
+    fn accepts_leases() -> bool
+    where
+        Self: Sized,
+    {
+        true
+    }
+
     /// Whether this backend uses warm-start states (`IsingProblem` fields 9 to
     /// 12). Answered without a device, like
     /// [`declared_stream_width`](Sampler::declared_stream_width), because

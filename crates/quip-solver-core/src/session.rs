@@ -211,8 +211,24 @@ fn family_support_json(entries: &[FamilySupport]) -> Vec<FamilySupportJson<'_>> 
 pub fn capabilities_for<S: Sampler<C>, C: Coefficient>(
     id: &BackendIdentity,
 ) -> Result<Capabilities, DeclarationError> {
-    let families = S::declaration().validate()?;
+    let families = validated_families::<S, C>()?;
     Ok(advertised_capabilities::<S, C>(id, &families))
+}
+
+/// The validated family table of `S`: its declaration, checked against itself
+/// and against [`Sampler::accepts_leases`].
+///
+/// # Errors
+/// Returns the first [`DeclarationError`] of the declaration, or
+/// [`DeclarationError::GeneratedWithoutLeases`] when it lists `generated`
+/// families on a sampler that declines leases.
+fn validated_families<S: Sampler<C>, C: Coefficient>() -> Result<FamilyTable, DeclarationError> {
+    let declaration = S::declaration();
+    let families = declaration.validate()?;
+    if !S::accepts_leases() && !declaration.generated.is_empty() {
+        return Err(DeclarationError::GeneratedWithoutLeases);
+    }
+    Ok(families)
 }
 
 /// The `Capabilities` this solver advertises, from the one place both answers
@@ -245,8 +261,15 @@ fn advertised_capabilities<S: Sampler<C>, C: Coefficient>(
         .map(str::to_owned)
         .collect();
     families.solver_id().clone_into(&mut caps.solver_id);
-    caps.generated_families = families.generated().to_vec();
     caps.accepted_families = families.accepted().to_vec();
+    if !S::accepts_leases() {
+        // A solver that declines leases expands none, so it lists no
+        // generators and no generated families, and serves only ISING_SAMPLE.
+        caps.supported_kinds = vec![JobKind::IsingSample as i32];
+        caps.generators.clear();
+        return caps;
+    }
+    caps.generated_families = families.generated().to_vec();
     if !caps.generated_families.is_empty() {
         // FAM-58
         caps.generators
@@ -1258,18 +1281,23 @@ async fn run_connected_session<S: Sampler<C>, C: Coefficient>(
                 Some(coord_msg::Msg::Job(job)) => {
                     let target = target_tx.borrow().clone();
                     if job.kind == JobKind::IsingGenerate as i32 {
-                        match lease::prepare(
-                            &job,
-                            lease_topology.as_ref(),
-                            target.as_ref(),
-                            id,
-                            families,
-                            sampler.max_reads(),
-                            num_sweeps,
-                            sweeps_per_beta,
-                            Arc::clone(&aborted),
-                            Arc::clone(&jobs_done),
-                        ) {
+                        let prepared = if S::accepts_leases() {
+                            lease::prepare(
+                                &job,
+                                lease_topology.as_ref(),
+                                target.as_ref(),
+                                id,
+                                families,
+                                sampler.max_reads(),
+                                num_sweeps,
+                                sweeps_per_beta,
+                                Arc::clone(&aborted),
+                                Arc::clone(&jobs_done),
+                            )
+                        } else {
+                            Err(quip_proto::v1::RejectReason::UnsupportedKind)
+                        };
+                        match prepared {
                             Ok((state, params)) => {
                                 // A family the binary did not declare is
                                 // generated on the default session path, even
@@ -1768,7 +1796,7 @@ pub fn run_code<S: Sampler<C>, C: Coefficient>(
         return ExitCode::ConfigInvalid;
     }
 
-    let families = match S::declaration().validate() {
+    let families = match validated_families::<S, C>() {
         Ok(families) => families,
         Err(e) => {
             tracing::error!("[quip-solver-{backend}] invalid family declaration: {e}");
@@ -3434,6 +3462,30 @@ mod tests {
         sampler!(Invalid, INVALID);
         sampler!(FullDeviceWidth, FULL, width 0);
 
+        macro_rules! declining_sampler {
+            ($name:ident, $decl:expr) => {
+                struct $name;
+                impl Sampler for $name {
+                    fn sample(
+                        &self,
+                        _graph: &crate::IsingGraph,
+                        _params: &crate::SampleParams,
+                    ) -> Result<Vec<crate::SamplerResult>, crate::SampleError> {
+                        Ok(vec![])
+                    }
+                    fn declaration() -> Declaration {
+                        $decl
+                    }
+                    fn accepts_leases() -> bool {
+                        false
+                    }
+                }
+            };
+        }
+
+        declining_sampler!(Declines, ACCEPT_ONLY);
+        declining_sampler!(DeclinesButGenerates, FULL);
+
         fn caps_of<S: Sampler>() -> Capabilities {
             let table = S::declaration().validate().expect("valid declaration");
             advertised_capabilities::<S, f64>(&test_identity(), &table)
@@ -3495,6 +3547,74 @@ mod tests {
             assert_eq!(caps_of::<Generic>().generators, [legacy, family]);
             assert_eq!(caps_of::<AcceptOnly>().generators, [legacy, family]);
             assert_eq!(caps_of::<Full>().generators, [legacy, family]);
+        }
+
+        /// `Blake3Chacha8V1` is advertised only by a solver that accepts
+        /// leases, and `FamilyChacha8V1` only when it generates families.
+        #[test]
+        fn generators_follow_lease_acceptance_and_generated_families() {
+            let kinds = |caps: &Capabilities| caps.supported_kinds.clone();
+            let accepting = caps_of::<Generic>();
+            assert_eq!(
+                kinds(&accepting),
+                [JobKind::IsingSample as i32, JobKind::IsingGenerate as i32]
+            );
+            assert!(!accepting.generated_families.is_empty());
+            assert!(accepting
+                .generators
+                .contains(&(GeneratorAlgorithm::Blake3Chacha8V1 as i32)));
+            assert!(accepting
+                .generators
+                .contains(&(GeneratorAlgorithm::FamilyChacha8V1 as i32)));
+
+            let declining = caps_of::<Declines>();
+            assert_eq!(kinds(&declining), [JobKind::IsingSample as i32]);
+            assert!(declining.generators.is_empty());
+            assert!(declining.generated_families.is_empty());
+            assert_eq!(
+                declining.accepted_families.len(),
+                1,
+                "accepted is unchanged"
+            );
+            assert_eq!(
+                declining.accepted_families,
+                caps_of::<AcceptOnly>().accepted_families
+            );
+        }
+
+        #[test]
+        fn the_printer_reflects_a_declined_lease() {
+            let v = json_of(&caps_of::<Declines>());
+            assert_eq!(v["supportedKinds"], serde_json::json!(["ISING_SAMPLE"]));
+            assert_eq!(v["generators"], serde_json::json!([]));
+            assert!(v.get("generatedFamilies").is_none());
+            assert!(v.get("acceptedFamilies").is_some());
+        }
+
+        #[test]
+        fn generated_families_on_a_declining_sampler_are_invalid() {
+            assert_eq!(
+                capabilities_for::<DeclinesButGenerates, f64>(&test_identity()),
+                Err(DeclarationError::GeneratedWithoutLeases)
+            );
+            assert!(capabilities_for::<Declines, f64>(&test_identity()).is_ok());
+            assert!(capabilities_for::<Full, f64>(&test_identity()).is_ok());
+        }
+
+        #[test]
+        fn a_declining_sampler_with_generated_families_stops_every_mode() {
+            for common in [
+                args(true, false, false),
+                args(false, true, false),
+                args(false, false, true),
+                args(false, false, false),
+            ] {
+                let code = run_code::<DeclinesButGenerates, f64>(test_identity(), &common, || {
+                    OPENED.store(true, Ordering::SeqCst);
+                    Ok(DeclinesButGenerates)
+                });
+                assert_eq!(code, ExitCode::InternalFatal);
+            }
         }
 
         #[test]

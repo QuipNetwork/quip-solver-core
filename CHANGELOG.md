@@ -7,6 +7,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
 
+### Added
+
+- A Rust solver can decline `ISING_GENERATE` leases. The new `Sampler::accepts_leases`
+  method defaults to `true`. When it returns `false`, the solver lists only
+  `ISING_SAMPLE`, advertises no generators and no generated families, and
+  rejects a lease with `UNSUPPORTED_KIND`.
+- A declaration that lists `generated` families is invalid for a sampler that
+  declines leases. It fails with `DeclarationError::GeneratedWithoutLeases`.
+- The conformance driver sends one lease to a solver that does not advertise
+  `ISING_GENERATE`. It expects `Reject` with `UNSUPPORTED_KIND`.
+
 ### Changed
 
 - `SPEC.md` section 3 defines the default start of a seeded SA run. When

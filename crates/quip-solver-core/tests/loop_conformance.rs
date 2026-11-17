@@ -57,6 +57,25 @@ async fn a_solver_that_ignores_its_seeds_fails_the_initial_spins_grade() {
     assert!(!report.is_conformant());
 }
 
+/// A solver that does not advertise `ISING_GENERATE` is graded on refusing a
+/// lease with `UNSUPPORTED_KIND`, and passes the whole walk.
+#[tokio::test]
+async fn a_solver_that_declines_leases_rejects_one_with_unsupported_kind() {
+    let bin = example_bin("mock_sampler_no_lease")
+        .to_string_lossy()
+        .into_owned();
+    let socket = unique_socket("no-lease");
+    let report = drive_miner(&bin, &format!("unix://{socket}")).await;
+    assert!(report.lease.is_none(), "no lease scenario ran: {report:?}");
+    assert!(
+        report.has_reject(b"job-lease", RejectReason::UnsupportedKind),
+        "missing UNSUPPORTED_KIND reject for job-lease: {:?}",
+        report.rejects
+    );
+    assert!(report.lease_conformant(), "{}", report.summary());
+    assert!(report.is_conformant(), "{}", report.summary());
+}
+
 #[tokio::test]
 async fn mock_sampler_passes_loop_conformance() {
     let bin = example_bin("mock_sampler_miner")

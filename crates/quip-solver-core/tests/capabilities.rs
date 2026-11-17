@@ -37,3 +37,21 @@ fn capabilities_answer_without_opening_the_device() {
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
     assert!(v.is_object());
 }
+
+/// A solver that declines leases lists only `ISING_SAMPLE`, no generators and
+/// no generated families; the accepted list is untouched.
+#[test]
+fn a_solver_that_declines_leases_advertises_no_generation() {
+    let out = Command::new(example_bin("mock_sampler_no_lease"))
+        .arg("--capabilities")
+        .output()
+        .expect("run --capabilities");
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+    assert_eq!(
+        v.get("supportedKinds"),
+        Some(&serde_json::json!(["ISING_SAMPLE"]))
+    );
+    assert_eq!(v.get("generators"), Some(&serde_json::json!([])));
+    assert!(v.get("generatedFamilies").is_none());
+}

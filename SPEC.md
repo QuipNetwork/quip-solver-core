@@ -21,6 +21,11 @@ A solver binary supports four modes.
 This mode prints what the solver supports, then exits. It must not open the
 device.
 
+`supported_kinds` and `generators` must match what the solver serves. A solver
+that declines leases lists only `ISING_SAMPLE` and no generators. It answers an
+`ISING_GENERATE` job with `Reject` reason `UNSUPPORTED_KIND`. The Rust
+`Sampler::accepts_leases` switch makes the session do all three.
+
 ### `--solve`
 
 This mode reads one problem as JSON on stdin. It writes the solutions as JSON
@@ -468,11 +473,12 @@ Use `Backend::Cpu` and `Algorithm::Sa` for a CPU simulated annealer.
 The [migration name table](MIGRATING.md#identity-names) lists all supported names.
 The fixed map in `quip_protocol::session` keeps command-line identity strings lowercase.
 
-The sixteen defaulted methods are:
+The seventeen defaulted methods are:
 
 | Method | Default |
 |---|---|
 | `sample_stream` | Serial loop over `sample`. Polls the cancel token at dequeue. |
+| `accepts_leases` | `true`. `false` lists only `ISING_SAMPLE`, advertises no generators and no generated families, and rejects every `ISING_GENERATE` job with `UNSUPPORTED_KIND`. |
 | `accepts_warm_start` | `false`. `true` adds `initial-spins` to the advertised features. |
 | `sample_warm` | Ignores the `WarmStart` and calls `sample`. |
 | `sample_stream_warm` | Serial loop over `sample_warm` for a seeded job and `sample` for a cold one. |
@@ -496,6 +502,8 @@ Each listed parameter set must pass the schema and bounds of every listed revisi
 The session validates the declaration before it runs any mode.
 An invalid declaration logs an error and exits 70 in every mode, before the device opens.
 `capabilities_for::<S, C>(&id)` builds the advertised `Capabilities` and returns `DeclarationError` for an invalid declaration.
+A declaration that lists `generated` claims is also invalid for a sampler whose `accepts_leases` returns `false`.
+`DeclarationError::GeneratedWithoutLeases` reports it.
 
 A sampler that returns `true` from `accepts_family_metadata` receives every job through `sample_stream_warm`, and never through `sample_stream`.
 `WarmStreamJob.family` holds `Some(FamilyContext)` for a job that passed the checks, and `None` for any other job.
@@ -797,7 +805,7 @@ For an `f64` CPU sampler, the output has this shape:
 
 The Rust session advertises `I32` plus the solver's own encoding, without duplicates.
 `Fixed<I4, S>` advertises only `I32`.
-Rust and C solvers advertise the default generator even without local generation.
+Rust and C solvers advertise the default generator even without local generation, unless a Rust sampler returns `false` from `accepts_leases`.
 The Python and TypeScript examples advertise only `ISING_SAMPLE` and `I32`, with no generators.
 
 `streamWidth: 0` declares a width that is a property of the opened device,
