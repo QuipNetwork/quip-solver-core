@@ -462,6 +462,8 @@ wheel:linux-aarch64:
     # request pipeline for the same push built in one target/: one job's git
     # clean and maturin staging removed lib_core.so from under the other.
     GIT_CLONE_PATH: $CI_BUILDS_DIR/$CI_CONCURRENT_ID/$CI_PROJECT_PATH
+    FC_VCPUS: "4"
+    FC_MEM: "8192"
   before_script:
     - apt-get update && apt-get install -y --no-install-recommends python3 python3-venv
     - python3 -m venv /opt/wheelenv
